@@ -52,7 +52,6 @@
     --color-chart-4: var(--chart-4);
     --color-chart-5: var(--chart-5);
 
-    /* IMPORTANTE: compatibilidad real con starter kit */
     --color-sidebar: var(--sidebar-background);
     --color-sidebar-foreground: var(--sidebar-foreground);
     --color-sidebar-primary: var(--sidebar-primary);
@@ -149,5 +148,170 @@
 
     .app-table-content {
         @apply overflow-x-auto;
+    }
+
+    /* SWEETALERT2 */
+    .swal2-container.swal2-backdrop-show {
+        backdrop-filter: blur(8px);
+        background: rgba(15, 23, 42, 0.26) !important;
+    }
+
+    .swal2-container .swal2-popup.app-swal-popup {
+        width: min(32rem, calc(100% - 2rem)) !important;
+        padding: 1.75rem 1.5rem 1.35rem !important;
+        border-radius: 24px !important;
+
+        /* aquí está el cuadro REAL */
+        background: #ffffff !important;
+        color: hsl(var(--foreground)) !important;
+        border: 1px solid rgba(15, 23, 42, 0.12) !important;
+        outline: 1px solid rgba(255, 255, 255, 0.65) !important;
+
+        /* sombra para que sí flote */
+        box-shadow:
+            0 24px 60px rgba(15, 23, 42, 0.18),
+            0 8px 24px rgba(15, 23, 42, 0.08),
+            inset 0 1px 0 rgba(255, 255, 255, 0.85) !important;
+    }
+
+    .dark .swal2-container .swal2-popup.app-swal-popup {
+        background: hsl(var(--card)) !important;
+        color: hsl(var(--card-foreground)) !important;
+        border: 1px solid hsl(var(--border) / 0.95) !important;
+        outline: 1px solid hsl(0 0% 100% / 0.04) !important;
+        box-shadow:
+            0 28px 70px rgba(0, 0, 0, 0.45),
+            0 10px 30px rgba(0, 0, 0, 0.28),
+            inset 0 1px 0 rgba(255, 255, 255, 0.04) !important;
+    }
+
+    .swal2-container .app-swal-icon.swal2-icon {
+        margin: 0.1rem auto 0.9rem !important;
+        transform: scale(0.95);
+    }
+
+    .swal2-container .app-swal-icon.swal2-warning {
+        border-width: 3px !important;
+        border-color: #ef4444 !important;
+        color: #ef4444 !important;
+    }
+
+    .swal2-container .app-swal-title.swal2-title {
+        margin: 0 !important;
+        padding: 0 !important;
+        color: hsl(var(--foreground)) !important;
+        font-size: 1.7rem !important;
+        line-height: 1.08 !important;
+        font-weight: 800 !important;
+        letter-spacing: -0.03em !important;
+    }
+
+    .swal2-container .app-swal-text.swal2-html-container {
+        margin: 0.75rem 0 0 0 !important;
+        padding: 0 !important;
+        color: hsl(var(--muted-foreground)) !important;
+        font-size: 0.98rem !important;
+        line-height: 1.6 !important;
+    }
+
+    .swal2-container .app-swal-actions.swal2-actions {
+        width: 100% !important;
+        margin: 1.45rem 0 0 0 !important;
+        padding: 0 !important;
+        display: flex !important;
+        justify-content: center !important;
+        gap: 0.8rem !important;
+    }
+
+    .swal2-container .app-swal-confirm.swal2-confirm,
+    .swal2-container .app-swal-cancel.swal2-cancel {
+        margin: 0 !important;
+        min-width: 150px !important;
+        height: 46px !important;
+        padding: 0 1.15rem !important;
+        border-radius: 14px !important;
+        font-size: 0.95rem !important;
+        font-weight: 700 !important;
+        letter-spacing: -0.01em !important;
+        transition:
+            transform 0.16s ease,
+            box-shadow 0.16s ease,
+            background-color 0.16s ease,
+            border-color 0.16s ease,
+            opacity 0.16s ease !important;
+    }
+
+    .swal2-container .app-swal-confirm.swal2-confirm:focus,
+    .swal2-container .app-swal-cancel.swal2-cancel:focus {
+        outline: none !important;
+        box-shadow: 0 0 0 4px hsl(var(--ring) / 0.16) !important;
+    }
+
+    .swal2-container .app-swal-confirm.swal2-confirm {
+        border: 1px solid #dc2626 !important;
+        background: linear-gradient(180deg, #ef4444 0%, #dc2626 100%) !important;
+        color: #ffffff !important;
+        box-shadow:
+            0 14px 28px rgba(220, 38, 38, 0.28),
+            inset 0 1px 0 rgba(255, 255, 255, 0.18) !important;
+    }
+
+    .swal2-container .app-swal-confirm.swal2-confirm:hover {
+        transform: translateY(-1px) !important;
+        background: linear-gradient(180deg, #f87171 0%, #dc2626 100%) !important;
+        box-shadow:
+            0 18px 34px rgba(220, 38, 38, 0.34),
+            inset 0 1px 0 rgba(255, 255, 255, 0.2) !important;
+    }
+
+    .swal2-container .app-swal-confirm.swal2-confirm:active {
+        transform: translateY(0) scale(0.985) !important;
+    }
+
+    .swal2-container .app-swal-cancel.swal2-cancel {
+        border: 1px solid rgba(15, 23, 42, 0.12) !important;
+        background: #ffffff !important;
+        color: hsl(var(--foreground)) !important;
+        box-shadow:
+            0 1px 2px rgba(15, 23, 42, 0.04),
+            inset 0 1px 0 rgba(255, 255, 255, 0.7) !important;
+    }
+
+    .dark .swal2-container .app-swal-cancel.swal2-cancel {
+        border: 1px solid hsl(var(--border)) !important;
+        background: hsl(var(--secondary)) !important;
+        color: hsl(var(--secondary-foreground)) !important;
+    }
+
+    .swal2-container .app-swal-cancel.swal2-cancel:hover {
+        transform: translateY(-1px) !important;
+        background: #f8fafc !important;
+        border-color: rgba(15, 23, 42, 0.16) !important;
+    }
+
+    .dark .swal2-container .app-swal-cancel.swal2-cancel:hover {
+        background: hsl(var(--muted)) !important;
+        border-color: hsl(var(--border) / 0.95) !important;
+    }
+
+    @media (max-width: 640px) {
+        .swal2-container .swal2-popup.app-swal-popup {
+            width: calc(100% - 1rem) !important;
+            padding: 1.45rem 1rem 1rem !important;
+            border-radius: 20px !important;
+        }
+
+        .swal2-container .app-swal-title.swal2-title {
+            font-size: 1.45rem !important;
+        }
+
+        .swal2-container .app-swal-actions.swal2-actions {
+            flex-direction: column-reverse !important;
+        }
+
+        .swal2-container .app-swal-confirm.swal2-confirm,
+        .swal2-container .app-swal-cancel.swal2-cancel {
+            width: 100% !important;
+        }
     }
 }
