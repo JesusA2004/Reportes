@@ -1,6 +1,6 @@
 @import 'tailwindcss';
-
 @import 'tw-animate-css';
+@import '../js/styles/theme.css';
 
 @source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
 @source '../../storage/framework/views/*.php';
@@ -9,13 +9,14 @@
 
 @theme inline {
     --font-sans:
-        Instrument Sans, ui-sans-serif, system-ui, sans-serif,
+        'Instrument Sans', ui-sans-serif, system-ui, sans-serif,
         'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
         'Noto Color Emoji';
 
-    --radius-lg: var(--radius);
-    --radius-md: calc(var(--radius) - 2px);
     --radius-sm: calc(var(--radius) - 4px);
+    --radius-md: calc(var(--radius) - 2px);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) + 4px);
 
     --color-background: var(--background);
     --color-foreground: var(--foreground);
@@ -51,6 +52,7 @@
     --color-chart-4: var(--chart-4);
     --color-chart-5: var(--chart-5);
 
+    /* IMPORTANTE: compatibilidad real con starter kit */
     --color-sidebar: var(--sidebar-background);
     --color-sidebar-foreground: var(--sidebar-foreground);
     --color-sidebar-primary: var(--sidebar-primary);
@@ -61,112 +63,91 @@
     --color-sidebar-ring: var(--sidebar-ring);
 }
 
-/*
-  The default border color has changed to `currentColor` in Tailwind CSS v4,
-  so we've added these compatibility styles to make sure everything still
-  looks the same as it did with Tailwind CSS v3.
-
-  If we ever want to remove these styles, we need to add an explicit border
-  color utility to any element that depends on these defaults.
-*/
 @layer base {
     *,
-    ::after,
     ::before,
+    ::after,
     ::backdrop,
     ::file-selector-button {
         border-color: var(--color-gray-200, currentColor);
     }
-}
 
-@layer utilities {
-    body,
-    html {
-        --font-sans:
-            'Instrument Sans', ui-sans-serif, system-ui, sans-serif,
-            'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
-            'Noto Color Emoji';
-    }
-}
-
-:root {
-    --background: hsl(0 0% 100%);
-    --foreground: hsl(0 0% 3.9%);
-    --card: hsl(0 0% 100%);
-    --card-foreground: hsl(0 0% 3.9%);
-    --popover: hsl(0 0% 100%);
-    --popover-foreground: hsl(0 0% 3.9%);
-    --primary: hsl(0 0% 9%);
-    --primary-foreground: hsl(0 0% 98%);
-    --secondary: hsl(0 0% 92.1%);
-    --secondary-foreground: hsl(0 0% 9%);
-    --muted: hsl(0 0% 96.1%);
-    --muted-foreground: hsl(0 0% 45.1%);
-    --accent: hsl(0 0% 96.1%);
-    --accent-foreground: hsl(0 0% 9%);
-    --destructive: hsl(0 84.2% 60.2%);
-    --destructive-foreground: hsl(0 0% 98%);
-    --border: hsl(0 0% 92.8%);
-    --input: hsl(0 0% 89.8%);
-    --ring: hsl(0 0% 3.9%);
-    --chart-1: hsl(12 76% 61%);
-    --chart-2: hsl(173 58% 39%);
-    --chart-3: hsl(197 37% 24%);
-    --chart-4: hsl(43 74% 66%);
-    --chart-5: hsl(27 87% 67%);
-    --radius: 0.5rem;
-    --sidebar-background: hsl(0 0% 98%);
-    --sidebar-foreground: hsl(240 5.3% 26.1%);
-    --sidebar-primary: hsl(0 0% 10%);
-    --sidebar-primary-foreground: hsl(0 0% 98%);
-    --sidebar-accent: hsl(0 0% 94%);
-    --sidebar-accent-foreground: hsl(0 0% 30%);
-    --sidebar-border: hsl(0 0% 91%);
-    --sidebar-ring: hsl(217.2 91.2% 59.8%);
-    --sidebar: hsl(0 0% 98%);
-}
-
-.dark {
-    --background: hsl(0 0% 3.9%);
-    --foreground: hsl(0 0% 98%);
-    --card: hsl(0 0% 3.9%);
-    --card-foreground: hsl(0 0% 98%);
-    --popover: hsl(0 0% 3.9%);
-    --popover-foreground: hsl(0 0% 98%);
-    --primary: hsl(0 0% 98%);
-    --primary-foreground: hsl(0 0% 9%);
-    --secondary: hsl(0 0% 14.9%);
-    --secondary-foreground: hsl(0 0% 98%);
-    --muted: hsl(0 0% 16.08%);
-    --muted-foreground: hsl(0 0% 63.9%);
-    --accent: hsl(0 0% 14.9%);
-    --accent-foreground: hsl(0 0% 98%);
-    --destructive: hsl(0 84% 60%);
-    --destructive-foreground: hsl(0 0% 98%);
-    --border: hsl(0 0% 14.9%);
-    --input: hsl(0 0% 14.9%);
-    --ring: hsl(0 0% 83.1%);
-    --chart-1: hsl(220 70% 50%);
-    --chart-2: hsl(160 60% 45%);
-    --chart-3: hsl(30 80% 55%);
-    --chart-4: hsl(280 65% 60%);
-    --chart-5: hsl(340 75% 55%);
-    --sidebar-background: hsl(0 0% 7%);
-    --sidebar-foreground: hsl(0 0% 95.9%);
-    --sidebar-primary: hsl(360, 100%, 100%);
-    --sidebar-primary-foreground: hsl(0 0% 100%);
-    --sidebar-accent: hsl(0 0% 15.9%);
-    --sidebar-accent-foreground: hsl(240 4.8% 95.9%);
-    --sidebar-border: hsl(0 0% 15.9%);
-    --sidebar-ring: hsl(217.2 91.2% 59.8%);
-    --sidebar: hsl(240 5.9% 10%);
-}
-
-@layer base {
     * {
         @apply border-border outline-ring/50;
     }
+
+    html {
+        @apply scroll-smooth;
+    }
+
     body {
-        @apply bg-background text-foreground;
+        @apply bg-background text-foreground antialiased;
+        font-family: var(--font-sans);
+    }
+}
+
+@layer components {
+    .app-shell {
+        @apply min-h-screen bg-background text-foreground;
+    }
+
+    .app-container {
+        @apply mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8;
+    }
+
+    .app-page {
+        @apply space-y-6;
+    }
+
+    .app-card {
+        @apply rounded-[var(--radius)] border bg-card text-card-foreground shadow-sm;
+    }
+
+    .app-card-soft {
+        @apply rounded-[calc(var(--radius)+4px)] border bg-card/80 text-card-foreground shadow-sm backdrop-blur;
+    }
+
+    .app-section {
+        @apply rounded-[calc(var(--radius)+6px)] border bg-card text-card-foreground shadow-sm;
+    }
+
+    .app-input {
+        @apply h-11 w-full rounded-2xl border bg-background px-4 text-sm shadow-sm transition placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20;
+    }
+
+    .app-textarea {
+        @apply w-full rounded-2xl border bg-background px-4 py-3 text-sm shadow-sm transition placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20;
+    }
+
+    .app-btn {
+        @apply inline-flex items-center justify-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-semibold transition;
+    }
+
+    .app-btn-primary {
+        @apply bg-primary text-primary-foreground hover:opacity-95;
+    }
+
+    .app-btn-secondary {
+        @apply border bg-background text-foreground hover:bg-muted;
+    }
+
+    .app-btn-danger {
+        @apply bg-destructive text-destructive-foreground hover:opacity-95;
+    }
+
+    .app-badge-muted {
+        @apply inline-flex items-center rounded-full bg-muted px-2.5 py-1 text-xs font-semibold text-muted-foreground;
+    }
+
+    .app-table-wrap {
+        @apply overflow-hidden rounded-[calc(var(--radius)+6px)] border bg-card shadow-sm;
+    }
+
+    .app-table-toolbar {
+        @apply flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center sm:justify-between;
+    }
+
+    .app-table-content {
+        @apply overflow-x-auto;
     }
 }
