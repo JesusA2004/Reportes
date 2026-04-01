@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Enums\MatchType;
+use App\Enums\SourceType;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
@@ -22,6 +24,8 @@ class EmployeeBranchAssignment extends Model {
     protected $casts = [
         'confidence' => 'decimal:2',
         'was_manual_reviewed' => 'boolean',
+        'source_type' => SourceType::class,
+        'match_type' => MatchType::class,
     ];
 
     public function period(): BelongsTo {

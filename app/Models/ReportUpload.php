@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use App\Enums\ReportUploadStatus;
 
 class ReportUpload extends Model {
 
@@ -24,6 +25,7 @@ class ReportUpload extends Model {
     protected $casts = [
         'uploaded_at' => 'datetime',
         'file_size' => 'integer',
+        'status' => ReportUploadStatus::class,
     ];
 
     public function period(): BelongsTo {

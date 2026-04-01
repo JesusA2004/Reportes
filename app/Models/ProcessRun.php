@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Enums\ProcessType;
+use App\Enums\ProcessRunStatus;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
@@ -19,6 +21,8 @@ class ProcessRun extends Model {
         'log',
         'started_at',
         'finished_at',
+        'status' => ProcessRunStatus::class,
+        'process_type' => ProcessType::class,
     ];
 
     protected $casts = [
