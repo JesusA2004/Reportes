@@ -42,8 +42,6 @@ const mainNavItems: NavItem[] = [
         href: dashboard(),
         icon: LayoutGrid,
     },
-
-    // OPERACIÓN
     {
         title: 'Histórico general',
         href: '/historico-general',
@@ -55,35 +53,6 @@ const mainNavItems: NavItem[] = [
         icon: CalendarRange,
     },
     {
-        title: 'Procesos',
-        href: '/procesos',
-        icon: ClipboardList,
-    },
-
-    // CATÁLOGOS
-    {
-        title: 'Sucursales',
-        href: '/sucursales',
-        icon: Building2,
-    },
-    {
-        title: 'Empleados',
-        href: '/empleados',
-        icon: Users,
-    },
-    {
-        title: 'Fuentes de datos',
-        href: '/fuentes',
-        icon: Database,
-    },
-    {
-        title: 'Productos financieros',
-        href: '/productos-financieros',
-        icon: FolderCog,
-    },
-
-    // CONCILIACIÓN / MATCH
-    {
         title: 'Asignación sucursal',
         href: '/asignaciones-empleado-sucursal',
         icon: GitCompareArrows,
@@ -93,48 +62,17 @@ const mainNavItems: NavItem[] = [
         href: '/validaciones',
         icon: ShieldCheck,
     },
-
-    // DATOS OPERATIVOS
-    {
-        title: 'Nómina NOI',
-        href: '/noi-movimientos',
-        icon: Wallet,
-    },
-    {
-        title: 'Colocación',
-        href: '/colocaciones',
-        icon: BadgeDollarSign,
-    },
-    {
-        title: 'Recuperación',
-        href: '/recuperaciones',
-        icon: PiggyBank,
-    },
-    {
-        title: 'Cartera',
-        href: '/cartera',
-        icon: BarChart3,
-    },
-    {
-        title: 'Gastos',
-        href: '/gastos',
-        icon: ReceiptText,
-    },
-
-    // RESULTADOS
     {
         title: 'Reportes mensuales',
         href: '/reportes-mensuales',
         icon: FileSpreadsheet,
     },
-
-    // ADMINISTRACIÓN
     {
         title: 'Configuración',
         href: '/settings/profile',
         icon: Settings,
     },
-];
+]
 
 const footerNavItems: NavItem[] = [];
 </script>

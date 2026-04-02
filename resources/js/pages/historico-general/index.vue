@@ -1,78 +1,77 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { useForm } from '@inertiajs/vue3'
+import { Head } from '@inertiajs/vue3'
 import {
     AlertCircle,
     CalendarDays,
     CheckCircle2,
-    ChevronDown,
     ChevronRight,
     Clock3,
     FileSpreadsheet,
-    FileUp,
-    FolderSearch2,
-    Layers3,
+    FolderOpen,
+    LoaderCircle,
+    Search,
+    Trash2,
     UploadCloud,
+    XCircle,
+    Inbox,
+    Sparkles,
+    FileUp,
+    ShieldAlert,
+    ArrowUpRight,
 } from 'lucide-vue-next'
 
+import AppLayout from '@/layouts/AppLayout.vue'
 import InputError from '@/components/InputError.vue'
-
-interface PeriodItem {
-    id: number
-    code: string
-    label: string
-    year?: number
-    month?: number
-    is_closed?: boolean
-    uploaded_sources_count?: number
-    required_sources_count?: number
-    missing_sources_count?: number
-    processed_count?: number
-    pending_count?: number
-    failed_count?: number
-    updated_at?: string | null
-    missing_sources?: string[]
-    report_final_available?: boolean
-}
-
-interface SourceItem {
-    id: number
-    code: string
-    name: string
-    description?: string | null
-}
-
-interface UploadItem {
-    id: number
-    original_name: string
-    status: 'pending' | 'processing' | 'processed' | 'failed'
-    uploaded_at?: string | null
-    notes?: string | null
-    source_code?: string | null
-    source_name?: string | null
-}
-
-interface GroupedPeriodUploads {
-    period_id: number
-    period_code: string
-    period_label: string
-    updated_at?: string | null
-    uploaded_sources_count?: number
-    required_sources_count?: number
-    missing_sources_count?: number
-    processed_count?: number
-    pending_count?: number
-    failed_count?: number
-    missing_sources?: string[]
-    report_final_available?: boolean
-    uploads: UploadItem[]
-}
+import { useHistoricoGeneralIndex } from '@/composables/useHistoricoGeneralIndex'
 
 const props = withDefaults(
     defineProps<{
-        periods: PeriodItem[]
-        sources: SourceItem[]
-        groupedUploads?: GroupedPeriodUploads[]
+        periods: Array<{
+            id: number
+            code: string
+            label: string
+            year?: number | null
+            month?: number | null
+            is_closed?: boolean
+            uploaded_sources_count?: number
+            required_sources_count?: number
+            missing_sources_count?: number
+            processed_count?: number
+            pending_count?: number
+            failed_count?: number
+            updated_at?: string | null
+            missing_sources?: string[]
+            report_final_available?: boolean
+        }>
+        sources: Array<{
+            id: number
+            code: string
+            name: string
+            description?: string | null
+        }>
+        groupedUploads?: Array<{
+            period_id: number
+            period_code: string
+            period_label: string
+            updated_at?: string | null
+            uploaded_sources_count?: number
+            required_sources_count?: number
+            missing_sources_count?: number
+            processed_count?: number
+            pending_count?: number
+            failed_count?: number
+            missing_sources?: string[]
+            report_final_available?: boolean
+            uploads: Array<{
+                id: number
+                original_name: string
+                status: 'pending' | 'processing' | 'processed' | 'failed'
+                uploaded_at?: string | null
+                notes?: string | null
+                source_code?: string | null
+                source_name?: string | null
+            }>
+        }>
         currentPeriodId?: number | null
     }>(),
     {
@@ -81,705 +80,571 @@ const props = withDefaults(
     },
 )
 
-const form = useForm<{
-    period_id: string | number
-    data_source_id: string | number
-    file: File | null
-    notes: string
-}>({
-    period_id: props.currentPeriodId ?? '',
-    data_source_id: '',
-    file: null,
-    notes: '',
+defineOptions({
+    layout: AppLayout,
 })
 
-const selectedFileName = computed(() => form.file?.name ?? 'Seleccionar archivo')
-
-const groupedMap = computed(() => {
-    const map = new Map<number, GroupedPeriodUploads>()
-
-    for (const item of props.groupedUploads) {
-        map.set(item.period_id, item)
-    }
-
-    return map
-})
-
-const periodRows = computed(() => {
-    return props.periods.map((period) => {
-        const grouped = groupedMap.value.get(period.id)
-
-        return {
-            id: period.id,
-            code: period.code,
-            label: period.label,
-            updated_at: grouped?.updated_at ?? period.updated_at ?? null,
-            uploaded_sources_count:
-                grouped?.uploaded_sources_count ?? period.uploaded_sources_count ?? 0,
-            required_sources_count:
-                grouped?.required_sources_count ??
-                period.required_sources_count ??
-                props.sources.length,
-            missing_sources_count:
-                grouped?.missing_sources_count ?? period.missing_sources_count ?? 0,
-            processed_count: grouped?.processed_count ?? period.processed_count ?? 0,
-            pending_count: grouped?.pending_count ?? period.pending_count ?? 0,
-            failed_count: grouped?.failed_count ?? period.failed_count ?? 0,
-            missing_sources: grouped?.missing_sources ?? period.missing_sources ?? [],
-            report_final_available:
-                grouped?.report_final_available ?? period.report_final_available ?? false,
-            uploads: grouped?.uploads ?? [],
-        }
-    })
-})
-
-const selectedPeriodRow = computed(() =>
-    periodRows.value.find((period) => String(period.id) === String(form.period_id)),
-)
-
-const totalPeriods = computed(() => periodRows.value.length)
-
-const completePeriods = computed(() =>
-    periodRows.value.filter((period) => (period.missing_sources_count ?? 0) === 0).length,
-)
-
-const incompletePeriods = computed(() =>
-    periodRows.value.filter((period) => (period.missing_sources_count ?? 0) > 0).length,
-)
-
-const totalUploads = computed(() =>
-    periodRows.value.reduce((acc, period) => acc + (period.uploads?.length ?? 0), 0),
-)
-
-const openPeriods = ref<number[]>(periodRows.value.slice(0, 2).map((item) => item.id))
-
-const isOpen = (periodId: number) => openPeriods.value.includes(periodId)
-
-const togglePeriod = (periodId: number) => {
-    if (isOpen(periodId)) {
-        openPeriods.value = openPeriods.value.filter((id) => id !== periodId)
-        return
-    }
-
-    openPeriods.value.push(periodId)
-}
-
-const onFileChange = (event: Event) => {
-    const input = event.target as HTMLInputElement | null
-    form.file = input?.files?.[0] ?? null
-}
-
-const submit = () => {
-    form.post('/historico-general', {
-        forceFormData: true,
-        preserveScroll: true,
-        onSuccess: () => {
-            form.reset('file', 'notes')
-        },
-    })
-}
-
-const groupedSourceStatus = (
-    period: (typeof periodRows.value)[number],
-    source: SourceItem,
-) => {
-    const found = period.uploads.find((upload) => upload.source_code === source.code)
-
-    if (!found) {
-        return {
-            label: 'Faltante',
-            classes: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
-        }
-    }
-
-    if (found.status === 'processed') {
-        return {
-            label: 'Cargado',
-            classes:
-                'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
-        }
-    }
-
-    if (found.status === 'failed') {
-        return {
-            label: 'Error',
-            classes: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
-        }
-    }
-
-    return {
-        label: 'Pendiente',
-        classes: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
-    }
-}
-
-const globalStatusLabel = (period: (typeof periodRows.value)[number]) => {
-    const missing = period.missing_sources_count ?? 0
-    const failed = period.failed_count ?? 0
-    const pending = period.pending_count ?? 0
-
-    if (failed > 0) return 'Con incidencias'
-    if (missing > 0) return `Faltan ${missing} reporte${missing === 1 ? '' : 's'}`
-    if (pending > 0) return 'En proceso'
-    return 'Completo'
-}
-
-const globalStatusClasses = (period: (typeof periodRows.value)[number]) => {
-    const missing = period.missing_sources_count ?? 0
-    const failed = period.failed_count ?? 0
-    const pending = period.pending_count ?? 0
-
-    if (failed > 0) {
-        return 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300'
-    }
-
-    if (missing > 0) {
-        return 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300'
-    }
-
-    if (pending > 0) {
-        return 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300'
-    }
-
-    return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
-}
+const {
+    form,
+    filters,
+    selectedFileName,
+    selectedPeriodRow,
+    filteredPeriods,
+    selectedUploads,
+    selectedSourceCards,
+    totalPeriods,
+    totalUploads,
+    completePeriods,
+    incompletePeriods,
+    currentProgress,
+    canUploadCurrentPeriod,
+    isCurrentPeriodComplete,
+    uploadDisabledReason,
+    submitLabel,
+    dragActive,
+    onFileChange,
+    onDrop,
+    onDragEnter,
+    onDragLeave,
+    onDragOver,
+    submit,
+    selectPeriod,
+    fileInputRef,
+    openFileDialog,
+    sourceOptions,
+    formatUploadStatus,
+    uploadStatusClass,
+    currentStatusLabel,
+    currentStatusClass,
+    currentStatusIcon,
+    deleteUpload,
+    isDeletingId,
+    quickFilter,
+} = useHistoricoGeneralIndex(props)
 </script>
 
 <template>
-    <div class="app-page w-full px-3 py-3 sm:px-4 sm:py-4 md:px-5 lg:px-6 xl:px-7 2xl:px-8">
-        <div class="space-y-5">
+    <Head title="Histórico general" />
+
+    <div class="app-page px-3 py-3 sm:px-4 sm:py-4 md:px-5 lg:px-6 xl:px-7 2xl:px-8">
+        <div class="space-y-6">
             <section class="app-card overflow-hidden">
-                <div class="border-b px-4 py-4 sm:px-5 lg:px-6">
-                    <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                        <div class="space-y-2">
-                            <div
-                                class="inline-flex items-center gap-2 rounded-full border border-primary/15 bg-primary/5 px-3 py-1.5 text-xs font-semibold text-primary"
-                            >
-                                <Layers3 class="size-3.5" />
-                                Histórico por periodos
-                            </div>
+                <div class="relative">
+                    <div class="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-primary/5" />
 
-                            <div class="space-y-1">
-                                <h1 class="text-2xl font-extrabold tracking-tight sm:text-3xl">
-                                    Histórico General
-                                </h1>
-                                <p class="max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base">
-                                    Administra la carga mensual de reportes, identifica faltantes
-                                    y consulta el histórico agrupado por mes.
-                                </p>
-                            </div>
-                        </div>
-
-                        <div class="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:min-w-[560px]">
-                            <div class="app-card-soft px-4 py-3">
-                                <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                    <CalendarDays class="size-4" />
-                                    Periodos
+                    <div class="relative p-4 sm:p-5 lg:p-6">
+                        <div class="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+                            <div class="space-y-4">
+                                <div
+                                    class="inline-flex w-fit items-center gap-2 rounded-full border border-primary/15 bg-primary/5 px-3 py-1.5 text-xs font-semibold text-primary"
+                                >
+                                    <Sparkles class="size-3.5" />
+                                    Gestión mensual de cargas
                                 </div>
-                                <p class="mt-2 text-sm font-bold sm:text-base">
-                                    {{ totalPeriods }}
-                                </p>
+
+                                <div class="space-y-2">
+                                    <h1 class="text-2xl font-extrabold tracking-tight sm:text-3xl lg:text-4xl">
+                                        Histórico General
+                                    </h1>
+                                    <p class="max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base">
+                                        Selecciona un periodo, carga sus archivos fuente, revisa su
+                                        estado y elimina documentos si hubo error para volver a subirlos.
+                                    </p>
+                                </div>
                             </div>
 
-                            <div class="app-card-soft px-4 py-3">
-                                <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                    <CheckCircle2 class="size-4" />
-                                    Completos
+                            <div class="grid grid-cols-2 gap-3 lg:w-[460px]">
+                                <div class="app-card-soft px-4 py-3 transition-all duration-200 hover:-translate-y-0.5">
+                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
+                                        <CalendarDays class="size-4" />
+                                        Periodos
+                                    </div>
+                                    <p class="mt-2 text-xl font-extrabold">{{ totalPeriods }}</p>
                                 </div>
-                                <p class="mt-2 text-sm font-bold sm:text-base">
-                                    {{ completePeriods }}
-                                </p>
-                            </div>
 
-                            <div class="app-card-soft px-4 py-3">
-                                <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                    <AlertCircle class="size-4" />
-                                    Con faltantes
+                                <div class="app-card-soft px-4 py-3 transition-all duration-200 hover:-translate-y-0.5">
+                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
+                                        <FileSpreadsheet class="size-4" />
+                                        Archivos
+                                    </div>
+                                    <p class="mt-2 text-xl font-extrabold">{{ totalUploads }}</p>
                                 </div>
-                                <p class="mt-2 text-sm font-bold sm:text-base">
-                                    {{ incompletePeriods }}
-                                </p>
-                            </div>
 
-                            <div class="app-card-soft px-4 py-3">
-                                <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                    <FileSpreadsheet class="size-4" />
-                                    Reportes
+                                <div class="app-card-soft px-4 py-3 transition-all duration-200 hover:-translate-y-0.5">
+                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
+                                        <CheckCircle2 class="size-4" />
+                                        Completos
+                                    </div>
+                                    <p class="mt-2 text-xl font-extrabold">{{ completePeriods }}</p>
                                 </div>
-                                <p class="mt-2 text-sm font-bold sm:text-base">
-                                    {{ totalUploads }}
-                                </p>
+
+                                <div class="app-card-soft px-4 py-3 transition-all duration-200 hover:-translate-y-0.5">
+                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
+                                        <AlertCircle class="size-4" />
+                                        Pendientes
+                                    </div>
+                                    <p class="mt-2 text-xl font-extrabold">{{ incompletePeriods }}</p>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </div>
+            </section>
 
-                <div class="grid gap-5 p-4 sm:p-5 xl:grid-cols-12 xl:p-6">
-                    <section class="app-card-soft xl:col-span-8">
-                        <div class="border-b px-4 py-4 sm:px-5">
-                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div class="grid gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
+                <!-- SIDEBAR PERIODOS -->
+                <aside class="space-y-4">
+                    <section class="app-card overflow-hidden">
+                        <div class="border-b px-4 py-4">
+                            <div class="flex items-center justify-between gap-3">
                                 <div>
-                                    <h2 class="text-lg font-bold tracking-tight">
-                                        Carga rápida del periodo
-                                    </h2>
-                                    <p class="mt-1 text-sm text-muted-foreground">
-                                        Selecciona el mes y sube el reporte correspondiente.
+                                    <h2 class="text-base font-bold tracking-tight">Periodos</h2>
+                                    <p class="mt-1 text-xs text-muted-foreground">
+                                        Elige un mes y trabaja solo sobre él.
                                     </p>
                                 </div>
 
-                                <span
-                                    v-if="selectedPeriodRow"
-                                    class="inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-semibold"
-                                    :class="globalStatusClasses(selectedPeriodRow)"
-                                >
-                                    {{ globalStatusLabel(selectedPeriodRow) }}
+                                <span class="app-badge-muted">
+                                    {{ filteredPeriods.length }}
                                 </span>
+                            </div>
+
+                            <div class="relative mt-4">
+                                <Search
+                                    class="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+                                />
+                                <input
+                                    v-model="filters.query"
+                                    type="text"
+                                    class="app-input h-10 pl-10"
+                                    placeholder="Buscar periodo..."
+                                />
                             </div>
                         </div>
 
-                        <form @submit.prevent="submit" class="space-y-5 p-4 sm:p-5">
-                            <div class="grid grid-cols-1 gap-4 lg:grid-cols-[1.15fr_1fr]">
-                                <div class="space-y-2">
-                                    <label for="period_id" class="text-sm font-semibold">Periodo</label>
-                                    <div class="relative">
-                                        <CalendarDays
-                                            class="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
-                                        />
-                                        <select
-                                            id="period_id"
-                                            v-model="form.period_id"
-                                            class="app-input appearance-none pl-10"
-                                        >
-                                            <option value="">Selecciona un periodo</option>
-                                            <option
-                                                v-for="period in periods"
-                                                :key="period.id"
-                                                :value="period.id"
-                                            >
-                                                {{ period.label }}
-                                            </option>
-                                        </select>
-                                    </div>
-                                    <InputError :message="form.errors.period_id" />
-                                </div>
-
-                                <div class="space-y-2">
-                                    <label for="data_source_id" class="text-sm font-semibold">Reporte</label>
-                                    <select
-                                        id="data_source_id"
-                                        v-model="form.data_source_id"
-                                        class="app-input appearance-none"
-                                    >
-                                        <option value="">Selecciona el reporte</option>
-                                        <option
-                                            v-for="source in sources"
-                                            :key="source.id"
-                                            :value="source.id"
-                                        >
-                                            {{ source.name }}
-                                        </option>
-                                    </select>
-                                    <InputError :message="form.errors.data_source_id" />
-                                </div>
-                            </div>
-
-                            <div class="space-y-2">
-                                <label class="text-sm font-semibold">Archivo</label>
-                                <label
-                                    for="file"
-                                    class="flex min-h-16 cursor-pointer items-center gap-3 rounded-2xl border border-dashed bg-background px-4 py-3 text-sm shadow-sm transition hover:border-primary/40 hover:bg-primary/5"
-                                >
-                                    <div
-                                        class="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary"
-                                    >
-                                        <FileUp class="size-5" />
-                                    </div>
-
-                                    <div class="min-w-0 flex-1">
-                                        <p class="truncate font-semibold">{{ selectedFileName }}</p>
-                                        <p class="text-xs text-muted-foreground">
-                                            Formato Excel (.xls, .xlsx, .xlsm)
+                        <div class="max-h-[560px] overflow-y-auto p-3">
+                            <button
+                                v-for="period in filteredPeriods"
+                                :key="period.id"
+                                type="button"
+                                @click="selectPeriod(period.id)"
+                                class="group mb-2 w-full rounded-[22px] border px-4 py-3 text-left shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
+                                :class="
+                                    selectedPeriodRow?.id === period.id
+                                        ? 'border-primary/30 bg-primary/5'
+                                        : 'border-border bg-background hover:bg-muted/30'
+                                "
+                            >
+                                <div class="flex items-start justify-between gap-3">
+                                    <div class="min-w-0">
+                                        <p class="truncate text-sm font-semibold">
+                                            {{ period.label }}
+                                        </p>
+                                        <p class="mt-1 text-xs text-muted-foreground">
+                                            {{ period.uploaded_sources_count }} de
+                                            {{ period.required_sources_count }} archivos base
                                         </p>
                                     </div>
 
-                                    <span class="hidden font-semibold text-primary sm:inline">
-                                        Seleccionar
-                                    </span>
+                                    <ChevronRight
+                                        class="mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-hover:translate-x-0.5"
+                                    />
+                                </div>
 
+                                <div class="mt-3 flex items-center justify-between gap-3">
+                                    <div class="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+                                        <div
+                                            class="h-full rounded-full bg-primary transition-all duration-300"
+                                            :style="{
+                                                width: `${Math.round(
+                                                    (period.uploaded_sources_count / Math.max(period.required_sources_count, 1)) * 100,
+                                                )}%`,
+                                            }"
+                                        />
+                                    </div>
+
+                                    <span
+                                        class="inline-flex rounded-full px-2 py-1 text-[11px] font-semibold"
+                                        :class="currentStatusClass(period)"
+                                    >
+                                        {{ currentStatusLabel(period) }}
+                                    </span>
+                                </div>
+                            </button>
+
+                            <div
+                                v-if="!filteredPeriods.length"
+                                class="rounded-[22px] border border-dashed bg-background px-4 py-8 text-center"
+                            >
+                                <Inbox class="mx-auto size-5 text-muted-foreground" />
+                                <p class="mt-3 text-sm font-semibold">Sin coincidencias</p>
+                                <p class="mt-1 text-xs text-muted-foreground">
+                                    Ajusta tu búsqueda para encontrar otro periodo.
+                                </p>
+                            </div>
+                        </div>
+                    </section>
+                </aside>
+
+                <!-- CONTENIDO PRINCIPAL -->
+                <section class="space-y-6">
+                    <section v-if="selectedPeriodRow" class="app-card overflow-hidden">
+                        <div class="border-b px-4 py-4 sm:px-5">
+                            <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                                <div>
+                                    <div class="flex flex-wrap items-center gap-2">
+                                        <h2 class="text-xl font-bold tracking-tight">
+                                            {{ selectedPeriodRow.label }}
+                                        </h2>
+
+                                        <span
+                                            class="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold"
+                                            :class="currentStatusClass(selectedPeriodRow)"
+                                        >
+                                            <component :is="currentStatusIcon(selectedPeriodRow)" class="size-3.5" />
+                                            {{ currentStatusLabel(selectedPeriodRow) }}
+                                        </span>
+                                    </div>
+
+                                    <p class="mt-2 text-sm text-muted-foreground">
+                                        Administra las fuentes del periodo actual desde un solo lugar.
+                                    </p>
+                                </div>
+
+                                <div class="grid gap-3 sm:grid-cols-3 lg:w-[430px]">
+                                    <div class="rounded-2xl border bg-background px-3 py-3">
+                                        <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                            Cargados
+                                        </p>
+                                        <p class="mt-2 text-xl font-extrabold">
+                                            {{ selectedPeriodRow.uploaded_sources_count }}
+                                        </p>
+                                    </div>
+
+                                    <div class="rounded-2xl border bg-background px-3 py-3">
+                                        <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                            Faltantes
+                                        </p>
+                                        <p class="mt-2 text-xl font-extrabold">
+                                            {{ selectedPeriodRow.missing_sources_count }}
+                                        </p>
+                                    </div>
+
+                                    <div class="rounded-2xl border bg-background px-3 py-3">
+                                        <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                            Avance
+                                        </p>
+                                        <p class="mt-2 text-xl font-extrabold">{{ currentProgress }}%</p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="mt-4 h-2 overflow-hidden rounded-full bg-muted">
+                                <div
+                                    class="h-full rounded-full bg-primary transition-all duration-500"
+                                    :style="{ width: `${currentProgress}%` }"
+                                />
+                            </div>
+                        </div>
+
+                        <div class="grid gap-6 p-4 sm:p-5 2xl:grid-cols-[minmax(0,1fr)_320px]">
+                            <!-- PANEL SUBIDA -->
+                            <div class="space-y-5">
+                                <div class="grid gap-4 md:grid-cols-[1fr_1fr_auto]">
+                                    <div class="space-y-2">
+                                        <label class="text-sm font-semibold">Periodo seleccionado</label>
+                                        <div class="app-input flex items-center">
+                                            {{ selectedPeriodRow.label }}
+                                        </div>
+                                    </div>
+
+                                    <div class="space-y-2">
+                                        <label for="data_source_id" class="text-sm font-semibold">Fuente</label>
+                                        <select
+                                            id="data_source_id"
+                                            v-model="form.data_source_id"
+                                            class="app-input"
+                                            :disabled="!canUploadCurrentPeriod || form.processing"
+                                        >
+                                            <option value="">Selecciona una fuente</option>
+                                            <option
+                                                v-for="source in sourceOptions"
+                                                :key="source.id"
+                                                :value="source.id"
+                                                :disabled="source.disabled"
+                                            >
+                                                {{ source.name }}{{ source.disabled ? ' · ya cargada' : '' }}
+                                            </option>
+                                        </select>
+                                        <InputError :message="form.errors.data_source_id" />
+                                    </div>
+
+                                    <div class="flex items-end">
+                                        <button
+                                            type="button"
+                                            class="app-btn app-btn-secondary h-11 w-full px-4 md:w-auto"
+                                            @click="openFileDialog"
+                                            :disabled="!canUploadCurrentPeriod || form.processing"
+                                        >
+                                            <FileUp class="size-4" />
+                                            Elegir
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div
+                                    class="rounded-[30px] border border-dashed px-5 py-6 shadow-sm transition-all duration-200"
+                                    :class="
+                                        dragActive
+                                            ? 'border-primary bg-primary/5 ring-2 ring-primary/10'
+                                            : 'border-border bg-background hover:border-primary/30 hover:bg-muted/20'
+                                    "
+                                    @drop.prevent="onDrop"
+                                    @dragenter.prevent="onDragEnter"
+                                    @dragleave.prevent="onDragLeave"
+                                    @dragover.prevent="onDragOver"
+                                >
                                     <input
-                                        id="file"
+                                        ref="fileInputRef"
                                         type="file"
                                         class="hidden"
                                         accept=".xls,.xlsx,.xlsm"
                                         @change="onFileChange"
                                     />
-                                </label>
-                                <InputError :message="form.errors.file" />
-                            </div>
 
-                            <div class="space-y-2">
-                                <label for="notes" class="text-sm font-semibold">Notas</label>
-                                <textarea
-                                    id="notes"
-                                    v-model="form.notes"
-                                    rows="3"
-                                    class="app-textarea"
-                                    placeholder="Observaciones opcionales del archivo o del periodo."
-                                />
-                                <InputError :message="form.errors.notes" />
-                            </div>
-
-                            <div
-                                v-if="selectedPeriodRow"
-                                class="rounded-2xl border border-border/70 bg-background/70 px-4 py-4"
-                            >
-                                <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                                    <div class="space-y-1">
-                                        <p class="text-sm font-semibold">
-                                            {{ selectedPeriodRow.label }}
-                                        </p>
-                                        <p class="text-sm text-muted-foreground">
-                                            {{ selectedPeriodRow.uploaded_sources_count }} de
-                                            {{ selectedPeriodRow.required_sources_count }} reportes cargados
-                                        </p>
-                                    </div>
-
-                                    <span
-                                        class="inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-semibold"
-                                        :class="globalStatusClasses(selectedPeriodRow)"
-                                    >
-                                        {{ globalStatusLabel(selectedPeriodRow) }}
-                                    </span>
-                                </div>
-
-                                <div v-if="selectedPeriodRow.missing_sources.length" class="mt-4">
-                                    <p class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                                        Reportes faltantes
-                                    </p>
-                                    <div class="flex flex-wrap gap-2">
-                                        <span
-                                            v-for="missing in selectedPeriodRow.missing_sources"
-                                            :key="missing"
-                                            class="inline-flex rounded-full bg-rose-100 px-2.5 py-1 text-xs font-semibold text-rose-700 dark:bg-rose-500/15 dark:text-rose-300"
+                                    <div class="flex flex-col items-center justify-center text-center">
+                                        <div
+                                            class="flex size-16 items-center justify-center rounded-3xl bg-primary/10 text-primary transition-transform duration-200"
+                                            :class="{ 'scale-110': dragActive || form.processing }"
                                         >
-                                            {{ missing }}
-                                        </span>
-                                    </div>
-                                </div>
-
-                                <div v-else class="mt-4">
-                                    <span
-                                        class="inline-flex rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
-                                    >
-                                        Periodo completo
-                                    </span>
-                                </div>
-                            </div>
-
-                            <div class="flex justify-end border-t pt-4">
-                                <button
-                                    type="submit"
-                                    class="app-btn app-btn-primary h-11 px-5 shadow-sm"
-                                    :disabled="form.processing"
-                                >
-                                    <UploadCloud class="size-4" />
-                                    {{ form.processing ? 'Subiendo...' : 'Subir reporte' }}
-                                </button>
-                            </div>
-                        </form>
-                    </section>
-
-                    <aside class="grid gap-5 xl:col-span-4">
-                        <section class="app-card-soft">
-                            <div class="border-b px-4 py-4">
-                                <h3 class="text-base font-bold tracking-tight">Estado por mes</h3>
-                            </div>
-
-                            <div class="space-y-3 p-4">
-                                <div
-                                    v-for="period in periodRows.slice(0, 4)"
-                                    :key="period.id"
-                                    class="rounded-2xl border border-border/70 bg-background/80 px-4 py-3"
-                                >
-                                    <div class="flex items-start justify-between gap-3">
-                                        <div class="min-w-0">
-                                            <p class="truncate text-sm font-semibold">
-                                                {{ period.label }}
-                                            </p>
-                                            <p class="mt-1 text-xs text-muted-foreground">
-                                                {{ period.uploaded_sources_count }} /
-                                                {{ period.required_sources_count }}
-                                                reportes
-                                            </p>
+                                            <LoaderCircle
+                                                v-if="form.processing"
+                                                class="size-7 animate-spin"
+                                            />
+                                            <UploadCloud
+                                                v-else
+                                                class="size-7"
+                                            />
                                         </div>
 
-                                        <span
-                                            class="inline-flex rounded-full px-2 py-1 text-[11px] font-semibold"
-                                            :class="globalStatusClasses(period)"
-                                        >
-                                            {{ globalStatusLabel(period) }}
-                                        </span>
-                                    </div>
-
-                                    <div
-                                        v-if="period.missing_sources.length"
-                                        class="mt-3 flex flex-wrap gap-2"
-                                    >
-                                        <span
-                                            v-for="missing in period.missing_sources.slice(0, 2)"
-                                            :key="missing"
-                                            class="inline-flex rounded-full bg-rose-100 px-2 py-1 text-[11px] font-semibold text-rose-700 dark:bg-rose-500/15 dark:text-rose-300"
-                                        >
-                                            {{ missing }}
-                                        </span>
-                                    </div>
-                                </div>
-                            </div>
-                        </section>
-                    </aside>
-                </div>
-            </section>
-
-            <section class="app-card overflow-hidden">
-                <div class="border-b px-4 py-4 sm:px-5 lg:px-6">
-                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                        <div>
-                            <h2 class="text-lg font-bold tracking-tight">Histórico por periodo</h2>
-                            <p class="mt-1 text-sm text-muted-foreground">
-                                Meses agrupados con sus reportes cargados, faltantes y acceso al reporte final.
-                            </p>
-                        </div>
-
-                        <span class="app-badge-muted">
-                            {{ periodRows.length }} periodo{{ periodRows.length === 1 ? '' : 's' }}
-                        </span>
-                    </div>
-                </div>
-
-                <div v-if="periodRows.length" class="divide-y">
-                    <article
-                        v-for="period in periodRows"
-                        :key="period.id"
-                        class="transition-colors"
-                    >
-                        <button
-                            type="button"
-                            class="flex w-full items-center justify-between gap-4 px-4 py-4 text-left hover:bg-muted/20 sm:px-5 lg:px-6"
-                            @click="togglePeriod(period.id)"
-                        >
-                            <div class="flex min-w-0 items-start gap-3">
-                                <div class="pt-0.5 text-muted-foreground">
-                                    <ChevronDown v-if="isOpen(period.id)" class="size-4" />
-                                    <ChevronRight v-else class="size-4" />
-                                </div>
-
-                                <div class="min-w-0 space-y-2">
-                                    <div class="flex flex-wrap items-center gap-2">
-                                        <h3 class="text-base font-bold tracking-tight sm:text-lg">
-                                            {{ period.label }}
+                                        <h3 class="mt-4 text-base font-bold tracking-tight">
+                                            {{
+                                                form.processing
+                                                    ? 'Subiendo archivo...'
+                                                    : dragActive
+                                                      ? 'Suelta tu archivo aquí'
+                                                      : 'Arrastra y suelta tu archivo'
+                                            }}
                                         </h3>
 
-                                        <span
-                                            class="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold"
-                                            :class="globalStatusClasses(period)"
+                                        <p class="mt-2 max-w-xl text-sm text-muted-foreground">
+                                            También puedes hacer clic en “Elegir” o en esta zona.
+                                            Formatos permitidos: .xls, .xlsx, .xlsm
+                                        </p>
+
+                                        <button
+                                            type="button"
+                                            class="mt-4 text-sm font-semibold text-primary transition hover:opacity-80"
+                                            @click="openFileDialog"
+                                            :disabled="!canUploadCurrentPeriod || form.processing"
                                         >
-                                            {{ globalStatusLabel(period) }}
-                                        </span>
+                                            {{ selectedFileName }}
+                                        </button>
+
+                                        <p
+                                            v-if="isCurrentPeriodComplete"
+                                            class="mt-4 rounded-full bg-emerald-100 px-3 py-1.5 text-xs font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
+                                        >
+                                            Este periodo ya está completo. Si necesitas volver a subir algo,
+                                            elimina primero el archivo correspondiente.
+                                        </p>
+
+                                        <p
+                                            v-else-if="uploadDisabledReason"
+                                            class="mt-4 rounded-full bg-muted px-3 py-1.5 text-xs font-semibold text-muted-foreground"
+                                        >
+                                            {{ uploadDisabledReason }}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div class="space-y-2">
+                                    <label for="notes" class="text-sm font-semibold">Notas</label>
+                                    <textarea
+                                        id="notes"
+                                        v-model="form.notes"
+                                        rows="3"
+                                        class="app-textarea"
+                                        placeholder="Observaciones opcionales del archivo o del periodo."
+                                        :disabled="form.processing"
+                                    />
+                                    <InputError :message="form.errors.notes" />
+                                    <InputError :message="form.errors.file" />
+                                </div>
+
+                                <div class="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+                                    <div class="text-xs text-muted-foreground">
+                                        {{ selectedUploads.length }} archivo{{ selectedUploads.length === 1 ? '' : 's' }}
+                                        cargado{{ selectedUploads.length === 1 ? '' : 's' }} en este periodo
                                     </div>
 
-                                    <div class="flex flex-wrap gap-2 text-xs text-muted-foreground sm:text-sm">
-                                        <span>
-                                            {{ period.uploaded_sources_count }} de
-                                            {{ period.required_sources_count }} reportes cargados
-                                        </span>
-                                        <span>•</span>
-                                        <span>Última actualización: {{ period.updated_at ?? '—' }}</span>
-                                    </div>
-
-                                    <div v-if="period.missing_sources.length" class="flex flex-wrap gap-2">
-                                        <span
-                                            v-for="missing in period.missing_sources"
-                                            :key="missing"
-                                            class="inline-flex rounded-full bg-rose-100 px-2.5 py-1 text-xs font-semibold text-rose-700 dark:bg-rose-500/15 dark:text-rose-300"
-                                        >
-                                            Falta {{ missing }}
-                                        </span>
-                                    </div>
+                                    <button
+                                        type="button"
+                                        class="app-btn app-btn-primary h-11 px-5 transition-all duration-200 hover:-translate-y-0.5"
+                                        :disabled="!canUploadCurrentPeriod || form.processing"
+                                        @click="submit"
+                                    >
+                                        <LoaderCircle v-if="form.processing" class="size-4 animate-spin" />
+                                        <UploadCloud v-else class="size-4" />
+                                        {{ submitLabel }}
+                                    </button>
                                 </div>
                             </div>
 
-                            <div class="hidden shrink-0 items-center gap-2 lg:flex">
-                                <a
-                                    :href="`/reporte-final?period=${period.id}`"
-                                    class="app-btn app-btn-primary h-10 px-4"
-                                >
-                                    Reporte final
-                                </a>
-                            </div>
-                        </button>
+                            <!-- RESUMEN LATERAL -->
+                            <aside class="space-y-4">
+                                <div class="rounded-[28px] border border-border/70 bg-background px-4 py-4 shadow-sm">
+                                    <p class="text-sm font-semibold">Fuentes del periodo</p>
 
-                        <div
-                            v-if="isOpen(period.id)"
-                            class="border-t bg-muted/10 px-4 py-4 sm:px-5 lg:px-6"
-                        >
-                            <div class="grid gap-5 xl:grid-cols-[1.2fr_.8fr]">
-                                <div class="space-y-4">
-                                    <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                                    <div class="mt-4 space-y-3">
                                         <div
-                                            v-for="source in sources"
+                                            v-for="source in selectedSourceCards"
                                             :key="source.id"
-                                            class="rounded-2xl border border-border/70 bg-background px-4 py-4 shadow-sm"
+                                            class="rounded-2xl border border-border/70 bg-muted/20 px-3 py-3 transition-all duration-200 hover:bg-muted/30"
                                         >
                                             <div class="flex items-start justify-between gap-3">
                                                 <div class="min-w-0">
-                                                    <p class="text-sm font-semibold">
-                                                        {{ source.name }}
-                                                    </p>
+                                                    <p class="text-sm font-semibold">{{ source.name }}</p>
                                                     <p class="mt-1 text-xs text-muted-foreground">
-                                                        {{ source.description || 'Reporte mensual' }}
+                                                        {{ source.description || 'Fuente mensual' }}
                                                     </p>
                                                 </div>
 
                                                 <span
                                                     class="inline-flex rounded-full px-2 py-1 text-[11px] font-semibold"
-                                                    :class="groupedSourceStatus(period, source).classes"
+                                                    :class="source.statusClass"
                                                 >
-                                                    {{ groupedSourceStatus(period, source).label }}
+                                                    {{ source.statusLabel }}
                                                 </span>
                                             </div>
                                         </div>
-                                    </div>
-
-                                    <div
-                                        v-if="period.uploads.length"
-                                        class="overflow-x-auto rounded-2xl border border-border/70 bg-background"
-                                    >
-                                        <table class="min-w-full text-sm">
-                                            <thead class="bg-muted/40 text-left text-muted-foreground">
-                                                <tr>
-                                                    <th class="px-4 py-3 font-semibold">Reporte</th>
-                                                    <th class="px-4 py-3 font-semibold">Archivo</th>
-                                                    <th class="px-4 py-3 font-semibold">Fecha</th>
-                                                    <th class="px-4 py-3 font-semibold">Estatus</th>
-                                                </tr>
-                                            </thead>
-
-                                            <tbody>
-                                                <tr
-                                                    v-for="upload in period.uploads"
-                                                    :key="upload.id"
-                                                    class="border-t hover:bg-muted/20"
-                                                >
-                                                    <td class="px-4 py-3 font-medium">
-                                                        {{ upload.source_name || '—' }}
-                                                    </td>
-                                                    <td class="px-4 py-3">
-                                                        <div class="max-w-[340px] truncate">
-                                                            {{ upload.original_name }}
-                                                        </div>
-                                                    </td>
-                                                    <td class="px-4 py-3 text-muted-foreground">
-                                                        {{ upload.uploaded_at ?? '—' }}
-                                                    </td>
-                                                    <td class="px-4 py-3">
-                                                        <span
-                                                            class="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold"
-                                                            :class="{
-                                                                'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300':
-                                                                    upload.status === 'pending' || upload.status === 'processing',
-                                                                'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300':
-                                                                    upload.status === 'processed',
-                                                                'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300':
-                                                                    upload.status === 'failed',
-                                                            }"
-                                                        >
-                                                            {{
-                                                                upload.status === 'processed'
-                                                                    ? 'Procesado'
-                                                                    : upload.status === 'failed'
-                                                                      ? 'Error'
-                                                                      : 'Pendiente'
-                                                            }}
-                                                        </span>
-                                                    </td>
-                                                </tr>
-                                            </tbody>
-                                        </table>
-                                    </div>
-
-                                    <div
-                                        v-else
-                                        class="rounded-2xl border border-border/70 bg-background px-4 py-8 text-center"
-                                    >
-                                        <p class="font-semibold">Sin reportes cargados</p>
-                                        <p class="mt-1 text-sm text-muted-foreground">
-                                            Este periodo aún no tiene archivos registrados.
-                                        </p>
                                     </div>
                                 </div>
 
-                                <aside class="space-y-4">
-                                    <div class="rounded-2xl border border-border/70 bg-background px-4 py-4 shadow-sm">
-                                        <h4 class="text-sm font-bold tracking-tight">Resumen del mes</h4>
-
-                                        <div class="mt-4 space-y-3">
-                                            <div class="flex items-center justify-between text-sm">
-                                                <span class="text-muted-foreground">Cargados</span>
-                                                <span class="font-semibold">
-                                                    {{ period.uploaded_sources_count }}
-                                                </span>
-                                            </div>
-
-                                            <div class="flex items-center justify-between text-sm">
-                                                <span class="text-muted-foreground">Faltantes</span>
-                                                <span class="font-semibold">
-                                                    {{ period.missing_sources_count }}
-                                                </span>
-                                            </div>
-
-                                            <div class="flex items-center justify-between text-sm">
-                                                <span class="text-muted-foreground">Reporte final</span>
-                                                <span class="font-semibold">
-                                                    {{ period.report_final_available ? 'Disponible' : 'Pendiente' }}
-                                                </span>
-                                            </div>
-                                        </div>
+                                <div class="rounded-[28px] border border-border/70 bg-background px-4 py-4 shadow-sm">
+                                    <div class="flex items-center justify-between gap-2">
+                                        <p class="text-sm font-semibold">Salida final</p>
+                                        <ArrowUpRight class="size-4 text-muted-foreground" />
                                     </div>
 
-                                    <div class="rounded-2xl border border-border/70 bg-background px-4 py-4 shadow-sm">
-                                        <h4 class="text-sm font-bold tracking-tight">Acciones</h4>
+                                    <p class="mt-2 text-sm text-muted-foreground">
+                                        Cuando las fuentes estén completas podrás pasar al reporte final.
+                                    </p>
 
-                                        <div class="mt-4 grid gap-2">
-                                            <a
-                                                :href="`/reporte-final?period=${period.id}`"
-                                                class="app-btn app-btn-primary h-10 justify-center"
-                                            >
-                                                Reporte final
-                                            </a>
-                                        </div>
-                                    </div>
-                                </aside>
+                                    <a
+                                        :href="`/reportes-mensuales?period=${selectedPeriodRow.id}`"
+                                        class="app-btn app-btn-secondary mt-4 h-11 w-full justify-between px-4 transition-all duration-200 hover:-translate-y-0.5"
+                                    >
+                                        <span>Ir a reporte final</span>
+                                        <ChevronRight class="size-4" />
+                                    </a>
+                                </div>
+                            </aside>
+                        </div>
+                    </section>
+
+                    <!-- ARCHIVOS DEL PERIODO -->
+                    <section v-if="selectedPeriodRow" class="app-card overflow-hidden">
+                        <div class="border-b px-4 py-4 sm:px-5">
+                            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                                <div>
+                                    <h3 class="text-lg font-bold tracking-tight">Archivos del periodo</h3>
+                                    <p class="mt-1 text-sm text-muted-foreground">
+                                        Elimina archivos incorrectos para volver a cargarlos.
+                                    </p>
+                                </div>
+
+                                <div class="relative w-full lg:max-w-sm">
+                                    <Search
+                                        class="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+                                    />
+                                    <input
+                                        v-model="quickFilter"
+                                        type="text"
+                                        class="app-input h-10 pl-10"
+                                        placeholder="Buscar archivo o fuente..."
+                                    />
+                                </div>
                             </div>
                         </div>
-                    </article>
-                </div>
 
-                <div v-else class="px-4 py-12 text-center sm:px-5">
-                    <div class="mx-auto flex max-w-sm flex-col items-center gap-3">
-                        <div
-                            class="flex size-12 items-center justify-center rounded-2xl bg-muted text-muted-foreground"
-                        >
-                            <FolderSearch2 class="size-5" />
+                        <div v-if="selectedUploads.length" class="grid gap-3 p-4 sm:p-5 md:grid-cols-2 2xl:grid-cols-3">
+                            <article
+                                v-for="upload in selectedUploads"
+                                :key="upload.id"
+                                class="group rounded-[26px] border border-border/70 bg-background px-4 py-4 shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-md"
+                            >
+                                <div class="flex items-start justify-between gap-3">
+                                    <div class="min-w-0">
+                                        <p class="text-sm font-semibold">
+                                            {{ upload.source_name || 'Sin fuente' }}
+                                        </p>
+                                        <p class="mt-1 truncate text-xs text-muted-foreground">
+                                            {{ upload.original_name }}
+                                        </p>
+                                    </div>
+
+                                    <span
+                                        class="inline-flex rounded-full px-2 py-1 text-[11px] font-semibold"
+                                        :class="uploadStatusClass(upload.status)"
+                                    >
+                                        {{ formatUploadStatus(upload.status) }}
+                                    </span>
+                                </div>
+
+                                <div class="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
+                                    <Clock3 class="size-3.5" />
+                                    {{ upload.uploaded_at ?? 'Sin fecha registrada' }}
+                                </div>
+
+                                <p
+                                    v-if="upload.notes"
+                                    class="mt-3 line-clamp-2 text-xs leading-5 text-muted-foreground"
+                                >
+                                    {{ upload.notes }}
+                                </p>
+
+                                <div class="mt-4 flex items-center justify-end gap-2 border-t pt-4">
+                                    <button
+                                        type="button"
+                                        class="app-btn h-10 border border-rose-200 bg-rose-50 px-4 text-rose-700 transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-100 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300"
+                                        :disabled="isDeletingId(upload.id)"
+                                        @click="deleteUpload(upload.id)"
+                                    >
+                                        <LoaderCircle
+                                            v-if="isDeletingId(upload.id)"
+                                            class="size-4 animate-spin"
+                                        />
+                                        <Trash2 v-else class="size-4" />
+                                        Quitar
+                                    </button>
+                                </div>
+                            </article>
                         </div>
-                        <div class="space-y-1">
-                            <p class="font-semibold">Aún no hay periodos cargados</p>
-                            <p class="text-sm text-muted-foreground">
-                                Cuando subas reportes mensuales aparecerán agrupados aquí.
+
+                        <div
+                            v-else
+                            class="px-4 py-10 text-center sm:px-5"
+                        >
+                            <FolderOpen class="mx-auto size-6 text-muted-foreground" />
+                            <p class="mt-3 text-sm font-semibold">Aún no hay archivos cargados</p>
+                            <p class="mt-1 text-sm text-muted-foreground">
+                                Sube primero una fuente para comenzar este periodo.
                             </p>
                         </div>
-                    </div>
-                </div>
-            </section>
+                    </section>
+                </section>
+            </div>
         </div>
     </div>
 </template>

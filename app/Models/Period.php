@@ -22,6 +22,29 @@ class Period extends Model {
         'is_closed' => 'boolean',
     ];
 
+    protected $appends = [
+        'label',
+    ];
+
+    public function getLabelAttribute(): string {
+        $months = [
+            1 => 'Enero',
+            2 => 'Febrero',
+            3 => 'Marzo',
+            4 => 'Abril',
+            5 => 'Mayo',
+            6 => 'Junio',
+            7 => 'Julio',
+            8 => 'Agosto',
+            9 => 'Septiembre',
+            10 => 'Octubre',
+            11 => 'Noviembre',
+            12 => 'Diciembre',
+        ];
+        $monthName = $months[(int) $this->month] ?? 'Periodo';
+        return "{$monthName} {$this->year}";
+    }
+
     public function reportUploads(): HasMany {
         return $this->hasMany(ReportUpload::class);
     }
