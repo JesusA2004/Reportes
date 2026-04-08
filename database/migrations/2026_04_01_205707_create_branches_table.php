@@ -9,11 +9,12 @@ return new class extends Migration {
     public function up(): void {
         Schema::create('branches', function (Blueprint $table) {
             $table->id();
-            $table->string('code')->nullable()->unique();
-            $table->string('name')->unique();
-            $table->string('normalized_name')->unique();
+            $table->string('code', 60)->unique();
+            $table->string('name', 160);
+            $table->string('normalized_name', 160)->nullable()->index();
             $table->boolean('is_active')->default(true);
             $table->timestamps();
+            $table->index('name');
         });
     }
 
