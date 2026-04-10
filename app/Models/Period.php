@@ -8,9 +8,12 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class Period extends Model {
 
     protected $fillable = [
+        'name',
+        'code',
+        'type',
         'year',
         'month',
-        'code',
+        'sequence',
         'start_date',
         'end_date',
         'is_closed',
@@ -27,6 +30,14 @@ class Period extends Model {
     ];
 
     public function getLabelAttribute(): string {
+        if (!empty($this->name)) {
+            return $this->name;
+        }
+
+        if ($this->type === 'weekly') {
+            return sprintf('Semana %d %04d-%02d', (int) $this->sequence, (int) $this->year, (int) $this->month);
+        }
+
         $months = [
             1 => 'Enero',
             2 => 'Febrero',
@@ -42,6 +53,7 @@ class Period extends Model {
             12 => 'Diciembre',
         ];
         $monthName = $months[(int) $this->month] ?? 'Periodo';
+
         return "{$monthName} {$this->year}";
     }
 
