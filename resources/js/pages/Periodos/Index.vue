@@ -3,28 +3,29 @@ import { Head } from '@inertiajs/vue3'
 import {
     CalendarDays,
     CheckCircle2,
-    Clock3,
     FolderOpen,
     Lock,
     MoreHorizontal,
     Plus,
     Search,
     Unlock,
-    XCircle,
 } from 'lucide-vue-next'
 
-import AppLayout from '@/layouts/AppLayout.vue'
 import InputError from '@/components/InputError.vue'
 import { usePeriodosIndex } from '@/composables/usePeriodosIndex'
+import AppLayout from '@/layouts/AppLayout.vue'
 
 const props = withDefaults(
     defineProps<{
         periods: Array<{
             id: number
+            name?: string | null
             code: string
+            type?: string | null
+            sequence?: number | null
             label: string
             year: number
-            month: number
+            month: number | null
             start_date?: string | null
             end_date?: string | null
             is_closed?: boolean
@@ -77,7 +78,7 @@ const {
                                     class="inline-flex w-fit items-center gap-2 rounded-full border border-primary/15 bg-primary/5 px-3 py-1.5 text-xs font-semibold text-primary"
                                 >
                                     <CalendarDays class="size-3.5" />
-                                    Control mensual del sistema
+                                    Control operativo por periodo
                                 </div>
 
                                 <div>
@@ -85,7 +86,7 @@ const {
                                         Periodos
                                     </h1>
                                     <p class="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base">
-                                        Administra los meses de trabajo, consulta su avance y controla
+                                        Administra periodos operativos, consulta su avance y controla
                                         qué periodos permanecen abiertos o cerrados para captura.
                                     </p>
                                 </div>
@@ -137,12 +138,23 @@ const {
                             <h2 class="text-lg font-bold tracking-tight">Nuevo periodo</h2>
                         </div>
                         <p class="mt-2 text-sm text-muted-foreground">
-                            Crea un nuevo mes operativo para el histórico.
+                            Crea nuevos periodos operativos para el histórico.
                         </p>
                     </div>
 
                     <form @submit.prevent="submitCreate" class="space-y-5 p-4 sm:p-5">
                         <div class="grid gap-4 sm:grid-cols-2">
+                            <div class="space-y-2 sm:col-span-2">
+                                <label class="text-sm font-semibold">Tipo</label>
+                                <select v-model="form.type" class="app-input">
+                                    <option value="weekly">Semanal (habilitado)</option>
+                                    <option value="bimonthly" disabled>Bimestral (próximamente)</option>
+                                    <option value="quarterly" disabled>Trimestral (próximamente)</option>
+                                    <option value="semiannual" disabled>Semestral (próximamente)</option>
+                                    <option value="annual" disabled>Anual (próximamente)</option>
+                                </select>
+                            </div>
+
                             <div class="space-y-2">
                                 <label class="text-sm font-semibold">Año</label>
                                 <input
@@ -155,7 +167,7 @@ const {
                             </div>
 
                             <div class="space-y-2">
-                                <label class="text-sm font-semibold">Mes</label>
+                                <label class="text-sm font-semibold">Mes contenedor</label>
                                 <select v-model="form.month" class="app-input">
                                     <option value="">Selecciona un mes</option>
                                     <option value="1">Enero</option>
@@ -202,7 +214,7 @@ const {
                             <div>
                                 <h2 class="text-lg font-bold tracking-tight">Listado de periodos</h2>
                                 <p class="mt-1 text-sm text-muted-foreground">
-                                    Periodos organizados por mes con su progreso y estado operativo.
+                                    Periodos organizados por tipo y rango con su progreso y estado operativo.
                                 </p>
                             </div>
 
@@ -253,9 +265,18 @@ const {
                                 </span>
 
                                 <span class="app-badge-muted">
+                                    {{ period.type ?? 'weekly' }}
+                                    <template v-if="period.sequence">#{{ period.sequence }}</template>
+                                </span>
+
+                                <span class="app-badge-muted">
                                     {{ period.uploaded_sources_count }} / {{ period.required_sources_count }}
                                 </span>
                             </div>
+
+                            <p class="mt-3 text-xs text-muted-foreground">
+                                {{ period.start_date }} → {{ period.end_date }}
+                            </p>
 
                             <div class="mt-4 h-2 overflow-hidden rounded-full bg-muted">
                                 <div

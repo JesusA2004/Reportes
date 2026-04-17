@@ -1,13 +1,16 @@
-import { computed, ref } from 'vue'
 import { useForm } from '@inertiajs/vue3'
 import Swal from 'sweetalert2'
+import { computed, ref } from 'vue'
 
 type PeriodItem = {
     id: number
+    name?: string | null
     code: string
+    type?: string | null
+    sequence?: number | null
     label: string
     year: number
-    month: number
+    month: number | null
     start_date?: string | null
     end_date?: string | null
     is_closed?: boolean
@@ -45,9 +48,11 @@ export function usePeriodosIndex(props: Props) {
     })
 
     const form = useForm<{
+        type: string
         year: string | number
         month: string | number
     }>({
+        type: 'weekly',
         year: '',
         month: '',
     })
@@ -55,7 +60,9 @@ export function usePeriodosIndex(props: Props) {
     const filteredPeriods = computed(() => {
         const query = filters.value.query.trim().toLowerCase()
 
-        if (!query) return props.periods
+        if (!query) {
+return props.periods
+}
 
         return props.periods.filter((period) => {
             return (
@@ -71,10 +78,18 @@ export function usePeriodosIndex(props: Props) {
     const activePeriods = computed(() => props.periods.filter((p) => (p.uploaded_sources_count ?? 0) > 0).length)
 
     const createLabel = computed(() => {
+        const type = form.type
         const year = Number(form.year)
         const month = Number(form.month)
 
-        if (!year || !month) return ''
+        if (!year || !month) {
+return ''
+}
+
+        if (type === 'weekly') {
+            return `Semanas de ${monthNames[month] ?? 'Periodo'} ${year}`
+        }
+
         return `${monthNames[month] ?? 'Periodo'} ${year}`
     })
 
@@ -112,7 +127,9 @@ export function usePeriodosIndex(props: Props) {
             },
         })
 
-        if (!result.isConfirmed) return
+        if (!result.isConfirmed) {
+return
+}
 
         Swal.fire({
             title: 'Creando periodo...',
