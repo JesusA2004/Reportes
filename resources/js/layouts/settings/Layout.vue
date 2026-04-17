@@ -12,15 +12,15 @@ import type { NavItem } from '@/types';
 
 const sidebarNavItems: NavItem[] = [
     {
-        title: 'Profile',
+        title: 'Perfil',
         href: editProfile(),
     },
     {
-        title: 'Security',
+        title: 'Seguridad',
         href: editSecurity(),
     },
     {
-        title: 'Appearance',
+        title: 'Apariencia',
         href: editAppearance(),
     },
 ];
@@ -29,43 +29,44 @@ const { isCurrentOrParentUrl } = useCurrentUrl();
 </script>
 
 <template>
-    <div class="px-4 py-6">
+    <section class="space-y-8 rounded-3xl border border-sidebar-border/70 bg-background p-5 shadow-sm sm:p-8">
         <Heading
-            title="Settings"
-            description="Manage your profile and account settings"
+            title="Configuración"
+            description="Administra la información de tu cuenta, la seguridad y la apariencia del sistema."
         />
 
-        <div class="flex flex-col lg:flex-row lg:space-x-12">
-            <aside class="w-full max-w-xl lg:w-48">
+        <div class="grid gap-8 lg:grid-cols-[240px_minmax(0,1fr)] lg:items-start">
+            <aside>
                 <nav
-                    class="flex flex-col space-y-1 space-x-0"
-                    aria-label="Settings"
+                    aria-label="Configuración"
+                    class="grid gap-2 rounded-2xl border border-sidebar-border/70 bg-muted/30 p-2"
                 >
                     <Button
                         v-for="item in sidebarNavItems"
                         :key="toUrl(item.href)"
+                        as-child
                         variant="ghost"
                         :class="[
-                            'w-full justify-start',
-                            { 'bg-muted': isCurrentOrParentUrl(item.href) },
+                            'h-11 justify-start rounded-xl px-4 text-sm font-medium transition-all',
+                            isCurrentOrParentUrl(item.href)
+                                ? 'bg-primary text-primary-foreground shadow-sm hover:bg-primary/90'
+                                : 'text-muted-foreground hover:bg-background hover:text-foreground'
                         ]"
-                        as-child
                     >
                         <Link :href="item.href">
-                            <component :is="item.icon" class="h-4 w-4" />
                             {{ item.title }}
                         </Link>
                     </Button>
                 </nav>
             </aside>
 
-            <Separator class="my-6 lg:hidden" />
+            <Separator class="lg:hidden" />
 
-            <div class="flex-1 md:max-w-2xl">
-                <section class="max-w-xl space-y-12">
+            <main class="min-w-0">
+                <section class="space-y-6 rounded-2xl border border-sidebar-border/70 bg-card/60 p-4 sm:p-6">
                     <slot />
                 </section>
-            </div>
+            </main>
         </div>
-    </div>
+    </section>
 </template>
