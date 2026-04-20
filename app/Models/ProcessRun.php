@@ -21,11 +21,11 @@ class ProcessRun extends Model {
         'log',
         'started_at',
         'finished_at',
-        'status' => ProcessRunStatus::class,
-        'process_type' => ProcessType::class,
     ];
 
     protected $casts = [
+        'status' => ProcessRunStatus::class,
+        'process_type' => ProcessType::class,
         'rows_read' => 'integer',
         'rows_inserted' => 'integer',
         'rows_skipped' => 'integer',

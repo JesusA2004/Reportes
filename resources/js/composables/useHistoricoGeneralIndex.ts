@@ -1,14 +1,15 @@
-import { computed, ref } from 'vue'
-import Swal from 'sweetalert2'
 import { router, useForm } from '@inertiajs/vue3'
 import {
     AlertCircle,
     CheckCircle2,
     Clock3,
     ShieldAlert,
-    FolderOpen,
-    type LucideIcon,
+    FolderOpen
+    
 } from 'lucide-vue-next'
+import type {LucideIcon} from 'lucide-vue-next';
+import Swal from 'sweetalert2'
+import { computed, ref } from 'vue'
 
 type PeriodItem = {
     id: number
@@ -43,6 +44,13 @@ type UploadItem = {
     notes?: string | null
     source_code?: string | null
     source_name?: string | null
+    last_process_run?: {
+        status?: 'pending' | 'running' | 'success' | 'failed' | string
+        rows_read?: number
+        rows_inserted?: number
+        rows_with_errors?: number
+        finished_at?: string | null
+    } | null
 }
 
 type GroupedPeriodUploads = {
@@ -147,7 +155,9 @@ export function useHistoricoGeneralIndex(props: Props) {
     const filteredPeriods = computed(() => {
         const query = filters.value.query.trim().toLowerCase()
 
-        if (!query) return periodRows.value
+        if (!query) {
+return periodRows.value
+}
 
         return periodRows.value.filter((period) => {
             return (
@@ -179,7 +189,9 @@ export function useHistoricoGeneralIndex(props: Props) {
     const incompletePeriods = computed(() => totalPeriods.value - completePeriods.value)
 
     const currentProgress = computed(() => {
-        if (!selectedPeriodRow.value) return 0
+        if (!selectedPeriodRow.value) {
+return 0
+}
 
         return Math.round(
             (selectedPeriodRow.value.uploaded_sources_count /
@@ -189,7 +201,9 @@ export function useHistoricoGeneralIndex(props: Props) {
     })
 
     const isCurrentPeriodComplete = computed(() => {
-        if (!selectedPeriodRow.value) return false
+        if (!selectedPeriodRow.value) {
+return false
+}
 
         return (
             selectedPeriodRow.value.required_sources_count > 0 &&
@@ -198,14 +212,26 @@ export function useHistoricoGeneralIndex(props: Props) {
     })
 
     const canUploadCurrentPeriod = computed(() => {
-        if (!selectedPeriodRow.value) return false
-        if (isCurrentPeriodComplete.value) return false
+        if (!selectedPeriodRow.value) {
+return false
+}
+
+        if (isCurrentPeriodComplete.value) {
+return false
+}
+
         return true
     })
 
     const uploadDisabledReason = computed(() => {
-        if (!selectedPeriodRow.value) return 'Selecciona un periodo.'
-        if (isCurrentPeriodComplete.value) return 'Periodo completo'
+        if (!selectedPeriodRow.value) {
+return 'Selecciona un periodo.'
+}
+
+        if (isCurrentPeriodComplete.value) {
+return 'Periodo completo'
+}
+
         return ''
     })
 
@@ -215,7 +241,9 @@ export function useHistoricoGeneralIndex(props: Props) {
         const uploads = selectedPeriodRow.value?.uploads ?? []
         const query = quickFilter.value.trim().toLowerCase()
 
-        if (!query) return uploads
+        if (!query) {
+return uploads
+}
 
         return uploads.filter((upload) => {
             return (
@@ -279,9 +307,18 @@ export function useHistoricoGeneralIndex(props: Props) {
     })
 
     const formatUploadStatus = (status: UploadItem['status']) => {
-        if (status === 'processed') return 'Procesado'
-        if (status === 'failed') return 'Error'
-        if (status === 'processing') return 'Procesando'
+        if (status === 'processed') {
+return 'Procesado'
+}
+
+        if (status === 'failed') {
+return 'Error'
+}
+
+        if (status === 'processing') {
+return 'Procesando'
+}
+
         return 'Pendiente'
     }
 
@@ -302,10 +339,22 @@ export function useHistoricoGeneralIndex(props: Props) {
     }
 
     const currentStatusLabel = (period: PeriodRow) => {
-        if (period.uploaded_sources_count === 0) return 'Sin carga'
-        if (period.failed_count > 0) return 'Con error'
-        if (period.pending_count > 0) return 'Procesando'
-        if (period.missing_sources_count > 0) return 'Incompleto'
+        if (period.uploaded_sources_count === 0) {
+return 'Sin carga'
+}
+
+        if (period.failed_count > 0) {
+return 'Con error'
+}
+
+        if (period.pending_count > 0) {
+return 'Procesando'
+}
+
+        if (period.missing_sources_count > 0) {
+return 'Incompleto'
+}
+
         return 'Completo'
     }
 
@@ -330,10 +379,22 @@ export function useHistoricoGeneralIndex(props: Props) {
     }
 
     const currentStatusIcon = (period: PeriodRow): LucideIcon => {
-        if (period.uploaded_sources_count === 0) return FolderOpen
-        if (period.failed_count > 0) return ShieldAlert
-        if (period.pending_count > 0) return Clock3
-        if (period.missing_sources_count > 0) return AlertCircle
+        if (period.uploaded_sources_count === 0) {
+return FolderOpen
+}
+
+        if (period.failed_count > 0) {
+return ShieldAlert
+}
+
+        if (period.pending_count > 0) {
+return Clock3
+}
+
+        if (period.missing_sources_count > 0) {
+return AlertCircle
+}
+
         return CheckCircle2
     }
 
@@ -346,12 +407,18 @@ export function useHistoricoGeneralIndex(props: Props) {
     }
 
     const openFileDialog = () => {
-        if (!canUploadCurrentPeriod.value || form.processing) return
+        if (!canUploadCurrentPeriod.value || form.processing) {
+return
+}
+
         fileInputRef.value?.click()
     }
 
     const assignFile = (file: File | null) => {
-        if (!file) return
+        if (!file) {
+return
+}
+
         form.file = file
     }
 
@@ -361,7 +428,10 @@ export function useHistoricoGeneralIndex(props: Props) {
     }
 
     const onDragEnter = () => {
-        if (!canUploadCurrentPeriod.value || form.processing) return
+        if (!canUploadCurrentPeriod.value || form.processing) {
+return
+}
+
         dragActive.value = true
     }
 
@@ -370,25 +440,37 @@ export function useHistoricoGeneralIndex(props: Props) {
     }
 
     const onDragOver = () => {
-        if (!canUploadCurrentPeriod.value || form.processing) return
+        if (!canUploadCurrentPeriod.value || form.processing) {
+return
+}
+
         dragActive.value = true
     }
 
     const onDrop = (event: DragEvent) => {
         dragActive.value = false
-        if (!canUploadCurrentPeriod.value || form.processing) return
+
+        if (!canUploadCurrentPeriod.value || form.processing) {
+return
+}
 
         const file = event.dataTransfer?.files?.[0] ?? null
         assignFile(file)
     }
 
     const submitLabel = computed(() => {
-        if (form.processing) return 'Subiendo...'
+        if (form.processing) {
+return 'Subiendo...'
+}
+
         return 'Subir archivo'
     })
 
     const submit = async () => {
-        if (!selectedPeriodRow.value) return
+        if (!selectedPeriodRow.value) {
+return
+}
+
         form.period_id = selectedPeriodRow.value.id
         Swal.fire({
             title: 'Subiendo archivo...',
@@ -416,6 +498,7 @@ export function useHistoricoGeneralIndex(props: Props) {
                 if (fileInputRef.value) {
                     fileInputRef.value.value = ''
                 }
+
                 Swal.fire({
                     title: 'Archivo subido',
                     text: 'Tu archivo se subió correctamente.',
@@ -472,7 +555,11 @@ export function useHistoricoGeneralIndex(props: Props) {
                 cancelButton: 'app-swal-cancel',
             },
         })
-        if (!result.isConfirmed) return
+
+        if (!result.isConfirmed) {
+return
+}
+
         deletingIds.value.push(uploadId)
         Swal.fire({
             title: 'Eliminando archivo...',
@@ -532,6 +619,85 @@ export function useHistoricoGeneralIndex(props: Props) {
         })
     }
 
+    const analyzeUpload = async (uploadId: number) => {
+        const result = await Swal.fire({
+            title: '¿Analizar archivo?',
+            text: 'Se ejecutará el procesamiento del archivo para actualizar su estado.',
+            icon: 'question',
+            showCancelButton: true,
+            confirmButtonText: 'Sí, analizar',
+            cancelButtonText: 'Cancelar',
+            reverseButtons: true,
+            buttonsStyling: false,
+            customClass: {
+                popup: 'app-swal-popup',
+                icon: 'app-swal-icon',
+                title: 'app-swal-title',
+                htmlContainer: 'app-swal-text',
+                actions: 'app-swal-actions',
+                confirmButton: 'app-swal-confirm',
+                cancelButton: 'app-swal-cancel',
+            },
+        })
+
+        if (!result.isConfirmed) {
+return
+}
+
+        Swal.fire({
+            title: 'Analizando archivo...',
+            text: 'Estamos procesando el archivo seleccionado.',
+            allowOutsideClick: false,
+            allowEscapeKey: false,
+            showConfirmButton: false,
+            buttonsStyling: false,
+            customClass: {
+                popup: 'app-swal-popup',
+                title: 'app-swal-title',
+                htmlContainer: 'app-swal-text',
+            },
+            didOpen: () => Swal.showLoading(),
+        })
+
+        router.post(`/historico-general/${uploadId}/analizar`, {}, {
+            preserveScroll: true,
+            onSuccess: () => {
+                Swal.fire({
+                    title: 'Archivo analizado',
+                    text: 'El procesamiento finalizó correctamente.',
+                    icon: 'success',
+                    confirmButtonText: 'Entendido',
+                    buttonsStyling: false,
+                    customClass: {
+                        popup: 'app-swal-popup',
+                        icon: 'app-swal-icon',
+                        title: 'app-swal-title',
+                        htmlContainer: 'app-swal-text',
+                        actions: 'app-swal-actions',
+                        confirmButton: 'app-swal-confirm',
+                    },
+                })
+            },
+            onError: () => {
+                Swal.fire({
+                    title: 'No se pudo analizar',
+                    text: 'Ocurrió un problema durante el análisis.',
+                    icon: 'error',
+                    confirmButtonText: 'Cerrar',
+                    buttonsStyling: false,
+                    customClass: {
+                        popup: 'app-swal-popup',
+                        icon: 'app-swal-icon',
+                        title: 'app-swal-title',
+                        htmlContainer: 'app-swal-text',
+                        actions: 'app-swal-actions',
+                        confirmButton: 'app-swal-confirm',
+                    },
+                })
+            },
+        })
+    }
+
     const isDeletingId = (uploadId: number) => deletingIds.value.includes(uploadId)
 
     return {
@@ -568,6 +734,7 @@ export function useHistoricoGeneralIndex(props: Props) {
         currentStatusClass,
         currentStatusIcon,
         deleteUpload,
+        analyzeUpload,
         isDeletingId,
         quickFilter,
     }

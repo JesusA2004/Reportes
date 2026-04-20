@@ -11,18 +11,17 @@ import {
     LoaderCircle,
     Search,
     Trash2,
+    PlayCircle,
     UploadCloud,
-    XCircle,
     Inbox,
     Sparkles,
     FileUp,
-    ShieldAlert,
     ArrowUpRight,
 } from 'lucide-vue-next'
 
-import AppLayout from '@/layouts/AppLayout.vue'
 import InputError from '@/components/InputError.vue'
 import { useHistoricoGeneralIndex } from '@/composables/useHistoricoGeneralIndex'
+import AppLayout from '@/layouts/AppLayout.vue'
 
 const props = withDefaults(
     defineProps<{
@@ -70,6 +69,13 @@ const props = withDefaults(
                 notes?: string | null
                 source_code?: string | null
                 source_name?: string | null
+                last_process_run?: {
+                    status?: 'pending' | 'running' | 'success' | 'failed' | string
+                    rows_read?: number
+                    rows_inserted?: number
+                    rows_with_errors?: number
+                    finished_at?: string | null
+                } | null
             }>
         }>
         currentPeriodId?: number | null
@@ -118,6 +124,7 @@ const {
     currentStatusClass,
     currentStatusIcon,
     deleteUpload,
+    analyzeUpload,
     isDeletingId,
     quickFilter,
 } = useHistoricoGeneralIndex(props)
@@ -558,9 +565,9 @@ const {
                         <div class="border-b px-4 py-4 sm:px-5">
                             <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                                 <div>
-                                    <h3 class="text-lg font-bold tracking-tight">Archivos del periodo</h3>
+                                        <h3 class="text-lg font-bold tracking-tight">Archivos del periodo</h3>
                                     <p class="mt-1 text-sm text-muted-foreground">
-                                        Elimina archivos incorrectos para volver a cargarlos.
+                                        Analiza cada archivo para convertirlo en mini reporte y luego consolidar la radiografía.
                                     </p>
                                 </div>
 
@@ -614,7 +621,28 @@ const {
                                     {{ upload.notes }}
                                 </p>
 
+                                <div
+                                    v-if="upload.last_process_run"
+                                    class="mt-3 rounded-xl border border-border/70 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground"
+                                >
+                                    <p>
+                                        Análisis: {{ upload.last_process_run.status || '—' }} ·
+                                        Leídas {{ upload.last_process_run.rows_read ?? 0 }} ·
+                                        Insertadas {{ upload.last_process_run.rows_inserted ?? 0 }} ·
+                                        Errores {{ upload.last_process_run.rows_with_errors ?? 0 }}
+                                    </p>
+                                </div>
+
                                 <div class="mt-4 flex items-center justify-end gap-2 border-t pt-4">
+                                    <button
+                                        type="button"
+                                        class="app-btn h-10 border border-sky-200 bg-sky-50 px-4 text-sky-700 transition-all duration-200 hover:-translate-y-0.5 hover:bg-sky-100 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-300"
+                                        @click="analyzeUpload(upload.id)"
+                                    >
+                                        <PlayCircle class="size-4" />
+                                        Analizar
+                                    </button>
+
                                     <button
                                         type="button"
                                         class="app-btn h-10 border border-rose-200 bg-rose-50 px-4 text-rose-700 transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-100 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300"
@@ -641,6 +669,16 @@ const {
                             <p class="mt-1 text-sm text-muted-foreground">
                                 Sube primero una fuente para comenzar este periodo.
                             </p>
+                        </div>
+
+                        <div v-if="selectedPeriodRow" class="border-t px-4 py-4 sm:px-5">
+                            <a
+                                class="app-btn app-btn-primary h-11 px-5"
+                                :href="`/reportes-mensuales/${selectedPeriodRow.id}/radiografia.xlsx`"
+                            >
+                                Generar radiografía (Excel/CSV)
+                                <ArrowUpRight class="size-4" />
+                            </a>
                         </div>
                     </section>
                 </section>

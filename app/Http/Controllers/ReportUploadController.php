@@ -8,6 +8,7 @@ use App\Jobs\ImportNoiNominaJob;
 use App\Models\DataSource;
 use App\Models\Period;
 use App\Models\ReportUpload;
+use App\Services\ReportAnalysisService;
 use App\Services\ReportUploadService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\Storage;
@@ -26,6 +27,7 @@ class ReportUploadController extends Controller {
             ->with([
                 'reportUploads' => fn ($query) => $query
                     ->with('dataSource:id,code,name')
+                    ->with(['processRuns' => fn ($processQuery) => $processQuery->latest()])
                     ->latest(),
             ])
             ->orderByDesc('year')
@@ -103,6 +105,15 @@ class ReportUploadController extends Controller {
                             'notes' => $upload->notes,
                             'source_code' => $upload->dataSource?->code,
                             'source_name' => $upload->dataSource?->name,
+                            'last_process_run' => $upload->processRuns->first()
+                                ? [
+                                    'status' => $upload->processRuns->first()->status?->value ?? $upload->processRuns->first()->status,
+                                    'rows_read' => $upload->processRuns->first()->rows_read,
+                                    'rows_inserted' => $upload->processRuns->first()->rows_inserted,
+                                    'rows_with_errors' => $upload->processRuns->first()->rows_with_errors,
+                                    'finished_at' => optional($upload->processRuns->first()->finished_at)->format('d/m/Y H:i'),
+                                ]
+                                : null,
                         ];
                     })->values(),
                 ];
@@ -138,11 +149,17 @@ class ReportUploadController extends Controller {
 
     public function destroy(ReportUpload $reportUpload): RedirectResponse
     {
-        if ($reportUpload->file_path && Storage::disk('public')->exists($reportUpload->file_path)) {
-            Storage::disk('public')->delete($reportUpload->file_path);
+        if ($reportUpload->stored_path && Storage::disk('public')->exists($reportUpload->stored_path)) {
+            Storage::disk('public')->delete($reportUpload->stored_path);
         }
         $reportUpload->delete();
         return back()->with('success', 'Archivo eliminado correctamente.');
+    }
+
+    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $analysisService): RedirectResponse {
+        $analysisService->analyze($reportUpload);
+
+        return back()->with('success', 'Archivo analizado correctamente.');
     }
 
 }
