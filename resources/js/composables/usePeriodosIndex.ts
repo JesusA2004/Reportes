@@ -90,6 +90,22 @@ return ''
             return `Semanas de ${monthNames[month] ?? 'Periodo'} ${year}`
         }
 
+        if (type === 'bimonthly') {
+            return `Bimestre ${Math.ceil(month / 2)} ${year}`
+        }
+
+        if (type === 'quarterly') {
+            return `Trimestre ${Math.ceil(month / 3)} ${year}`
+        }
+
+        if (type === 'semiannual') {
+            return `Semestre ${month <= 6 ? 1 : 2} ${year}`
+        }
+
+        if (type === 'annual') {
+            return `Anual ${year}`
+        }
+
         return `${monthNames[month] ?? 'Periodo'} ${year}`
     })
 

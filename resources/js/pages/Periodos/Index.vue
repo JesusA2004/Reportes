@@ -147,11 +147,11 @@ const {
                             <div class="space-y-2 sm:col-span-2">
                                 <label class="text-sm font-semibold">Tipo</label>
                                 <select v-model="form.type" class="app-input">
-                                    <option value="weekly">Semanal (habilitado)</option>
-                                    <option value="bimonthly" disabled>Bimestral (próximamente)</option>
-                                    <option value="quarterly" disabled>Trimestral (próximamente)</option>
-                                    <option value="semiannual" disabled>Semestral (próximamente)</option>
-                                    <option value="annual" disabled>Anual (próximamente)</option>
+                                    <option value="weekly">Semanal</option>
+                                    <option value="bimonthly">Bimestral</option>
+                                    <option value="quarterly">Trimestral</option>
+                                    <option value="semiannual">Semestral</option>
+                                    <option value="annual">Anual</option>
                                 </select>
                             </div>
 

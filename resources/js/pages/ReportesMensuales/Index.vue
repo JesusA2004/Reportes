@@ -56,6 +56,15 @@ const goToPeriod = (periodId: number) => {
                     </p>
                 </button>
             </div>
+
+            <div v-if="selectedPeriodId" class="mt-5 border-t pt-4">
+                <a
+                    class="app-btn app-btn-primary h-11 px-5"
+                    :href="`/reportes-mensuales/${selectedPeriodId}/radiografia.xlsx`"
+                >
+                    Descargar radiografía (Excel/CSV)
+                </a>
+            </div>
         </div>
     </div>
 </template>

@@ -21,6 +21,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::get('/', [ReportUploadController::class, 'index'])->name('index');
             Route::post('/', [ReportUploadController::class, 'store'])->name('store');
             Route::delete('/{reportUpload}', [ReportUploadController::class, 'destroy'])->name('destroy');
+            Route::post('/{reportUpload}/analizar', [ReportUploadController::class, 'analyze'])->name('analyze');
 
             // Déjalas solo cuando ya existan de verdad
             // Route::get('/{reportUpload}', [ReportUploadController::class, 'show'])->name('show');
@@ -60,6 +61,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::get('/', [MonthlyReportController::class, 'index'])->name('index');
             Route::get('/{period}', [MonthlyReportController::class, 'show'])->name('show');
             Route::post('/{period}/consolidar', [MonthlyReportController::class, 'consolidate'])->name('consolidate');
+            Route::get('/{period}/radiografia.xlsx', [MonthlyReportController::class, 'exportRadiography'])->name('export-radiography');
         });
 });
 
