@@ -11,8 +11,6 @@ use App\Http\Controllers\MonthlyReportController;
 Route::redirect('/', '/login');
 
 Route::middleware(['auth', 'verified'])->group(function () {
-
-
     Route::inertia('/dashboard', 'Dashboard')->name('dashboard');
 
     Route::prefix('historico-general')
@@ -52,7 +50,6 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->name('validaciones.')
         ->group(function () {
             Route::get('/', [ValidationController::class, 'index'])->name('index');
-            Route::put('/{validation}', [ValidationController::class, 'update'])->name('update');
         });
 
     Route::prefix('reportes-mensuales')
@@ -65,10 +62,8 @@ Route::middleware(['auth', 'verified'])->group(function () {
         });
 });
 
-
 if (Features::enabled(Features::updatePasswords())) {
     // Espacio para lógica futura si la ocupas.
 }
-
 
 require __DIR__ . '/settings.php';

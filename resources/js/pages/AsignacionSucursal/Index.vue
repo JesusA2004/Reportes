@@ -9,10 +9,12 @@ import {
     AlertTriangle,
     Link2,
     GitCompareArrows,
+    Gauge,
+    FileText,
 } from 'lucide-vue-next'
 
-import AppLayout from '@/layouts/AppLayout.vue'
 import { useAsignacionSucursalIndex } from '@/composables/useAsignacionSucursalIndex'
+import AppLayout from '@/layouts/AppLayout.vue'
 
 const props = withDefaults(
     defineProps<{
@@ -22,9 +24,14 @@ const props = withDefaults(
             normalized_name?: string | null
             branch_name?: string | null
             source_name?: string | null
-            match_status: 'matched' | 'pending' | 'manual' | 'unmatched'
+            source_reference?: string | null
+            match_type?: 'exact' | 'normalized' | 'manual' | 'unmatched' | string | null
+            confidence?: number | null
+            was_manual_reviewed?: boolean
+            ui_status: 'matched' | 'pending' | 'manual' | 'unmatched'
             period_label?: string | null
             updated_at?: string | null
+            notes?: string | null
         }>
         branches: Array<{
             id: number
@@ -50,6 +57,8 @@ const {
     pendingAssignments,
     unmatchedAssignments,
     statusClass,
+    formatMatchType,
+    formatConfidence,
 } = useAsignacionSucursalIndex(props)
 </script>
 
@@ -77,7 +86,7 @@ const {
                                         Asignación sucursal
                                     </h1>
                                     <p class="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base">
-                                        Revisa el match de empleados contra sucursales operativas y
+                                        Revisa el cruce de empleados contra sucursales operativas y
                                         detecta casos que todavía requieren validación manual.
                                     </p>
                                 </div>
@@ -95,7 +104,7 @@ const {
                                 <div class="app-card-soft px-4 py-3">
                                     <div class="flex items-center gap-2 text-xs text-muted-foreground">
                                         <CheckCircle2 class="size-4" />
-                                        Matched
+                                        Match correcto
                                     </div>
                                     <p class="mt-2 text-xl font-extrabold">{{ matchedAssignments }}</p>
                                 </div>
@@ -158,7 +167,10 @@ const {
                     </div>
                 </div>
 
-                <div v-if="filteredAssignments.length" class="grid gap-4 p-4 sm:p-5 lg:grid-cols-2 2xl:grid-cols-3">
+                <div
+                    v-if="filteredAssignments.length"
+                    class="grid gap-4 p-4 sm:p-5 lg:grid-cols-2 2xl:grid-cols-3"
+                >
                     <article
                         v-for="item in filteredAssignments"
                         :key="item.id"
@@ -176,9 +188,9 @@ const {
 
                             <span
                                 class="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold"
-                                :class="statusClass(item.match_status)"
+                                :class="statusClass(item.ui_status)"
                             >
-                                {{ item.match_status }}
+                                {{ item.ui_status }}
                             </span>
                         </div>
 
@@ -193,10 +205,32 @@ const {
                                 <span>{{ item.source_name || 'Sin fuente' }}</span>
                             </div>
 
+                            <div class="flex items-center gap-2 text-sm">
+                                <ArrowRightLeft class="size-4 text-muted-foreground" />
+                                <span>Tipo de match: {{ formatMatchType(item.match_type) }}</span>
+                            </div>
+
+                            <div class="flex items-center gap-2 text-sm">
+                                <Gauge class="size-4 text-muted-foreground" />
+                                <span>Confianza: {{ formatConfidence(item.confidence) }}</span>
+                            </div>
+
                             <div class="flex items-center gap-2 text-sm text-muted-foreground">
                                 <GitCompareArrows class="size-4" />
                                 <span>{{ item.period_label || 'Sin periodo' }}</span>
                             </div>
+
+                            <div v-if="item.notes" class="flex items-start gap-2 text-sm text-muted-foreground">
+                                <FileText class="mt-0.5 size-4 shrink-0" />
+                                <span>{{ item.notes }}</span>
+                            </div>
+
+                            <p
+                                v-if="item.was_manual_reviewed"
+                                class="text-xs font-medium text-sky-600 dark:text-sky-300"
+                            >
+                                Revisado manualmente
+                            </p>
                         </div>
 
                         <div class="mt-4 flex items-center justify-between border-t pt-4">

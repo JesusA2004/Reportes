@@ -6,9 +6,14 @@ type AssignmentItem = {
     normalized_name?: string | null
     branch_name?: string | null
     source_name?: string | null
-    match_status: 'matched' | 'pending' | 'manual' | 'unmatched'
+    source_reference?: string | null
+    match_type?: 'exact' | 'normalized' | 'manual' | 'unmatched' | string | null
+    confidence?: number | null
+    was_manual_reviewed?: boolean
+    ui_status: 'matched' | 'pending' | 'manual' | 'unmatched'
     period_label?: string | null
     updated_at?: string | null
+    notes?: string | null
 }
 
 type Props = {
@@ -34,21 +39,22 @@ export function useAsignacionSucursalIndex(props: Props) {
                 !query ||
                 item.employee_name.toLowerCase().includes(query) ||
                 (item.normalized_name ?? '').toLowerCase().includes(query) ||
-                (item.branch_name ?? '').toLowerCase().includes(query)
+                (item.branch_name ?? '').toLowerCase().includes(query) ||
+                (item.source_name ?? '').toLowerCase().includes(query)
 
             const matchesStatus =
-                selectedStatus.value === 'all' || item.match_status === selectedStatus.value
+                selectedStatus.value === 'all' || item.ui_status === selectedStatus.value
 
             return matchesQuery && matchesStatus
         })
     })
 
     const totalAssignments = computed(() => props.assignments.length)
-    const matchedAssignments = computed(() => props.assignments.filter((a) => a.match_status === 'matched').length)
-    const pendingAssignments = computed(() => props.assignments.filter((a) => a.match_status === 'pending' || a.match_status === 'manual').length)
-    const unmatchedAssignments = computed(() => props.assignments.filter((a) => a.match_status === 'unmatched').length)
+    const matchedAssignments = computed(() => props.assignments.filter((a) => a.ui_status === 'matched').length)
+    const pendingAssignments = computed(() => props.assignments.filter((a) => a.ui_status === 'pending' || a.ui_status === 'manual').length)
+    const unmatchedAssignments = computed(() => props.assignments.filter((a) => a.ui_status === 'unmatched').length)
 
-    const statusClass = (status: AssignmentItem['match_status']) => {
+    const statusClass = (status: AssignmentItem['ui_status']) => {
         if (status === 'matched') {
             return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
         }
@@ -64,6 +70,19 @@ export function useAsignacionSucursalIndex(props: Props) {
         return 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300'
     }
 
+    const formatMatchType = (matchType?: AssignmentItem['match_type']) => {
+        if (matchType === 'exact') return 'Exacto'
+        if (matchType === 'normalized') return 'Normalizado'
+        if (matchType === 'manual') return 'Manual'
+        if (matchType === 'unmatched') return 'Sin match'
+        return 'Sin definir'
+    }
+
+    const formatConfidence = (confidence?: number | null) => {
+        if (confidence === null || confidence === undefined) return '—'
+        return `${Math.round(confidence * 100)}%`
+    }
+
     return {
         filters,
         selectedStatus,
@@ -73,5 +92,7 @@ export function useAsignacionSucursalIndex(props: Props) {
         pendingAssignments,
         unmatchedAssignments,
         statusClass,
+        formatMatchType,
+        formatConfidence,
     }
 }

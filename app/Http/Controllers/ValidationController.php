@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Enums\MatchType;
 use App\Models\DataSource;
 use App\Models\EmployeeBranchAssignment;
 use App\Models\Period;
@@ -17,29 +18,39 @@ class ValidationController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | 1) Empleados sin sucursal asignada
+        | 1) Empleados sin sucursal asignada o sin match
         |--------------------------------------------------------------------------
         */
         $pendingAssignments = EmployeeBranchAssignment::query()
             ->with([
                 'employee:id,full_name',
-                'period:id,year,month,code',
+                'period:id,name,code,type,year,month,sequence,start_date,end_date',
             ])
-            ->whereNull('branch_id')
+            ->where(function ($query) {
+                $query->whereNull('branch_id')
+                    ->orWhere('match_type', MatchType::Unmatched->value);
+            })
             ->latest()
             ->get();
 
         foreach ($pendingAssignments as $assignment) {
+            $isUnmatched = $assignment->match_type?->value === MatchType::Unmatched->value;
+
             $items->push([
                 'id' => 'assignment-' . $assignment->id,
                 'type' => 'Asignación de sucursal',
-                'title' => 'Empleado sin sucursal asignada',
-                'description' => 'Este registro requiere revisión manual para definir la sucursal correcta.',
+                'title' => $isUnmatched
+                    ? 'Empleado sin match de sucursal'
+                    : 'Empleado sin sucursal asignada',
+                'description' => $isUnmatched
+                    ? 'No fue posible determinar automáticamente una sucursal para este empleado.'
+                    : 'Este registro requiere revisión manual para definir la sucursal correcta.',
                 'employee_name' => $assignment->employee?->full_name,
                 'period_label' => $assignment->period?->label,
                 'severity' => 'high',
                 'status' => 'open',
                 'updated_at' => optional($assignment->updated_at)->format('d/m/Y H:i'),
+                'timestamp' => optional($assignment->updated_at)?->timestamp ?? 0,
             ]);
         }
 
@@ -50,7 +61,7 @@ class ValidationController extends Controller
         */
         $failedUploads = ReportUpload::query()
             ->with([
-                'period:id,year,month,code',
+                'period:id,name,code,type,year,month,sequence,start_date,end_date',
                 'dataSource:id,name',
             ])
             ->where('status', 'failed')
@@ -70,6 +81,7 @@ class ValidationController extends Controller
                 'severity' => 'medium',
                 'status' => 'open',
                 'updated_at' => optional($upload->updated_at)->format('d/m/Y H:i'),
+                'timestamp' => optional($upload->updated_at)?->timestamp ?? 0,
             ]);
         }
 
@@ -86,6 +98,7 @@ class ValidationController extends Controller
             ->with('reportUploads:id,period_id,data_source_id')
             ->orderByDesc('year')
             ->orderByDesc('month')
+            ->orderByDesc('sequence')
             ->get();
 
         foreach ($periods as $period) {
@@ -108,13 +121,18 @@ class ValidationController extends Controller
                     'severity' => $missingCount >= 2 ? 'high' : 'medium',
                     'status' => 'open',
                     'updated_at' => optional($period->updated_at)->format('d/m/Y H:i'),
+                    'timestamp' => optional($period->updated_at)?->timestamp ?? 0,
                 ]);
             }
         }
 
         return Inertia::render('Validaciones/Index', [
             'validations' => $items
-                ->sortByDesc('updated_at')
+                ->sortByDesc('timestamp')
+                ->map(function (array $item) {
+                    unset($item['timestamp']);
+                    return $item;
+                })
                 ->values(),
         ]);
     }

@@ -2,9 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Enums\DataSourceCode;
 use App\Http\Requests\StoreReportUploadRequest;
-use App\Jobs\ImportNoiNominaJob;
 use App\Models\DataSource;
 use App\Models\Period;
 use App\Models\ReportUpload;
@@ -32,6 +30,7 @@ class ReportUploadController extends Controller {
             ])
             ->orderByDesc('year')
             ->orderByDesc('month')
+            ->orderByDesc('sequence')
             ->get();
         $periods = $periodModels
             ->map(function ($period) use ($requiredSourcesCount) {
@@ -131,24 +130,16 @@ class ReportUploadController extends Controller {
         StoreReportUploadRequest $request,
         ReportUploadService $service
     ): RedirectResponse {
-        $upload = $service->store(
+        $service->store(
             periodId: (int) $request->integer('period_id'),
             dataSourceId: (int) $request->integer('data_source_id'),
             file: $request->file('file'),
             notes: $request->string('notes')->toString() ?: null,
         );
-
-        $source = DataSource::findOrFail($upload->data_source_id);
-
-        if ($source->code === DataSourceCode::NoiNomina->value) {
-            ImportNoiNominaJob::dispatch($upload->id);
-        }
-
-        return back()->with('success', 'Archivo subido correctamente.');
+        return back()->with('success', 'Archivo subido correctamente. Ahora puedes analizarlo.');
     }
 
-    public function destroy(ReportUpload $reportUpload): RedirectResponse
-    {
+    public function destroy(ReportUpload $reportUpload): RedirectResponse {
         if ($reportUpload->stored_path && Storage::disk('public')->exists($reportUpload->stored_path)) {
             Storage::disk('public')->delete($reportUpload->stored_path);
         }
@@ -156,9 +147,9 @@ class ReportUploadController extends Controller {
         return back()->with('success', 'Archivo eliminado correctamente.');
     }
 
-    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $analysisService): RedirectResponse {
+    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $analysisService): RedirectResponse
+    {
         $analysisService->analyze($reportUpload);
-
         return back()->with('success', 'Archivo analizado correctamente.');
     }
 
