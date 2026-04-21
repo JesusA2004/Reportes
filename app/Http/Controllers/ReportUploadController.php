@@ -118,7 +118,7 @@ class ReportUploadController extends Controller {
                 ];
             })
             ->values();
-        return Inertia::render('Historico-General/Index', [
+        return Inertia::render('Historico-General/index', [
             'periods' => $periods,
             'sources' => $sources,
             'groupedUploads' => $groupedUploads,

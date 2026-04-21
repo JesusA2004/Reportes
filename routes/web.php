@@ -59,6 +59,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::get('/{period}', [MonthlyReportController::class, 'show'])->name('show');
             Route::post('/{period}/consolidar', [MonthlyReportController::class, 'consolidate'])->name('consolidate');
             Route::get('/{period}/radiografia.xlsx', [MonthlyReportController::class, 'exportRadiography'])->name('export-radiography');
+            Route::get('/{period}/consolidado.csv', [MonthlyReportController::class, 'exportSummary'])->name('export-summary');
         });
 });
 

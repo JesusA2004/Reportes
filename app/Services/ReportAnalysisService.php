@@ -8,24 +8,30 @@ use App\Enums\ProcessType;
 use App\Enums\ReportUploadStatus;
 use App\Models\ProcessRun;
 use App\Models\ReportUpload;
+use App\Services\Imports\GastosImportService;
 use App\Services\Imports\NoiNominaImportService;
 use Illuminate\Support\Facades\DB;
 
-class ReportAnalysisService {
-
+class ReportAnalysisService
+{
     public function __construct(
         protected NoiNominaImportService $noiNominaImportService,
+        protected GastosImportService $gastosImportService,
     ) {
     }
 
-    public function analyze(ReportUpload $upload): ProcessRun {
+    public function analyze(ReportUpload $upload): ProcessRun
+    {
         $sourceCode = $upload->dataSource?->code;
+
         if (!$sourceCode) {
             throw new \RuntimeException('El archivo no tiene una fuente de datos asociada.');
         }
+
         $upload->update([
             'status' => ReportUploadStatus::Processing,
         ]);
+
         $run = ProcessRun::query()->create([
             'period_id' => $upload->period_id,
             'report_upload_id' => $upload->id,
@@ -38,13 +44,16 @@ class ReportAnalysisService {
             'rows_with_errors' => 0,
             'log' => 'Inicio de análisis de archivo.',
         ]);
+
         try {
             $result = DB::transaction(function () use ($upload, $sourceCode) {
                 return match ($sourceCode) {
                     DataSourceCode::NoiNomina->value => $this->noiNominaImportService->handle($upload),
+                    DataSourceCode::Gastos->value => $this->gastosImportService->handle($upload),
                     default => throw new \RuntimeException("La fuente [{$sourceCode}] aún no tiene importador implementado."),
                 };
             });
+
             $run->update([
                 'rows_read' => (int) ($result['rows_read'] ?? 0),
                 'rows_inserted' => (int) ($result['rows_inserted'] ?? 0),
@@ -54,6 +63,7 @@ class ReportAnalysisService {
                 'finished_at' => now(),
                 'log' => (string) ($result['log'] ?? 'Análisis finalizado correctamente.'),
             ]);
+
             $upload->update([
                 'status' => ReportUploadStatus::Processed,
             ]);
@@ -63,12 +73,14 @@ class ReportAnalysisService {
                 'finished_at' => now(),
                 'log' => mb_strimwidth($exception->getMessage(), 0, 2000),
             ]);
+
             $upload->update([
                 'status' => ReportUploadStatus::Failed,
             ]);
+
             throw $exception;
         }
+
         return $run->fresh();
     }
-
 }

@@ -2,13 +2,14 @@
 
 namespace App\Services\Imports;
 
+use App\Models\Branch;
 use App\Models\Employee;
-use App\Models\NoiMovement;
+use App\Models\Expense;
 use App\Models\ReportUpload;
 use Illuminate\Support\Facades\Storage;
 use Maatwebsite\Excel\Facades\Excel;
 
-class NoiNominaImportService
+class GastosImportService
 {
     public function handle(ReportUpload $upload): array
     {
@@ -24,7 +25,7 @@ class NoiNominaImportService
         $sheets = Excel::toArray([], $absolutePath);
 
         if (empty($sheets) || empty($sheets[0])) {
-            throw new \RuntimeException('El archivo NOI está vacío o no se pudo leer.');
+            throw new \RuntimeException('El archivo de gastos está vacío o no se pudo leer.');
         }
 
         $rows = $sheets[0];
@@ -36,7 +37,7 @@ class NoiNominaImportService
 
         $headerMap = $this->buildHeaderMap($headerRow);
 
-        $requiredColumns = ['employee_name', 'concept', 'amount'];
+        $requiredColumns = ['concept', 'amount'];
         $missingRequired = collect($requiredColumns)
             ->filter(fn (string $field) => !array_key_exists($field, $headerMap))
             ->values()
@@ -44,11 +45,11 @@ class NoiNominaImportService
 
         if (!empty($missingRequired)) {
             throw new \RuntimeException(
-                'El archivo NOI no contiene columnas mínimas requeridas: ' . implode(', ', $missingRequired) . '.'
+                'El archivo de gastos no contiene columnas mínimas requeridas: ' . implode(', ', $missingRequired) . '.'
             );
         }
 
-        NoiMovement::query()
+        Expense::query()
             ->where('report_upload_id', $upload->id)
             ->delete();
 
@@ -68,24 +69,25 @@ class NoiNominaImportService
             try {
                 $mapped = $this->mapRow($row, $headerMap);
 
-                if (!$mapped['employee_name'] || $mapped['amount'] === null) {
+                if (!$mapped['concept'] || $mapped['amount'] === null) {
                     $rowsSkipped++;
                     continue;
                 }
 
-                $employee = $this->resolveEmployee($mapped);
+                $employee = $this->resolveEmployee($mapped['employee_name']);
+                $branch = $this->resolveBranch($mapped['branch_name']);
 
-                NoiMovement::query()->create([
+                Expense::query()->create([
                     'period_id' => $upload->period_id,
-                    'employee_id' => $employee?->id,
                     'report_upload_id' => $upload->id,
+                    'employee_id' => $employee?->id,
+                    'branch_id' => $branch?->id,
+                    'category' => $mapped['category'],
                     'concept' => $mapped['concept'],
-                    'concept_type' => $mapped['concept_type'],
                     'amount' => $mapped['amount'],
-                    'quantity' => $mapped['quantity'],
-                    'payroll_type' => $mapped['payroll_type'],
-                    'movement_date' => $mapped['movement_date'],
-                    'raw_row_hash' => hash('sha256', json_encode($mapped['raw_payload'], JSON_UNESCAPED_UNICODE)),
+                    'paid_amount' => $mapped['paid_amount'],
+                    'expense_date' => $mapped['expense_date'],
+                    'observations' => $mapped['observations'],
                     'raw_payload' => $mapped['raw_payload'],
                 ]);
 
@@ -101,7 +103,7 @@ class NoiNominaImportService
             'rows_skipped' => $rowsSkipped,
             'rows_with_errors' => $rowsWithErrors,
             'log' => sprintf(
-                'Importación NOI finalizada. Leídas: %d, insertadas: %d, omitidas: %d, con error: %d.',
+                'Importación de gastos finalizada. Leídas: %d, insertadas: %d, omitidas: %d, con error: %d.',
                 $rowsRead,
                 $rowsInserted,
                 $rowsSkipped,
@@ -113,31 +115,29 @@ class NoiNominaImportService
     private function buildHeaderMap(array $headerRow): array
     {
         $aliases = [
-            'employee_code' => [
-                'employee_code', 'codigo_empleado', 'clave_empleado', 'num_empleado', 'numero_empleado',
-                'no_empleado', 'id_empleado', 'codigo', 'clave',
-            ],
             'employee_name' => [
-                'employee_name', 'empleado', 'nombre_empleado', 'nombre', 'trabajador', 'colaborador',
-                'nombre_completo',
+                'employee_name', 'empleado', 'nombre_empleado', 'nombre', 'colaborador', 'responsable',
+            ],
+            'branch_name' => [
+                'branch_name', 'sucursal', 'oficina', 'branch', 'unidad',
+            ],
+            'category' => [
+                'category', 'categoria', 'tipo_gasto', 'rubro',
             ],
             'concept' => [
-                'concept', 'concepto', 'descripcion_concepto', 'descripcion',
-            ],
-            'concept_type' => [
-                'concept_type', 'tipo_concepto', 'tipo', 'tipo_movimiento', 'naturaleza',
+                'concept', 'concepto', 'descripcion', 'detalle', 'gasto',
             ],
             'amount' => [
                 'amount', 'importe', 'monto', 'total', 'valor',
             ],
-            'quantity' => [
-                'quantity', 'cantidad', 'unidades',
+            'paid_amount' => [
+                'paid_amount', 'monto_pagado', 'pagado', 'importe_pagado',
             ],
-            'payroll_type' => [
-                'payroll_type', 'tipo_nomina', 'nomina', 'tipo_de_nomina',
+            'expense_date' => [
+                'expense_date', 'fecha_gasto', 'fecha', 'fecha_pago',
             ],
-            'movement_date' => [
-                'movement_date', 'fecha_movimiento', 'fecha', 'fecha_nomina',
+            'observations' => [
+                'observations', 'observaciones', 'comentarios', 'notas',
             ],
         ];
 
@@ -163,71 +163,53 @@ class NoiNominaImportService
 
     private function mapRow(array $row, array $headerMap): array
     {
-        $employeeCode = $this->valueFromRow($row, $headerMap, 'employee_code');
         $employeeName = $this->cleanString($this->valueFromRow($row, $headerMap, 'employee_name'));
+        $branchName = $this->cleanString($this->valueFromRow($row, $headerMap, 'branch_name'));
+        $category = $this->cleanString($this->valueFromRow($row, $headerMap, 'category'));
         $concept = $this->cleanString($this->valueFromRow($row, $headerMap, 'concept'));
-        $conceptType = $this->cleanString($this->valueFromRow($row, $headerMap, 'concept_type'));
         $amount = $this->toDecimal($this->valueFromRow($row, $headerMap, 'amount'));
-        $quantity = $this->toDecimal($this->valueFromRow($row, $headerMap, 'quantity'));
-        $payrollType = $this->cleanString($this->valueFromRow($row, $headerMap, 'payroll_type'));
-        $movementDate = $this->toDateValue($this->valueFromRow($row, $headerMap, 'movement_date'));
+        $paidAmount = $this->toDecimal($this->valueFromRow($row, $headerMap, 'paid_amount'));
+        $expenseDate = $this->toDateValue($this->valueFromRow($row, $headerMap, 'expense_date'));
+        $observations = $this->cleanString($this->valueFromRow($row, $headerMap, 'observations'));
 
         return [
-            'employee_code' => $this->cleanString($employeeCode),
             'employee_name' => $employeeName,
+            'branch_name' => $branchName,
+            'category' => $category,
             'concept' => $concept,
-            'concept_type' => $conceptType,
             'amount' => $amount,
-            'quantity' => $quantity,
-            'payroll_type' => $payrollType,
-            'movement_date' => $movementDate,
+            'paid_amount' => $paidAmount,
+            'expense_date' => $expenseDate,
+            'observations' => $observations,
             'raw_payload' => $row,
         ];
     }
 
-    private function resolveEmployee(array $mapped): ?Employee
+    private function resolveEmployee(?string $fullName): ?Employee
     {
-        $employeeCode = $mapped['employee_code'] ?: null;
-        $fullName = $mapped['employee_name'];
-
         if (!$fullName) {
             return null;
         }
 
         $normalizedName = $this->normalizeName($fullName);
-        [$firstName, $paternalLastName, $maternalLastName] = $this->splitName($fullName);
 
-        if ($employeeCode) {
-            return Employee::query()->updateOrCreate(
-                [
-                    'employee_code' => $employeeCode,
-                    'source_system' => 'noi',
-                ],
-                [
-                    'full_name' => $fullName,
-                    'normalized_name' => $normalizedName,
-                    'first_name' => $firstName,
-                    'paternal_last_name' => $paternalLastName,
-                    'maternal_last_name' => $maternalLastName,
-                    'is_active' => true,
-                ],
-            );
+        return Employee::query()
+            ->where('normalized_name', $normalizedName)
+            ->first();
+    }
+
+    private function resolveBranch(?string $branchName): ?Branch
+    {
+        if (!$branchName) {
+            return null;
         }
 
-        return Employee::query()->updateOrCreate(
-            [
-                'normalized_name' => $normalizedName,
-                'source_system' => 'noi',
-            ],
-            [
-                'employee_code' => null,
-                'full_name' => $fullName,
-                'first_name' => $firstName,
-                'paternal_last_name' => $paternalLastName,
-                'maternal_last_name' => $maternalLastName,
-                'is_active' => true,
-            ],
-        );
+        $normalizedName = $this->normalizeName($branchName);
+
+        return Branch::query()
+            ->where('normalized_name', $normalizedName)
+            ->orWhereRaw('LOWER(name) = ?', [mb_strtolower($branchName)])
+            ->first();
     }
 
     private function valueFromRow(array $row, array $headerMap, string $field): mixed
@@ -268,33 +250,6 @@ class NoiNominaImportService
         $value = preg_replace('/\s+/u', ' ', $value) ?? $value;
 
         return trim($value);
-    }
-
-    private function splitName(string $fullName): array
-    {
-        $parts = preg_split('/\s+/u', trim($fullName)) ?: [];
-
-        if (count($parts) === 0) {
-            return [null, null, null];
-        }
-
-        if (count($parts) === 1) {
-            return [$parts[0], null, null];
-        }
-
-        if (count($parts) === 2) {
-            return [$parts[0], $parts[1], null];
-        }
-
-        $maternalLastName = array_pop($parts);
-        $paternalLastName = array_pop($parts);
-        $firstName = implode(' ', $parts);
-
-        return [
-            $firstName ?: null,
-            $paternalLastName ?: null,
-            $maternalLastName ?: null,
-        ];
     }
 
     private function toDecimal(mixed $value): ?float

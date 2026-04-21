@@ -6,15 +6,15 @@ use App\Enums\MatchType;
 use App\Enums\SourceType;
 use App\Models\Branch;
 use App\Models\EmployeeBranchAssignment;
+use App\Services\EmployeeBranchAutoMatchService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class EmployeeBranchAssignmentController extends Controller
-{
-    public function index(): Response
-    {
+class EmployeeBranchAssignmentController extends Controller {
+
+    public function index(): Response {
         $assignments = EmployeeBranchAssignment::query()
             ->with([
                 'employee:id,full_name,normalized_name',
@@ -25,19 +25,16 @@ class EmployeeBranchAssignmentController extends Controller
             ->get()
             ->map(fn (EmployeeBranchAssignment $assignment) => $this->transformAssignment($assignment))
             ->values();
-
         $branches = Branch::query()
             ->orderBy('name')
             ->get(['id', 'name']);
-
         return Inertia::render('AsignacionSucursal/Index', [
             'assignments' => $assignments,
             'branches' => $branches,
         ]);
     }
 
-    public function pending(): Response
-    {
+    public function pending(): Response {
         $assignments = EmployeeBranchAssignment::query()
             ->with([
                 'employee:id,full_name,normalized_name',
@@ -52,20 +49,25 @@ class EmployeeBranchAssignmentController extends Controller
             ->get()
             ->map(fn (EmployeeBranchAssignment $assignment) => $this->transformAssignment($assignment))
             ->values();
-
         $branches = Branch::query()
             ->orderBy('name')
             ->get(['id', 'name']);
-
         return Inertia::render('AsignacionSucursal/Index', [
             'assignments' => $assignments,
             'branches' => $branches,
         ]);
     }
 
-    public function autoMatch(): RedirectResponse
+    public function autoMatch(Request $request, EmployeeBranchAutoMatchService $service): RedirectResponse
     {
-        return back()->with('warning', 'El match automático aún no está implementado con lógica real.');
+        $validated = $request->validate([
+            'period_id' => ['nullable', 'integer', 'exists:periods,id'],
+        ]);
+        $result = $service->handle($validated['period_id'] ?? null);
+        return back()->with(
+            'success',
+            "Match automático ejecutado. Procesados: {$result['processed']}, matched: {$result['matched']}, sin match: {$result['unmatched']}."
+        );
     }
 
     public function manualMatch(Request $request, EmployeeBranchAssignment $assignment): RedirectResponse
@@ -77,7 +79,6 @@ class EmployeeBranchAssignmentController extends Controller
             'branch_id.required' => 'Debes seleccionar una sucursal.',
             'branch_id.exists' => 'La sucursal seleccionada no existe.',
         ]);
-
         $assignment->update([
             'branch_id' => (int) $validated['branch_id'],
             'source_type' => SourceType::Manual,
@@ -87,7 +88,6 @@ class EmployeeBranchAssignmentController extends Controller
             'was_manual_reviewed' => true,
             'notes' => $validated['notes'] ?? $assignment->notes,
         ]);
-
         return back()->with('success', 'Asignación manual guardada correctamente.');
     }
 
@@ -105,7 +105,6 @@ class EmployeeBranchAssignmentController extends Controller
             'confidence.min' => 'La confianza mínima es 0.',
             'confidence.max' => 'La confianza máxima es 1.',
         ]);
-
         $newBranchId = array_key_exists('branch_id', $validated)
             ? $validated['branch_id']
             : $assignment->branch_id;
@@ -113,7 +112,6 @@ class EmployeeBranchAssignmentController extends Controller
         $newMatchType = array_key_exists('match_type', $validated)
             ? MatchType::from($validated['match_type'])
             : $assignment->match_type;
-
         $payload = [
             'branch_id' => $newBranchId,
             'match_type' => $newMatchType,
@@ -121,13 +119,10 @@ class EmployeeBranchAssignmentController extends Controller
             'was_manual_reviewed' => $validated['was_manual_reviewed'] ?? $assignment->was_manual_reviewed,
             'notes' => array_key_exists('notes', $validated) ? $validated['notes'] : $assignment->notes,
         ];
-
         if ($newMatchType === MatchType::Manual || ($assignment->source_type?->value === SourceType::Manual->value)) {
             $payload['source_type'] = SourceType::Manual;
         }
-
         $assignment->update($payload);
-
         return back()->with('success', 'Asignación actualizada correctamente.');
     }
 
@@ -138,7 +133,6 @@ class EmployeeBranchAssignmentController extends Controller
         $period = $assignment->period;
         $matchType = $assignment->match_type?->value ?? null;
         $sourceType = $assignment->source_type?->value ?? null;
-
         return [
             'id' => $assignment->id,
             'employee_name' => $employee?->full_name ?? 'Sin empleado',
@@ -159,24 +153,19 @@ class EmployeeBranchAssignmentController extends Controller
     private function resolveUiStatus(EmployeeBranchAssignment $assignment): string
     {
         $matchType = $assignment->match_type?->value;
-
         if ($assignment->branch_id && $matchType === MatchType::Manual->value) {
             return 'manual';
         }
-
         if ($assignment->branch_id) {
             return 'matched';
         }
-
         if ($matchType === MatchType::Unmatched->value) {
             return 'unmatched';
         }
-
         return 'pending';
     }
 
-    private function formatSourceType(?string $sourceType): string
-    {
+    private function formatSourceType(?string $sourceType): string {
         return match ($sourceType) {
             SourceType::Noi->value => 'NOI',
             SourceType::Lendus->value => 'Lendus',
@@ -184,4 +173,5 @@ class EmployeeBranchAssignmentController extends Controller
             default => 'Cruce operativo',
         };
     }
+
 }
