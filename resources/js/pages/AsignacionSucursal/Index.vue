@@ -9,6 +9,7 @@ import {
     ClipboardList,
     FileText,
     GitCompareArrows,
+    Info,
     Link2,
     Search,
     Sparkles,
@@ -114,7 +115,7 @@ const filters = reactive({
 })
 
 const selectedPeriodId = computed({
-    get: () => props.selected_period_id ? String(props.selected_period_id) : '',
+    get: () => (props.selected_period_id ? String(props.selected_period_id) : ''),
     set: (value: string) => {
         router.get(
             '/asignaciones-empleado-sucursal',
@@ -149,6 +150,7 @@ function getManualForm(item: Assignment) {
 
 function runAutoMatch() {
     autoMatchForm.period_id = props.selected_period_id ?? null
+
     autoMatchForm.post('/asignaciones-empleado-sucursal/match-automatico', {
         preserveScroll: true,
     })
@@ -182,6 +184,19 @@ function statusClass(status: Assignment['ui_status']) {
     }
 }
 
+function statusLabel(status: Assignment['ui_status']) {
+    switch (status) {
+        case 'matched':
+            return 'Match correcto'
+        case 'manual':
+            return 'Manual'
+        case 'unmatched':
+            return 'Sin match'
+        default:
+            return 'Pendiente'
+    }
+}
+
 function formatConfidence(value?: number | null) {
     if (value === null || value === undefined) return '—'
     return `${Math.round(value * 100)}%`
@@ -206,12 +221,6 @@ const filteredAssignments = computed(() => {
     })
 })
 
-const pendingAssignments = computed(() =>
-    filteredAssignments.value.filter((item) =>
-        ['pending', 'unmatched'].includes(item.ui_status) || item.needs_manual_attention,
-    ),
-)
-
 const matchedAssignments = computed(() =>
     filteredAssignments.value.filter((item) => item.ui_status === 'matched'),
 )
@@ -219,6 +228,14 @@ const matchedAssignments = computed(() =>
 const manualAssignments = computed(() =>
     filteredAssignments.value.filter((item) => item.ui_status === 'manual'),
 )
+
+const pendingAssignments = computed(() =>
+    filteredAssignments.value.filter((item) =>
+        ['pending', 'unmatched'].includes(item.ui_status) || item.needs_manual_attention,
+    ),
+)
+
+const hasNoAssignments = computed(() => props.assignments.length === 0)
 </script>
 
 <template>
@@ -245,15 +262,16 @@ const manualAssignments = computed(() =>
                                         Asignación sucursal
                                     </h1>
                                     <p class="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base">
-                                        Carga empleados activos del periodo, detecta altas, bajas, incidencias
-                                        y permite asignar sucursal cuando el cruce automático no sea suficiente.
+                                        Toma los colaboradores detectados en el periodo, intenta asignar sucursal,
+                                        separa incidencias y deja lista la revisión manual para altas, bajas y nombres
+                                        que no empaten correctamente.
                                     </p>
                                 </div>
 
                                 <div class="flex flex-wrap items-center gap-3">
                                     <select
                                         v-model="selectedPeriodId"
-                                        class="app-input h-11 min-w-[240px]"
+                                        class="app-input h-11 min-w-[260px]"
                                     >
                                         <option value="">Selecciona un periodo</option>
                                         <option
@@ -282,6 +300,22 @@ const manualAssignments = computed(() =>
                                         {{ selected_period_label || 'Sin periodo seleccionado' }}
                                     </span>
                                 </p>
+
+                                <div
+                                    v-if="hasNoAssignments"
+                                    class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200"
+                                >
+                                    <div class="flex items-start gap-2">
+                                        <Info class="mt-0.5 size-4" />
+                                        <div>
+                                            <p class="font-semibold">Aún no hay asignaciones generadas</p>
+                                            <p class="mt-1 leading-6">
+                                                Si ya analizaste NOI y otras fuentes del periodo, ejecuta
+                                                <span class="font-semibold">Cruzar y actualizar</span> para poblar este módulo.
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
 
                             <div class="grid grid-cols-2 gap-3 lg:w-[460px]">
@@ -338,163 +372,207 @@ const manualAssignments = computed(() =>
                 </div>
             </section>
 
-            <section class="app-card overflow-hidden">
-                <div class="border-b px-4 py-4 sm:px-5">
-                    <div class="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-                        <div>
-                            <h2 class="text-lg font-bold tracking-tight">Empleados del periodo</h2>
-                            <p class="mt-1 text-sm text-muted-foreground">
-                                Filtra y corrige sucursales desde aquí. Los registros manuales se respetan en los próximos cruces.
+            <section class="grid gap-6 xl:grid-cols-3">
+                <div class="app-card overflow-hidden">
+                    <div class="border-b px-4 py-4 sm:px-5">
+                        <h2 class="text-lg font-bold tracking-tight">Resumen rápido</h2>
+                        <p class="mt-1 text-sm text-muted-foreground">
+                            Estado de las asignaciones del periodo actual.
+                        </p>
+                    </div>
+
+                    <div class="space-y-3 p-4 sm:p-5">
+                        <div class="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4 dark:border-emerald-500/20 dark:bg-emerald-500/10">
+                            <p class="text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
+                                Match correcto
+                            </p>
+                            <p class="mt-2 text-2xl font-extrabold text-emerald-800 dark:text-emerald-200">
+                                {{ matchedAssignments.length }}
                             </p>
                         </div>
 
-                        <div class="flex flex-col gap-3 sm:flex-row">
-                            <div class="relative w-full sm:w-[320px]">
-                                <Search class="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-                                <input
-                                    v-model="filters.query"
-                                    type="text"
-                                    class="app-input h-11 pl-10"
-                                    placeholder="Buscar empleado, sucursal o nota..."
-                                />
-                            </div>
+                        <div class="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 dark:border-amber-500/20 dark:bg-amber-500/10">
+                            <p class="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
+                                Pendientes / incidencias
+                            </p>
+                            <p class="mt-2 text-2xl font-extrabold text-amber-800 dark:text-amber-200">
+                                {{ pendingAssignments.length }}
+                            </p>
+                        </div>
 
-                            <select
-                                v-model="filters.status"
-                                class="app-input h-11 sm:w-[190px]"
-                            >
-                                <option value="all">Todos</option>
-                                <option value="matched">Match correcto</option>
-                                <option value="manual">Manual</option>
-                                <option value="pending">Pendiente</option>
-                                <option value="unmatched">Sin match</option>
-                            </select>
+                        <div class="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-4 dark:border-sky-500/20 dark:bg-sky-500/10">
+                            <p class="text-xs font-semibold uppercase tracking-wide text-sky-700 dark:text-sky-300">
+                                Ajustados manualmente
+                            </p>
+                            <p class="mt-2 text-2xl font-extrabold text-sky-800 dark:text-sky-200">
+                                {{ manualAssignments.length }}
+                            </p>
                         </div>
                     </div>
                 </div>
 
-                <div
-                    v-if="filteredAssignments.length"
-                    class="grid gap-4 p-4 sm:p-5 lg:grid-cols-2 2xl:grid-cols-3"
-                >
-                    <article
-                        v-for="item in filteredAssignments"
-                        :key="item.id"
-                        class="rounded-[28px] border border-border/70 bg-background px-4 py-4 shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-md"
-                    >
-                        <div class="flex items-start justify-between gap-3">
+                <div class="app-card overflow-hidden xl:col-span-2">
+                    <div class="border-b px-4 py-4 sm:px-5">
+                        <div class="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                             <div>
-                                <h3 class="text-base font-bold tracking-tight">
-                                    {{ item.employee_name }}
-                                </h3>
-                                <p class="mt-1 text-xs text-muted-foreground">
-                                    {{ item.normalized_name || 'Sin nombre normalizado' }}
+                                <h2 class="text-lg font-bold tracking-tight">Empleados del periodo</h2>
+                                <p class="mt-1 text-sm text-muted-foreground">
+                                    Filtra y corrige sucursales desde aquí. Los registros manuales se respetan en los próximos cruces.
                                 </p>
                             </div>
 
-                            <span
-                                class="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold"
-                                :class="statusClass(item.ui_status)"
-                            >
-                                {{ item.ui_status }}
-                            </span>
-                        </div>
+                            <div class="flex flex-col gap-3 sm:flex-row">
+                                <div class="relative w-full sm:w-[320px]">
+                                    <Search class="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+                                    <input
+                                        v-model="filters.query"
+                                        type="text"
+                                        class="app-input h-11 pl-10"
+                                        placeholder="Buscar empleado, sucursal o nota..."
+                                    />
+                                </div>
 
-                        <div class="mt-4 space-y-3">
-                            <div class="flex items-center gap-2 text-sm">
-                                <Building2 class="size-4 text-muted-foreground" />
-                                <span class="font-medium">{{ item.branch_name || 'Sin sucursal asignada' }}</span>
-                            </div>
-
-                            <div class="flex items-center gap-2 text-sm">
-                                <Link2 class="size-4 text-muted-foreground" />
-                                <span>{{ item.source_name || 'Sin fuente' }}</span>
-                            </div>
-
-                            <div class="flex items-center gap-2 text-sm">
-                                <ArrowRightLeft class="size-4 text-muted-foreground" />
-                                <span>{{ item.match_label || 'Pendiente' }}</span>
-                            </div>
-
-                            <div class="flex items-center gap-2 text-sm">
-                                <ClipboardList class="size-4 text-muted-foreground" />
-                                <span>{{ item.match_explanation || 'Sin explicación' }}</span>
-                            </div>
-
-                            <div class="flex items-center gap-2 text-sm text-muted-foreground">
-                                <GitCompareArrows class="size-4" />
-                                <span>{{ item.period_label || 'Sin periodo' }}</span>
-                            </div>
-
-                            <div class="flex items-center gap-2 text-sm text-muted-foreground">
-                                <FileText class="size-4" />
-                                <span>Confianza: {{ formatConfidence(item.confidence) }}</span>
-                            </div>
-
-                            <div
-                                v-if="item.notes"
-                                class="rounded-2xl border border-border/70 bg-muted/30 px-3 py-3 text-sm text-muted-foreground"
-                            >
-                                {{ item.notes }}
-                            </div>
-
-                            <div
-                                v-if="item.was_manual_reviewed"
-                                class="rounded-2xl border border-sky-200 bg-sky-50 px-3 py-3 text-xs font-medium text-sky-700 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-300"
-                            >
-                                Registro revisado manualmente.
-                            </div>
-                        </div>
-
-                        <div
-                            v-if="item.ui_status !== 'matched' || !item.branch_id"
-                            class="mt-4 space-y-3 rounded-[22px] border border-border/70 bg-muted/20 p-4"
-                        >
-                            <p class="text-sm font-semibold">Asignación manual</p>
-
-                            <select
-                                v-model="getManualForm(item).branch_id"
-                                class="app-input h-11"
-                            >
-                                <option value="">Selecciona sucursal</option>
-                                <option
-                                    v-for="branch in branches"
-                                    :key="branch.id"
-                                    :value="String(branch.id)"
+                                <select
+                                    v-model="filters.status"
+                                    class="app-input h-11 sm:w-[190px]"
                                 >
-                                    {{ branch.name }}
-                                </option>
-                            </select>
+                                    <option value="all">Todos</option>
+                                    <option value="matched">Match correcto</option>
+                                    <option value="manual">Manual</option>
+                                    <option value="pending">Pendiente</option>
+                                    <option value="unmatched">Sin match</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
 
-                            <textarea
-                                v-model="getManualForm(item).notes"
-                                class="app-input min-h-[96px]"
-                                placeholder="Notas de revisión..."
-                            />
+                    <div
+                        v-if="filteredAssignments.length"
+                        class="grid gap-4 p-4 sm:p-5 lg:grid-cols-2"
+                    >
+                        <article
+                            v-for="item in filteredAssignments"
+                            :key="item.id"
+                            class="rounded-[28px] border border-border/70 bg-background px-4 py-4 shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-md"
+                        >
+                            <div class="flex items-start justify-between gap-3">
+                                <div class="min-w-0">
+                                    <h3 class="truncate text-base font-bold tracking-tight">
+                                        {{ item.employee_name }}
+                                    </h3>
+                                    <p class="mt-1 text-xs text-muted-foreground">
+                                        {{ item.normalized_name || 'Sin nombre normalizado' }}
+                                    </p>
+                                </div>
 
-                            <button
-                                type="button"
-                                class="app-btn h-11 px-5"
-                                @click="saveManualAssignment(item)"
+                                <span
+                                    class="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold"
+                                    :class="statusClass(item.ui_status)"
+                                >
+                                    {{ statusLabel(item.ui_status) }}
+                                </span>
+                            </div>
+
+                            <div class="mt-4 space-y-3">
+                                <div class="flex items-center gap-2 text-sm">
+                                    <Building2 class="size-4 text-muted-foreground" />
+                                    <span class="font-medium">{{ item.branch_name || 'Sin sucursal asignada' }}</span>
+                                </div>
+
+                                <div class="flex items-center gap-2 text-sm">
+                                    <Link2 class="size-4 text-muted-foreground" />
+                                    <span>{{ item.source_name || 'Sin fuente' }}</span>
+                                </div>
+
+                                <div class="flex items-center gap-2 text-sm">
+                                    <ArrowRightLeft class="size-4 text-muted-foreground" />
+                                    <span>{{ item.match_label || 'Pendiente' }}</span>
+                                </div>
+
+                                <div class="flex items-center gap-2 text-sm">
+                                    <ClipboardList class="size-4 text-muted-foreground" />
+                                    <span>{{ item.match_explanation || 'Sin explicación' }}</span>
+                                </div>
+
+                                <div class="flex items-center gap-2 text-sm text-muted-foreground">
+                                    <GitCompareArrows class="size-4" />
+                                    <span>{{ item.period_label || 'Sin periodo' }}</span>
+                                </div>
+
+                                <div class="flex items-center gap-2 text-sm text-muted-foreground">
+                                    <FileText class="size-4" />
+                                    <span>Confianza: {{ formatConfidence(item.confidence) }}</span>
+                                </div>
+
+                                <div
+                                    v-if="item.notes"
+                                    class="rounded-2xl border border-border/70 bg-muted/30 px-3 py-3 text-sm text-muted-foreground"
+                                >
+                                    {{ item.notes }}
+                                </div>
+
+                                <div
+                                    v-if="item.was_manual_reviewed"
+                                    class="rounded-2xl border border-sky-200 bg-sky-50 px-3 py-3 text-xs font-medium text-sky-700 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-300"
+                                >
+                                    Registro revisado manualmente.
+                                </div>
+                            </div>
+
+                            <div
+                                v-if="item.ui_status !== 'matched' || !item.branch_id"
+                                class="mt-4 space-y-3 rounded-[22px] border border-border/70 bg-muted/20 p-4"
                             >
-                                Guardar asignación
-                            </button>
-                        </div>
+                                <p class="text-sm font-semibold">Asignación manual</p>
 
-                        <div class="mt-4 flex items-center justify-between border-t pt-4">
-                            <p class="text-xs text-muted-foreground">
-                                Actualizado: {{ item.updated_at ?? '—' }}
-                            </p>
-                        </div>
-                    </article>
-                </div>
+                                <select
+                                    v-model="getManualForm(item).branch_id"
+                                    class="app-input h-11"
+                                >
+                                    <option value="">Selecciona sucursal</option>
+                                    <option
+                                        v-for="branch in branches"
+                                        :key="branch.id"
+                                        :value="String(branch.id)"
+                                    >
+                                        {{ branch.name }}
+                                    </option>
+                                </select>
 
-                <div v-else class="px-4 py-10 text-center sm:px-5">
-                    <UserRound class="mx-auto size-6 text-muted-foreground" />
-                    <p class="mt-3 text-sm font-semibold">No hay registros</p>
-                    <p class="mt-1 text-sm text-muted-foreground">
-                        No se encontraron coincidencias con los filtros actuales.
-                    </p>
+                                <textarea
+                                    v-model="getManualForm(item).notes"
+                                    class="app-input min-h-[96px]"
+                                    placeholder="Notas de revisión..."
+                                />
+
+                                <button
+                                    type="button"
+                                    class="app-btn h-11 px-5"
+                                    @click="saveManualAssignment(item)"
+                                >
+                                    Guardar asignación
+                                </button>
+                            </div>
+
+                            <div class="mt-4 flex items-center justify-between border-t pt-4">
+                                <p class="text-xs text-muted-foreground">
+                                    Actualizado: {{ item.updated_at ?? '—' }}
+                                </p>
+                            </div>
+                        </article>
+                    </div>
+
+                    <div v-else class="px-4 py-12 text-center sm:px-5">
+                        <UserRound class="mx-auto size-6 text-muted-foreground" />
+                        <p class="mt-3 text-sm font-semibold">No hay registros visibles</p>
+                        <p class="mt-1 text-sm text-muted-foreground">
+                            {{
+                                hasNoAssignments
+                                    ? 'Todavía no se han generado asignaciones para este periodo. Ejecuta “Cruzar y actualizar”.'
+                                    : 'No se encontraron coincidencias con los filtros actuales.'
+                            }}
+                        </p>
+                    </div>
                 </div>
             </section>
 
@@ -509,7 +587,7 @@ const manualAssignments = computed(() =>
                             <h2 class="text-lg font-bold tracking-tight">Incidencias</h2>
                         </div>
                         <p class="mt-1 text-sm text-muted-foreground">
-                            Registros que todavía requieren atención manual.
+                            Registros que requieren atención manual.
                         </p>
                     </div>
 

@@ -9,8 +9,6 @@ class DatabaseSeeder extends Seeder {
     public function run(): void {
         $this->call([
             DataSourceSeeder::class,
-            PeriodSeeder::class,
-            BranchSeeder::class,
             FinancialProductSeeder::class,
         ]);
     }

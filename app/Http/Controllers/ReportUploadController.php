@@ -198,10 +198,18 @@ class ReportUploadController extends Controller
         return back()->with('success', 'Archivo eliminado correctamente.');
     }
 
-    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $analysisService): RedirectResponse
+    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $reportAnalysisService)
     {
-        $analysisService->analyze($reportUpload);
-
+        $reportUpload->load('dataSource');
+        session()->save();
+        $run = $reportAnalysisService->analyze($reportUpload);
+        if (request()->expectsJson()) {
+            return response()->json([
+                'ok' => true,
+                'run_id' => $run->id,
+                'status' => $run->status?->value,
+            ]);
+        }
         return back()->with('success', 'Archivo analizado correctamente.');
     }
 
@@ -221,6 +229,22 @@ class ReportUploadController extends Controller
                     && $week->end_date->gte($period->start_date);
             })
             ->values();
+    }
+
+    public function progress(ReportUpload $reportUpload) {
+        $run = $reportUpload->processRuns()
+            ->latest('id')
+            ->first();
+        return response()->json([
+            'status' => $run?->status?->value ?? 'pending',
+            'rows_read' => (int) ($run?->rows_read ?? 0),
+            'rows_inserted' => (int) ($run?->rows_inserted ?? 0),
+            'rows_skipped' => (int) ($run?->rows_skipped ?? 0),
+            'rows_with_errors' => (int) ($run?->rows_with_errors ?? 0),
+            'log' => (string) ($run?->log ?? 'Esperando inicio del análisis...'),
+            'started_at' => $run?->started_at,
+            'finished_at' => $run?->finished_at,
+        ]);
     }
 
     private function resolveUploadsForPeriod(Period $period, Collection $coveredWeeks): Collection

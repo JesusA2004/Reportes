@@ -39,12 +39,6 @@ class DataSourceSeeder extends Seeder {
                 'description' => 'Archivo de gastos operativos',
                 'is_active' => true,
             ],
-            [
-                'code' => 'macro_analisis',
-                'name' => 'Macro Análisis',
-                'description' => 'Plantilla macro/intermedia actual',
-                'is_active' => true,
-            ],
         ];
 
         foreach ($sources as $source) {

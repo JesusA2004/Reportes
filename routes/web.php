@@ -13,6 +13,9 @@ Route::redirect('/', '/login');
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::inertia('/dashboard', 'Dashboard')->name('dashboard');
 
+    Route::get('/historico-general/{reportUpload}/progreso', [ReportUploadController::class, 'progress'])
+    ->name('historico-general.progress');
+
     Route::prefix('historico-general')
         ->name('historico-general.')
         ->group(function () {

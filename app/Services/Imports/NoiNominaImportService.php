@@ -5,11 +5,16 @@ namespace App\Services\Imports;
 use App\Models\Employee;
 use App\Models\NoiMovement;
 use App\Models\ReportUpload;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Maatwebsite\Excel\Facades\Excel;
+use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 
 class NoiNominaImportService
 {
+    private array $employeeCache = [];
+
     public function handle(ReportUpload $upload): array
     {
         if (!$upload->stored_path) {
@@ -20,6 +25,8 @@ class NoiNominaImportService
             throw new \RuntimeException('El archivo físico no existe en storage/public.');
         }
 
+        @set_time_limit(0);
+
         $absolutePath = Storage::disk('public')->path($upload->stored_path);
         $sheets = Excel::toArray([], $absolutePath);
 
@@ -28,15 +35,17 @@ class NoiNominaImportService
         }
 
         $rows = $sheets[0];
-        $headerRow = $rows[0] ?? null;
+        $headerRowIndex = $this->detectHeaderRowIndex($rows);
+        $headerRow = $rows[$headerRowIndex] ?? null;
 
         if (!$headerRow || !is_array($headerRow)) {
-            throw new \RuntimeException('No se encontró una fila de encabezados válida.');
+            throw new \RuntimeException('No se encontró una fila de encabezados válida en el archivo NOI.');
         }
 
         $headerMap = $this->buildHeaderMap($headerRow);
 
-        $requiredColumns = ['employee_name', 'concept', 'amount'];
+        $requiredColumns = ['concept', 'amount'];
+
         $missingRequired = collect($requiredColumns)
             ->filter(fn (string $field) => !array_key_exists($field, $headerMap))
             ->values()
@@ -44,7 +53,10 @@ class NoiNominaImportService
 
         if (!empty($missingRequired)) {
             throw new \RuntimeException(
-                'El archivo NOI no contiene columnas mínimas requeridas: ' . implode(', ', $missingRequired) . '.'
+                'El archivo NOI no contiene columnas mínimas requeridas: '
+                . implode(', ', $missingRequired)
+                . '. Encabezados detectados: '
+                . implode(', ', array_values(array_filter($headerRow, fn ($value) => filled($value))))
             );
         }
 
@@ -57,7 +69,10 @@ class NoiNominaImportService
         $rowsSkipped = 0;
         $rowsWithErrors = 0;
 
-        foreach (array_slice($rows, 1) as $row) {
+        $currentEmployeeName = null;
+        $currentEmployeeCode = null;
+
+        foreach (array_slice($rows, $headerRowIndex + 1) as $row) {
             if (!is_array($row) || $this->isEmptyRow($row)) {
                 $rowsSkipped++;
                 continue;
@@ -68,30 +83,73 @@ class NoiNominaImportService
             try {
                 $mapped = $this->mapRow($row, $headerMap);
 
-                if (!$mapped['employee_name'] || $mapped['amount'] === null) {
+                if ($mapped['employee_code']) {
+                    $currentEmployeeCode = $mapped['employee_code'];
+                }
+
+                if ($this->isValidEmployeeName($mapped['employee_name'])) {
+                    $currentEmployeeName = $mapped['employee_name'];
+                }
+
+                if (
+                    !$this->isValidEmployeeName($mapped['employee_name']) &&
+                    $currentEmployeeName &&
+                    ($mapped['concept'] || $mapped['amount'] !== null)
+                ) {
+                    $mapped['employee_name'] = $currentEmployeeName;
+                }
+
+                if (
+                    !$mapped['employee_code'] &&
+                    $currentEmployeeCode &&
+                    ($mapped['concept'] || $mapped['amount'] !== null)
+                ) {
+                    $mapped['employee_code'] = $currentEmployeeCode;
+                }
+
+                if (!$this->shouldInsertRow($mapped)) {
                     $rowsSkipped++;
                     continue;
                 }
 
                 $employee = $this->resolveEmployee($mapped);
 
+                if (!$employee) {
+                    $rowsSkipped++;
+                    continue;
+                }
+
                 NoiMovement::query()->create([
                     'period_id' => $upload->period_id,
-                    'employee_id' => $employee?->id,
+                    'employee_id' => $employee->id,
                     'report_upload_id' => $upload->id,
-                    'concept' => $mapped['concept'],
+                    'concept' => $mapped['concept'] ?: 'Sin concepto',
                     'concept_type' => $mapped['concept_type'],
                     'amount' => $mapped['amount'],
-                    'quantity' => $mapped['quantity'],
-                    'payroll_type' => $mapped['payroll_type'],
-                    'movement_date' => $mapped['movement_date'],
-                    'raw_row_hash' => hash('sha256', json_encode($mapped['raw_payload'], JSON_UNESCAPED_UNICODE)),
+                    'quantity' => $mapped['quantity'] ?? 1,
+                    'payroll_type' => $mapped['payroll_type'] ?: 'NOI',
+                    'movement_date' => $mapped['movement_date'] ?? now()->toDateString(),
+                    'raw_row_hash' => hash(
+                        'sha256',
+                        json_encode($mapped['raw_payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                    ),
                     'raw_payload' => $mapped['raw_payload'],
                 ]);
 
                 $rowsInserted++;
-            } catch (\Throwable) {
+            } catch (\Throwable $e) {
                 $rowsWithErrors++;
+
+                throw new \RuntimeException(
+                    'Error al insertar fila NOI. Empleado: '
+                    . ($mapped['employee_name'] ?? 'N/D')
+                    . ' | Concepto: '
+                    . ($mapped['concept'] ?? 'N/D')
+                    . ' | Amount: '
+                    . (($mapped['amount'] ?? null) === null ? 'NULL' : (string) $mapped['amount'])
+                    . ' | Detalle: '
+                    . $e->getMessage()
+                );
             }
         }
 
@@ -101,51 +159,113 @@ class NoiNominaImportService
             'rows_skipped' => $rowsSkipped,
             'rows_with_errors' => $rowsWithErrors,
             'log' => sprintf(
-                'Importación NOI finalizada. Leídas: %d, insertadas: %d, omitidas: %d, con error: %d.',
+                'Importación NOI completada. Leídas: %d, insertadas: %d, omitidas: %d, con error: %d.',
                 $rowsRead,
                 $rowsInserted,
                 $rowsSkipped,
-                $rowsWithErrors,
+                $rowsWithErrors
             ),
         ];
     }
 
+    private function detectHeaderRowIndex(array $rows): int
+    {
+        $bestIndex = 0;
+        $bestScore = -1;
+
+        foreach (array_slice($rows, 0, 20, true) as $index => $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $normalized = array_map(
+                fn ($value) => $this->normalizeHeader((string) $value),
+                $row
+            );
+
+            $score = 0;
+
+            foreach ($normalized as $value) {
+                if (
+                    in_array($value, [
+                        'nombre_del_trabajador',
+                        'concepto',
+                        'acumulado',
+                        'importe',
+                        'monto',
+                        'total',
+                    ], true)
+                ) {
+                    $score++;
+                }
+            }
+
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $bestIndex = (int) $index;
+            }
+        }
+
+        return $bestIndex;
+    }
+
     private function buildHeaderMap(array $headerRow): array
     {
-        $aliases = [
-            'employee_code' => [
-                'employee_code', 'codigo_empleado', 'clave_empleado', 'num_empleado', 'numero_empleado',
-                'no_empleado', 'id_empleado', 'codigo', 'clave',
-            ],
-            'employee_name' => [
-                'employee_name', 'empleado', 'nombre_empleado', 'nombre', 'trabajador', 'colaborador',
-                'nombre_completo',
-            ],
-            'concept' => [
-                'concept', 'concepto', 'descripcion_concepto', 'descripcion',
-            ],
-            'concept_type' => [
-                'concept_type', 'tipo_concepto', 'tipo', 'tipo_movimiento', 'naturaleza',
-            ],
-            'amount' => [
-                'amount', 'importe', 'monto', 'total', 'valor',
-            ],
-            'quantity' => [
-                'quantity', 'cantidad', 'unidades',
-            ],
-            'payroll_type' => [
-                'payroll_type', 'tipo_nomina', 'nomina', 'tipo_de_nomina',
-            ],
-            'movement_date' => [
-                'movement_date', 'fecha_movimiento', 'fecha', 'fecha_nomina',
-            ],
-        ];
-
         $normalizedHeaders = [];
 
-        foreach ($headerRow as $index => $value) {
-            $normalizedHeaders[$index] = $this->normalizeHeader((string) $value);
+        foreach ($headerRow as $index => $header) {
+            $normalizedHeaders[(int) $index] = $this->normalizeHeader((string) $header);
         }
+
+        $aliases = [
+            'concept' => [
+                'concept',
+                'concepto',
+                'descripcion_concepto',
+                'movimiento',
+                'descripcion',
+            ],
+            'concept_type' => [
+                'concept_type',
+                'tipo_concepto',
+                'tipo',
+                'naturaleza',
+                'tipo_movimiento',
+            ],
+            'amount' => [
+                'amount',
+                'importe',
+                'monto',
+                'neto',
+                'total',
+                'importe_neto',
+                'pago_neto',
+                'valor',
+                'acumulado',
+            ],
+            'quantity' => [
+                'quantity',
+                'cantidad',
+                'unidades',
+                'dias',
+                'horas',
+            ],
+            'payroll_type' => [
+                'payroll_type',
+                'tipo_nomina',
+                'nomina',
+                'nomina_tipo',
+                'periodo_nomina',
+            ],
+            'movement_date' => [
+                'movement_date',
+                'fecha',
+                'fecha_movimiento',
+                'fecha_aplicacion',
+                'fecha_nomina',
+                'periodo',
+            ],
+        ];
 
         $map = [];
 
@@ -163,8 +283,19 @@ class NoiNominaImportService
 
     private function mapRow(array $row, array $headerMap): array
     {
-        $employeeCode = $this->valueFromRow($row, $headerMap, 'employee_code');
-        $employeeName = $this->cleanString($this->valueFromRow($row, $headerMap, 'employee_name'));
+        $col0 = $this->cleanString($row[0] ?? null);
+        $col1 = $this->cleanString($row[1] ?? null);
+
+        $employeeCode = $this->extractEmployeeCode($col1);
+
+        $employeeName = null;
+
+        if ($this->isValidEmployeeName($col1)) {
+            $employeeName = $col1;
+        } elseif ($this->isValidEmployeeName($col0)) {
+            $employeeName = $col0;
+        }
+
         $concept = $this->cleanString($this->valueFromRow($row, $headerMap, 'concept'));
         $conceptType = $this->cleanString($this->valueFromRow($row, $headerMap, 'concept_type'));
         $amount = $this->toDecimal($this->valueFromRow($row, $headerMap, 'amount'));
@@ -173,7 +304,7 @@ class NoiNominaImportService
         $movementDate = $this->toDateValue($this->valueFromRow($row, $headerMap, 'movement_date'));
 
         return [
-            'employee_code' => $this->cleanString($employeeCode),
+            'employee_code' => $employeeCode,
             'employee_name' => $employeeName,
             'concept' => $concept,
             'concept_type' => $conceptType,
@@ -185,20 +316,56 @@ class NoiNominaImportService
         ];
     }
 
+    private function shouldInsertRow(array $mapped): bool
+    {
+        if (!$this->isValidEmployeeName($mapped['employee_name'])) {
+            return false;
+        }
+
+        if (!$mapped['concept']) {
+            return false;
+        }
+
+        if ($mapped['amount'] === null) {
+            return false;
+        }
+
+        $concept = $this->normalizeText($mapped['concept']);
+
+        if (in_array($concept, ['acumulado', 'total', 'totales', 'subtotal', 'sub_total'], true)) {
+            return false;
+        }
+
+        return true;
+    }
+
     private function resolveEmployee(array $mapped): ?Employee
     {
         $employeeCode = $mapped['employee_code'] ?: null;
         $fullName = $mapped['employee_name'];
 
-        if (!$fullName) {
+        if (!$this->isValidEmployeeName($fullName)) {
             return null;
         }
 
         $normalizedName = $this->normalizeName($fullName);
+
+        if ($normalizedName === '') {
+            return null;
+        }
+
         [$firstName, $paternalLastName, $maternalLastName] = $this->splitName($fullName);
 
+        $cacheKey = $employeeCode
+            ? "code:{$employeeCode}"
+            : "name:{$normalizedName}";
+
+        if (array_key_exists($cacheKey, $this->employeeCache)) {
+            return $this->employeeCache[$cacheKey];
+        }
+
         if ($employeeCode) {
-            return Employee::query()->updateOrCreate(
+            $employee = Employee::query()->updateOrCreate(
                 [
                     'employee_code' => $employeeCode,
                     'source_system' => 'noi',
@@ -212,9 +379,11 @@ class NoiNominaImportService
                     'is_active' => true,
                 ],
             );
+
+            return $this->employeeCache[$cacheKey] = $employee;
         }
 
-        return Employee::query()->updateOrCreate(
+        $employee = Employee::query()->updateOrCreate(
             [
                 'normalized_name' => $normalizedName,
                 'source_system' => 'noi',
@@ -228,6 +397,21 @@ class NoiNominaImportService
                 'is_active' => true,
             ],
         );
+
+        return $this->employeeCache[$cacheKey] = $employee;
+    }
+
+    private function extractEmployeeCode(?string $value): ?string
+    {
+        if (!$value) {
+            return null;
+        }
+
+        if (preg_match('/clave\s+del\s+trabajador\s*:\s*(\d+)/i', $value, $matches)) {
+            return $matches[1];
+        }
+
+        return null;
     }
 
     private function valueFromRow(array $row, array $headerMap, string $field): mixed
@@ -236,106 +420,51 @@ class NoiNominaImportService
             return null;
         }
 
-        $index = $headerMap[$field];
-
-        return $row[$index] ?? null;
+        return $row[$headerMap[$field]] ?? null;
     }
 
     private function normalizeHeader(string $value): string
     {
-        $value = trim(mb_strtolower($value));
-        $value = str_replace(
-            ['á', 'é', 'í', 'ó', 'ú', 'ü', 'ñ'],
-            ['a', 'e', 'i', 'o', 'u', 'u', 'n'],
-            $value
-        );
-
-        $value = preg_replace('/[^a-z0-9]+/u', '_', $value) ?? $value;
-        $value = trim($value, '_');
-
-        return $value;
+        return Str::of($value)
+            ->ascii()
+            ->lower()
+            ->replaceMatches('/[^a-z0-9]+/', '_')
+            ->trim('_')
+            ->value();
     }
 
     private function normalizeName(string $value): string
     {
-        $value = trim(mb_strtolower($value));
-        $value = str_replace(
-            ['á', 'é', 'í', 'ó', 'ú', 'ü', 'ñ'],
-            ['a', 'e', 'i', 'o', 'u', 'u', 'n'],
-            $value
-        );
+        return Str::of($value)
+            ->ascii()
+            ->lower()
+            ->replaceMatches('/[^a-z0-9\s]+/', ' ')
+            ->replaceMatches('/\s+/', ' ')
+            ->trim()
+            ->value();
+    }
 
-        $value = preg_replace('/\s+/u', ' ', $value) ?? $value;
-
-        return trim($value);
+    private function normalizeText(string $value): string
+    {
+        return Str::of($value)
+            ->ascii()
+            ->lower()
+            ->replaceMatches('/[^a-z0-9\s]+/', ' ')
+            ->replaceMatches('/\s+/', ' ')
+            ->trim()
+            ->value();
     }
 
     private function splitName(string $fullName): array
     {
-        $parts = preg_split('/\s+/u', trim($fullName)) ?: [];
-
-        if (count($parts) === 0) {
-            return [null, null, null];
-        }
-
-        if (count($parts) === 1) {
-            return [$parts[0], null, null];
-        }
-
-        if (count($parts) === 2) {
-            return [$parts[0], $parts[1], null];
-        }
-
-        $maternalLastName = array_pop($parts);
-        $paternalLastName = array_pop($parts);
-        $firstName = implode(' ', $parts);
+        $parts = preg_split('/\s+/', trim($fullName)) ?: [];
+        $parts = array_values(array_filter($parts, fn ($part) => $part !== ''));
 
         return [
-            $firstName ?: null,
-            $paternalLastName ?: null,
-            $maternalLastName ?: null,
+            $parts[0] ?? null,
+            $parts[1] ?? null,
+            $parts[2] ?? null,
         ];
-    }
-
-    private function toDecimal(mixed $value): ?float
-    {
-        if ($value === null || $value === '') {
-            return null;
-        }
-
-        if (is_numeric($value)) {
-            return round((float) $value, 2);
-        }
-
-        $normalized = str_replace(['$', ',', ' '], '', (string) $value);
-
-        if ($normalized === '' || !is_numeric($normalized)) {
-            return null;
-        }
-
-        return round((float) $normalized, 2);
-    }
-
-    private function toDateValue(mixed $value): ?string
-    {
-        if ($value === null || $value === '') {
-            return null;
-        }
-
-        if (is_numeric($value)) {
-            try {
-                $date = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToDateTimeObject((float) $value);
-                return $date->format('Y-m-d');
-            } catch (\Throwable) {
-                return null;
-            }
-        }
-
-        try {
-            return \Carbon\Carbon::parse((string) $value)->format('Y-m-d');
-        } catch (\Throwable) {
-            return null;
-        }
     }
 
     private function cleanString(mixed $value): ?string
@@ -346,7 +475,78 @@ class NoiNominaImportService
 
         $value = trim((string) $value);
 
-        return $value === '' ? null : $value;
+        return $value !== '' ? $value : null;
+    }
+
+    private function isValidEmployeeName(?string $value): bool
+    {
+        if (!$value) {
+            return false;
+        }
+
+        $value = trim($value);
+
+        if ($value === '' || $value === '-' || $value === '--') {
+            return false;
+        }
+
+        if (stripos($value, 'clave del trabajador') !== false) {
+            return false;
+        }
+
+        $normalized = $this->normalizeName($value);
+
+        if ($normalized === '') {
+            return false;
+        }
+
+        if (in_array($normalized, ['nombre', 'trabajador', 'empleado'], true)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private function toDecimal(mixed $value): ?float
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (is_numeric($value)) {
+            return (float) $value;
+        }
+
+        $value = str_replace(['$', ' '], '', (string) $value);
+
+        if (str_contains($value, ',') && str_contains($value, '.')) {
+            $value = str_replace(',', '', $value);
+        } elseif (str_contains($value, ',') && !str_contains($value, '.')) {
+            $value = str_replace(',', '.', $value);
+        }
+
+        return is_numeric($value) ? (float) $value : null;
+    }
+
+    private function toDateValue(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (is_numeric($value)) {
+            try {
+                return Carbon::instance(ExcelDate::excelToDateTimeObject($value))->format('Y-m-d');
+            } catch (\Throwable) {
+                return null;
+            }
+        }
+
+        try {
+            return Carbon::parse((string) $value)->format('Y-m-d');
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     private function isEmptyRow(array $row): bool

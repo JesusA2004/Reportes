@@ -29,7 +29,7 @@ return new class extends Migration {
             $table->timestamp('uploaded_at')->nullable();
             $table->string('status', 30)->default('pending')->index();
             $table->text('notes')->nullable();
-            $table->json('covered_period_ids')->nullable()->after('period_id');
+            $table->json('covered_period_ids')->nullable();
             $table->timestamps();
             $table->index(['period_id', 'data_source_id']);
         });

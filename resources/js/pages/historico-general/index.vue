@@ -1,32 +1,39 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { Head, router, useForm } from '@inertiajs/vue3'
 import Swal from 'sweetalert2'
 import {
     AlertCircle,
     ArrowUpRight,
     CalendarDays,
+    CalendarRange,
     CheckCircle2,
     ChevronDown,
     ChevronRight,
     Clock3,
     FileSpreadsheet,
-    FileUp,
     FolderOpen,
     Inbox,
+    Info,
+    Layers3,
     LoaderCircle,
     PlayCircle,
     Search,
     Sparkles,
     Trash2,
     UploadCloud,
-    Layers3,
-    Info,
-    CalendarRange,
 } from 'lucide-vue-next'
 
 import InputError from '@/components/InputError.vue'
 import AppLayout from '@/layouts/AppLayout.vue'
+
+type WeekOption = {
+    id: number
+    label: string
+    sequence?: number | null
+    start_date?: string | null
+    end_date?: string | null
+}
 
 type PeriodItem = {
     id: number
@@ -39,6 +46,8 @@ type PeriodItem = {
     start_date?: string | null
     end_date?: string | null
     is_closed?: boolean
+    can_receive_uploads?: boolean
+    is_derived?: boolean
     uploaded_sources_count?: number
     required_sources_count?: number
     missing_sources_count?: number
@@ -48,6 +57,7 @@ type PeriodItem = {
     updated_at?: string | null
     missing_sources?: string[]
     report_final_available?: boolean
+    available_week_options?: WeekOption[]
 }
 
 type SourceItem = {
@@ -65,6 +75,8 @@ type UploadItem = {
     notes?: string | null
     source_code?: string | null
     source_name?: string | null
+    covered_period_ids?: number[]
+    covered_period_labels?: string[]
     covered_week_ids?: number[]
     covered_week_labels?: string[]
     last_process_run?: {
@@ -102,6 +114,8 @@ type PeriodRow = {
     sequence: number | null
     start_date: string | null
     end_date: string | null
+    can_receive_uploads: boolean
+    is_derived: boolean
     updated_at: string | null
     uploaded_sources_count: number
     required_sources_count: number
@@ -112,6 +126,7 @@ type PeriodRow = {
     missing_sources: string[]
     report_final_available: boolean
     uploads: UploadItem[]
+    available_week_options: WeekOption[]
 }
 
 const props = withDefaults(
@@ -159,13 +174,13 @@ const form = useForm<{
     data_source_id: string | number
     file: File | null
     notes: string
-    covered_week_ids: number[]
+    covered_period_ids: number[]
 }>({
     period_id: props.currentPeriodId ?? '',
     data_source_id: '',
     file: null,
     notes: '',
-    covered_week_ids: [],
+    covered_period_ids: [],
 })
 
 const groupedMap = computed(() => {
@@ -178,9 +193,32 @@ const groupedMap = computed(() => {
     return map
 })
 
+const weekOptionMap = computed(() => {
+    const map = new Map<number, WeekOption>()
+
+    for (const period of props.periods) {
+        const optionFromPeriod: WeekOption = {
+            id: period.id,
+            label: period.label,
+            sequence: period.sequence ?? null,
+            start_date: period.start_date ?? null,
+            end_date: period.end_date ?? null,
+        }
+
+        map.set(period.id, optionFromPeriod)
+
+        for (const option of period.available_week_options ?? []) {
+            map.set(option.id, option)
+        }
+    }
+
+    return map
+})
+
 const periodRows = computed<PeriodRow[]>(() => {
     return props.periods.map((period) => {
         const grouped = groupedMap.value.get(period.id)
+        const directWeekOption = weekOptionMap.value.get(period.id)
 
         return {
             id: period.id,
@@ -190,8 +228,10 @@ const periodRows = computed<PeriodRow[]>(() => {
             year: period.year ?? null,
             month: period.month ?? null,
             sequence: period.sequence ?? null,
-            start_date: period.start_date ?? null,
-            end_date: period.end_date ?? null,
+            start_date: period.start_date ?? directWeekOption?.start_date ?? null,
+            end_date: period.end_date ?? directWeekOption?.end_date ?? null,
+            can_receive_uploads: Boolean(period.can_receive_uploads ?? (period.type === 'weekly')),
+            is_derived: Boolean(period.is_derived ?? (period.type !== 'weekly')),
             updated_at: grouped?.updated_at ?? period.updated_at ?? null,
             uploaded_sources_count: grouped?.uploaded_sources_count ?? period.uploaded_sources_count ?? 0,
             required_sources_count: grouped?.required_sources_count ?? period.required_sources_count ?? props.sources.length,
@@ -202,6 +242,7 @@ const periodRows = computed<PeriodRow[]>(() => {
             missing_sources: grouped?.missing_sources ?? period.missing_sources ?? props.sources.map((s) => s.name),
             report_final_available: grouped?.report_final_available ?? period.report_final_available ?? false,
             uploads: grouped?.uploads ?? [],
+            available_week_options: period.available_week_options ?? [],
         }
     })
 })
@@ -223,8 +264,7 @@ const filteredWeeklyPeriods = computed(() => {
         return (
             period.label.toLowerCase().includes(query) ||
             period.code.toLowerCase().includes(query) ||
-            (period.start_date ?? '').includes(query) ||
-            (period.end_date ?? '').includes(query)
+            formatRange(period.start_date, period.end_date).toLowerCase().includes(query)
         )
     })
 })
@@ -307,9 +347,9 @@ const selectedPeriodRow = computed(() => {
 })
 
 const selectedIsWeekly = computed(() => selectedPeriodRow.value?.type === 'weekly')
-const selectedIsAutomatic = computed(() => !!selectedPeriodRow.value && selectedPeriodRow.value.type !== 'weekly')
-
+const selectedIsAutomatic = computed(() => Boolean(selectedPeriodRow.value?.is_derived))
 const totalPeriods = computed(() => periodRows.value.length)
+
 const totalUploads = computed(() =>
     periodRows.value.reduce((acc, period) => acc + period.uploads.length, 0),
 )
@@ -323,7 +363,7 @@ const incompletePeriods = computed(() =>
 )
 
 function currentStatusLabel(period: PeriodRow) {
-    if (period.type !== 'weekly') return 'Automático'
+    if (period.is_derived) return 'Automático'
     if (period.uploaded_sources_count === 0) return 'Sin carga'
     if (period.failed_count > 0) return 'Con error'
     if (period.pending_count > 0) return 'Procesando'
@@ -332,7 +372,7 @@ function currentStatusLabel(period: PeriodRow) {
 }
 
 function currentStatusClass(period: PeriodRow) {
-    if (period.type !== 'weekly') {
+    if (period.is_derived) {
         return 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300'
     }
 
@@ -355,19 +395,6 @@ function currentStatusClass(period: PeriodRow) {
     return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
 }
 
-function formatShortDate(date?: string | null) {
-    if (!date) return 'Sin fecha'
-
-    const parsed = new Date(`${date}T00:00:00`)
-    if (Number.isNaN(parsed.getTime())) return date
-
-    return new Intl.DateTimeFormat('es-MX', {
-        day: 'numeric',
-        month: 'short',
-        year: 'numeric',
-    }).format(parsed)
-}
-
 function formatLongDate(date?: string | null) {
     if (!date) return 'Sin fecha'
 
@@ -377,6 +404,19 @@ function formatLongDate(date?: string | null) {
     return new Intl.DateTimeFormat('es-MX', {
         day: 'numeric',
         month: 'long',
+        year: 'numeric',
+    }).format(parsed)
+}
+
+function formatShortDate(date?: string | null) {
+    if (!date) return 'Sin fecha'
+
+    const parsed = new Date(`${date}T00:00:00`)
+    if (Number.isNaN(parsed.getTime())) return date
+
+    return new Intl.DateTimeFormat('es-MX', {
+        day: 'numeric',
+        month: 'short',
         year: 'numeric',
     }).format(parsed)
 }
@@ -411,23 +451,6 @@ const selectedUploads = computed(() => {
     })
 })
 
-const uploadedSourceCodesForCurrentPeriod = computed(() => {
-    return new Set(
-        (selectedPeriodRow.value?.uploads ?? [])
-            .map((upload) => upload.source_code)
-            .filter(Boolean),
-    )
-})
-
-const sourceOptions = computed(() => {
-    return props.sources.map((source) => ({
-        ...source,
-        disabled: selectedIsWeekly.value
-            ? uploadedSourceCodesForCurrentPeriod.value.has(source.code)
-            : true,
-    }))
-})
-
 const selectedFileName = computed(() => form.file?.name ?? 'Ningún archivo seleccionado')
 
 const selectedSourceCards = computed(() => {
@@ -439,7 +462,7 @@ const selectedSourceCards = computed(() => {
         if (!found) {
             return {
                 ...source,
-                statusLabel: selectedIsAutomatic.value ? 'No aplica carga directa' : 'Pendiente',
+                statusLabel: selectedIsAutomatic.value ? 'Automático' : 'Pendiente',
                 statusClass: selectedIsAutomatic.value
                     ? 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300'
                     : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
@@ -470,33 +493,103 @@ const selectedSourceCards = computed(() => {
     })
 })
 
-const sameMonthWeeklyCoverageOptions = computed(() => {
+const currentAvailableWeekOptions = computed<WeekOption[]>(() => {
     if (!selectedPeriodRow.value || !selectedIsWeekly.value) return []
+
+    if (selectedPeriodRow.value.available_week_options.length) {
+        return [...selectedPeriodRow.value.available_week_options].sort((a, b) => {
+            const aSeq = a.sequence ?? 0
+            const bSeq = b.sequence ?? 0
+            return aSeq - bSeq
+        })
+    }
 
     return weeklyPeriods.value
         .filter((week) =>
             week.year === selectedPeriodRow.value?.year &&
             week.month === selectedPeriodRow.value?.month,
         )
+        .map((week) => ({
+            id: week.id,
+            label: week.label,
+            sequence: week.sequence,
+            start_date: week.start_date,
+            end_date: week.end_date,
+        }))
         .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
 })
 
-const defaultCoveredWeeks = computed(() => {
-    if (!selectedPeriodRow.value || !selectedIsWeekly.value) return []
+const selectedSourceCode = computed(() => {
+    const selectedId = Number(form.data_source_id)
 
-    return [selectedPeriodRow.value.id]
+    if (!selectedId) return null
+
+    const source = props.sources.find((item) => item.id === selectedId)
+    return source?.code ?? null
 })
 
-function syncCoveredWeeksWithSelectedPeriod() {
+const takenCoveredPeriodIdsForSelectedSource = computed(() => {
+    const sourceCode = selectedSourceCode.value
+    if (!sourceCode || !selectedPeriodRow.value || !selectedIsWeekly.value) return new Set<number>()
+
+    const sameMonthWeeks = weeklyPeriods.value.filter((week) =>
+        week.year === selectedPeriodRow.value?.year &&
+        week.month === selectedPeriodRow.value?.month,
+    )
+
+    const ids = new Set<number>()
+
+    for (const week of sameMonthWeeks) {
+        for (const upload of week.uploads) {
+            if (upload.source_code !== sourceCode) continue
+
+            const coveredIds =
+                upload.covered_period_ids ??
+                upload.covered_week_ids ??
+                []
+
+            if (coveredIds.length) {
+                for (const id of coveredIds) {
+                    ids.add(id)
+                }
+            } else {
+                ids.add(week.id)
+            }
+        }
+    }
+
+    return ids
+})
+
+function isCoverageOptionDisabled(optionId: number) {
+    return takenCoveredPeriodIdsForSelectedSource.value.has(optionId)
+}
+
+function syncCoveredPeriodsWithSelectedPeriod() {
     if (!selectedIsWeekly.value) {
-        form.covered_week_ids = []
+        form.covered_period_ids = []
         return
     }
 
-    if (form.covered_week_ids.length === 0) {
-        form.covered_week_ids = [...defaultCoveredWeeks.value]
+    if (!form.covered_period_ids.length && selectedPeriodRow.value) {
+        form.covered_period_ids = [selectedPeriodRow.value.id]
     }
 }
+
+watch(
+    () => form.data_source_id,
+    () => {
+        form.covered_period_ids = form.covered_period_ids.filter(
+            (id) => !isCoverageOptionDisabled(id),
+        )
+
+        if (selectedPeriodRow.value && form.covered_period_ids.length === 0) {
+            if (!isCoverageOptionDisabled(selectedPeriodRow.value.id)) {
+                form.covered_period_ids = [selectedPeriodRow.value.id]
+            }
+        }
+    },
+)
 
 function selectPeriod(periodId: number) {
     form.period_id = periodId
@@ -509,28 +602,30 @@ function selectPeriod(periodId: number) {
     const selected = periodRows.value.find((period) => period.id === periodId)
 
     if (selected?.type === 'weekly') {
-        form.covered_week_ids = [selected.id]
+        form.covered_period_ids = [selected.id]
     } else {
-        form.covered_week_ids = []
+        form.covered_period_ids = []
     }
 }
 
 if (props.currentPeriodId) {
     const initial = periodRows.value.find((period) => period.id === props.currentPeriodId)
     if (initial?.type === 'weekly') {
-        form.covered_week_ids = [initial.id]
+        form.covered_period_ids = [initial.id]
     }
 }
 
 const canUploadCurrentPeriod = computed(() => {
     if (!selectedPeriodRow.value) return false
-    if (!selectedIsWeekly.value) return false
+    if (!selectedPeriodRow.value.can_receive_uploads) return false
     return true
 })
 
 const uploadDisabledReason = computed(() => {
     if (!selectedPeriodRow.value) return 'Selecciona una semana.'
-    if (selectedIsAutomatic.value) return 'Los bimestres, trimestres, semestres y anual se alimentan automáticamente con semanas.'
+    if (!selectedPeriodRow.value.can_receive_uploads) {
+        return 'Este periodo se alimenta automáticamente con semanas.'
+    }
     return ''
 })
 
@@ -597,16 +692,46 @@ function onDrop(event: DragEvent) {
     assignFile(file)
 }
 
+function firstErrorMessage() {
+    const errors = form.errors as Record<string, string | undefined>
+    return (
+        errors.file ||
+        errors.data_source_id ||
+        errors.covered_period_ids ||
+        errors.notes ||
+        'Revisa la fuente, archivo y semanas seleccionadas.'
+    )
+}
+
 async function submit() {
-    if (!selectedPeriodRow.value) return
-    if (!selectedIsWeekly.value) return
+    if (!selectedPeriodRow.value || !selectedIsWeekly.value) return
 
-    syncCoveredWeeksWithSelectedPeriod()
+    syncCoveredPeriodsWithSelectedPeriod()
 
-    if (!form.covered_week_ids.length) {
+    if (!form.data_source_id) {
+        await Swal.fire({
+            title: 'Selecciona una fuente',
+            text: 'Debes elegir si el archivo corresponde a NOI, Gastos, Lendus u otra fuente.',
+            icon: 'warning',
+            confirmButtonText: 'Entendido',
+        })
+        return
+    }
+
+    if (!form.covered_period_ids.length) {
         await Swal.fire({
             title: 'Selecciona semanas',
             text: 'Debes indicar qué semanas cubre este reporte.',
+            icon: 'warning',
+            confirmButtonText: 'Entendido',
+        })
+        return
+    }
+
+    if (!form.file) {
+        await Swal.fire({
+            title: 'Selecciona un archivo',
+            text: 'Debes elegir el archivo que vas a subir.',
             icon: 'warning',
             confirmButtonText: 'Entendido',
         })
@@ -629,7 +754,7 @@ async function submit() {
         preserveScroll: true,
         onSuccess: () => {
             form.reset('file', 'notes', 'data_source_id')
-            form.covered_week_ids = selectedPeriodRow.value ? [selectedPeriodRow.value.id] : []
+            form.covered_period_ids = selectedPeriodRow.value ? [selectedPeriodRow.value.id] : []
             dragActive.value = false
 
             if (fileInputRef.value) {
@@ -643,10 +768,10 @@ async function submit() {
                 confirmButtonText: 'Entendido',
             })
         },
-        onError: () => {
-            Swal.fire({
+        onError: async () => {
+            await Swal.fire({
                 title: 'No se pudo subir',
-                text: 'Revisa la fuente, archivo y semanas seleccionadas.',
+                text: firstErrorMessage(),
                 icon: 'error',
                 confirmButtonText: 'Cerrar',
             })
@@ -702,32 +827,177 @@ async function analyzeUpload(uploadId: number) {
 
     if (!result.isConfirmed) return
 
+    let finished = false
+    let pollTimer: number | null = null
+
+    const renderProgress = async () => {
+        try {
+            const response = await fetch(`/historico-general/${uploadId}/progreso`, {
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    Accept: 'application/json',
+                },
+                credentials: 'same-origin',
+            })
+
+            if (!response.ok) {
+                return
+            }
+
+            const data = await response.json()
+
+            const rowsRead = Number(data.rows_read ?? 0)
+            const rowsInserted = Number(data.rows_inserted ?? 0)
+            const rowsSkipped = Number(data.rows_skipped ?? 0)
+            const rowsWithErrors = Number(data.rows_with_errors ?? 0)
+            const status = String(data.status ?? 'running')
+            const log = String(data.log ?? 'Procesando...')
+            const totalKnown = Math.max(rowsRead, rowsInserted + rowsSkipped + rowsWithErrors, 1)
+            const progress = Math.min(
+                100,
+                Math.max(
+                    5,
+                    Math.round(((rowsInserted + rowsSkipped + rowsWithErrors) / totalKnown) * 100),
+                ),
+            )
+
+            Swal.update({
+                html: `
+                    <div class="space-y-4 text-left">
+                        <p class="text-sm text-slate-600 dark:text-slate-300">
+                            ${log}
+                        </p>
+
+                        <div class="h-3 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                            <div
+                                class="h-full rounded-full bg-emerald-500 transition-all duration-300"
+                                style="width: ${progress}%"
+                            ></div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-3 text-sm">
+                            <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
+                                <div class="text-slate-500">Leídas</div>
+                                <div class="text-lg font-semibold">${rowsRead}</div>
+                            </div>
+                            <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
+                                <div class="text-slate-500">Insertadas</div>
+                                <div class="text-lg font-semibold">${rowsInserted}</div>
+                            </div>
+                            <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
+                                <div class="text-slate-500">Omitidas</div>
+                                <div class="text-lg font-semibold">${rowsSkipped}</div>
+                            </div>
+                            <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
+                                <div class="text-slate-500">Errores</div>
+                                <div class="text-lg font-semibold">${rowsWithErrors}</div>
+                            </div>
+                        </div>
+
+                        <div class="text-xs text-slate-500">
+                            Estado: ${status}
+                        </div>
+                    </div>
+                `,
+            })
+
+            if (status === 'success') {
+                finished = true
+                if (pollTimer) window.clearInterval(pollTimer)
+
+                await Swal.fire({
+                    title: 'Archivo analizado',
+                    text: log || 'El procesamiento finalizó correctamente.',
+                    icon: rowsInserted > 0 ? 'success' : 'warning',
+                    confirmButtonText: 'Entendido',
+                })
+
+                router.visit(window.location.pathname + window.location.search, {
+                    method: 'get',
+                    preserveScroll: true,
+                    preserveState: true,
+                    replace: true,
+                })
+            }
+
+            if (status === 'failed') {
+                finished = true
+                if (pollTimer) window.clearInterval(pollTimer)
+
+                await Swal.fire({
+                    title: 'No se pudo analizar',
+                    text: log || 'Ocurrió un problema durante el análisis.',
+                    icon: 'error',
+                    confirmButtonText: 'Cerrar',
+                })
+
+                router.visit(window.location.pathname + window.location.search, {
+                    method: 'get',
+                    preserveScroll: true,
+                    preserveState: true,
+                    replace: true,
+                })
+            }
+        } catch {
+            // silencio temporal mientras sigue el polling
+        }
+    }
+
     Swal.fire({
         title: 'Analizando archivo...',
-        text: 'Estamos procesando el archivo seleccionado.',
+        html: `
+            <div class="space-y-4 text-left">
+                <p class="text-sm text-slate-600 dark:text-slate-300">
+                    Iniciando proceso...
+                </p>
+                <div class="h-3 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                    <div class="h-full w-[5%] rounded-full bg-emerald-500 transition-all duration-300"></div>
+                </div>
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                    <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
+                        <div class="text-slate-500">Leídas</div>
+                        <div class="text-lg font-semibold">0</div>
+                    </div>
+                    <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
+                        <div class="text-slate-500">Insertadas</div>
+                        <div class="text-lg font-semibold">0</div>
+                    </div>
+                    <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
+                        <div class="text-slate-500">Omitidas</div>
+                        <div class="text-lg font-semibold">0</div>
+                    </div>
+                    <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
+                        <div class="text-slate-500">Errores</div>
+                        <div class="text-lg font-semibold">0</div>
+                    </div>
+                </div>
+            </div>
+        `,
         allowOutsideClick: false,
         allowEscapeKey: false,
         showConfirmButton: false,
-        didOpen: () => Swal.showLoading(),
-    })
+        didOpen: async () => {
+            fetch(`/historico-general/${uploadId}/analizar`, {
+                method: 'POST',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    Accept: 'application/json',
+                    'X-CSRF-TOKEN': document
+                        .querySelector('meta[name="csrf-token"]')
+                        ?.getAttribute('content') ?? '',
+                },
+                credentials: 'same-origin',
+            }).catch(() => null)
 
-    router.post(`/historico-general/${uploadId}/analizar`, {}, {
-        preserveScroll: true,
-        onSuccess: () => {
-            Swal.fire({
-                title: 'Archivo analizado',
-                text: 'El procesamiento finalizó correctamente.',
-                icon: 'success',
-                confirmButtonText: 'Entendido',
-            })
+            await renderProgress()
+            pollTimer = window.setInterval(async () => {
+                if (!finished) {
+                    await renderProgress()
+                }
+            }, 1200)
         },
-        onError: () => {
-            Swal.fire({
-                title: 'No se pudo analizar',
-                text: 'Ocurrió un problema durante el análisis.',
-                icon: 'error',
-                confirmButtonText: 'Cerrar',
-            })
+        willClose: () => {
+            if (pollTimer) window.clearInterval(pollTimer)
         },
     })
 }
@@ -757,8 +1027,10 @@ async function analyzeUpload(uploadId: number) {
                                         Histórico General
                                     </h1>
                                     <p class="max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base">
-                                        Sube archivos contra semanas. Un archivo puede cubrir una o varias semanas.
-                                        Los periodos agrupados como bimestre, trimestre, semestre y anual se forman automáticamente con la información de las semanas involucradas.
+                                        Sube archivos por semanas. NOI y Lendus Cobranza alimentan el cruce de colaboradores,
+                                        sucursales, altas, bajas e incidencias. Después del análisis, revisa
+                                        <span class="font-semibold text-foreground">Asignación sucursal</span>
+                                        para validar el resultado del periodo.
                                     </p>
                                 </div>
                             </div>
@@ -1069,14 +1341,12 @@ async function analyzeUpload(uploadId: number) {
                                                 class="app-input"
                                                 :disabled="!canUploadCurrentPeriod || form.processing"
                                             >
-                                                <option value="">Selecciona una fuente</option>
                                                 <option
-                                                    v-for="source in sourceOptions"
+                                                    v-for="source in props.sources"
                                                     :key="source.id"
                                                     :value="source.id"
-                                                    :disabled="source.disabled"
                                                 >
-                                                    {{ source.name }}{{ source.disabled ? ' · ya cargada' : '' }}
+                                                    {{ source.name }}
                                                 </option>
                                             </select>
                                             <InputError :message="form.errors.data_source_id" />
@@ -1087,36 +1357,47 @@ async function analyzeUpload(uploadId: number) {
                                         <div class="flex items-center gap-2">
                                             <CalendarRange class="size-4 text-primary" />
                                             <label class="text-sm font-semibold">
-                                                Semanas que cubre este archivo
+                                                Semanas cubiertas por este archivo
                                             </label>
                                         </div>
 
                                         <p class="text-sm text-muted-foreground">
-                                            Marca una o varias semanas. Esto sirve cuando el archivo descargado desde NOI u otra fuente cubre 1, 2, 4 o 5 semanas del mismo mes.
+                                            Selecciona exactamente las semanas incluidas en este reporte. Las ya cubiertas para la fuente elegida aparecen bloqueadas.
                                         </p>
 
                                         <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                                             <label
-                                                v-for="week in sameMonthWeeklyCoverageOptions"
+                                                v-for="week in currentAvailableWeekOptions"
                                                 :key="week.id"
-                                                class="flex cursor-pointer items-start gap-3 rounded-2xl border border-border/70 bg-background px-4 py-3 transition hover:bg-muted/30"
+                                                class="flex items-start gap-3 rounded-2xl border px-4 py-3 transition"
+                                                :class="
+                                                    isCoverageOptionDisabled(week.id)
+                                                        ? 'cursor-not-allowed border-border/60 bg-muted/30 opacity-60'
+                                                        : 'cursor-pointer border-border/70 bg-background hover:bg-muted/30'
+                                                "
                                             >
                                                 <input
-                                                    v-model="form.covered_week_ids"
+                                                    v-model="form.covered_period_ids"
                                                     type="checkbox"
                                                     :value="week.id"
                                                     class="mt-1"
-                                                    :disabled="form.processing"
+                                                    :disabled="form.processing || isCoverageOptionDisabled(week.id)"
                                                 />
                                                 <div>
                                                     <p class="text-sm font-semibold">{{ week.label }}</p>
                                                     <p class="mt-1 text-xs text-muted-foreground">
                                                         {{ formatRange(week.start_date, week.end_date) }}
                                                     </p>
+                                                    <p
+                                                        v-if="isCoverageOptionDisabled(week.id)"
+                                                        class="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300"
+                                                    >
+                                                        Ya cubierta para esta fuente
+                                                    </p>
                                                 </div>
                                             </label>
                                         </div>
-                                        <InputError :message="form.errors.covered_week_ids" />
+                                        <InputError :message="form.errors.covered_period_ids" />
                                     </div>
 
                                     <div
@@ -1249,7 +1530,7 @@ async function analyzeUpload(uploadId: number) {
                                     </div>
 
                                     <p class="mt-2 text-sm text-muted-foreground">
-                                        Cuando la información base esté lista, podrás pasar al reporte final.
+                                        Cuando NOI, cobranza y demás fuentes base estén analizadas y validadas en Asignación sucursal, podrás pasar al reporte final.
                                     </p>
 
                                     <a
@@ -1316,7 +1597,7 @@ async function analyzeUpload(uploadId: number) {
                                 </div>
 
                                 <div
-                                    v-if="upload.covered_week_labels?.length"
+                                    v-if="(upload.covered_period_labels?.length || upload.covered_week_labels?.length)"
                                     class="mt-3 rounded-xl border border-border/70 bg-muted/20 px-3 py-3"
                                 >
                                     <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -1324,7 +1605,7 @@ async function analyzeUpload(uploadId: number) {
                                     </p>
                                     <div class="mt-2 flex flex-wrap gap-2">
                                         <span
-                                            v-for="weekLabel in upload.covered_week_labels"
+                                            v-for="weekLabel in (upload.covered_period_labels?.length ? upload.covered_period_labels : upload.covered_week_labels)"
                                             :key="weekLabel"
                                             class="rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-semibold text-primary"
                                         >
