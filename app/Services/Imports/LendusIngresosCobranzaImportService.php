@@ -12,11 +12,11 @@ use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Reader\IReadFilter;
 use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 
-class LendusIngresosCobranzaImportService
-{
+class LendusIngresosCobranzaImportService {
+
     private array $branchCache = [];
 
-    public function handle(ReportUpload $upload): array
+    public function handle(ReportUpload $upload, ?callable $progress = null): array
     {
         if (!$upload->stored_path) {
             throw new \RuntimeException('El archivo no tiene stored_path.');
@@ -122,6 +122,16 @@ class LendusIngresosCobranzaImportService
 
                 $rowsRead++;
 
+                if ($progress && $rowsRead % 250 === 0) {
+                    $progress([
+                        'rows_read' => $rowsRead,
+                        'rows_inserted' => $rowsInserted,
+                        'rows_skipped' => $rowsSkipped,
+                        'rows_with_errors' => $rowsWithErrors,
+                        'log' => "Procesando cobranza... {$rowsRead} filas leídas.",
+                    ]);
+                }
+
                 try {
                     $mapped = $this->mapRow($row, $headerMap);
 
@@ -185,6 +195,15 @@ class LendusIngresosCobranzaImportService
             if (!empty($batch)) {
                 Recovery::query()->insert($batch);
                 $rowsInserted += count($batch);
+                if ($progress) {
+                    $progress([
+                        'rows_read' => $rowsRead,
+                        'rows_inserted' => $rowsInserted,
+                        'rows_skipped' => $rowsSkipped,
+                        'rows_with_errors' => $rowsWithErrors,
+                        'log' => "Insertadas {$rowsInserted} filas de cobranza...",
+                    ]);
+                }
             }
 
             unset($chunkRows, $batch);
