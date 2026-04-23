@@ -11,6 +11,7 @@ class ReportUpload extends Model {
 
     protected $fillable = [
         'period_id',
+        'covered_period_ids',
         'data_source_id',
         'original_name',
         'stored_path',
@@ -26,6 +27,7 @@ class ReportUpload extends Model {
         'uploaded_at' => 'datetime',
         'file_size' => 'integer',
         'status' => ReportUploadStatus::class,
+        'covered_period_ids' => 'array',
     ];
 
     public function period(): BelongsTo {

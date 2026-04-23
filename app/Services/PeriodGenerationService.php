@@ -6,87 +6,72 @@ use App\Models\Period;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
 
-class PeriodGenerationService
-{
-    /**
-     * @return Collection<int, Period>
-     */
+class PeriodGenerationService {
+
     public function generate(int $year, int $month, string $type): Collection
     {
-        return match ($type) {
-            'weekly' => $this->generateWeekly($year, $month),
-            'bimonthly' => $this->generateBimonthly($year, $month),
-            'quarterly' => $this->generateQuarterly($year, $month),
-            'semiannual' => $this->generateSemiannual($year, $month),
-            'annual' => $this->generateAnnual($year),
-            default => throw new \InvalidArgumentException("Tipo de periodo no soportado: {$type}"),
-        };
+        if ($type === 'weekly') {
+            $weekly = $this->generateWeekly($year, $month);
+            $derived = $this->syncDerivedPeriods($year);
+
+            return $weekly->concat($derived)->values();
+        }
+        return $this->syncDerivedPeriods($year);
     }
 
     private function getWeeklySequenceStart(int $year, Carbon $start): int
     {
         $yearStart = Carbon::create($year, 1, 1)->startOfDay();
         $firstSunday = $yearStart->copy()->endOfWeek(Carbon::SUNDAY);
-
-        // La semana 1 especial de inicio de año
         if ($start->betweenIncluded($yearStart, $firstSunday)) {
             return 1;
         }
-
         $firstMondayAfterOpeningWeek = $firstSunday->copy()->addDay()->startOfDay();
-
         return 2 + (int) floor(
             $firstMondayAfterOpeningWeek->diffInDays($start) / 7
         );
     }
 
     /**
-     * Semana 1: día 1 al primer domingo. Luego lunes-domingo.
-     *
-     * @return Collection<int, Period>
+     * Regla semanal:
+     * - Enero arranca con una semana especial del día 1 al primer domingo.
+     * - Después, todas las semanas son lunes a domingo.
+     * - Si la última semana cruza de mes, se respeta completa.
      */
     private function generateWeekly(int $year, int $month): Collection
     {
         $monthStart = Carbon::create($year, $month, 1)->startOfDay();
         $monthEnd = $monthStart->copy()->endOfMonth()->startOfDay();
-
-        // Enero: excepción, empieza en el día 1
-        // Resto de meses: empieza en el primer lunes del mes
         if ($month === 1) {
             $cursor = $monthStart->copy();
         } else {
-            $cursor = $monthStart->copy()->next(Carbon::MONDAY);
-
-            // Si el día 1 ya es lunes, next() se va al siguiente lunes, así que corregimos
-            if ($monthStart->dayOfWeek === Carbon::MONDAY) {
-                $cursor = $monthStart->copy();
-            }
+            $cursor = $monthStart->dayOfWeek === Carbon::MONDAY
+                ? $monthStart->copy()
+                : $monthStart->copy()->next(Carbon::MONDAY);
         }
-
-        // Si por alguna razón el primer lunes ya cae fuera del mes, no hay periodos
         if ($cursor->gt($monthEnd)) {
             return collect();
         }
-
         $sequence = $this->getWeeklySequenceStart($year, $cursor);
         $periods = collect();
-
+        $keptIds = [];
         while ($cursor->lte($monthEnd)) {
             $start = $cursor->copy();
-
-            $end = ($year === (int) $start->year && $month === 1 && $sequence === 1)
-                ? $start->copy()->endOfWeek(Carbon::SUNDAY)
-                : $start->copy()->endOfWeek(Carbon::SUNDAY);
-
-            $monthName = ucfirst($start->translatedFormat('F'));
-            $code = sprintf('W-%04d-%02d-%02d', $year, $month, $sequence);
-            $name = sprintf('Semana %d - %s %d', $sequence, $monthName, $start->year);
-
+            $end = $start->copy()->endOfWeek(Carbon::SUNDAY);
+            $periodMonth = (int) $start->month;
+            $periodYear = (int) $start->year;
+            $name = sprintf(
+                'Semana %d - %s %d',
+                $sequence,
+                ucfirst($start->translatedFormat('F')),
+                $periodYear
+            );
+            $code = sprintf('W-%04d-%02d', $year, $sequence);
             $period = Period::query()->updateOrCreate(
                 [
                     'type' => 'weekly',
-                    'year' => $year,
-                    'month' => $month,
+                    'year' => $periodYear,
+                    'month' => $periodMonth,
                     'sequence' => $sequence,
                 ],
                 [
@@ -97,139 +82,201 @@ class PeriodGenerationService
                     'is_closed' => false,
                 ],
             );
-
             $periods->push($period);
-
+            $keptIds[] = $period->id;
             $cursor = $end->copy()->addDay()->startOfDay();
             $sequence++;
         }
-
-        return $periods;
+        Period::query()
+            ->where('type', 'weekly')
+            ->where('year', $year)
+            ->where('month', $month)
+            ->when(!empty($keptIds), fn ($query) => $query->whereNotIn('id', $keptIds))
+            ->delete();
+        return $periods->values();
     }
 
-    /**
-     * Quincenal dentro del mes base:
-     * 1) 1-15
-     * 2) 16-fin de mes
-     *
-     * @return Collection<int, Period>
-     */
-    private function generateBimonthly(int $year, int $month): Collection
-    {
-        $periods = collect();
-        $firstStart = Carbon::create($year, $month, 1)->startOfDay();
-        $firstEnd = Carbon::create($year, $month, 15)->startOfDay();
-        $secondStart = Carbon::create($year, $month, 16)->startOfDay();
-        $secondEnd = Carbon::create($year, $month, 1)->endOfMonth()->startOfDay();
-        $ranges = [
-            1 => [$firstStart, $firstEnd],
-            2 => [$secondStart, $secondEnd],
+    private function syncDerivedPeriods(int $year): Collection {
+        return collect()
+            ->concat($this->syncBimonthlyPeriods($year))
+            ->concat($this->syncQuarterlyPeriods($year))
+            ->concat($this->syncSemiannualPeriods($year))
+            ->concat($this->syncAnnualPeriods($year))
+            ->values();
+    }
+
+    private function syncBimonthlyPeriods(int $year): Collection {
+        $blocks = [
+            1 => [1, 2],
+            2 => [3, 4],
+            3 => [5, 6],
+            4 => [7, 8],
+            5 => [9, 10],
+            6 => [11, 12],
         ];
-        foreach ($ranges as $sequence => [$start, $end]) {
-            $name = sprintf('Quincena %d - %s %d', $sequence, ucfirst($start->translatedFormat('F')), $year);
-            $code = sprintf('B-%04d-%02d-%02d', $year, $month, $sequence);
-            $period = Period::query()->updateOrCreate(
-                [
-                    'type' => 'bimonthly',
-                    'year' => $year,
-                    'month' => $month,
-                    'sequence' => $sequence,
-                ],
-                [
-                    'name' => $name,
-                    'code' => $code,
-                    'start_date' => $start->toDateString(),
-                    'end_date' => $end->toDateString(),
-                    'is_closed' => false,
-                ],
+        $periods = collect();
+        $keptIds = [];
+        foreach ($blocks as $sequence => $months) {
+            $period = $this->syncGroupedPeriod(
+                type: 'bimonthly',
+                year: $year,
+                sequence: $sequence,
+                months: $months,
+                name: sprintf('Bimestre %d - %d', $sequence, $year),
+                code: sprintf('BI-%04d-%02d', $year, $sequence),
             );
-            $periods->push($period);
+            if ($period) {
+                $periods->push($period);
+                $keptIds[] = $period->id;
+            }
         }
-        return $periods;
+        Period::query()
+            ->where('type', 'bimonthly')
+            ->where('year', $year)
+            ->when(!empty($keptIds), fn ($query) => $query->whereNotIn('id', $keptIds))
+            ->delete();
+        return $periods->values();
     }
 
-    /**
-     * Trimestre calendario según el mes base seleccionado.
-     *
-     * @return Collection<int, Period>
-     */
-    private function generateQuarterly(int $year, int $month): Collection {
-        $quarter = (int) ceil($month / 3);
-        $startMonth = (($quarter - 1) * 3) + 1;
-        $start = Carbon::create($year, $startMonth, 1)->startOfDay();
-        $end = $start->copy()->addMonths(2)->endOfMonth()->startOfDay();
-        $period = Period::query()->updateOrCreate(
-            [
-                'type' => 'quarterly',
-                'year' => $year,
-                'month' => $startMonth,
-                'sequence' => 1,
-            ],
-            [
-                'name' => sprintf('Trimestre %d - %d', $quarter, $year),
-                'code' => sprintf('Q-%04d-%02d', $year, $quarter),
-                'start_date' => $start->toDateString(),
-                'end_date' => $end->toDateString(),
-                'is_closed' => false,
-            ],
-        );
+    private function syncQuarterlyPeriods(int $year): Collection {
+        $blocks = [
+            1 => [1, 2, 3],
+            2 => [4, 5, 6],
+            3 => [7, 8, 9],
+            4 => [10, 11, 12],
+        ];
+        $periods = collect();
+        $keptIds = [];
+        foreach ($blocks as $sequence => $months) {
+            $period = $this->syncGroupedPeriod(
+                type: 'quarterly',
+                year: $year,
+                sequence: $sequence,
+                months: $months,
+                name: sprintf('Trimestre %d - %d', $sequence, $year),
+                code: sprintf('TRI-%04d-%02d', $year, $sequence),
+            );
+            if ($period) {
+                $periods->push($period);
+                $keptIds[] = $period->id;
+            }
+        }
+        Period::query()
+            ->where('type', 'quarterly')
+            ->where('year', $year)
+            ->when(!empty($keptIds), fn ($query) => $query->whereNotIn('id', $keptIds))
+            ->delete();
+        return $periods->values();
+    }
 
+    private function syncSemiannualPeriods(int $year): Collection {
+        $blocks = [
+            1 => [1, 2, 3, 4, 5, 6],
+            2 => [7, 8, 9, 10, 11, 12],
+        ];
+        $periods = collect();
+        $keptIds = [];
+        foreach ($blocks as $sequence => $months) {
+            $period = $this->syncGroupedPeriod(
+                type: 'semiannual',
+                year: $year,
+                sequence: $sequence,
+                months: $months,
+                name: sprintf('Semestre %d - %d', $sequence, $year),
+                code: sprintf('SEM-%04d-%02d', $year, $sequence),
+            );
+            if ($period) {
+                $periods->push($period);
+                $keptIds[] = $period->id;
+            }
+        }
+        Period::query()
+            ->where('type', 'semiannual')
+            ->where('year', $year)
+            ->when(!empty($keptIds), fn ($query) => $query->whereNotIn('id', $keptIds))
+            ->delete();
+        return $periods->values();
+    }
+
+    private function syncAnnualPeriods(int $year): Collection {
+        $months = range(1, 12);
+        $period = $this->syncGroupedPeriod(
+            type: 'annual',
+            year: $year,
+            sequence: 1,
+            months: $months,
+            name: sprintf('Anual %d', $year),
+            code: sprintf('AN-%04d', $year),
+        );
+        if (!$period) {
+            Period::query()
+                ->where('type', 'annual')
+                ->where('year', $year)
+                ->delete();
+
+            return collect();
+        }
         return collect([$period]);
     }
 
-    /**
-     * Semestre calendario según el mes base seleccionado.
-     *
-     * @return Collection<int, Period>
-     */
-    private function generateSemiannual(int $year, int $month): Collection
+    private function syncGroupedPeriod(
+        string $type,
+        int $year,
+        int $sequence,
+        array $months,
+        string $name,
+        string $code
+    ): ?Period {
+        $weeks = $this->getWeeklyPeriodsForMonths($year, $months);
+        if (!$this->monthsAreReady($weeks, $months)) {
+            return null;
+        }
+        $firstWeek = $weeks->sortBy('start_date')->first();
+        $lastWeek = $weeks->sortByDesc('end_date')->first();
+        if (!$firstWeek || !$lastWeek) {
+            return null;
+        }
+        return Period::query()->updateOrCreate(
+            [
+                'type' => $type,
+                'year' => $year,
+                'month' => (int) min($months),
+                'sequence' => $sequence,
+            ],
+            [
+                'name' => $name,
+                'code' => $code,
+                'start_date' => $firstWeek->start_date->toDateString(),
+                'end_date' => $lastWeek->end_date->toDateString(),
+                'is_closed' => false,
+            ],
+        );
+    }
+
+    private function getWeeklyPeriodsForMonths(int $year, array $months): Collection
     {
-        $semester = $month <= 6 ? 1 : 2;
-        $startMonth = $semester === 1 ? 1 : 7;
-        $start = Carbon::create($year, $startMonth, 1)->startOfDay();
-        $end = $start->copy()->addMonths(5)->endOfMonth()->startOfDay();
-        $period = Period::query()->updateOrCreate(
-            [
-                'type' => 'semiannual',
-                'year' => $year,
-                'month' => $startMonth,
-                'sequence' => 1,
-            ],
-            [
-                'name' => sprintf('Semestre %d - %d', $semester, $year),
-                'code' => sprintf('S-%04d-%02d', $year, $semester),
-                'start_date' => $start->toDateString(),
-                'end_date' => $end->toDateString(),
-                'is_closed' => false,
-            ],
-        );
-        return collect([$period]);
+        return Period::query()
+            ->where('type', 'weekly')
+            ->where('year', $year)
+            ->whereIn('month', $months)
+            ->orderBy('start_date')
+            ->get();
     }
 
-    /**
-     * Año calendario completo.
-     *
-     * @return Collection<int, Period>
-     */
-    private function generateAnnual(int $year): Collection {
-        $start = Carbon::create($year, 1, 1)->startOfDay();
-        $end = Carbon::create($year, 12, 31)->startOfDay();
-        $period = Period::query()->updateOrCreate(
-            [
-                'type' => 'annual',
-                'year' => $year,
-                'month' => 1,
-                'sequence' => 1,
-            ],
-            [
-                'name' => sprintf('Anual %d', $year),
-                'code' => sprintf('A-%04d', $year),
-                'start_date' => $start->toDateString(),
-                'end_date' => $end->toDateString(),
-                'is_closed' => false,
-            ],
-        );
-        return collect([$period]);
+    private function monthsAreReady(Collection $weeks, array $months): bool
+    {
+        $availableMonths = $weeks
+            ->pluck('month')
+            ->map(fn ($month) => (int) $month)
+            ->unique()
+            ->values()
+            ->all();
+        foreach ($months as $month) {
+            if (!in_array((int) $month, $availableMonths, true)) {
+                return false;
+            }
+        }
+        return true;
     }
 
 }

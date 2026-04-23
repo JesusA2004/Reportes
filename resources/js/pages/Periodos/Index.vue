@@ -10,6 +10,7 @@ import {
     ChevronRight,
     FolderOpen,
     HelpCircle,
+    Info,
     Lock,
     MoreHorizontal,
     Plus,
@@ -51,7 +52,6 @@ const props = withDefaults(
 )
 
 defineOptions({
-    // @ts-expect-error layout callback de Inertia
     layout: (h, page) =>
         h(
             AppLayout,
@@ -79,6 +79,8 @@ const {
     submitCreate,
     togglePeriod,
 } = usePeriodosIndex(props)
+
+form.type = 'weekly'
 
 const monthNames = [
     '',
@@ -187,14 +189,12 @@ function getMonthTitle(period: {
 
 function getFriendlyType(period: { type?: string | null }) {
     switch (period.type) {
-        case 'weekly':
-            return 'Semanal'
         case 'bimonthly':
-            return 'Bimestral / Quincenal'
+            return 'Bimestres'
         case 'quarterly':
-            return 'Trimestral'
+            return 'Trimestres'
         case 'semiannual':
-            return 'Semestral'
+            return 'Semestres'
         case 'annual':
             return 'Anual'
         default:
@@ -205,13 +205,15 @@ function getFriendlyType(period: { type?: string | null }) {
 function getPeriodTitle(period: {
     type?: string | null
     sequence?: number | null
+    year: number
     label: string
 }) {
     if (period.type === 'weekly' && period.sequence) return `Semana ${period.sequence}`
-    if (period.type === 'bimonthly' && period.sequence) return `Periodo ${period.sequence}`
+    if (period.type === 'bimonthly' && period.sequence) return `Bimestre ${period.sequence}`
     if (period.type === 'quarterly' && period.sequence) return `Trimestre ${period.sequence}`
     if (period.type === 'semiannual' && period.sequence) return `Semestre ${period.sequence}`
-    if (period.type === 'annual') return 'Periodo anual'
+    if (period.type === 'annual') return `Anual ${period.year}`
+
     return period.label
 }
 
@@ -361,91 +363,38 @@ function getStatusClasses(period: {
 
     <div class="app-page px-4 py-4 sm:px-6">
         <div class="space-y-6">
-            <section class="app-card overflow-hidden">
-                <div class="relative">
-                    <div class="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-primary/5" />
-
-                    <div class="relative p-5 sm:p-6">
-                        <div class="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-                            <div class="space-y-3">
-                                <div
-                                    class="inline-flex w-fit items-center gap-2 rounded-full border border-primary/15 bg-primary/5 px-3 py-1.5 text-xs font-semibold text-primary"
-                                >
-                                    <CalendarDays class="size-3.5" />
-                                    Control operativo por periodo
-                                </div>
-
-                                <div>
-                                    <h1 class="text-2xl font-extrabold tracking-tight sm:text-3xl">
-                                        Periodos
-                                    </h1>
-                                    <p class="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base">
-                                        Consulta los periodos agrupados de forma más clara. Las semanas se muestran por mes,
-                                        mientras que los demás tipos se separan en su propia sección.
-                                    </p>
-                                </div>
-                            </div>
-
-                            <div class="grid grid-cols-2 gap-3 lg:w-[420px]">
-                                <div class="app-card-soft px-4 py-3">
-                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                        <FolderOpen class="size-4" />
-                                        Total
-                                    </div>
-                                    <p class="mt-2 text-xl font-extrabold">{{ totalPeriods }}</p>
-                                </div>
-
-                                <div class="app-card-soft px-4 py-3">
-                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                        <Unlock class="size-4" />
-                                        Abiertos
-                                    </div>
-                                    <p class="mt-2 text-xl font-extrabold">{{ openPeriods }}</p>
-                                </div>
-
-                                <div class="app-card-soft px-4 py-3">
-                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                        <Lock class="size-4" />
-                                        Cerrados
-                                    </div>
-                                    <p class="mt-2 text-xl font-extrabold">{{ closedPeriods }}</p>
-                                </div>
-
-                                <div class="app-card-soft px-4 py-3">
-                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                        <ShieldAlert class="size-4" />
-                                        Revisión
-                                    </div>
-                                    <p class="mt-2 text-xl font-extrabold">{{ blockedPeriods }}</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </section>
 
             <section class="app-card overflow-hidden">
                 <div class="border-b px-4 py-4 sm:px-5">
                     <div class="flex items-start justify-between gap-4">
                         <div>
-                            <h2 class="text-lg font-bold tracking-tight">Nuevo periodo</h2>
+                            <h2 class="text-lg font-bold tracking-tight">Generar semanas del mes</h2>
                             <p class="mt-2 text-sm text-muted-foreground">
-                                Crea periodos operativos semanales, quincenales, trimestrales, semestrales o anuales.
+                                Selecciona el año y mes base. Los periodos agregados se recalculan automáticamente.
                             </p>
                         </div>
                     </div>
                 </div>
 
                 <form @submit.prevent="submitCreate" class="space-y-5 p-4 sm:p-5">
+                    <div class="rounded-2xl border border-primary/15 bg-primary/5 px-4 py-3">
+                        <div class="flex items-start gap-3">
+                            <Info class="mt-0.5 size-4 text-primary" />
+                            <div class="text-sm text-muted-foreground">
+                                <p class="font-semibold text-foreground">Generación automática activada</p>
+                                <p class="mt-1">
+                                    Solo se generan semanas manualmente. Bimestres, trimestres, semestres y anual
+                                    se crean o actualizan solos con base en las semanas existentes.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="grid gap-4 sm:grid-cols-2">
                         <div class="space-y-2 sm:col-span-2">
                             <label class="text-sm font-semibold">Tipo</label>
                             <select v-model="form.type" class="app-input">
                                 <option value="weekly">Semanal</option>
-                                <option value="bimonthly">Bimestral / Quincenal</option>
-                                <option value="quarterly">Trimestral</option>
-                                <option value="semiannual">Semestral</option>
-                                <option value="annual">Anual</option>
                             </select>
                             <InputError :message="form.errors.type" />
                         </div>
@@ -491,12 +440,15 @@ function getStatusClasses(period: {
                                 {{ createLabel || 'Selecciona año y mes' }}
                             </span>
                         </p>
+                        <p class="mt-1 text-xs text-muted-foreground">
+                            También se actualizarán automáticamente los periodos agrupados que ya puedan existir para ese año.
+                        </p>
                     </div>
 
                     <div>
                         <button type="submit" class="app-btn h-11 px-5" :disabled="form.processing">
                             <Plus class="mr-2 size-4" />
-                            {{ form.processing ? 'Creando...' : 'Crear periodo' }}
+                            {{ form.processing ? 'Generando...' : 'Generar semanas y sincronizar' }}
                         </button>
                     </div>
                 </form>
@@ -508,7 +460,7 @@ function getStatusClasses(period: {
                         <div>
                             <h2 class="text-lg font-bold tracking-tight">Listado de periodos</h2>
                             <p class="mt-1 text-sm text-muted-foreground">
-                                Las semanas se agrupan por mes. Los demás tipos se muestran por categoría.
+                                Las semanas se agrupan por mes y los demás periodos aparecen como agrupaciones automáticas.
                             </p>
                         </div>
 
@@ -535,7 +487,7 @@ function getStatusClasses(period: {
                             <div>
                                 <h3 class="text-base font-bold tracking-tight">Semanales por mes</h3>
                                 <p class="text-sm text-muted-foreground">
-                                    Aquí se muestran únicamente los periodos semanales agrupados por mes.
+                                    Aquí se muestran únicamente las semanas generadas para cada mes.
                                 </p>
                             </div>
                         </div>
@@ -753,9 +705,9 @@ function getStatusClasses(period: {
                                 <Sparkles class="size-5" />
                             </div>
                             <div>
-                                <h3 class="text-base font-bold tracking-tight">Otros tipos de periodos</h3>
+                                <h3 class="text-base font-bold tracking-tight">Periodos agrupados automáticos</h3>
                                 <p class="text-sm text-muted-foreground">
-                                    Trimestrales, bimestrales/quincenales, semestrales y anuales se muestran por separado.
+                                    Se generan solos cuando ya existen suficientes semanas para formar cada bloque.
                                 </p>
                             </div>
                         </div>
@@ -770,7 +722,7 @@ function getStatusClasses(period: {
                                     {{ group.title }}
                                 </h3>
                                 <p class="text-sm text-muted-foreground">
-                                    {{ group.periods.length }} periodo(s)
+                                    {{ group.periods.length }} periodo(s) generados automáticamente
                                 </p>
                             </div>
 
@@ -793,6 +745,10 @@ function getStatusClasses(period: {
 
                                             <p class="mt-3 text-sm font-semibold text-foreground">
                                                 {{ getPeriodSubtitle(period) }}
+                                            </p>
+
+                                            <p class="mt-1 text-xs text-muted-foreground">
+                                                Agrupación automática basada en semanas ya existentes.
                                             </p>
                                         </div>
 
