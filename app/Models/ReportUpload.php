@@ -42,7 +42,7 @@ class ReportUpload extends Model {
         return $this->belongsTo(User::class, 'uploaded_by');
     }
 
-    public function processRuns(): HasMany {
+    public function processRuns() {
         return $this->hasMany(ProcessRun::class);
     }
 

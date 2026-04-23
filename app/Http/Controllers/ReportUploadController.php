@@ -198,11 +198,10 @@ class ReportUploadController extends Controller
         return back()->with('success', 'Archivo eliminado correctamente.');
     }
 
-    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $reportAnalysisService)
-    {
+    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $analysisService) {
         $reportUpload->load('dataSource');
         session()->save();
-        $run = $reportAnalysisService->analyze($reportUpload);
+        $run = $analysisService->analyze($reportUpload);
         if (request()->expectsJson()) {
             return response()->json([
                 'ok' => true,
