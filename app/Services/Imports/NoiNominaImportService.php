@@ -15,7 +15,7 @@ class NoiNominaImportService
 {
     private array $employeeCache = [];
 
-    public function handle(ReportUpload $upload): array
+    public function handle(ReportUpload $upload, ?callable $progress = null): array
     {
         if (!$upload->stored_path) {
             throw new \RuntimeException('El archivo no tiene stored_path.');
@@ -126,7 +126,7 @@ class NoiNominaImportService
                     'concept' => $mapped['concept'] ?: 'Sin concepto',
                     'concept_type' => $mapped['concept_type'],
                     'amount' => $mapped['amount'],
-                    'quantity' => $mapped['quantity'] ?? 1,
+                    'quantity' => 1,
                     'payroll_type' => $mapped['payroll_type'] ?: 'NOI',
                     'movement_date' => $mapped['movement_date'] ?? now()->toDateString(),
                     'raw_row_hash' => hash(
@@ -150,6 +150,16 @@ class NoiNominaImportService
                     . ' | Detalle: '
                     . $e->getMessage()
                 );
+            }
+
+            if ($progress && $rowsRead % 250 === 0) {
+                $progress([
+                    'rows_read' => $rowsRead,
+                    'rows_inserted' => $rowsInserted,
+                    'rows_skipped' => $rowsSkipped,
+                    'rows_with_errors' => $rowsWithErrors,
+                    'log' => "Procesando NOI... {$rowsRead} filas leídas.",
+                ]);
             }
         }
 
@@ -186,16 +196,14 @@ class NoiNominaImportService
             $score = 0;
 
             foreach ($normalized as $value) {
-                if (
-                    in_array($value, [
-                        'nombre_del_trabajador',
-                        'concepto',
-                        'acumulado',
-                        'importe',
-                        'monto',
-                        'total',
-                    ], true)
-                ) {
+                if (in_array($value, [
+                    'nombre_del_trabajador',
+                    'concepto',
+                    'acumulado',
+                    'importe',
+                    'monto',
+                    'total',
+                ], true)) {
                     $score++;
                 }
             }
@@ -327,6 +335,10 @@ class NoiNominaImportService
         }
 
         if ($mapped['amount'] === null) {
+            return false;
+        }
+
+        if ((float) $mapped['amount'] == 0.0) {
             return false;
         }
 
