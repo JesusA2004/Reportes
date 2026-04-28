@@ -11,6 +11,8 @@ use App\Models\ReportUpload;
 use App\Services\Imports\GastosImportService;
 use App\Services\Imports\LendusIngresosCobranzaImportService;
 use App\Services\Imports\NoiNominaImportService;
+use App\Services\Imports\LendusMinistracionesImportService;
+use App\Services\Imports\LendusSaldosClienteImportService;
 use Illuminate\Support\Facades\DB;
 
 class ReportAnalysisService
@@ -19,6 +21,8 @@ class ReportAnalysisService
         protected NoiNominaImportService $noiNominaImportService,
         protected GastosImportService $gastosImportService,
         protected LendusIngresosCobranzaImportService $lendusIngresosCobranzaImportService,
+        protected LendusMinistracionesImportService $lendusMinistracionesImportService,
+        protected LendusSaldosClienteImportService $lendusSaldosClienteImportService,
     ) {
     }
 
@@ -58,6 +62,8 @@ class ReportAnalysisService
                     DataSourceCode::NoiNomina->value => $this->noiNominaImportService->handle($upload, $progress),
                     DataSourceCode::Gastos->value => $this->gastosImportService->handle($upload, $progress),
                     DataSourceCode::LendusIngresosCobranza->value => $this->lendusIngresosCobranzaImportService->handle($upload, $progress),
+                    DataSourceCode::LendusMinistraciones->value => $this->lendusMinistracionesImportService->handle($upload, $progress),
+                    DataSourceCode::LendusSaldosCliente->value => $this->lendusSaldosClienteImportService->handle($upload, $progress),
                     default => throw new \RuntimeException("La fuente [{$sourceCode}] aún no tiene importador implementado."),
                 };
             });

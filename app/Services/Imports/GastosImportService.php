@@ -29,7 +29,8 @@ class GastosImportService
         }
 
         $rows = $sheets[0];
-        $headerRow = $rows[0] ?? null;
+        $headerRowIndex = $this->detectHeaderRowIndex($rows);
+        $headerRow = $rows[$headerRowIndex] ?? null;
 
         if (!$headerRow || !is_array($headerRow)) {
             throw new \RuntimeException('No se encontró una fila de encabezados válida.');
@@ -58,7 +59,7 @@ class GastosImportService
         $rowsSkipped = 0;
         $rowsWithErrors = 0;
 
-        foreach (array_slice($rows, 1) as $row) {
+        foreach (array_slice($rows, $headerRowIndex + 1) as $row) {
             if (!is_array($row) || $this->isEmptyRow($row)) {
                 $rowsSkipped++;
                 continue;
@@ -88,7 +89,7 @@ class GastosImportService
                     'paid_amount' => $mapped['paid_amount'],
                     'expense_date' => $mapped['expense_date'],
                     'observations' => $mapped['observations'],
-                    'raw_payload' => $mapped['raw_payload'],
+                    'raw_payload' => null,
                 ]);
 
                 $rowsInserted++;
@@ -110,6 +111,31 @@ class GastosImportService
                 $rowsWithErrors,
             ),
         ];
+    }
+
+
+    private function detectHeaderRowIndex(array $rows): int
+    {
+        foreach (array_slice($rows, 0, 25, true) as $index => $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $normalized = array_map(fn ($value) => $this->normalizeHeader((string) $value), $row);
+            $score = 0;
+
+            foreach ($normalized as $value) {
+                if (in_array($value, ['empleado', 'categoria', 'concepto', 'monto_gasto', 'monto', 'sucursal', 'oficina'], true)) {
+                    $score++;
+                }
+            }
+
+            if ($score >= 2) {
+                return (int) $index;
+            }
+        }
+
+        return 0;
     }
 
     private function buildHeaderMap(array $headerRow): array
