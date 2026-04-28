@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\MonthlyEmployeeSummary;
 use App\Models\Period;
 use App\Services\PeriodConsolidationService;
+use App\Services\RadiografiaExportService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -162,55 +163,12 @@ class MonthlyReportController extends Controller
         ]);
     }
 
-    public function exportRadiography(Period $period): StreamedResponse
+    public function exportRadiography(Period $period, RadiografiaExportService $service)
     {
-        $uploads = $period->reportUploads()
-            ->with('dataSource:id,code,name')
-            ->with(['processRuns' => fn ($query) => $query->latest()])
-            ->get();
+        $path = $service->export($period);
 
-        $filename = sprintf('radiografia_%s.csv', $period->code ?: $period->id);
+        $filename = sprintf('radiografia_%s.xlsx', $period->code ?: $period->id);
 
-        return response()->streamDownload(function () use ($period, $uploads) {
-            $handle = fopen('php://output', 'w');
-
-            fputcsv($handle, [
-                'period_id',
-                'period_code',
-                'period_label',
-                'source_code',
-                'source_name',
-                'file_name',
-                'upload_status',
-                'analysis_status',
-                'rows_read',
-                'rows_inserted',
-                'rows_with_errors',
-                'analysis_finished_at',
-            ]);
-
-            foreach ($uploads as $upload) {
-                $run = $upload->processRuns->first();
-
-                fputcsv($handle, [
-                    $period->id,
-                    $period->code,
-                    $period->label,
-                    $upload->dataSource?->code,
-                    $upload->dataSource?->name,
-                    $upload->original_name,
-                    $upload->status?->value ?? $upload->status,
-                    $run?->status?->value ?? $run?->status,
-                    $run?->rows_read ?? 0,
-                    $run?->rows_inserted ?? 0,
-                    $run?->rows_with_errors ?? 0,
-                    optional($run?->finished_at)->format('Y-m-d H:i:s'),
-                ]);
-            }
-
-            fclose($handle);
-        }, $filename, [
-            'Content-Type' => 'text/csv; charset=UTF-8',
-        ]);
+        return response()->download($path, $filename);
     }
 }
