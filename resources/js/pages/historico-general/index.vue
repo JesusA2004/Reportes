@@ -125,6 +125,8 @@ type PeriodRow = {
     failed_count: number
     missing_sources: string[]
     report_final_available: boolean
+    radiography_status?: string
+    radiography_invalidated?: boolean
     uploads: UploadItem[]
     available_week_options: WeekOption[]
 }
@@ -241,6 +243,8 @@ const periodRows = computed<PeriodRow[]>(() => {
             failed_count: grouped?.failed_count ?? period.failed_count ?? 0,
             missing_sources: grouped?.missing_sources ?? period.missing_sources ?? props.sources.map((s) => s.name),
             report_final_available: grouped?.report_final_available ?? period.report_final_available ?? false,
+            radiography_status: (grouped as any)?.radiography_status ?? (period as any).radiography_status ?? 'missing',
+            radiography_invalidated: Boolean((grouped as any)?.radiography_invalidated ?? (period as any).radiography_invalidated ?? false),
             uploads: grouped?.uploads ?? [],
             available_week_options: period.available_week_options ?? [],
         }
@@ -814,6 +818,29 @@ function isDeletingId(uploadId: number) {
     return deletingIds.value.includes(uploadId)
 }
 
+
+function radiographyBadge(period: PeriodRow) {
+    if (period.radiography_invalidated) return { label: 'Invalidada', cls: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300' }
+    if (period.radiography_status === 'generated') return { label: 'Lista', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300' }
+    if (period.pending_count > 0) return { label: 'En proceso', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300' }
+    if ((period.missing_sources_count ?? 0) > 0) return { label: 'Faltan fuentes', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300' }
+    return { label: 'Pendiente', cls: 'bg-slate-100 text-slate-700 dark:bg-slate-500/15 dark:text-slate-300' }
+}
+
+async function submitRadiography(action: 'generar' | 'regenerar') {
+    if (!selectedPeriodRow.value) return
+    const result = await Swal.fire({ title: `¿${action === 'generar' ? 'Generar' : 'Regenerar'} radiografía?`, text: 'Se consolidarán las métricas del periodo.', icon: 'question', showCancelButton: true, confirmButtonText: 'Sí, continuar', cancelButtonText: 'Cancelar' })
+    if (!result.isConfirmed) return
+    router.post(`/reportes-mensuales/${selectedPeriodRow.value.id}/consolidar`, {}, { preserveScroll: true })
+}
+
+async function exportRadiography() {
+    if (!selectedPeriodRow.value) return
+    const result = await Swal.fire({ title: '¿Exportar radiografía?', text: 'Se descargará el archivo Excel del periodo.', icon: 'question', showCancelButton: true, confirmButtonText: 'Sí, exportar', cancelButtonText: 'Cancelar' })
+    if (!result.isConfirmed) return
+    window.location.href = `/reportes-mensuales/${selectedPeriodRow.value.id}/radiografia.xlsx`
+}
+
 async function analyzeUpload(uploadId: number) {
     const result = await Swal.fire({
         title: '¿Analizar archivo?',
@@ -1255,6 +1282,8 @@ async function analyzeUpload(uploadId: number) {
                                             {{ currentStatusLabel(selectedPeriodRow) }}
                                         </span>
 
+                                        <span class="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold" :class="radiographyBadge(selectedPeriodRow).cls">{{ radiographyBadge(selectedPeriodRow).label }}</span>
+
                                         <span
                                             v-if="selectedIsAutomatic"
                                             class="inline-flex items-center gap-1 rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold text-sky-700 dark:bg-sky-500/15 dark:text-sky-300"
@@ -1676,13 +1705,12 @@ async function analyzeUpload(uploadId: number) {
                         </div>
 
                         <div v-if="selectedPeriodRow" class="border-t px-4 py-4 sm:px-5">
-                            <a
-                                class="app-btn app-btn-primary h-11 px-5"
-                                :href="`/reportes-mensuales/${selectedPeriodRow.id}/radiografia.xlsx`"
-                            >
-                                Generar radiografía
-                                <ArrowUpRight class="size-4" />
-                            </a>
+                            <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                            <button type="button" class="app-btn app-btn-primary h-11 px-4" @click="submitRadiography('generar')">Generar Radiografía</button>
+                            <button type="button" class="app-btn h-11 border px-4" @click="submitRadiography('regenerar')">Regenerar Radiografía</button>
+                            <a :href="selectedPeriodRow ? `/reportes-mensuales?period=${selectedPeriodRow.id}` : "#"" class="app-btn h-11 border px-4">Consultar Radiografía</a>
+                            <button type="button" class="app-btn h-11 border px-4" @click="exportRadiography">Exportar Excel</button>
+                        </div>
                         </div>
                     </section>
                 </section>

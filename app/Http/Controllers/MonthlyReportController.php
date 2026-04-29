@@ -5,6 +5,11 @@ namespace App\Http\Controllers;
 use App\Models\MonthlyEmployeeSummary;
 use App\Models\Period;
 use App\Services\PeriodConsolidationService;
+use App\Services\RadiografiaExportService;
+use App\Services\PeriodRadiographyService;
+use App\Models\PeriodSummary;
+use App\Enums\DataSourceCode;
+use App\Models\PeriodRadiographyExport;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -91,14 +96,15 @@ class MonthlyReportController extends Controller
         ]);
     }
 
-    public function consolidate(Period $period, PeriodConsolidationService $service): RedirectResponse
+    public function consolidate(Period $period, PeriodRadiographyService $service): RedirectResponse
     {
-        $result = $service->consolidate($period);
-
-        return back()->with(
-            'success',
-            "Consolidación finalizada. Generados: {$result['created']}, incluidos: {$result['included']}, excluidos: {$result['excluded']}."
-        );
+        $status = $this->sourceStatus($period);
+        if (!empty($status['missing']) || !empty($status['errors'])) {
+            $faltantes = implode(', ', array_merge($status['missing'], $status['errors']));
+            return back()->with('error', 'No se puede generar la radiografía. Faltan fuentes o análisis procesado: ' . $faltantes . '.');
+        }
+        $service->generate($period, auth()->id());
+        return back()->with('success', 'Radiografía consolidada correctamente.');
     }
 
     public function exportSummary(Period $period): StreamedResponse
@@ -162,55 +168,80 @@ class MonthlyReportController extends Controller
         ]);
     }
 
-    public function exportRadiography(Period $period): StreamedResponse
+    public function exportRadiography(Period $period, RadiografiaExportService $service)
     {
-        $uploads = $period->reportUploads()
-            ->with('dataSource:id,code,name')
-            ->with(['processRuns' => fn ($query) => $query->latest()])
-            ->get();
+        $summary = PeriodSummary::query()->where('period_id', $period->id)->first();
+        if (!$summary || $summary->status !== "generated" || $summary->invalidated_at) {
+            return back()->with('error', 'No existe un consolidado vigente para exportar la radiografía.');
+        }
+        $path = $service->export($period);
+        $filename = basename($path);
 
-        $filename = sprintf('radiografia_%s.csv', $period->code ?: $period->id);
+        PeriodRadiographyExport::query()->create([
+            'period_summary_id' => $summary->id,
+            'export_path' => $path,
+            'template_version' => config('app.version'),
+            'exported_at' => now(),
+            'exported_by' => auth()->id(),
+        ]);
 
-        return response()->streamDownload(function () use ($period, $uploads) {
-            $handle = fopen('php://output', 'w');
+        return response()->download($path, $filename);
+    }
 
-            fputcsv($handle, [
-                'period_id',
-                'period_code',
-                'period_label',
-                'source_code',
-                'source_name',
-                'file_name',
-                'upload_status',
-                'analysis_status',
-                'rows_read',
-                'rows_inserted',
-                'rows_with_errors',
-                'analysis_finished_at',
-            ]);
+    public function status(Period $period)
+    {
+        $summary = PeriodSummary::query()->with('incidents')->where('period_id', $period->id)->first();
+        $sources = $this->sourceStatus($period);
+        $ready = (bool) ($summary && $summary->status === 'generated' && !$summary->invalidated_at);
 
-            foreach ($uploads as $upload) {
-                $run = $upload->processRuns->first();
-
-                fputcsv($handle, [
-                    $period->id,
-                    $period->code,
-                    $period->label,
-                    $upload->dataSource?->code,
-                    $upload->dataSource?->name,
-                    $upload->original_name,
-                    $upload->status?->value ?? $upload->status,
-                    $run?->status?->value ?? $run?->status,
-                    $run?->rows_read ?? 0,
-                    $run?->rows_inserted ?? 0,
-                    $run?->rows_with_errors ?? 0,
-                    optional($run?->finished_at)->format('Y-m-d H:i:s'),
-                ]);
-            }
-
-            fclose($handle);
-        }, $filename, [
-            'Content-Type' => 'text/csv; charset=UTF-8',
+        return response()->json([
+            'ready' => $ready,
+            'status' => $summary?->status ?? 'missing',
+            'invalidated_at' => $summary?->invalidated_at,
+            'invalidated_reason' => $summary?->invalidated_reason,
+            'incidents_count' => (int) ($summary?->incidents?->count() ?? 0),
+            'sources_processed' => $sources['processed'],
+            'sources_error' => $sources['errors'],
+            'sources_missing' => $sources['missing'],
+            'can_generate' => !$ready && empty($sources['missing']) && empty($sources['errors']),
+            'can_regenerate' => $ready && empty($sources['missing']) && empty($sources['errors']),
+            'can_export' => $ready,
         ]);
     }
+    private function requiredSourceCodes(): array
+    {
+        return [
+            DataSourceCode::NoiNomina->value,
+            DataSourceCode::LendusIngresosCobranza->value,
+            DataSourceCode::Gastos->value,
+            DataSourceCode::LendusMinistraciones->value,
+            DataSourceCode::LendusSaldosCliente->value,
+        ];
+    }
+
+    private function sourceStatus(Period $period): array
+    {
+        $uploads = $period->reportUploads()->with('dataSource:id,code,name')->get();
+        $required = $this->requiredSourceCodes();
+
+        $processed = [];
+        $errors = [];
+        $missing = [];
+
+        foreach ($required as $code) {
+            $sourceUploads = $uploads->filter(fn($u) => $u->dataSource?->code === $code);
+            if ($sourceUploads->isEmpty()) {
+                $missing[] = $code;
+                continue;
+            }
+            if ($sourceUploads->contains(fn($u) => (string)($u->status?->value ?? $u->status) === 'processed')) {
+                $processed[] = $code;
+            } else {
+                $errors[] = $code;
+            }
+        }
+
+        return compact('processed','errors','missing');
+    }
+
 }
