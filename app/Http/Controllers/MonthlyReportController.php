@@ -8,6 +8,8 @@ use App\Services\PeriodConsolidationService;
 use App\Services\RadiografiaExportService;
 use App\Services\PeriodRadiographyService;
 use App\Models\PeriodSummary;
+use App\Enums\DataSourceCode;
+use App\Models\PeriodRadiographyExport;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -96,6 +98,11 @@ class MonthlyReportController extends Controller
 
     public function consolidate(Period $period, PeriodRadiographyService $service): RedirectResponse
     {
+        $status = $this->sourceStatus($period);
+        if (!empty($status['missing']) || !empty($status['errors'])) {
+            $faltantes = implode(', ', array_merge($status['missing'], $status['errors']));
+            return back()->with('error', 'No se puede generar la radiografía. Faltan fuentes o análisis procesado: ' . $faltantes . '.');
+        }
         $service->generate($period, auth()->id());
         return back()->with('success', 'Radiografía consolidada correctamente.');
     }
@@ -168,19 +175,73 @@ class MonthlyReportController extends Controller
             return back()->with('error', 'No existe un consolidado vigente para exportar la radiografía.');
         }
         $path = $service->export($period);
-        $filename = sprintf('radiografia_%s.xlsx', $period->code ?: $period->id);
+        $filename = basename($path);
+
+        PeriodRadiographyExport::query()->create([
+            'period_summary_id' => $summary->id,
+            'export_path' => $path,
+            'template_version' => config('app.version'),
+            'exported_at' => now(),
+            'exported_by' => auth()->id(),
+        ]);
+
         return response()->download($path, $filename);
     }
 
     public function status(Period $period)
     {
         $summary = PeriodSummary::query()->with('incidents')->where('period_id', $period->id)->first();
+        $sources = $this->sourceStatus($period);
+        $ready = (bool) ($summary && $summary->status === 'generated' && !$summary->invalidated_at);
+
         return response()->json([
-            "ready" => (bool) ($summary && $summary->status === "generated" && !$summary->invalidated_at),
-            "status" => $summary?->status ?? "missing",
-            "invalidated_at" => $summary?->invalidated_at,
-            "invalidated_reason" => $summary?->invalidated_reason,
-            "incidents_count" => (int) ($summary?->incidents?->count() ?? 0),
+            'ready' => $ready,
+            'status' => $summary?->status ?? 'missing',
+            'invalidated_at' => $summary?->invalidated_at,
+            'invalidated_reason' => $summary?->invalidated_reason,
+            'incidents_count' => (int) ($summary?->incidents?->count() ?? 0),
+            'sources_processed' => $sources['processed'],
+            'sources_error' => $sources['errors'],
+            'sources_missing' => $sources['missing'],
+            'can_generate' => !$ready && empty($sources['missing']) && empty($sources['errors']),
+            'can_regenerate' => $ready && empty($sources['missing']) && empty($sources['errors']),
+            'can_export' => $ready,
         ]);
     }
+    private function requiredSourceCodes(): array
+    {
+        return [
+            DataSourceCode::NoiNomina->value,
+            DataSourceCode::LendusIngresosCobranza->value,
+            DataSourceCode::Gastos->value,
+            DataSourceCode::LendusMinistraciones->value,
+            DataSourceCode::LendusSaldosCliente->value,
+        ];
+    }
+
+    private function sourceStatus(Period $period): array
+    {
+        $uploads = $period->reportUploads()->with('dataSource:id,code,name')->get();
+        $required = $this->requiredSourceCodes();
+
+        $processed = [];
+        $errors = [];
+        $missing = [];
+
+        foreach ($required as $code) {
+            $sourceUploads = $uploads->filter(fn($u) => $u->dataSource?->code === $code);
+            if ($sourceUploads->isEmpty()) {
+                $missing[] = $code;
+                continue;
+            }
+            if ($sourceUploads->contains(fn($u) => (string)($u->status?->value ?? $u->status) === 'processed')) {
+                $processed[] = $code;
+            } else {
+                $errors[] = $code;
+            }
+        }
+
+        return compact('processed','errors','missing');
+    }
+
 }
