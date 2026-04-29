@@ -5,8 +5,8 @@ namespace App\Http\Controllers;
 use App\Http\Requests\StoreReportUploadRequest;
 use App\Models\DataSource;
 use App\Models\Period;
-use App\Models\ReportUpload;
 use App\Models\PeriodSummary;
+use App\Models\ReportUpload;
 use App\Services\ReportAnalysisService;
 use App\Services\ReportUploadService;
 use Illuminate\Http\RedirectResponse;
@@ -26,7 +26,9 @@ class ReportUploadController extends Controller
 
         $requiredSourcesCount = $sources->count();
 
-        $summariesByPeriod = PeriodSummary::query()->get()->keyBy('period_id');
+        $summariesByPeriod = PeriodSummary::query()
+            ->get()
+            ->keyBy('period_id');
 
         $periodModels = Period::query()
             ->with([
@@ -43,9 +45,10 @@ class ReportUploadController extends Controller
         $weeklyPeriods = $periodModels->where('type', 'weekly')->values();
 
         $periods = $periodModels
-            ->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount) {
+            ->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount, $summariesByPeriod) {
                 $coveredWeeks = $this->resolveCoveredWeeks($period, $weeklyPeriods);
                 $uploads = $this->resolveUploadsForPeriod($period, $coveredWeeks);
+                $summary = $summariesByPeriod->get($period->id);
 
                 $uploadedSourceCodes = $uploads
                     ->pluck('dataSource.code')
@@ -96,17 +99,18 @@ class ReportUploadController extends Controller
                     'failed_count' => $failedCount,
                     'missing_sources' => $missingSources,
                     'report_final_available' => $missingSources->count() === 0 && $requiredSourcesCount > 0,
-                    'radiography_status' => $summariesByPeriod->get($period->id)?->status ?? 'missing',
-                    'radiography_invalidated' => (bool) $summariesByPeriod->get($period->id)?->invalidated_at,
+                    'radiography_status' => $summary?->status ?? 'missing',
+                    'radiography_invalidated' => (bool) $summary?->invalidated_at,
                     'available_week_options' => $availableWeekOptions,
                 ];
             })
             ->values();
 
         $groupedUploads = $periodModels
-            ->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount) {
+            ->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount, $summariesByPeriod) {
                 $coveredWeeks = $this->resolveCoveredWeeks($period, $weeklyPeriods);
                 $uploads = $this->resolveUploadsForPeriod($period, $coveredWeeks);
+                $summary = $summariesByPeriod->get($period->id);
 
                 $uploadedSourceCodes = $uploads
                     ->pluck('dataSource.code')
@@ -132,8 +136,8 @@ class ReportUploadController extends Controller
                     'failed_count' => $uploads->where('status', 'failed')->count(),
                     'missing_sources' => $missingSources,
                     'report_final_available' => $missingSources->count() === 0 && $requiredSourcesCount > 0,
-                    'radiography_status' => $summariesByPeriod->get($period->id)?->status ?? 'missing',
-                    'radiography_invalidated' => (bool) $summariesByPeriod->get($period->id)?->invalidated_at,
+                    'radiography_status' => $summary?->status ?? 'missing',
+                    'radiography_invalidated' => (bool) $summary?->invalidated_at,
                     'uploads' => $uploads
                         ->unique('id')
                         ->values()
@@ -145,6 +149,8 @@ class ReportUploadController extends Controller
                                 ->filter()
                                 ->values();
 
+                            $latestProcessRun = $upload->processRuns->first();
+
                             return [
                                 'id' => $upload->id,
                                 'original_name' => $upload->original_name,
@@ -155,12 +161,12 @@ class ReportUploadController extends Controller
                                 'source_name' => $upload->dataSource?->name,
                                 'covered_period_ids' => $upload->covered_period_ids ?? [],
                                 'covered_period_labels' => $coveredWeekLabels,
-                                'last_process_run' => $upload->processRuns->first() ? [
-                                    'status' => $upload->processRuns->first()->status?->value ?? $upload->processRuns->first()->status,
-                                    'rows_read' => $upload->processRuns->first()->rows_read,
-                                    'rows_inserted' => $upload->processRuns->first()->rows_inserted,
-                                    'rows_with_errors' => $upload->processRuns->first()->rows_with_errors,
-                                    'finished_at' => optional($upload->processRuns->first()->finished_at)->format('d/m/Y H:i'),
+                                'last_process_run' => $latestProcessRun ? [
+                                    'status' => $latestProcessRun->status?->value ?? $latestProcessRun->status,
+                                    'rows_read' => $latestProcessRun->rows_read,
+                                    'rows_inserted' => $latestProcessRun->rows_inserted,
+                                    'rows_with_errors' => $latestProcessRun->rows_with_errors,
+                                    'finished_at' => optional($latestProcessRun->finished_at)->format('d/m/Y H:i'),
                                 ] : null,
                             ];
                         }),
@@ -205,10 +211,14 @@ class ReportUploadController extends Controller
         return back()->with('success', 'Archivo eliminado correctamente.');
     }
 
-    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $analysisService) {
+    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $analysisService)
+    {
         $reportUpload->load('dataSource');
+
         session()->save();
+
         $run = $analysisService->analyze($reportUpload);
+
         if (request()->expectsJson()) {
             return response()->json([
                 'ok' => true,
@@ -216,7 +226,26 @@ class ReportUploadController extends Controller
                 'status' => $run->status?->value,
             ]);
         }
+
         return back()->with('success', 'Archivo analizado correctamente.');
+    }
+
+    public function progress(ReportUpload $reportUpload)
+    {
+        $run = $reportUpload->processRuns()
+            ->latest('id')
+            ->first();
+
+        return response()->json([
+            'status' => $run?->status?->value ?? 'pending',
+            'rows_read' => (int) ($run?->rows_read ?? 0),
+            'rows_inserted' => (int) ($run?->rows_inserted ?? 0),
+            'rows_skipped' => (int) ($run?->rows_skipped ?? 0),
+            'rows_with_errors' => (int) ($run?->rows_with_errors ?? 0),
+            'log' => (string) ($run?->log ?? 'Esperando inicio del análisis...'),
+            'started_at' => $run?->started_at,
+            'finished_at' => $run?->finished_at,
+        ]);
     }
 
     private function resolveCoveredWeeks(Period $period, Collection $weeklyPeriods): Collection
@@ -237,29 +266,17 @@ class ReportUploadController extends Controller
             ->values();
     }
 
-    public function progress(ReportUpload $reportUpload) {
-        $run = $reportUpload->processRuns()
-            ->latest('id')
-            ->first();
-        return response()->json([
-            'status' => $run?->status?->value ?? 'pending',
-            'rows_read' => (int) ($run?->rows_read ?? 0),
-            'rows_inserted' => (int) ($run?->rows_inserted ?? 0),
-            'rows_skipped' => (int) ($run?->rows_skipped ?? 0),
-            'rows_with_errors' => (int) ($run?->rows_with_errors ?? 0),
-            'log' => (string) ($run?->log ?? 'Esperando inicio del análisis...'),
-            'started_at' => $run?->started_at,
-            'finished_at' => $run?->finished_at,
-        ]);
-    }
-
     private function resolveUploadsForPeriod(Period $period, Collection $coveredWeeks): Collection
     {
         if ($coveredWeeks->isEmpty()) {
             return collect();
         }
 
-        $weekIds = $coveredWeeks->pluck('id')->map(fn ($id) => (int) $id)->values()->all();
+        $weekIds = $coveredWeeks
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->values()
+            ->all();
 
         return ReportUpload::query()
             ->with('dataSource:id,code,name')
