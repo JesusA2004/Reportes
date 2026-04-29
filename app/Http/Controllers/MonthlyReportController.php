@@ -6,6 +6,8 @@ use App\Models\MonthlyEmployeeSummary;
 use App\Models\Period;
 use App\Services\PeriodConsolidationService;
 use App\Services\RadiografiaExportService;
+use App\Services\PeriodRadiographyService;
+use App\Models\PeriodSummary;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -92,14 +94,10 @@ class MonthlyReportController extends Controller
         ]);
     }
 
-    public function consolidate(Period $period, PeriodConsolidationService $service): RedirectResponse
+    public function consolidate(Period $period, PeriodRadiographyService $service): RedirectResponse
     {
-        $result = $service->consolidate($period);
-
-        return back()->with(
-            'success',
-            "Consolidación finalizada. Generados: {$result['created']}, incluidos: {$result['included']}, excluidos: {$result['excluded']}."
-        );
+        $service->generate($period, auth()->id());
+        return back()->with('success', 'Radiografía consolidada correctamente.');
     }
 
     public function exportSummary(Period $period): StreamedResponse
@@ -165,10 +163,24 @@ class MonthlyReportController extends Controller
 
     public function exportRadiography(Period $period, RadiografiaExportService $service)
     {
+        $summary = PeriodSummary::query()->where('period_id', $period->id)->first();
+        if (!$summary || $summary->status !== "generated" || $summary->invalidated_at) {
+            return back()->with('error', 'No existe un consolidado vigente para exportar la radiografía.');
+        }
         $path = $service->export($period);
-
         $filename = sprintf('radiografia_%s.xlsx', $period->code ?: $period->id);
-
         return response()->download($path, $filename);
+    }
+
+    public function status(Period $period)
+    {
+        $summary = PeriodSummary::query()->with('incidents')->where('period_id', $period->id)->first();
+        return response()->json([
+            "ready" => (bool) ($summary && $summary->status === "generated" && !$summary->invalidated_at),
+            "status" => $summary?->status ?? "missing",
+            "invalidated_at" => $summary?->invalidated_at,
+            "invalidated_reason" => $summary?->invalidated_reason,
+            "incidents_count" => (int) ($summary?->incidents?->count() ?? 0),
+        ]);
     }
 }

@@ -6,6 +6,7 @@ use App\Http\Requests\StoreReportUploadRequest;
 use App\Models\DataSource;
 use App\Models\Period;
 use App\Models\ReportUpload;
+use App\Models\PeriodSummary;
 use App\Services\ReportAnalysisService;
 use App\Services\ReportUploadService;
 use Illuminate\Http\RedirectResponse;
@@ -24,6 +25,8 @@ class ReportUploadController extends Controller
             ->get(['id', 'code', 'name', 'description']);
 
         $requiredSourcesCount = $sources->count();
+
+        $summariesByPeriod = PeriodSummary::query()->get()->keyBy('period_id');
 
         $periodModels = Period::query()
             ->with([
@@ -93,6 +96,8 @@ class ReportUploadController extends Controller
                     'failed_count' => $failedCount,
                     'missing_sources' => $missingSources,
                     'report_final_available' => $missingSources->count() === 0 && $requiredSourcesCount > 0,
+                    'radiography_status' => $summariesByPeriod->get($period->id)?->status ?? 'missing',
+                    'radiography_invalidated' => (bool) $summariesByPeriod->get($period->id)?->invalidated_at,
                     'available_week_options' => $availableWeekOptions,
                 ];
             })
@@ -127,6 +132,8 @@ class ReportUploadController extends Controller
                     'failed_count' => $uploads->where('status', 'failed')->count(),
                     'missing_sources' => $missingSources,
                     'report_final_available' => $missingSources->count() === 0 && $requiredSourcesCount > 0,
+                    'radiography_status' => $summariesByPeriod->get($period->id)?->status ?? 'missing',
+                    'radiography_invalidated' => (bool) $summariesByPeriod->get($period->id)?->invalidated_at,
                     'uploads' => $uploads
                         ->unique('id')
                         ->values()
