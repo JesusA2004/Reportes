@@ -6,8 +6,12 @@ use App\Http\Requests\StoreReportUploadRequest;
 use App\Models\DataSource;
 use App\Models\Period;
 use App\Models\ReportUpload;
+use App\Models\PeriodSummary;
 use App\Services\ReportAnalysisService;
 use App\Services\ReportUploadService;
+use App\Models\PeriodIncident;
+use App\Services\PeriodRadiographyService;
+use App\Services\DatabaseUpdateService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
@@ -24,6 +28,8 @@ class ReportUploadController extends Controller
             ->get(['id', 'code', 'name', 'description']);
 
         $requiredSourcesCount = $sources->count();
+
+        $summariesByPeriod = PeriodSummary::query()->get()->keyBy('period_id');
 
         $periodModels = Period::query()
             ->with([
@@ -93,6 +99,8 @@ class ReportUploadController extends Controller
                     'failed_count' => $failedCount,
                     'missing_sources' => $missingSources,
                     'report_final_available' => $missingSources->count() === 0 && $requiredSourcesCount > 0,
+                    'radiography_status' => $summariesByPeriod->get($period->id)?->status ?? 'missing',
+                    'radiography_invalidated' => (bool) $summariesByPeriod->get($period->id)?->invalidated_at,
                     'available_week_options' => $availableWeekOptions,
                 ];
             })
@@ -127,6 +135,8 @@ class ReportUploadController extends Controller
                     'failed_count' => $uploads->where('status', 'failed')->count(),
                     'missing_sources' => $missingSources,
                     'report_final_available' => $missingSources->count() === 0 && $requiredSourcesCount > 0,
+                    'radiography_status' => $summariesByPeriod->get($period->id)?->status ?? 'missing',
+                    'radiography_invalidated' => (bool) $summariesByPeriod->get($period->id)?->invalidated_at,
                     'uploads' => $uploads
                         ->unique('id')
                         ->values()
@@ -210,6 +220,63 @@ class ReportUploadController extends Controller
             ]);
         }
         return back()->with('success', 'Archivo analizado correctamente.');
+    }
+
+
+    public function updateDatabase(Period $period, DatabaseUpdateService $service): RedirectResponse
+    {
+        $result = $service->updateForPeriod($period, auth()->id());
+        if (!$result['ok']) {
+            return back()->with('error', $result['message']);
+        }
+
+        return back()->with('success', $result['message']);
+    }
+
+    public function incidents(Period $period)
+    {
+        $summary = PeriodSummary::query()->where('period_id', $period->id)->first();
+        if (!$summary) {
+            return response()->json(['incidents' => []]);
+        }
+
+        $incidents = PeriodIncident::query()->where('period_summary_id', $summary->id)->get()->map(fn($i) => [
+            'id' => $i->id,
+            'type' => $i->type,
+            'severity' => $i->severity,
+            'message' => $i->message,
+            'context' => $i->context,
+            'resolved' => (bool) ($i->context['resolved'] ?? false),
+        ]);
+
+        return response()->json(['incidents' => $incidents]);
+    }
+
+    public function resolveIncident(Period $period, PeriodIncident $incident): RedirectResponse
+    {
+        $context = $incident->context ?? [];
+        $incident->update(['context' => array_merge($context, ['resolved' => true, 'resolved_by' => auth()->id(), 'resolved_at' => now()->toDateTimeString()])]);
+        return back()->with('success', 'Incidencia resuelta correctamente.');
+    }
+
+    public function generateRadiography(Period $period, PeriodRadiographyService $service): RedirectResponse
+    {
+        $summary = PeriodSummary::query()->where('period_id', $period->id)->first();
+        if (!$summary || $summary->status !== 'db_updated') {
+            return back()->with('error', 'Primero debes actualizar la BD del periodo.');
+        }
+
+        $criticalPending = PeriodIncident::query()->where('period_summary_id', $summary->id)->get()->contains(function ($incident) {
+            $context = $incident->context ?? [];
+            return (($context['critical'] ?? false) === true) && (($context['resolved'] ?? false) !== true);
+        });
+
+        if ($criticalPending) {
+            return back()->with('error', 'Hay incidencias pendientes por resolver.');
+        }
+
+        $service->generate($period, auth()->id());
+        return back()->with('success', 'Radiografía generada correctamente.');
     }
 
     private function resolveCoveredWeeks(Period $period, Collection $weeklyPeriods): Collection
