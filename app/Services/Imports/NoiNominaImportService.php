@@ -611,4 +611,15 @@ class NoiNominaImportService
 
         return true;
     }
+
+    private function normalizeHumanName(?string $value): string {
+        return Str::of((string) $value)
+            ->ascii()
+            ->lower()
+            ->replaceMatches('/[^a-z0-9\s]/', ' ')
+            ->replaceMatches('/\s+/', ' ')
+            ->trim()
+            ->value();
+    }
+
 }
