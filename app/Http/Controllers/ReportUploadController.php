@@ -11,17 +11,11 @@ use App\Models\ReportUpload;
 use App\Services\DatabaseUpdateService;
 use App\Services\PeriodRadiographyService;
 use App\Services\ReportAnalysisService;
-use App\Services\DatabaseUpdateService;
-use App\Services\PeriodRadiographyService;
 use App\Services\ReportUploadService;
-use App\Models\PeriodIncident;
-use App\Services\PeriodRadiographyService;
-use App\Services\DatabaseUpdateService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
