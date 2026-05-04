@@ -57,6 +57,17 @@ type PeriodItem = {
     updated_at?: string | null
     missing_sources?: string[]
     report_final_available?: boolean
+    database_updated?: boolean
+    database_invalidated?: boolean
+    pending_critical_incidents_count?: number
+    missing_database_sources?: string[]
+    missing_radiography_sources?: string[]
+    radiography_ready?: boolean
+    can_update_database?: boolean
+    can_resolve_incidents?: boolean
+    can_generate_radiography?: boolean
+    can_export_radiography?: boolean
+    blocking_reasons?: string[]
     available_week_options?: WeekOption[]
 }
 
@@ -125,6 +136,19 @@ type PeriodRow = {
     failed_count: number
     missing_sources: string[]
     report_final_available: boolean
+    radiography_status?: string
+    radiography_invalidated?: boolean
+    database_updated?: boolean
+    database_invalidated?: boolean
+    pending_critical_incidents_count?: number
+    missing_database_sources?: string[]
+    missing_radiography_sources?: string[]
+    radiography_ready?: boolean
+    can_update_database?: boolean
+    can_resolve_incidents?: boolean
+    can_generate_radiography?: boolean
+    can_export_radiography?: boolean
+    blocking_reasons?: string[]
     uploads: UploadItem[]
     available_week_options: WeekOption[]
 }
@@ -241,6 +265,19 @@ const periodRows = computed<PeriodRow[]>(() => {
             failed_count: grouped?.failed_count ?? period.failed_count ?? 0,
             missing_sources: grouped?.missing_sources ?? period.missing_sources ?? props.sources.map((s) => s.name),
             report_final_available: grouped?.report_final_available ?? period.report_final_available ?? false,
+            radiography_status: (grouped as any)?.radiography_status ?? (period as any).radiography_status ?? 'missing',
+            radiography_invalidated: Boolean((grouped as any)?.radiography_invalidated ?? (period as any).radiography_invalidated ?? false),
+            database_updated: Boolean((period as any).database_updated ?? false),
+            database_invalidated: Boolean((period as any).database_invalidated ?? false),
+            pending_critical_incidents_count: Number((period as any).pending_critical_incidents_count ?? 0),
+            missing_database_sources: (period as any).missing_database_sources ?? [],
+            missing_radiography_sources: (period as any).missing_radiography_sources ?? [],
+            radiography_ready: Boolean((period as any).radiography_ready ?? false),
+            can_update_database: Boolean((period as any).can_update_database ?? false),
+            can_resolve_incidents: Boolean((period as any).can_resolve_incidents ?? false),
+            can_generate_radiography: Boolean((period as any).can_generate_radiography ?? false),
+            can_export_radiography: Boolean((period as any).can_export_radiography ?? false),
+            blocking_reasons: (period as any).blocking_reasons ?? [],
             uploads: grouped?.uploads ?? [],
             available_week_options: period.available_week_options ?? [],
         }
@@ -814,193 +851,46 @@ function isDeletingId(uploadId: number) {
     return deletingIds.value.includes(uploadId)
 }
 
-async function analyzeUpload(uploadId: number) {
-    const result = await Swal.fire({
-        title: '¿Analizar archivo?',
-        text: 'Se procesará el archivo para generar o actualizar información.',
-        icon: 'question',
-        showCancelButton: true,
-        confirmButtonText: 'Sí, analizar',
-        cancelButtonText: 'Cancelar',
-        reverseButtons: true,
-    })
 
-    if (!result.isConfirmed) return
-
-    let finished = false
-    let pollTimer: number | null = null
-
-    const renderProgress = async () => {
-        try {
-            const response = await fetch(`/historico-general/${uploadId}/progreso`, {
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest',
-                    Accept: 'application/json',
-                },
-                credentials: 'same-origin',
-            })
-
-            if (!response.ok) {
-                return
-            }
-
-            const data = await response.json()
-
-            const rowsRead = Number(data.rows_read ?? 0)
-            const rowsInserted = Number(data.rows_inserted ?? 0)
-            const rowsSkipped = Number(data.rows_skipped ?? 0)
-            const rowsWithErrors = Number(data.rows_with_errors ?? 0)
-            const status = String(data.status ?? 'running')
-            const log = String(data.log ?? 'Procesando...')
-            const totalKnown = Math.max(rowsRead, rowsInserted + rowsSkipped + rowsWithErrors, 1)
-            const progress = Math.min(
-                100,
-                Math.max(
-                    5,
-                    Math.round(((rowsInserted + rowsSkipped + rowsWithErrors) / totalKnown) * 100),
-                ),
-            )
-
-            Swal.update({
-                html: `
-                    <div class="space-y-4 text-left">
-                        <p class="text-sm text-slate-600 dark:text-slate-300">
-                            ${log}
-                        </p>
-
-                        <div class="h-3 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
-                            <div
-                                class="h-full rounded-full bg-emerald-500 transition-all duration-300"
-                                style="width: ${progress}%"
-                            ></div>
-                        </div>
-
-                        <div class="grid grid-cols-2 gap-3 text-sm">
-                            <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
-                                <div class="text-slate-500">Leídas</div>
-                                <div class="text-lg font-semibold">${rowsRead}</div>
-                            </div>
-                            <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
-                                <div class="text-slate-500">Insertadas</div>
-                                <div class="text-lg font-semibold">${rowsInserted}</div>
-                            </div>
-                            <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
-                                <div class="text-slate-500">Omitidas</div>
-                                <div class="text-lg font-semibold">${rowsSkipped}</div>
-                            </div>
-                            <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
-                                <div class="text-slate-500">Errores</div>
-                                <div class="text-lg font-semibold">${rowsWithErrors}</div>
-                            </div>
-                        </div>
-
-                        <div class="text-xs text-slate-500">
-                            Estado: ${status}
-                        </div>
-                    </div>
-                `,
-            })
-
-            if (status === 'success') {
-                finished = true
-                if (pollTimer) window.clearInterval(pollTimer)
-
-                await Swal.fire({
-                    title: 'Archivo analizado',
-                    text: log || 'El procesamiento finalizó correctamente.',
-                    icon: rowsInserted > 0 ? 'success' : 'warning',
-                    confirmButtonText: 'Entendido',
-                })
-
-                router.visit(window.location.pathname + window.location.search, {
-                    method: 'get',
-                    preserveScroll: true,
-                    preserveState: true,
-                    replace: true,
-                })
-            }
-
-            if (status === 'failed') {
-                finished = true
-                if (pollTimer) window.clearInterval(pollTimer)
-
-                await Swal.fire({
-                    title: 'No se pudo analizar',
-                    text: log || 'Ocurrió un problema durante el análisis.',
-                    icon: 'error',
-                    confirmButtonText: 'Cerrar',
-                })
-
-                router.visit(window.location.pathname + window.location.search, {
-                    method: 'get',
-                    preserveScroll: true,
-                    preserveState: true,
-                    replace: true,
-                })
-            }
-        } catch {
-            // silencio temporal mientras sigue el polling
-        }
-    }
-
-    Swal.fire({
-        title: 'Analizando archivo...',
-        html: `
-            <div class="space-y-4 text-left">
-                <p class="text-sm text-slate-600 dark:text-slate-300">
-                    Iniciando proceso...
-                </p>
-                <div class="h-3 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
-                    <div class="h-full w-[5%] rounded-full bg-emerald-500 transition-all duration-300"></div>
-                </div>
-                <div class="grid grid-cols-2 gap-3 text-sm">
-                    <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
-                        <div class="text-slate-500">Leídas</div>
-                        <div class="text-lg font-semibold">0</div>
-                    </div>
-                    <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
-                        <div class="text-slate-500">Insertadas</div>
-                        <div class="text-lg font-semibold">0</div>
-                    </div>
-                    <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
-                        <div class="text-slate-500">Omitidas</div>
-                        <div class="text-lg font-semibold">0</div>
-                    </div>
-                    <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
-                        <div class="text-slate-500">Errores</div>
-                        <div class="text-lg font-semibold">0</div>
-                    </div>
-                </div>
-            </div>
-        `,
-        allowOutsideClick: false,
-        allowEscapeKey: false,
-        showConfirmButton: false,
-        didOpen: async () => {
-            fetch(`/historico-general/${uploadId}/analizar`, {
-                method: 'POST',
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest',
-                    Accept: 'application/json',
-                    'X-CSRF-TOKEN': document
-                        .querySelector('meta[name="csrf-token"]')
-                        ?.getAttribute('content') ?? '',
-                },
-                credentials: 'same-origin',
-            }).catch(() => null)
-
-            await renderProgress()
-            pollTimer = window.setInterval(async () => {
-                if (!finished) {
-                    await renderProgress()
-                }
-            }, 1200)
-        },
-        willClose: () => {
-            if (pollTimer) window.clearInterval(pollTimer)
-        },
-    })
+function radiographyBadge(period: PeriodRow) {
+    if (period.radiography_invalidated) return { label: 'Invalidada', cls: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300' }
+    if (period.radiography_status === 'generated') return { label: 'Lista', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300' }
+    if (period.pending_count > 0) return { label: 'En proceso', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300' }
+    if ((period.missing_sources_count ?? 0) > 0) return { label: 'Faltan fuentes', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300' }
+    return { label: 'Pendiente', cls: 'bg-slate-100 text-slate-700 dark:bg-slate-500/15 dark:text-slate-300' }
 }
+
+async function submitRadiography(action: 'generar' | 'regenerar') {
+    if (!selectedPeriodRow.value) return
+    const result = await Swal.fire({ title: `¿${action === 'generar' ? 'Generar' : 'Regenerar'} radiografía?`, text: 'Se consolidarán las métricas del periodo.', icon: 'question', showCancelButton: true, confirmButtonText: 'Sí, continuar', cancelButtonText: 'Cancelar' })
+    if (!result.isConfirmed) return
+    router.post(`/reportes-mensuales/${selectedPeriodRow.value.id}/consolidar`, {}, { preserveScroll: true })
+}
+
+
+async function updateDatabaseStep() {
+    if (!selectedPeriodRow.value) return
+    const result = await Swal.fire({ title: '¿Actualizar BD?', text: 'Se actualizarán empleados, promotores, sucursales e incidencias base del periodo.', icon: 'question', showCancelButton: true, confirmButtonText: 'Sí, actualizar', cancelButtonText: 'Cancelar' })
+    if (!result.isConfirmed) return
+    Swal.fire({ title: 'Actualizando BD...', text: 'Procesando NOI y Cobranza.', allowOutsideClick: false, showConfirmButton: false, didOpen: () => Swal.showLoading() })
+    router.post(`/historico-general/${selectedPeriodRow.value.id}/actualizar-bd`, {}, { preserveScroll: true, onFinish: () => Swal.close() })
+}
+
+async function generateRadiographyStep() {
+    if (!selectedPeriodRow.value) return
+    const result = await Swal.fire({ title: '¿Analizar y generar Radiografía?', text: 'Se analizará el periodo completo y se llenará la plantilla Excel.', icon: 'question', showCancelButton: true, confirmButtonText: 'Sí, generar', cancelButtonText: 'Cancelar' })
+    if (!result.isConfirmed) return
+    Swal.fire({ title: 'Generando Radiografía...', text: 'Analizando gastos, colocación, cartera y consolidado final.', allowOutsideClick: false, showConfirmButton: false, didOpen: () => Swal.showLoading() })
+    router.post(`/historico-general/${selectedPeriodRow.value.id}/generar-radiografia`, {}, { preserveScroll: true, onFinish: () => Swal.close() })
+}
+
+async function exportRadiography() {
+    if (!selectedPeriodRow.value) return
+    const result = await Swal.fire({ title: '¿Exportar radiografía?', text: 'Se descargará el archivo Excel del periodo.', icon: 'question', showCancelButton: true, confirmButtonText: 'Sí, exportar', cancelButtonText: 'Cancelar' })
+    if (!result.isConfirmed) return
+    window.location.href = `/reportes-mensuales/${selectedPeriodRow.value.id}/radiografia.xlsx`
+}
+
 </script>
 
 <template>
@@ -1068,6 +958,7 @@ async function analyzeUpload(uploadId: number) {
                                     <p class="mt-2 text-xl font-extrabold">{{ incompletePeriods }}</p>
                                 </div>
                             </div>
+                            <p v-if="selectedPeriodRow?.blocking_reasons?.length" class="mt-2 text-xs text-amber-700 dark:text-amber-300">{{ selectedPeriodRow.blocking_reasons.join(" · ") }}</p>
                         </div>
                     </div>
                 </div>
@@ -1099,6 +990,7 @@ async function analyzeUpload(uploadId: number) {
                                     placeholder="Buscar semana..."
                                 />
                             </div>
+                            <p v-if="selectedPeriodRow?.blocking_reasons?.length" class="mt-2 text-xs text-amber-700 dark:text-amber-300">{{ selectedPeriodRow.blocking_reasons.join(" · ") }}</p>
                         </div>
 
                         <div class="max-h-[520px] overflow-y-auto p-3 space-y-3">
@@ -1182,6 +1074,7 @@ async function analyzeUpload(uploadId: number) {
                                     Ajusta la búsqueda para encontrar otra semana.
                                 </p>
                             </div>
+                            <p v-if="selectedPeriodRow?.blocking_reasons?.length" class="mt-2 text-xs text-amber-700 dark:text-amber-300">{{ selectedPeriodRow.blocking_reasons.join(" · ") }}</p>
                         </div>
                     </section>
 
@@ -1234,6 +1127,7 @@ async function analyzeUpload(uploadId: number) {
                                     Aparecerán conforme existan semanas suficientes.
                                 </p>
                             </div>
+                            <p v-if="selectedPeriodRow?.blocking_reasons?.length" class="mt-2 text-xs text-amber-700 dark:text-amber-300">{{ selectedPeriodRow.blocking_reasons.join(" · ") }}</p>
                         </div>
                     </section>
                 </aside>
@@ -1254,6 +1148,8 @@ async function analyzeUpload(uploadId: number) {
                                         >
                                             {{ currentStatusLabel(selectedPeriodRow) }}
                                         </span>
+
+                                        <span class="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold" :class="radiographyBadge(selectedPeriodRow).cls">{{ radiographyBadge(selectedPeriodRow).label }}</span>
 
                                         <span
                                             v-if="selectedIsAutomatic"
@@ -1303,6 +1199,7 @@ async function analyzeUpload(uploadId: number) {
                                     :style="{ width: `${currentProgress}%` }"
                                 />
                             </div>
+                            <p v-if="selectedPeriodRow?.blocking_reasons?.length" class="mt-2 text-xs text-amber-700 dark:text-amber-300">{{ selectedPeriodRow.blocking_reasons.join(" · ") }}</p>
                         </div>
 
                         <div class="grid gap-6 p-4 sm:p-5 2xl:grid-cols-[minmax(0,1fr)_320px]">
@@ -1565,6 +1462,7 @@ async function analyzeUpload(uploadId: number) {
                                     />
                                 </div>
                             </div>
+                            <p v-if="selectedPeriodRow?.blocking_reasons?.length" class="mt-2 text-xs text-amber-700 dark:text-amber-300">{{ selectedPeriodRow.blocking_reasons.join(" · ") }}</p>
                         </div>
 
                         <div v-if="selectedUploads.length" class="grid gap-3 p-4 sm:p-5 md:grid-cols-2 2xl:grid-cols-3">
@@ -1634,15 +1532,7 @@ async function analyzeUpload(uploadId: number) {
                                 </div>
 
                                 <div class="mt-4 flex items-center justify-end gap-2 border-t pt-4">
-                                    <button
-                                        type="button"
-                                        class="app-btn h-10 border border-sky-200 bg-sky-50 px-4 text-sky-700 transition-all duration-200 hover:-translate-y-0.5 hover:bg-sky-100 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-300"
-                                        @click="analyzeUpload(upload.id)"
-                                    >
-                                        <PlayCircle class="size-4" />
-                                        Analizar
-                                    </button>
-
+                                    
                                     <button
                                         type="button"
                                         class="app-btn h-10 border border-rose-200 bg-rose-50 px-4 text-rose-700 transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-100 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300"
@@ -1676,13 +1566,13 @@ async function analyzeUpload(uploadId: number) {
                         </div>
 
                         <div v-if="selectedPeriodRow" class="border-t px-4 py-4 sm:px-5">
-                            <a
-                                class="app-btn app-btn-primary h-11 px-5"
-                                :href="`/reportes-mensuales/${selectedPeriodRow.id}/radiografia.xlsx`"
-                            >
-                                Generar radiografía
-                                <ArrowUpRight class="size-4" />
-                            </a>
+                            <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                            <button type="button" class="app-btn app-btn-primary h-11 px-4" @click="updateDatabaseStep" :disabled="!selectedPeriodRow?.can_update_database">Actualizar BD</button>
+                            <button type="button" class="app-btn h-11 border px-4" @click="generateRadiographyStep" :disabled="!selectedPeriodRow?.can_generate_radiography">Analizar y generar Radiografía</button>
+                            <a :href="selectedPeriodRow ? `/reportes-mensuales?period=${selectedPeriodRow.id}` : '#'" class="app-btn h-11 border px-4">Consultar Radiografía</a>
+                            <button type="button" class="app-btn h-11 border px-4" @click="exportRadiography" :disabled="!selectedPeriodRow?.can_export_radiography">Exportar Excel</button>
+                        </div>
+                            <p v-if="selectedPeriodRow?.blocking_reasons?.length" class="mt-2 text-xs text-amber-700 dark:text-amber-300">{{ selectedPeriodRow.blocking_reasons.join(" · ") }}</p>
                         </div>
                     </section>
                 </section>
