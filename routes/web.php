@@ -23,6 +23,10 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::post('/', [ReportUploadController::class, 'store'])->name('store');
             Route::delete('/{reportUpload}', [ReportUploadController::class, 'destroy'])->name('destroy');
             Route::post('/{reportUpload}/analizar', [ReportUploadController::class, 'analyze'])->name('analyze');
+            Route::post('/{period}/actualizar-bd', [ReportUploadController::class, 'updateDatabase'])->name('update-db');
+            Route::get('/{period}/incidencias', [ReportUploadController::class, 'incidents'])->name('incidents');
+            Route::post('/{period}/incidencias/{incident}/resolver', [ReportUploadController::class, 'resolveIncident'])->name('resolve-incident');
+            Route::post('/{period}/generar-radiografia', [ReportUploadController::class, 'generateRadiography'])->name('generate-radiography');
 
             // Déjalas solo cuando ya existan de verdad
             // Route::get('/{reportUpload}', [ReportUploadController::class, 'show'])->name('show');
