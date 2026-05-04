@@ -975,21 +975,28 @@ async function submitRadiography(action: 'generar' | 'regenerar') {
     router.post(`/reportes-mensuales/${selectedPeriodRow.value.id}/consolidar`, {}, { preserveScroll: true })
 }
 
-
-async function updateDatabaseStep() {
+function updateDatabase() {
     if (!selectedPeriodRow.value) return
-    const result = await Swal.fire({ title: '¿Actualizar BD?', text: 'Se actualizarán empleados, promotores, sucursales e incidencias base del periodo.', icon: 'question', showCancelButton: true, confirmButtonText: 'Sí, actualizar', cancelButtonText: 'Cancelar' })
-    if (!result.isConfirmed) return
-    Swal.fire({ title: 'Actualizando BD...', text: 'Procesando NOI y Cobranza.', allowOutsideClick: false, showConfirmButton: false, didOpen: () => Swal.showLoading() })
-    router.post(`/historico-general/${selectedPeriodRow.value.id}/actualizar-bd`, {}, { preserveScroll: true, onFinish: () => Swal.close() })
+    router.post(`/historico-general/${selectedPeriodRow.value.id}/actualizar-bd`)
 }
 
-async function generateRadiographyStep() {
+async function openIncidents() {
     if (!selectedPeriodRow.value) return
-    const result = await Swal.fire({ title: '¿Analizar y generar Radiografía?', text: 'Se analizará el periodo completo y se llenará la plantilla Excel.', icon: 'question', showCancelButton: true, confirmButtonText: 'Sí, generar', cancelButtonText: 'Cancelar' })
-    if (!result.isConfirmed) return
-    Swal.fire({ title: 'Generando Radiografía...', text: 'Analizando gastos, colocación, cartera y consolidado final.', allowOutsideClick: false, showConfirmButton: false, didOpen: () => Swal.showLoading() })
-    router.post(`/historico-general/${selectedPeriodRow.value.id}/generar-radiografia`, {}, { preserveScroll: true, onFinish: () => Swal.close() })
+    const response = await fetch(`/historico-general/${selectedPeriodRow.value.id}/incidencias`)
+    const payload = await response.json()
+    const count = Array.isArray(payload.items) ? payload.items.length : 0
+    await Swal.fire({
+        icon: count ? 'warning' : 'success',
+        title: count ? 'Incidencias pendientes' : 'Sin incidencias críticas',
+        text: count
+            ? 'Hay incidencias pendientes antes de generar la radiografía.'
+            : 'No hay incidencias pendientes para este periodo.',
+    })
+}
+
+function runFullRadiography() {
+    if (!selectedPeriodRow.value) return
+    router.post(`/historico-general/${selectedPeriodRow.value.id}/generar-radiografia`)
 }
 
 async function exportRadiography() {
@@ -2026,7 +2033,6 @@ async function exportRadiography() {
                                 </div>
 
                                 <div class="mt-4 flex items-center justify-end gap-2 border-t pt-4">
-                                    
                                     <button
                                         type="button"
                                         class="app-btn h-10 border border-rose-200 bg-rose-50 px-4 text-rose-700 transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-100 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300"
@@ -2062,10 +2068,11 @@ async function exportRadiography() {
 
                         <div v-if="selectedPeriodRow" class="border-t px-4 py-4 sm:px-5">
                             <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                            <button type="button" class="app-btn app-btn-primary h-11 px-4" @click="updateDatabaseStep" :disabled="!selectedPeriodRow?.can_update_database">Actualizar BD</button>
-                            <button type="button" class="app-btn h-11 border px-4" @click="generateRadiographyStep" :disabled="!selectedPeriodRow?.can_generate_radiography">Analizar y generar Radiografía</button>
+                            <button type="button" class="app-btn app-btn-primary h-11 px-4" @click="updateDatabase">Actualizar BD</button>
+                            <button type="button" class="app-btn h-11 border px-4" @click="openIncidents">Resolver incidencias</button>
+                            <button type="button" class="app-btn h-11 border px-4" @click="runFullRadiography">Analizar y generar Radiografía</button>
                             <a :href="selectedPeriodRow ? `/reportes-mensuales?period=${selectedPeriodRow.id}` : '#'" class="app-btn h-11 border px-4">Consultar Radiografía</a>
-                            <button type="button" class="app-btn h-11 border px-4" @click="exportRadiography" :disabled="!selectedPeriodRow?.can_export_radiography">Exportar Excel</button>
+                            <button type="button" class="app-btn h-11 border px-4" @click="exportRadiography">Exportar Excel</button>
                         </div>
                             <p v-if="selectedPeriodRow?.blocking_reasons?.length" class="mt-2 text-xs text-amber-700 dark:text-amber-300">{{ selectedPeriodRow.blocking_reasons.join(" · ") }}</p>
                         </div>
