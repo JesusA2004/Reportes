@@ -3,6 +3,8 @@
 namespace App\Services\Imports;
 
 use App\Models\Branch;
+use App\Models\Employee;
+use App\Models\EmployeeBranchAssignment;
 use App\Models\Recovery;
 use App\Models\ReportUpload;
 use Carbon\Carbon;
@@ -223,6 +225,55 @@ class LendusIngresosCobranzaImportService {
                 $rowsWithErrors
             ),
         ];
+    }
+
+    public function scanForDatabaseUpdate(ReportUpload $upload): array
+    {
+        $absolutePath = Storage::disk('public')->path($upload->stored_path);
+        $reader = IOFactory::createReaderForFile($absolutePath);
+        $reader->setReadDataOnly(true);
+        $info = $reader->listWorksheetInfo($absolutePath)[0] ?? null;
+        if (!$info) {
+            throw new \RuntimeException('No se encontró hoja en cobranza.');
+        }
+        $previewRows = $this->readChunk($absolutePath, $info['worksheetName'], 1, min(30, (int) $info['totalRows']), (string) $info['lastColumnLetter']);
+        $headerRowIndex = $this->detectHeaderRowIndex($previewRows);
+        $headerMap = $this->buildHeaderMap($previewRows[$headerRowIndex] ?? []);
+        $rows = $this->readChunk($absolutePath, $info['worksheetName'], $headerRowIndex + 2, (int) $info['totalRows'], (string) $info['lastColumnLetter']);
+        $promoters = 0; $branches = 0; $incidents = [];
+
+        foreach ($rows as $row) {
+            if (!is_array($row) || $this->isEmptyRow($row)) continue;
+            $mapped = $this->mapRow($row, $headerMap);
+            $promoterName = trim((string) ($mapped['promoter_name'] ?? ''));
+            $branchName = trim((string) ($mapped['branch_name'] ?? ''));
+            if ($promoterName === '') continue;
+
+            $promoter = Employee::query()->firstOrCreate(
+                ['normalized_name' => $this->normalizeHumanName($promoterName)],
+                ['full_name' => $promoterName, 'is_active' => true, 'source_system' => 'lendus_cobranza']
+            );
+            $promoters++;
+
+            if ($branchName === '') {
+                $incidents[] = ['type' => 'promoter_without_branch', 'message' => "Promotor sin sucursal: {$promoterName}"];
+                continue;
+            }
+
+            $normalizedBranch = $this->normalizeHumanName($branchName);
+            $branch = Branch::query()->firstOrCreate(
+                ['normalized_name' => $normalizedBranch],
+                ['name' => $branchName, 'is_active' => true]
+            );
+            $branches++;
+
+            EmployeeBranchAssignment::query()->updateOrCreate(
+                ['period_id' => $upload->period_id, 'employee_id' => $promoter->id, 'source_type' => 'lendus'],
+                ['branch_id' => $branch->id, 'match_type' => 'normalized', 'confidence' => 0.8, 'was_manual_reviewed' => false]
+            );
+        }
+
+        return ['promoters_detected' => $promoters, 'branches_detected' => $branches, 'incidents' => $incidents];
     }
 
     private function readChunk(
