@@ -261,10 +261,29 @@ class LendusIngresosCobranzaImportService {
             }
 
             $normalizedBranch = $this->normalizeHumanName($branchName);
+            $branchCode = Str::upper(
+                Str::limit(
+                    preg_replace('/[^A-Za-z0-9]+/', '_', Str::ascii($normalizedBranch)),
+                    60,
+                    ''
+                )
+            );
+
             $branch = Branch::query()->firstOrCreate(
                 ['normalized_name' => $normalizedBranch],
-                ['name' => $branchName, 'is_active' => true]
+                [
+                    'code' => $branchCode ?: 'SUCURSAL_' . substr(md5($normalizedBranch), 0, 8),
+                    'name' => $branchName,
+                    'is_active' => true,
+                ]
             );
+
+            if (!$branch->code) {
+                $branch->update([
+                    'code' => $branchCode ?: 'SUCURSAL_' . substr(md5($normalizedBranch), 0, 8),
+                ]);
+            }
+
             $branches++;
 
             EmployeeBranchAssignment::query()->updateOrCreate(

@@ -2,6 +2,8 @@
 
 namespace App\Services;
 
+use App\Enums\DataSourceCode;
+use App\Enums\ReportUploadStatus;
 use App\Models\Expense;
 use App\Models\Period;
 use App\Models\PeriodBranchSummary;
@@ -12,23 +14,46 @@ use App\Models\PeriodSummary;
 use App\Models\Placement;
 use App\Models\Portfolio;
 use App\Models\Recovery;
+use App\Models\ReportUpload;
 use Illuminate\Support\Facades\DB;
 
 class PeriodRadiographyService
 {
+    public function __construct(
+        protected ReportAnalysisService $reportAnalysisService,
+    ) {
+    }
+
     public function generate(Period $period, ?int $userId = null): PeriodSummary
     {
+        @ini_set('memory_limit', '1024M');
+        @ini_set('max_execution_time', '900');
+        @set_time_limit(900);
+
+        $this->importSourcesForFinalRadiography($period);
+
         return DB::transaction(function () use ($period, $userId) {
             $run = PeriodRadiographyRun::query()->create([
-                'period_id' => $period->id, 'status' => 'running', 'started_at' => now(), 'created_by' => $userId,
+                'period_id' => $period->id,
+                'status' => 'running',
+                'started_at' => now(),
+                'created_by' => $userId,
             ]);
 
             $summary = PeriodSummary::query()->updateOrCreate(
                 ['period_id' => $period->id],
-                ['status' => 'generated', 'generated_at' => now(), 'generated_by' => $userId, 'invalidated_at' => null, 'invalidated_by' => null, 'invalidated_reason' => null]
+                [
+                    'status' => 'generated',
+                    'generated_at' => now(),
+                    'generated_by' => $userId,
+                    'invalidated_at' => null,
+                    'invalidated_by' => null,
+                    'invalidated_reason' => null,
+                ],
             );
 
             $uploadIds = $period->reportUploads()->pluck('id')->values()->all();
+
             $summary->update([
                 'source_upload_ids' => $uploadIds,
                 'global_metrics' => $this->globalMetrics($period),
@@ -36,54 +61,229 @@ class PeriodRadiographyService
                 'version' => (int) ($summary->version ?? 0) + 1,
             ]);
 
-            PeriodBranchSummary::query()->where('period_summary_id', $summary->id)->delete();
+            PeriodBranchSummary::query()
+                ->where('period_summary_id', $summary->id)
+                ->delete();
+
             foreach ($this->branchMetrics($period) as $row) {
-                PeriodBranchSummary::query()->create(['period_summary_id' => $summary->id, 'branch_id' => $row['branch_id'], 'metrics' => $row]);
+                PeriodBranchSummary::query()->create([
+                    'period_summary_id' => $summary->id,
+                    'branch_id' => $row['branch_id'],
+                    'metrics' => $row,
+                ]);
             }
 
-            PeriodCorporateSummary::query()->updateOrCreate(['period_summary_id' => $summary->id], ['metrics' => $this->corporateMetrics($period)]);
+            PeriodCorporateSummary::query()->updateOrCreate(
+                ['period_summary_id' => $summary->id],
+                ['metrics' => $this->corporateMetrics($period)],
+            );
 
-            PeriodIncident::query()->where('period_summary_id', $summary->id)->delete();
+            PeriodIncident::query()
+                ->where('period_summary_id', $summary->id)
+                ->delete();
+
             foreach ($this->incidents($period) as $incident) {
-                PeriodIncident::query()->create(['period_summary_id' => $summary->id] + $incident);
+                PeriodIncident::query()->create([
+                    'period_summary_id' => $summary->id,
+                    ...$incident,
+                ]);
             }
 
-            $run->update(['status' => 'success', 'period_summary_id' => $summary->id, 'finished_at' => now(), 'log' => 'Consolidado generado correctamente.']);
+            $run->update([
+                'status' => 'success',
+                'period_summary_id' => $summary->id,
+                'finished_at' => now(),
+                'log' => 'Consolidado generado correctamente.',
+            ]);
+
             return $summary->fresh(['branchSummaries', 'corporateSummary', 'incidents']);
         });
     }
 
     public function invalidateForPeriod(Period $period, ?int $userId, string $reason): void
     {
-        PeriodSummary::query()->where('period_id', $period->id)->whereNull('invalidated_at')->update([
-            'status' => 'invalidated', 'invalidated_at' => now(), 'invalidated_by' => $userId, 'invalidated_reason' => $reason,
-        ]);
+        PeriodSummary::query()
+            ->where('period_id', $period->id)
+            ->whereNull('invalidated_at')
+            ->update([
+                'status' => 'invalidated',
+                'invalidated_at' => now(),
+                'invalidated_by' => $userId,
+                'invalidated_reason' => $reason,
+            ]);
     }
 
-    private function globalMetrics(Period $period): array {
+    private function importSourcesForFinalRadiography(Period $period): void
+    {
+        $requiredSources = $this->requiredSourceCodes();
+
+        $uploads = $period->reportUploads()
+            ->with('dataSource')
+            ->latest('id')
+            ->get()
+            ->filter(fn (ReportUpload $upload) => $upload->dataSource && in_array($upload->dataSource->code, $requiredSources, true))
+            ->unique(fn (ReportUpload $upload) => $upload->dataSource->code)
+            ->values();
+
+        $uploadedCodes = $uploads
+            ->pluck('dataSource.code')
+            ->filter()
+            ->values()
+            ->all();
+
+        $missing = collect($requiredSources)
+            ->filter(fn (string $code) => !in_array($code, $uploadedCodes, true))
+            ->values()
+            ->all();
+
+        if (!empty($missing)) {
+            throw new \RuntimeException(
+                'No se puede generar la Radiografía. Faltan fuentes: ' . implode(', ', $missing) . '.'
+            );
+        }
+
+        foreach ($uploads as $upload) {
+            if (!$upload->stored_path) {
+                throw new \RuntimeException("El archivo {$upload->original_name} no tiene ruta de almacenamiento.");
+            }
+
+            /*
+             * En el flujo final sí se permite análisis pesado:
+             * aquí se llenan tablas factuales para consolidar la Radiografía:
+             * expenses, recoveries, placements, portfolios y noi_movements.
+             */
+            $status = (string) ($upload->status?->value ?? $upload->status);
+
+            if ($status !== ReportUploadStatus::Processed->value) {
+                $this->reportAnalysisService->analyze($upload);
+            }
+        }
+    }
+
+    private function requiredSourceCodes(): array
+    {
         return [
-            'gasto_total' => (float) Expense::query()->where('period_id', $period->id)->sum('amount'),
-            'recuperacion_total' => (float) Recovery::query()->where('period_id', $period->id)->sum('total_amount'),
-            'colocacion_total' => (float) Placement::query()->where('period_id', $period->id)->sum('amount'),
-            'valor_cartera_total' => (float) Portfolio::query()->where('period_id', $period->id)->sum('balance'),
-            'cartera_vencida_total' => (float) Portfolio::query()->where('period_id', $period->id)->sum('past_due_balance'),
+            DataSourceCode::NoiNomina->value,
+            DataSourceCode::LendusIngresosCobranza->value,
+            DataSourceCode::Gastos->value,
+            DataSourceCode::LendusMinistraciones->value,
+            DataSourceCode::LendusSaldosCliente->value,
         ];
     }
-    private function corporateMetrics(Period $period): array { $g=$this->globalMetrics($period); $g['mora_porcentaje']=$g['valor_cartera_total']>0?round(($g['cartera_vencida_total']/$g['valor_cartera_total'])*100,2):0; return $g; }
-    private function branchMetrics(Period $period): array {
+
+    private function globalMetrics(Period $period): array
+    {
+        $valorCartera = (float) Portfolio::query()
+            ->where('period_id', $period->id)
+            ->sum('balance');
+
+        $carteraVencida = (float) Portfolio::query()
+            ->where('period_id', $period->id)
+            ->sum('past_due_balance');
+
+        return [
+            'gasto_total' => (float) Expense::query()
+                ->where('period_id', $period->id)
+                ->sum('amount'),
+            'recuperacion_total' => (float) Recovery::query()
+                ->where('period_id', $period->id)
+                ->sum('total_amount'),
+            'colocacion_total' => (float) Placement::query()
+                ->where('period_id', $period->id)
+                ->sum('amount'),
+            'valor_cartera_total' => $valorCartera,
+            'cartera_vencida_total' => $carteraVencida,
+            'mora_porcentaje' => $valorCartera > 0
+                ? round(($carteraVencida / $valorCartera) * 100, 2)
+                : 0,
+        ];
+    }
+
+    private function corporateMetrics(Period $period): array
+    {
+        return $this->globalMetrics($period);
+    }
+
+    private function branchMetrics(Period $period): array
+    {
         $rows = [];
-        $branchIds = collect()->merge(Expense::where('period_id',$period->id)->pluck('branch_id'))->merge(Recovery::where('period_id',$period->id)->pluck('branch_id'))->merge(Placement::where('period_id',$period->id)->pluck('branch_id'))->merge(Portfolio::where('period_id',$period->id)->pluck('branch_id'))->filter()->unique();
+
+        $branchIds = collect()
+            ->merge(Expense::query()->where('period_id', $period->id)->pluck('branch_id'))
+            ->merge(Recovery::query()->where('period_id', $period->id)->pluck('branch_id'))
+            ->merge(Placement::query()->where('period_id', $period->id)->pluck('branch_id'))
+            ->merge(Portfolio::query()->where('period_id', $period->id)->pluck('branch_id'))
+            ->filter()
+            ->unique()
+            ->values();
+
         foreach ($branchIds as $branchId) {
-            $valor = (float) Portfolio::where('period_id',$period->id)->where('branch_id',$branchId)->sum('balance');
-            $vencida = (float) Portfolio::where('period_id',$period->id)->where('branch_id',$branchId)->sum('past_due_balance');
-            $rows[] = ['branch_id'=>$branchId,'gasto_total'=>(float)Expense::where('period_id',$period->id)->where('branch_id',$branchId)->sum('amount'),'recuperacion_total'=>(float)Recovery::where('period_id',$period->id)->where('branch_id',$branchId)->sum('total_amount'),'colocacion_total'=>(float)Placement::where('period_id',$period->id)->where('branch_id',$branchId)->sum('amount'),'valor_cartera'=>$valor,'cartera_vencida'=>$vencida,'mora_porcentaje'=>$valor>0?round($vencida/$valor*100,2):0];
+            $valor = (float) Portfolio::query()
+                ->where('period_id', $period->id)
+                ->where('branch_id', $branchId)
+                ->sum('balance');
+
+            $vencida = (float) Portfolio::query()
+                ->where('period_id', $period->id)
+                ->where('branch_id', $branchId)
+                ->sum('past_due_balance');
+
+            $rows[] = [
+                'branch_id' => $branchId,
+                'gasto_total' => (float) Expense::query()
+                    ->where('period_id', $period->id)
+                    ->where('branch_id', $branchId)
+                    ->sum('amount'),
+                'recuperacion_total' => (float) Recovery::query()
+                    ->where('period_id', $period->id)
+                    ->where('branch_id', $branchId)
+                    ->sum('total_amount'),
+                'colocacion_total' => (float) Placement::query()
+                    ->where('period_id', $period->id)
+                    ->where('branch_id', $branchId)
+                    ->sum('amount'),
+                'valor_cartera' => $valor,
+                'cartera_vencida' => $vencida,
+                'mora_porcentaje' => $valor > 0 ? round(($vencida / $valor) * 100, 2) : 0,
+            ];
         }
+
         return $rows;
     }
-    private function incidents(Period $period): array {
-        $items=[];
-        if (!$period->reportUploads()->exists()) $items[]=['type'=>'fuentes_faltantes','severity'=>'high','message'=>'No hay fuentes cargadas para el periodo.','context'=>null];
-        if (Portfolio::where('period_id',$period->id)->sum('past_due_balance')>Portfolio::where('period_id',$period->id)->sum('balance')*0.25) $items[]=['type'=>'mora_alta','severity'=>'warning','message'=>'La mora del periodo supera el 25%.','context'=>null];
+
+    private function incidents(Period $period): array
+    {
+        $items = [];
+
+        if (!$period->reportUploads()->exists()) {
+            $items[] = [
+                'type' => 'fuentes_faltantes',
+                'severity' => 'high',
+                'message' => 'No hay fuentes cargadas para el periodo.',
+                'context' => null,
+            ];
+        }
+
+        $valorCartera = (float) Portfolio::query()
+            ->where('period_id', $period->id)
+            ->sum('balance');
+
+        $carteraVencida = (float) Portfolio::query()
+            ->where('period_id', $period->id)
+            ->sum('past_due_balance');
+
+        if ($valorCartera > 0 && $carteraVencida > ($valorCartera * 0.25)) {
+            $items[] = [
+                'type' => 'mora_alta',
+                'severity' => 'warning',
+                'message' => 'La mora del periodo supera el 25%.',
+                'context' => [
+                    'valor_cartera' => $valorCartera,
+                    'cartera_vencida' => $carteraVencida,
+                ],
+            ];
+        }
+
         return $items;
     }
 }

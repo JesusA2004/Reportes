@@ -8,8 +8,11 @@ use App\Models\ReportUpload;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 use Maatwebsite\Excel\Facades\Excel;
+use PhpOffice\PhpSpreadsheet\Reader\IReadFilter;
 use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
+
 
 class NoiNominaImportService
 {
@@ -180,42 +183,172 @@ class NoiNominaImportService
 
     public function scanForDatabaseUpdate(ReportUpload $upload): array
     {
+        if (!$upload->stored_path) {
+            throw new \RuntimeException('El archivo NOI no tiene ruta de almacenamiento.');
+        }
+
+        if (!Storage::disk('public')->exists($upload->stored_path)) {
+            throw new \RuntimeException('El archivo físico de NOI no existe en storage/public.');
+        }
+
+        @set_time_limit(0);
+
         $absolutePath = Storage::disk('public')->path($upload->stored_path);
-        $sheets = Excel::toArray([], $absolutePath);
-        $rows = $sheets[0] ?? [];
-        $headerRowIndex = $this->detectHeaderRowIndex($rows);
-        $headerMap = $this->buildHeaderMap($rows[$headerRowIndex] ?? []);
-        $employeesDetected = 0;
+
+        $reader = IOFactory::createReaderForFile($absolutePath);
+        $reader->setReadDataOnly(true);
+
+        if (method_exists($reader, 'setReadEmptyCells')) {
+            $reader->setReadEmptyCells(false);
+        }
+
+        $sheetsInfo = $reader->listWorksheetInfo($absolutePath);
+
+        if (empty($sheetsInfo)) {
+            throw new \RuntimeException('No se encontraron hojas en el archivo NOI.');
+        }
+
+        $sheetName = $sheetsInfo[0]['worksheetName'];
+        $highestRow = (int) ($sheetsInfo[0]['totalRows'] ?? 0);
+
+        if ($highestRow <= 0) {
+            throw new \RuntimeException('El archivo NOI no contiene filas útiles.');
+        }
+
+        $employeesByKey = [];
+        $rowsRead = 0;
+        $rowsSkipped = 0;
         $incidents = [];
 
-        foreach (array_slice($rows, $headerRowIndex + 1) as $row) {
-            if (!is_array($row) || $this->isEmptyRow($row)) {
-                continue;
-            }
-            $mapped = $this->mapRow($row, $headerMap);
-            $name = trim((string) ($mapped['employee_name'] ?? ''));
-            if (!$this->isValidEmployeeName($name)) {
-                continue;
-            }
-            $normalized = $this->normalizeHumanName($name);
-            $code = $mapped['employee_code'] ?: null;
-            $employee = Employee::query()
-                ->when($code, fn ($q) => $q->where('employee_code', $code), fn ($q) => $q->where('normalized_name', $normalized))
-                ->first();
+        /*
+         * Actualizar BD debe ser ligero:
+         * para NOI solo detectamos empleados desde columnas A y B.
+         * No leemos conceptos, importes, acumulados ni movimientos.
+         */
+        $chunkSize = 300;
 
-            if (!$employee) {
-                Employee::query()->create([
-                    'employee_code' => $code,
-                    'full_name' => $name,
+        for ($start = 1; $start <= $highestRow; $start += $chunkSize) {
+            $end = min($start + $chunkSize - 1, $highestRow);
+
+            $chunkRows = $this->readNoiEmployeeColumnsForDatabaseUpdate(
+                path: $absolutePath,
+                sheetName: $sheetName,
+                startRow: $start,
+                endRow: $end,
+            );
+
+            foreach ($chunkRows as $row) {
+                if (!is_array($row) || $this->isEmptyRow($row)) {
+                    $rowsSkipped++;
+                    continue;
+                }
+
+                $rowsRead++;
+
+                $col0 = $this->cleanString($row[0] ?? null);
+                $col1 = $this->cleanString($row[1] ?? null);
+
+                $employeeCode = $this->extractEmployeeCode($col1);
+                $employeeName = null;
+
+                if ($this->isValidEmployeeName($col1)) {
+                    $employeeName = $col1;
+                } elseif ($this->isValidEmployeeName($col0)) {
+                    $employeeName = $col0;
+                }
+
+                if (!$this->isValidEmployeeName($employeeName)) {
+                    $rowsSkipped++;
+                    continue;
+                }
+
+                $normalized = $this->normalizeName($employeeName);
+
+                if ($normalized === '') {
+                    $rowsSkipped++;
+                    continue;
+                }
+
+                $key = $employeeCode ? "code:{$employeeCode}" : "name:{$normalized}";
+
+                if (isset($employeesByKey[$key])) {
+                    continue;
+                }
+
+                [$firstName, $paternalLastName, $maternalLastName] = $this->splitName($employeeName);
+
+                $employeesByKey[$key] = [
+                    'employee_code' => $employeeCode,
+                    'full_name' => $employeeName,
                     'normalized_name' => $normalized,
+                    'first_name' => $firstName,
+                    'paternal_last_name' => $paternalLastName,
+                    'maternal_last_name' => $maternalLastName,
                     'is_active' => true,
                     'source_system' => 'noi',
-                ]);
-                $employeesDetected++;
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ];
+            }
+
+            unset($chunkRows);
+            gc_collect_cycles();
+        }
+
+        $employeesDetected = 0;
+        $employees = array_values($employeesByKey);
+
+        if (!empty($employees)) {
+            $withCode = collect($employees)
+                ->filter(fn (array $employee) => filled($employee['employee_code']))
+                ->values();
+
+            $withoutCode = collect($employees)
+                ->filter(fn (array $employee) => blank($employee['employee_code']))
+                ->values();
+
+            foreach ($withCode->chunk(300) as $chunk) {
+                Employee::query()->upsert(
+                    $chunk->all(),
+                    ['employee_code', 'source_system'],
+                    [
+                        'full_name',
+                        'normalized_name',
+                        'first_name',
+                        'paternal_last_name',
+                        'maternal_last_name',
+                        'is_active',
+                        'updated_at',
+                    ],
+                );
+
+                $employeesDetected += $chunk->count();
+            }
+
+            foreach ($withoutCode->chunk(300) as $chunk) {
+                Employee::query()->upsert(
+                    $chunk->all(),
+                    ['normalized_name', 'source_system'],
+                    [
+                        'full_name',
+                        'first_name',
+                        'paternal_last_name',
+                        'maternal_last_name',
+                        'is_active',
+                        'updated_at',
+                    ],
+                );
+
+                $employeesDetected += $chunk->count();
             }
         }
 
-        return ['employees_detected' => $employeesDetected, 'incidents' => $incidents];
+        return [
+            'employees_detected' => $employeesDetected,
+            'rows_read' => $rowsRead,
+            'rows_skipped' => $rowsSkipped,
+            'incidents' => $incidents,
+        ];
     }
 
     private function detectHeaderRowIndex(array $rows): int
@@ -552,7 +685,14 @@ class NoiNominaImportService
             return false;
         }
 
-        if (in_array($normalized, ['nombre', 'trabajador', 'empleado'], true)) {
+        if (in_array($normalized, [
+            'nombre',
+            'trabajador',
+            'empleado',
+            'nombre del trabajador',
+            'nombre trabajador',
+            'nombre empleado',
+        ], true)) {
             return false;
         }
 
@@ -612,14 +752,53 @@ class NoiNominaImportService
         return true;
     }
 
-    private function normalizeHumanName(?string $value): string {
-        return Str::of((string) $value)
-            ->ascii()
-            ->lower()
-            ->replaceMatches('/[^a-z0-9\s]/', ' ')
-            ->replaceMatches('/\s+/', ' ')
-            ->trim()
-            ->value();
+    private function readNoiEmployeeColumnsForDatabaseUpdate(
+        string $path,
+        string $sheetName,
+        int $startRow,
+        int $endRow,
+    ): array {
+        $reader = IOFactory::createReaderForFile($path);
+        $reader->setReadDataOnly(true);
+
+        if (method_exists($reader, 'setReadEmptyCells')) {
+            $reader->setReadEmptyCells(false);
+        }
+
+        $reader->setLoadSheetsOnly([$sheetName]);
+
+        $reader->setReadFilter(new class($startRow, $endRow) implements IReadFilter {
+            public function __construct(
+                private readonly int $startRow,
+                private readonly int $endRow,
+            ) {
+            }
+
+            public function readCell($columnAddress, $row, $worksheetName = ''): bool
+            {
+                if ($row < $this->startRow || $row > $this->endRow) {
+                    return false;
+                }
+
+                return in_array($columnAddress, ['A', 'B'], true);
+            }
+        });
+
+        $spreadsheet = $reader->load($path);
+        $sheet = $spreadsheet->getSheetByName($sheetName) ?? $spreadsheet->getActiveSheet();
+
+        $rows = $sheet->rangeToArray(
+            'A' . $startRow . ':B' . $endRow,
+            null,
+            true,
+            false,
+            false,
+        );
+
+        $spreadsheet->disconnectWorksheets();
+        unset($sheet, $spreadsheet);
+
+        return $rows;
     }
 
 }
