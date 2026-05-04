@@ -834,6 +834,30 @@ async function submitRadiography(action: 'generar' | 'regenerar') {
     router.post(`/reportes-mensuales/${selectedPeriodRow.value.id}/consolidar`, {}, { preserveScroll: true })
 }
 
+function updateDatabase() {
+    if (!selectedPeriodRow.value) return
+    router.post(`/historico-general/${selectedPeriodRow.value.id}/actualizar-bd`)
+}
+
+async function openIncidents() {
+    if (!selectedPeriodRow.value) return
+    const response = await fetch(`/historico-general/${selectedPeriodRow.value.id}/incidencias`)
+    const payload = await response.json()
+    const count = Array.isArray(payload.items) ? payload.items.length : 0
+    await Swal.fire({
+        icon: count ? 'warning' : 'success',
+        title: count ? 'Incidencias pendientes' : 'Sin incidencias críticas',
+        text: count
+            ? 'Hay incidencias pendientes antes de generar la radiografía.'
+            : 'No hay incidencias pendientes para este periodo.',
+    })
+}
+
+function runFullRadiography() {
+    if (!selectedPeriodRow.value) return
+    router.post(`/historico-general/${selectedPeriodRow.value.id}/generar-radiografia`)
+}
+
 async function exportRadiography() {
     if (!selectedPeriodRow.value) return
     const result = await Swal.fire({ title: '¿Exportar radiografía?', text: 'Se descargará el archivo Excel del periodo.', icon: 'question', showCancelButton: true, confirmButtonText: 'Sí, exportar', cancelButtonText: 'Cancelar' })
@@ -1665,15 +1689,6 @@ async function analyzeUpload(uploadId: number) {
                                 <div class="mt-4 flex items-center justify-end gap-2 border-t pt-4">
                                     <button
                                         type="button"
-                                        class="app-btn h-10 border border-sky-200 bg-sky-50 px-4 text-sky-700 transition-all duration-200 hover:-translate-y-0.5 hover:bg-sky-100 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-300"
-                                        @click="analyzeUpload(upload.id)"
-                                    >
-                                        <PlayCircle class="size-4" />
-                                        Analizar
-                                    </button>
-
-                                    <button
-                                        type="button"
                                         class="app-btn h-10 border border-rose-200 bg-rose-50 px-4 text-rose-700 transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-100 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300"
                                         :disabled="isDeletingId(upload.id)"
                                         @click="deleteUpload(upload.id)"
@@ -1706,9 +1721,10 @@ async function analyzeUpload(uploadId: number) {
 
                         <div v-if="selectedPeriodRow" class="border-t px-4 py-4 sm:px-5">
                             <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                            <button type="button" class="app-btn app-btn-primary h-11 px-4" @click="submitRadiography('generar')">Generar Radiografía</button>
-                            <button type="button" class="app-btn h-11 border px-4" @click="submitRadiography('regenerar')">Regenerar Radiografía</button>
-                            <a :href="selectedPeriodRow ? `/reportes-mensuales?period=${selectedPeriodRow.id}` : "#"" class="app-btn h-11 border px-4">Consultar Radiografía</a>
+                            <button type="button" class="app-btn app-btn-primary h-11 px-4" @click="updateDatabase">Actualizar BD</button>
+                            <button type="button" class="app-btn h-11 border px-4" @click="openIncidents">Resolver incidencias</button>
+                            <button type="button" class="app-btn h-11 border px-4" @click="runFullRadiography">Analizar y generar Radiografía</button>
+                            <a :href="selectedPeriodRow ? `/reportes-mensuales?period=${selectedPeriodRow.id}` : '#'" class="app-btn h-11 border px-4">Consultar Radiografía</a>
                             <button type="button" class="app-btn h-11 border px-4" @click="exportRadiography">Exportar Excel</button>
                         </div>
                         </div>

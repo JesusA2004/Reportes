@@ -8,10 +8,13 @@ use App\Models\Period;
 use App\Models\ReportUpload;
 use App\Models\PeriodSummary;
 use App\Services\ReportAnalysisService;
+use App\Services\DatabaseUpdateService;
+use App\Services\PeriodRadiographyService;
 use App\Services\ReportUploadService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -191,7 +194,7 @@ class ReportUploadController extends Controller
             notes: $request->string('notes')->toString() ?: null,
         );
 
-        return back()->with('success', 'Archivo subido correctamente. Ahora puedes analizarlo.');
+        return back()->with('success', 'Archivo subido correctamente.');
     }
 
     public function destroy(ReportUpload $reportUpload): RedirectResponse
@@ -217,6 +220,46 @@ class ReportUploadController extends Controller
             ]);
         }
         return back()->with('success', 'Archivo analizado correctamente.');
+    }
+
+    public function updateDatabase(Period $period, DatabaseUpdateService $service): RedirectResponse
+    {
+        $service->updateForPeriod($period);
+        return back()->with('success', 'BD actualizada correctamente. Revisa incidencias pendientes.');
+    }
+
+    public function incidents(Period $period)
+    {
+        $summary = PeriodSummary::query()->where('period_id', $period->id)->with('incidents')->first();
+        return response()->json([
+            'items' => $summary?->incidents?->map(fn ($incident) => [
+                'id' => $incident->id,
+                'type' => $incident->type,
+                'severity' => $incident->severity,
+                'message' => $incident->message,
+            ])->values() ?? [],
+            'has_critical' => (bool) ($summary?->incidents?->contains(fn ($item) => $item->severity === 'high') ?? false),
+        ]);
+    }
+
+    public function resolveIncident(Period $period, \App\Models\PeriodIncident $incident, Request $request): RedirectResponse
+    {
+        abort_unless($incident->periodSummary?->period_id === $period->id, 404);
+        $incident->update([
+            'severity' => 'resolved',
+            'context' => array_merge($incident->context ?? [], [
+                'resolved_by' => auth()->id(),
+                'resolved_at' => now()->toDateTimeString(),
+                'resolution_note' => (string) $request->input('resolution_note', 'Resuelta manualmente.'),
+            ]),
+        ]);
+        return back()->with('success', 'Incidencia resuelta correctamente.');
+    }
+
+    public function generateRadiography(Period $period, PeriodRadiographyService $service): RedirectResponse
+    {
+        $service->generate($period, auth()->id());
+        return back()->with('success', 'Radiografía generada correctamente.');
     }
 
     private function resolveCoveredWeeks(Period $period, Collection $weeklyPeriods): Collection
