@@ -3,14 +3,21 @@
 namespace App\Services;
 
 use App\Enums\DataSourceCode;
+use App\Models\EmployeeBranchAssignment;
 use App\Models\Period;
+use App\Models\PeriodIncident;
 use App\Models\PeriodSummary;
-use App\Services\ReportAnalysisService;
+use App\Services\Imports\LendusIngresosCobranzaImportService;
+use App\Services\Imports\NoiNominaImportService;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 
 class DatabaseUpdateService
 {
-    public function __construct(protected ReportAnalysisService $analysisService)
+    public function __construct(
+        protected NoiNominaImportService $noiNominaImportService,
+        protected LendusIngresosCobranzaImportService $lendusIngresosCobranzaImportService,
+    )
     {
     }
 
@@ -31,15 +38,42 @@ class DatabaseUpdateService
                 ]);
             }
 
-            $this->analysisService->analyze($upload);
+            if (!$upload->stored_path || !Storage::disk('public')->exists($upload->stored_path)) {
+                throw ValidationException::withMessages([
+                    'period' => "El archivo de {$upload->dataSource?->name} no existe físicamente en storage.",
+                ]);
+            }
         }
 
-        PeriodSummary::query()->updateOrCreate(
+        $noiUpload = $uploads->first(fn ($item) => $item->dataSource?->code === DataSourceCode::NoiNomina->value);
+        $cobranzaUpload = $uploads->first(fn ($item) => $item->dataSource?->code === DataSourceCode::LendusIngresosCobranza->value);
+
+        $noiResult = $this->noiNominaImportService->scanForDatabaseUpdate($noiUpload);
+        $cobranzaResult = $this->lendusIngresosCobranzaImportService->scanForDatabaseUpdate($cobranzaUpload);
+
+        $summary = PeriodSummary::query()->updateOrCreate(
             ['period_id' => $period->id],
             [
                 'status' => 'database_updated',
-                'warnings' => [],
+                'warnings' => [
+                    'db_update' => [
+                        'employees_detected' => $noiResult['employees_detected'] ?? 0,
+                        'promoters_detected' => $cobranzaResult['promoters_detected'] ?? 0,
+                        'branches_detected' => $cobranzaResult['branches_detected'] ?? 0,
+                    ],
+                ],
             ],
         );
+
+        PeriodIncident::query()->where('period_summary_id', $summary->id)->where('type', 'like', 'db_update.%')->delete();
+        foreach (array_merge($noiResult['incidents'] ?? [], $cobranzaResult['incidents'] ?? []) as $incident) {
+            PeriodIncident::query()->create([
+                'period_summary_id' => $summary->id,
+                'type' => 'db_update.' . ($incident['type'] ?? 'unknown'),
+                'severity' => $incident['severity'] ?? 'high',
+                'message' => $incident['message'] ?? 'Incidencia detectada durante actualización de BD.',
+                'context' => $incident['context'] ?? null,
+            ]);
+        }
     }
 }

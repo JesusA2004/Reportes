@@ -178,6 +178,46 @@ class NoiNominaImportService
         ];
     }
 
+    public function scanForDatabaseUpdate(ReportUpload $upload): array
+    {
+        $absolutePath = Storage::disk('public')->path($upload->stored_path);
+        $sheets = Excel::toArray([], $absolutePath);
+        $rows = $sheets[0] ?? [];
+        $headerRowIndex = $this->detectHeaderRowIndex($rows);
+        $headerMap = $this->buildHeaderMap($rows[$headerRowIndex] ?? []);
+        $employeesDetected = 0;
+        $incidents = [];
+
+        foreach (array_slice($rows, $headerRowIndex + 1) as $row) {
+            if (!is_array($row) || $this->isEmptyRow($row)) {
+                continue;
+            }
+            $mapped = $this->mapRow($row, $headerMap);
+            $name = trim((string) ($mapped['employee_name'] ?? ''));
+            if (!$this->isValidEmployeeName($name)) {
+                continue;
+            }
+            $normalized = $this->normalizeHumanName($name);
+            $code = $mapped['employee_code'] ?: null;
+            $employee = Employee::query()
+                ->when($code, fn ($q) => $q->where('employee_code', $code), fn ($q) => $q->where('normalized_name', $normalized))
+                ->first();
+
+            if (!$employee) {
+                Employee::query()->create([
+                    'employee_code' => $code,
+                    'full_name' => $name,
+                    'normalized_name' => $normalized,
+                    'is_active' => true,
+                    'source_system' => 'noi',
+                ]);
+                $employeesDetected++;
+            }
+        }
+
+        return ['employees_detected' => $employeesDetected, 'incidents' => $incidents];
+    }
+
     private function detectHeaderRowIndex(array $rows): int
     {
         $bestIndex = 0;
