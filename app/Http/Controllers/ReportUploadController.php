@@ -5,12 +5,16 @@ namespace App\Http\Controllers;
 use App\Http\Requests\StoreReportUploadRequest;
 use App\Models\DataSource;
 use App\Models\Period;
+use App\Models\PeriodSummary;
 use App\Models\ReportUpload;
 use App\Models\PeriodSummary;
 use App\Services\ReportAnalysisService;
 use App\Services\DatabaseUpdateService;
 use App\Services\PeriodRadiographyService;
 use App\Services\ReportUploadService;
+use App\Models\PeriodIncident;
+use App\Services\PeriodRadiographyService;
+use App\Services\DatabaseUpdateService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
@@ -46,9 +50,10 @@ class ReportUploadController extends Controller
         $weeklyPeriods = $periodModels->where('type', 'weekly')->values();
 
         $periods = $periodModels
-            ->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount) {
+            ->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount, $summariesByPeriod) {
                 $coveredWeeks = $this->resolveCoveredWeeks($period, $weeklyPeriods);
                 $uploads = $this->resolveUploadsForPeriod($period, $coveredWeeks);
+                $summary = $summariesByPeriod->get($period->id);
 
                 $uploadedSourceCodes = $uploads
                     ->pluck('dataSource.code')
@@ -80,6 +85,23 @@ class ReportUploadController extends Controller
                         ->values()
                     : collect();
 
+
+                $summary = $summariesByPeriod->get($period->id);
+                $requiredDb = ['noi_nomina', 'lendus_ingresos_cobranza'];
+                $requiredRad = ['noi_nomina', 'lendus_ingresos_cobranza', 'gastos', 'lendus_ministraciones', 'lendus_saldos_cliente'];
+                $missingDb = collect($requiredDb)->filter(fn ($code) => !$uploads->contains(fn ($u) => $u->dataSource?->code === $code && (($u->status?->value ?? $u->status) === 'processed')))->values();
+                $missingRad = collect($requiredRad)->filter(fn ($code) => !$uploads->contains(fn ($u) => $u->dataSource?->code === $code && (($u->status?->value ?? $u->status) === 'processed')))->values();
+                $databaseUpdated = ($summary?->status === 'db_updated') && !$summary?->invalidated_at;
+                $radiographyReady = ($summary?->status === 'generated') && !$summary?->invalidated_at;
+                $pendingCritical = $summary?->incidents()->get()->filter(fn($i) => (($i->context['critical'] ?? false) === true) && (($i->context['resolved'] ?? false) !== true))->count() ?? 0;
+                $templateExists = File::exists(config('radiografia.template_path', resource_path('templates/radiografia_template.xlsx')));
+                $blockingReasons = [];
+                if ($missingDb->isNotEmpty()) { $blockingReasons[] = 'Primero sube NOI Nómina y Lendus Ingresos Cobranza.'; }
+                if (!$databaseUpdated) { $blockingReasons[] = 'Primero actualiza la BD.'; }
+                if ($pendingCritical > 0) { $blockingReasons[] = 'Hay incidencias críticas pendientes.'; }
+                if ($missingRad->isNotEmpty()) { $blockingReasons[] = 'Faltan fuentes para generar Radiografía.'; }
+                if (!$templateExists) { $blockingReasons[] = 'Falta la plantilla de Radiografía.'; }
+
                 return [
                     'id' => $period->id,
                     'code' => $period->code,
@@ -99,6 +121,17 @@ class ReportUploadController extends Controller
                     'failed_count' => $failedCount,
                     'missing_sources' => $missingSources,
                     'report_final_available' => $missingSources->count() === 0 && $requiredSourcesCount > 0,
+                    'database_updated' => $databaseUpdated,
+                    'database_invalidated' => (bool) $summary?->invalidated_at && $summary?->status === 'invalidated',
+                    'pending_critical_incidents_count' => $pendingCritical,
+                    'missing_database_sources' => $missingDb,
+                    'missing_radiography_sources' => $missingRad,
+                    'radiography_ready' => $radiographyReady,
+                    'can_update_database' => $missingDb->isEmpty(),
+                    'can_resolve_incidents' => $pendingCritical > 0,
+                    'can_generate_radiography' => $databaseUpdated && $missingRad->isEmpty() && $pendingCritical === 0 && $templateExists,
+                    'can_export_radiography' => $radiographyReady,
+                    'blocking_reasons' => $blockingReasons,
                     'radiography_status' => $summariesByPeriod->get($period->id)?->status ?? 'missing',
                     'radiography_invalidated' => (bool) $summariesByPeriod->get($period->id)?->invalidated_at,
                     'available_week_options' => $availableWeekOptions,
@@ -107,9 +140,10 @@ class ReportUploadController extends Controller
             ->values();
 
         $groupedUploads = $periodModels
-            ->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount) {
+            ->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount, $summariesByPeriod) {
                 $coveredWeeks = $this->resolveCoveredWeeks($period, $weeklyPeriods);
                 $uploads = $this->resolveUploadsForPeriod($period, $coveredWeeks);
+                $summary = $summariesByPeriod->get($period->id);
 
                 $uploadedSourceCodes = $uploads
                     ->pluck('dataSource.code')
@@ -121,6 +155,22 @@ class ReportUploadController extends Controller
                     ->whereNotIn('code', $uploadedSourceCodes)
                     ->pluck('name')
                     ->values();
+
+                $summary = $summariesByPeriod->get($period->id);
+                $requiredDb = ['noi_nomina', 'lendus_ingresos_cobranza'];
+                $requiredRad = ['noi_nomina', 'lendus_ingresos_cobranza', 'gastos', 'lendus_ministraciones', 'lendus_saldos_cliente'];
+                $missingDb = collect($requiredDb)->filter(fn ($code) => !$uploads->contains(fn ($u) => $u->dataSource?->code === $code && (($u->status?->value ?? $u->status) === 'processed')))->values();
+                $missingRad = collect($requiredRad)->filter(fn ($code) => !$uploads->contains(fn ($u) => $u->dataSource?->code === $code && (($u->status?->value ?? $u->status) === 'processed')))->values();
+                $databaseUpdated = ($summary?->status === 'db_updated') && !$summary?->invalidated_at;
+                $radiographyReady = ($summary?->status === 'generated') && !$summary?->invalidated_at;
+                $pendingCritical = $summary?->incidents()->get()->filter(fn($i) => (($i->context['critical'] ?? false) === true) && (($i->context['resolved'] ?? false) !== true))->count() ?? 0;
+                $templateExists = File::exists(config('radiografia.template_path', resource_path('templates/radiografia_template.xlsx')));
+                $blockingReasons = [];
+                if ($missingDb->isNotEmpty()) { $blockingReasons[] = 'Primero sube NOI Nómina y Lendus Ingresos Cobranza.'; }
+                if (!$databaseUpdated) { $blockingReasons[] = 'Primero actualiza la BD.'; }
+                if ($pendingCritical > 0) { $blockingReasons[] = 'Hay incidencias críticas pendientes.'; }
+                if ($missingRad->isNotEmpty()) { $blockingReasons[] = 'Faltan fuentes para generar Radiografía.'; }
+                if (!$templateExists) { $blockingReasons[] = 'Falta la plantilla de Radiografía.'; }
 
                 return [
                     'period_id' => $period->id,
@@ -135,6 +185,17 @@ class ReportUploadController extends Controller
                     'failed_count' => $uploads->where('status', 'failed')->count(),
                     'missing_sources' => $missingSources,
                     'report_final_available' => $missingSources->count() === 0 && $requiredSourcesCount > 0,
+                    'database_updated' => $databaseUpdated,
+                    'database_invalidated' => (bool) $summary?->invalidated_at && $summary?->status === 'invalidated',
+                    'pending_critical_incidents_count' => $pendingCritical,
+                    'missing_database_sources' => $missingDb,
+                    'missing_radiography_sources' => $missingRad,
+                    'radiography_ready' => $radiographyReady,
+                    'can_update_database' => $missingDb->isEmpty(),
+                    'can_resolve_incidents' => $pendingCritical > 0,
+                    'can_generate_radiography' => $databaseUpdated && $missingRad->isEmpty() && $pendingCritical === 0 && $templateExists,
+                    'can_export_radiography' => $radiographyReady,
+                    'blocking_reasons' => $blockingReasons,
                     'radiography_status' => $summariesByPeriod->get($period->id)?->status ?? 'missing',
                     'radiography_invalidated' => (bool) $summariesByPeriod->get($period->id)?->invalidated_at,
                     'uploads' => $uploads
@@ -148,6 +209,8 @@ class ReportUploadController extends Controller
                                 ->filter()
                                 ->values();
 
+                            $latestProcessRun = $upload->processRuns->first();
+
                             return [
                                 'id' => $upload->id,
                                 'original_name' => $upload->original_name,
@@ -158,12 +221,12 @@ class ReportUploadController extends Controller
                                 'source_name' => $upload->dataSource?->name,
                                 'covered_period_ids' => $upload->covered_period_ids ?? [],
                                 'covered_period_labels' => $coveredWeekLabels,
-                                'last_process_run' => $upload->processRuns->first() ? [
-                                    'status' => $upload->processRuns->first()->status?->value ?? $upload->processRuns->first()->status,
-                                    'rows_read' => $upload->processRuns->first()->rows_read,
-                                    'rows_inserted' => $upload->processRuns->first()->rows_inserted,
-                                    'rows_with_errors' => $upload->processRuns->first()->rows_with_errors,
-                                    'finished_at' => optional($upload->processRuns->first()->finished_at)->format('d/m/Y H:i'),
+                                'last_process_run' => $latestProcessRun ? [
+                                    'status' => $latestProcessRun->status?->value ?? $latestProcessRun->status,
+                                    'rows_read' => $latestProcessRun->rows_read,
+                                    'rows_inserted' => $latestProcessRun->rows_inserted,
+                                    'rows_with_errors' => $latestProcessRun->rows_with_errors,
+                                    'finished_at' => optional($latestProcessRun->finished_at)->format('d/m/Y H:i'),
                                 ] : null,
                             ];
                         }),
@@ -208,10 +271,14 @@ class ReportUploadController extends Controller
         return back()->with('success', 'Archivo eliminado correctamente.');
     }
 
-    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $analysisService) {
+    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $analysisService)
+    {
         $reportUpload->load('dataSource');
+
         session()->save();
+
         $run = $analysisService->analyze($reportUpload);
+
         if (request()->expectsJson()) {
             return response()->json([
                 'ok' => true,
@@ -219,6 +286,7 @@ class ReportUploadController extends Controller
                 'status' => $run->status?->value,
             ]);
         }
+
         return back()->with('success', 'Archivo analizado correctamente.');
     }
 
@@ -280,29 +348,17 @@ class ReportUploadController extends Controller
             ->values();
     }
 
-    public function progress(ReportUpload $reportUpload) {
-        $run = $reportUpload->processRuns()
-            ->latest('id')
-            ->first();
-        return response()->json([
-            'status' => $run?->status?->value ?? 'pending',
-            'rows_read' => (int) ($run?->rows_read ?? 0),
-            'rows_inserted' => (int) ($run?->rows_inserted ?? 0),
-            'rows_skipped' => (int) ($run?->rows_skipped ?? 0),
-            'rows_with_errors' => (int) ($run?->rows_with_errors ?? 0),
-            'log' => (string) ($run?->log ?? 'Esperando inicio del análisis...'),
-            'started_at' => $run?->started_at,
-            'finished_at' => $run?->finished_at,
-        ]);
-    }
-
     private function resolveUploadsForPeriod(Period $period, Collection $coveredWeeks): Collection
     {
         if ($coveredWeeks->isEmpty()) {
             return collect();
         }
 
-        $weekIds = $coveredWeeks->pluck('id')->map(fn ($id) => (int) $id)->values()->all();
+        $weekIds = $coveredWeeks
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->values()
+            ->all();
 
         return ReportUpload::query()
             ->with('dataSource:id,code,name')
