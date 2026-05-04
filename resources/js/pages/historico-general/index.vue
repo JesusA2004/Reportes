@@ -116,6 +116,12 @@ type GroupedPeriodUploads = {
 };
 
 type PeriodRow = {
+    can_update_database?: boolean
+    can_resolve_incidents?: boolean
+    can_generate_radiography?: boolean
+    can_export_radiography?: boolean
+    blocking_reasons?: string[]
+
     id: number
     code: string
     label: string
@@ -293,9 +299,14 @@ const periodRows = computed<PeriodRow[]>(() => {
             blocking_reasons: (period as any).blocking_reasons ?? [],
             uploads: grouped?.uploads ?? [],
             available_week_options: period.available_week_options ?? [],
-        };
-    });
-});
+            can_update_database: (period as any).can_update_database ?? true,
+            can_resolve_incidents: (period as any).can_resolve_incidents ?? false,
+            can_generate_radiography: (period as any).can_generate_radiography ?? false,
+            can_export_radiography: (period as any).can_export_radiography ?? false,
+            blocking_reasons: (period as any).blocking_reasons ?? [],
+        }
+    })
+})
 
 const weeklyPeriods = computed(() =>
     periodRows.value.filter((period) => period.type === 'weekly'),
@@ -977,7 +988,23 @@ async function submitRadiography(action: 'generar' | 'regenerar') {
 
 function updateDatabase() {
     if (!selectedPeriodRow.value) return
-    router.post(`/historico-general/${selectedPeriodRow.value.id}/actualizar-bd`)
+    const steps = [
+        'Validando NOI Nómina',
+        'Leyendo empleados',
+        'Normalizando empleados',
+        'Validando Lendus Ingresos Cobranza',
+        'Detectando promotores',
+        'Detectando oficinas/sucursales',
+        'Cruzando promotores con sucursales',
+        'Guardando datos operativos mínimos',
+        'Detectando incidencias',
+    ]
+    let i = 0
+    Swal.fire({ title: 'Actualizando BD', html: 'Esto puede tardar algunos minutos. No cierres esta ventana.<br><b>Iniciando...</b>', allowOutsideClick: false, didOpen: () => Swal.showLoading() })
+    const timer = window.setInterval(() => {
+        if (i < steps.length) Swal.update({ html: `Esto puede tardar algunos minutos. No cierres esta ventana.<br><b>${steps[i++]}</b>` })
+    }, 900)
+    router.post(`/historico-general/${selectedPeriodRow.value.id}/actualizar-bd`, {}, { onFinish: () => { clearInterval(timer); Swal.close() } })
 }
 
 async function openIncidents() {
@@ -996,7 +1023,13 @@ async function openIncidents() {
 
 function runFullRadiography() {
     if (!selectedPeriodRow.value) return
-    router.post(`/historico-general/${selectedPeriodRow.value.id}/generar-radiografia`)
+    const steps = ['Validando archivos del periodo', 'Leyendo Gastos', 'Calculando gastos por sucursal', 'Leyendo Ministraciones', 'Calculando colocación', 'Leyendo Saldos por Cliente', 'Calculando valor cartera', 'Calculando mora', 'Integrando recuperación', 'Integrando nómina', 'Consolidando global', 'Consolidando corporativo', 'Consolidando sucursales', 'Llenando plantilla Excel', 'Guardando Radiografía final']
+    let i = 0
+    Swal.fire({ title: 'Analizando periodo', html: 'Esto puede tardar algunos minutos. No cierres esta ventana.<br><b>Iniciando...</b>', allowOutsideClick: false, didOpen: () => Swal.showLoading() })
+    const timer = window.setInterval(() => {
+        if (i < steps.length) Swal.update({ html: `Esto puede tardar algunos minutos. No cierres esta ventana.<br><b>${steps[i++]}</b>` })
+    }, 900)
+    router.post(`/historico-general/${selectedPeriodRow.value.id}/generar-radiografia`, {}, { onFinish: () => { clearInterval(timer); Swal.close() } })
 }
 
 async function exportRadiography() {
@@ -2068,13 +2101,15 @@ async function exportRadiography() {
 
                         <div v-if="selectedPeriodRow" class="border-t px-4 py-4 sm:px-5">
                             <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                            <button type="button" class="app-btn app-btn-primary h-11 px-4" @click="updateDatabase">Actualizar BD</button>
-                            <button type="button" class="app-btn h-11 border px-4" @click="openIncidents">Resolver incidencias</button>
-                            <button type="button" class="app-btn h-11 border px-4" @click="runFullRadiography">Analizar y generar Radiografía</button>
+                            <button type="button" class="app-btn app-btn-primary h-11 px-4 disabled:opacity-50" :disabled="!selectedPeriodRow.can_update_database" @click="updateDatabase">Actualizar BD</button>
+                            <button type="button" class="app-btn h-11 border px-4 disabled:opacity-50" :disabled="!selectedPeriodRow.can_resolve_incidents" @click="openIncidents">Resolver incidencias</button>
+                            <button type="button" class="app-btn h-11 border px-4 disabled:opacity-50" :disabled="!selectedPeriodRow.can_generate_radiography" @click="runFullRadiography">Analizar y generar Radiografía</button>
                             <a :href="selectedPeriodRow ? `/reportes-mensuales?period=${selectedPeriodRow.id}` : '#'" class="app-btn h-11 border px-4">Consultar Radiografía</a>
-                            <button type="button" class="app-btn h-11 border px-4" @click="exportRadiography">Exportar Excel</button>
+                            <button type="button" class="app-btn h-11 border px-4 disabled:opacity-50" :disabled="!selectedPeriodRow.can_export_radiography" @click="exportRadiography">Exportar Excel</button>
                         </div>
-                            <p v-if="selectedPeriodRow?.blocking_reasons?.length" class="mt-2 text-xs text-amber-700 dark:text-amber-300">{{ selectedPeriodRow.blocking_reasons.join(" · ") }}</p>
+                        <ul v-if="selectedPeriodRow.blocking_reasons?.length" class="mt-3 list-disc space-y-1 pl-5 text-xs text-amber-600">
+                            <li v-for="reason in selectedPeriodRow.blocking_reasons" :key="reason">{{ reason }}</li>
+                        </ul>
                         </div>
                     </section>
                 </section>
