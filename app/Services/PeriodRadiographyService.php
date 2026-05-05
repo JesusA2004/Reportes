@@ -9,12 +9,12 @@ use App\Models\Period;
 use App\Models\PeriodBranchSummary;
 use App\Models\PeriodCorporateSummary;
 use App\Models\PeriodIncident;
-use App\Models\PeriodRadiographyRun;
 use App\Models\PeriodSummary;
 use App\Models\Placement;
 use App\Models\Portfolio;
 use App\Models\Recovery;
 use App\Models\ReportUpload;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 class PeriodRadiographyService
@@ -27,19 +27,18 @@ class PeriodRadiographyService
     public function generate(Period $period, ?int $userId = null): PeriodSummary
     {
         @ini_set('memory_limit', '1024M');
-        @ini_set('max_execution_time', '900');
-        @set_time_limit(900);
+        @ini_set('max_execution_time', '1800');
+        @set_time_limit(1800);
 
-        $this->importSourcesForFinalRadiography($period);
+        /*
+         * IMPORTANTE:
+         * Este servicio ya NO crea PeriodRadiographyRun.
+         * El run lo controla GenerateRadiographyJob, para evitar estados falsos
+         * como "success" cuando todavía hay fuentes pendientes.
+         */
+        $uploads = $this->importSourcesForFinalRadiography($period);
 
-        return DB::transaction(function () use ($period, $userId) {
-            $run = PeriodRadiographyRun::query()->create([
-                'period_id' => $period->id,
-                'status' => 'running',
-                'started_at' => now(),
-                'created_by' => $userId,
-            ]);
-
+        return DB::transaction(function () use ($period, $userId, $uploads) {
             $summary = PeriodSummary::query()->updateOrCreate(
                 ['period_id' => $period->id],
                 [
@@ -52,10 +51,8 @@ class PeriodRadiographyService
                 ],
             );
 
-            $uploadIds = $period->reportUploads()->pluck('id')->values()->all();
-
             $summary->update([
-                'source_upload_ids' => $uploadIds,
+                'source_upload_ids' => $uploads->pluck('id')->values()->all(),
                 'global_metrics' => $this->globalMetrics($period),
                 'warnings' => [],
                 'version' => (int) ($summary->version ?? 0) + 1,
@@ -89,13 +86,6 @@ class PeriodRadiographyService
                 ]);
             }
 
-            $run->update([
-                'status' => 'success',
-                'period_summary_id' => $summary->id,
-                'finished_at' => now(),
-                'log' => 'Consolidado generado correctamente.',
-            ]);
-
             return $summary->fresh(['branchSummaries', 'corporateSummary', 'incidents']);
         });
     }
@@ -113,15 +103,13 @@ class PeriodRadiographyService
             ]);
     }
 
-    private function importSourcesForFinalRadiography(Period $period): void
+    private function importSourcesForFinalRadiography(Period $period): Collection
     {
         $requiredSources = $this->requiredSourceCodes();
 
-        $uploads = $period->reportUploads()
-            ->with('dataSource')
-            ->latest('id')
-            ->get()
+        $uploads = $this->uploadsForPeriod($period)
             ->filter(fn (ReportUpload $upload) => $upload->dataSource && in_array($upload->dataSource->code, $requiredSources, true))
+            ->sortByDesc('id')
             ->unique(fn (ReportUpload $upload) => $upload->dataSource->code)
             ->values();
 
@@ -147,17 +135,46 @@ class PeriodRadiographyService
                 throw new \RuntimeException("El archivo {$upload->original_name} no tiene ruta de almacenamiento.");
             }
 
-            /*
-             * En el flujo final sí se permite análisis pesado:
-             * aquí se llenan tablas factuales para consolidar la Radiografía:
-             * expenses, recoveries, placements, portfolios y noi_movements.
-             */
             $status = (string) ($upload->status?->value ?? $upload->status);
 
             if ($status !== ReportUploadStatus::Processed->value) {
                 $this->reportAnalysisService->analyze($upload);
             }
+
+            $upload->refresh()->load('dataSource');
+
+            $freshStatus = (string) ($upload->status?->value ?? $upload->status);
+
+            if ($freshStatus !== ReportUploadStatus::Processed->value) {
+                $lastRun = $upload->processRuns()
+                    ->latest('id')
+                    ->first();
+
+                $reason = $lastRun?->log
+                    ?: 'El importador terminó sin dejar el archivo como procesado.';
+
+                throw new \RuntimeException(
+                    "La fuente {$upload->dataSource?->code} no quedó procesada. Archivo: {$upload->original_name}. Detalle: {$reason}"
+                );
+            }
         }
+
+        return $uploads;
+    }
+
+    private function uploadsForPeriod(Period $period): Collection
+    {
+        return ReportUpload::query()
+            ->with('dataSource')
+            ->get()
+            ->filter(function (ReportUpload $upload) use ($period) {
+                $coveredIds = collect($upload->covered_period_ids ?? [])
+                    ->map(fn ($id) => (int) $id);
+
+                return (int) $upload->period_id === (int) $period->id
+                    || $coveredIds->contains((int) $period->id);
+            })
+            ->values();
     }
 
     private function requiredSourceCodes(): array
@@ -255,7 +272,7 @@ class PeriodRadiographyService
     {
         $items = [];
 
-        if (!$period->reportUploads()->exists()) {
+        if ($this->uploadsForPeriod($period)->isEmpty()) {
             $items[] = [
                 'type' => 'fuentes_faltantes',
                 'severity' => 'high',

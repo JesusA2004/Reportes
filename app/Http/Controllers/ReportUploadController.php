@@ -187,7 +187,10 @@ class ReportUploadController extends Controller {
 
         GenerateRadiographyJob::dispatch($period->id, auth()->id(), $run->id);
 
-        return back()->with('success', 'La Radiografía se está generando. Puedes cerrar esta ventana y volver más tarde.');
+        return back()->with(
+            'success',
+            'La Radiografía se está generando. Puedes cerrar esta ventana y volver más tarde. Cuando el Excel final esté listo, se habilitará la descarga y se enviará una notificación al correo de tu usuario.'
+        );
     }
 
     private function resolveCoveredWeeks(Period $period, Collection $weeklyPeriods): Collection

@@ -24,8 +24,9 @@ class GenerateRadiographyJob implements ShouldQueue
     use Queueable;
     use SerializesModels;
 
-    public int $timeout = 1200;
-    public int $tries = 1;
+    public int $timeout = 1800;
+    public int $tries = 3;
+    public int $maxExceptions = 1;
 
     public function __construct(
         public int $periodId,
@@ -39,8 +40,8 @@ class GenerateRadiographyJob implements ShouldQueue
         RadiografiaExportService $exportService,
     ): void {
         @ini_set('memory_limit', '1024M');
-        @ini_set('max_execution_time', '1200');
-        @set_time_limit(1200);
+        @ini_set('max_execution_time', '1800');
+        @set_time_limit(1800);
 
         $period = Period::query()->findOrFail($this->periodId);
 
@@ -61,11 +62,18 @@ class GenerateRadiographyJob implements ShouldQueue
         $run->update([
             'status' => 'running',
             'started_at' => $run->started_at ?: now(),
-            'log' => 'Analizando archivos y generando Radiografía.',
+            'finished_at' => null,
+            'log' => 'Analizando fuentes pendientes.',
         ]);
 
         try {
-            $radiographyService->generate($period, $this->userId);
+            $summary = $radiographyService->generate($period, $this->userId);
+
+            $run->update([
+                'status' => 'running',
+                'period_summary_id' => $summary->id,
+                'log' => 'Generando Excel final.',
+            ]);
 
             $path = $exportService->export($period);
 
