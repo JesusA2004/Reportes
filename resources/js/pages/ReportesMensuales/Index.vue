@@ -22,6 +22,22 @@ type PeriodItem = {
     is_closed: boolean
 }
 
+type GeneratedReport = {
+    id: number
+    name: string
+    period_id: number
+    period: string
+    period_code: string
+    type: string
+    scope: string
+    generated_at: string
+    generated_by?: number | null
+    status: string
+    excel_url: string
+    pdf_url: string
+    preview_url: string
+}
+
 type SummaryRow = {
     id: number
     employee_name?: string | null
@@ -42,11 +58,13 @@ const props = withDefaults(
         selectedPeriodId?: number | null
         summaryRows?: SummaryRow[]
         message: string
+        generatedReports?: GeneratedReport[]
     }>(),
     {
         periods: () => [],
         selectedPeriodId: null,
         summaryRows: () => [],
+        generatedReports: () => [],
     },
 )
 
@@ -137,6 +155,47 @@ const money = (value: number) =>
                         </button>
                     </div>
                 </div>
+            </section>
+
+            <section class="app-card p-5 shadow-xl shadow-slate-200/60 sm:p-6">
+                <div class="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                    <div>
+                        <h2 class="text-lg font-black tracking-tight">Reportes generados</h2>
+                        <p class="mt-1 text-sm text-muted-foreground">Consulta, previsualiza y descarga los Excel/PDF ya guardados sin recalcular todo.</p>
+                    </div>
+                    <span class="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700">{{ generatedReports.length }} disponibles</span>
+                </div>
+                <div v-if="generatedReports.length" class="overflow-x-auto rounded-2xl border border-border/70">
+                    <table class="min-w-full text-sm">
+                        <thead>
+                            <tr class="border-b bg-muted/40 text-left text-muted-foreground">
+                                <th class="px-4 py-3 font-bold">Reporte</th>
+                                <th class="px-4 py-3 font-bold">Periodo</th>
+                                <th class="px-4 py-3 font-bold">Tipo / alcance</th>
+                                <th class="px-4 py-3 font-bold">Generado</th>
+                                <th class="px-4 py-3 font-bold">Estado</th>
+                                <th class="px-4 py-3 text-right font-bold">Acciones</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="report in generatedReports" :key="report.id" class="border-b last:border-b-0">
+                                <td class="px-4 py-3 font-black">{{ report.name }}</td>
+                                <td class="px-4 py-3">{{ report.period }}<p class="text-xs text-muted-foreground">{{ report.period_code }}</p></td>
+                                <td class="px-4 py-3">{{ report.type }}<p class="text-xs text-muted-foreground">{{ report.scope }}</p></td>
+                                <td class="px-4 py-3">{{ report.generated_at ?? '—' }}</td>
+                                <td class="px-4 py-3"><span class="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-black text-emerald-700">{{ report.status }}</span></td>
+                                <td class="px-4 py-3">
+                                    <div class="flex justify-end gap-2">
+                                        <a class="rounded-xl border px-3 py-2 text-xs font-bold hover:bg-muted" :href="report.preview_url">Ver</a>
+                                        <a class="rounded-xl border px-3 py-2 text-xs font-bold hover:bg-muted" :href="report.excel_url">Excel</a>
+                                        <a class="rounded-xl border px-3 py-2 text-xs font-bold hover:bg-muted" :href="report.pdf_url">PDF</a>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div v-else class="rounded-2xl border border-dashed p-8 text-center text-sm text-muted-foreground">Aún no hay reportes generados. Genéralos desde Histórico general.</div>
             </section>
 
             <section class="app-card p-5 sm:p-6">

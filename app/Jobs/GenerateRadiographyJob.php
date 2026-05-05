@@ -76,6 +76,7 @@ class GenerateRadiographyJob implements ShouldQueue
             ]);
 
             $path = $exportService->export($period);
+            $pdfPath = $exportService->exportPdf($period);
 
             $summary = PeriodSummary::query()
                 ->where('period_id', $period->id)
@@ -85,7 +86,19 @@ class GenerateRadiographyJob implements ShouldQueue
                 PeriodRadiographyExport::query()->create([
                     'period_summary_id' => $summary->id,
                     'export_path' => $path,
+                    'file_type' => 'excel',
                     'template_version' => config('app.version'),
+                    'metadata' => ['period_id' => $period->id, 'period_label' => $period->label],
+                    'exported_at' => now(),
+                    'exported_by' => $this->userId,
+                ]);
+
+                PeriodRadiographyExport::query()->create([
+                    'period_summary_id' => $summary->id,
+                    'export_path' => $pdfPath,
+                    'file_type' => 'pdf',
+                    'template_version' => config('app.version'),
+                    'metadata' => ['period_id' => $period->id, 'period_label' => $period->label],
                     'exported_at' => now(),
                     'exported_by' => $this->userId,
                 ]);
@@ -95,12 +108,12 @@ class GenerateRadiographyJob implements ShouldQueue
                 'status' => 'success',
                 'period_summary_id' => $summary?->id,
                 'finished_at' => now(),
-                'log' => 'Radiografía generada y Excel final listo para descargar.',
+                'log' => 'Radiografía generada con Excel y PDF listos para descargar.',
             ]);
 
             $this->notifyUser(
                 subject: 'Radiografía lista para descargar',
-                message: "La Radiografía del periodo {$period->label} ya está lista para descargar.",
+                message: "La Radiografía del periodo {$period->label} ya está lista. Puedes consultarla en Reportes mensuales y descargar Excel o PDF.",
                 period: $period,
             );
         } catch (\Throwable $exception) {
@@ -134,7 +147,7 @@ class GenerateRadiographyJob implements ShouldQueue
         }
 
         try {
-            $downloadUrl = route('reportes-mensuales.export-radiography', $period);
+            $downloadUrl = route('reportes-mensuales.index') . '?period=' . $period->id;
 
             Mail::raw($message . PHP_EOL . PHP_EOL . 'Descargar: ' . $downloadUrl, function ($mail) use ($user, $subject) {
                 $mail->to($user->email)->subject($subject);

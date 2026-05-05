@@ -93,4 +93,8 @@ class Period extends Model {
         return $this->hasMany(MonthlyEmployeeSummary::class);
     }
 
+    public function radiographyRuns(): HasMany {
+        return $this->hasMany(PeriodRadiographyRun::class);
+    }
+
 }
