@@ -29,6 +29,13 @@ const uploadsBySource = computed(() => {
 const { currentStep, steps, selectStep } = useHistoricWorkflow(period, incidents)
 const form = useForm({ period_id:'', data_source_id:'', file:null as File | null, notes:'', covered_period_ids:[] as number[] })
 
+async function loadIncidents() {
+    if (!selectedPeriodId.value) return
+    const response = await fetch(`/historico-general/${selectedPeriodId.value}/incidencias`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    const data = await response.json()
+    incidents.value = data.items ?? []
+}
+
 watch(selectedPeriodId, () => { incidents.value = []; currentStep.value = 'files'; loadIncidents() }, { immediate: true })
 
 const toastError = (title: string, text: string) => Swal.fire({ title, text, icon: 'warning', confirmButtonText: 'Entendido' })
@@ -52,12 +59,6 @@ const updateDatabase = () => {
     if (!selectedPeriodId.value) return
     Swal.fire({ title:'Actualizando base de datos', html:'<p>Validando archivos obligatorios...</p><p>Leyendo NOI y Cobranza...</p><p>Registrando incidencias...</p>', allowOutsideClick:false, showConfirmButton:false, didOpen:()=>Swal.showLoading() })
     router.post(`/historico-general/${selectedPeriodId.value}/actualizar-bd`, {}, { preserveScroll:true, onSuccess:()=>{ Swal.fire('BD actualizada','Revisa incidencias pendientes antes de continuar.','success'); currentStep.value='incidents'; loadIncidents() }, onError:()=>Swal.fire('No se pudo actualizar','Faltan fuentes o alguna fuente tiene error.','error') })
-}
-const loadIncidents = async () => {
-    if (!selectedPeriodId.value) return
-    const response = await fetch(`/historico-general/${selectedPeriodId.value}/incidencias`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
-    const data = await response.json()
-    incidents.value = data.items ?? []
 }
 const resolveIncident = async (id:number) => {
     const result = await Swal.fire({ title:'Resolver incidencia', input:'textarea', inputLabel:'Nota de resolución', inputPlaceholder:'Describe cómo quedó resuelta...', showCancelButton:true, confirmButtonText:'Guardar resolución', cancelButtonText:'Cancelar', inputValidator:(value)=> !value ? 'Captura una nota de resolución.' : undefined })
