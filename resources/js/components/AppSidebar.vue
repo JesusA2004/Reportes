@@ -4,20 +4,9 @@ import {
     LayoutGrid,
     CalendarRange,
     Upload,
-    Database,
-    Building2,
-    Users,
     GitCompareArrows,
-    Wallet,
-    BadgeDollarSign,
-    PiggyBank,
-    ReceiptText,
     FileSpreadsheet,
-    BarChart3,
     Settings,
-    ShieldCheck,
-    ClipboardList,
-    FolderCog,
 } from 'lucide-vue-next';
 
 import AppLogo from '@/components/AppLogo.vue';
@@ -53,14 +42,9 @@ const mainNavItems: NavItem[] = [
         icon: CalendarRange,
     },
     {
-        title: 'Asignación sucursal',
+        title: 'Empleados',
         href: '/asignaciones-empleado-sucursal',
         icon: GitCompareArrows,
-    },
-    {
-        title: 'Validaciones',
-        href: '/validaciones',
-        icon: ShieldCheck,
     },
     {
         title: 'Reportes mensuales',

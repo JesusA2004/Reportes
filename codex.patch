@@ -1,0 +1,2848 @@
+diff --git a/resources/js/components/AppSidebar.vue b/resources/js/components/AppSidebar.vue
+index b622e0f52d31d492c90dac5590668e5a867f8390..a700b0a9efd60962b7ec2793612729a52b40c45d 100644
+--- a/resources/js/components/AppSidebar.vue
++++ b/resources/js/components/AppSidebar.vue
+@@ -1,89 +1,73 @@
+ <script setup lang="ts">
+ import { Link } from '@inertiajs/vue3';
+ import {
+     LayoutGrid,
+     CalendarRange,
+     Upload,
+-    Database,
+-    Building2,
+-    Users,
+     GitCompareArrows,
+-    Wallet,
+-    BadgeDollarSign,
+-    PiggyBank,
+-    ReceiptText,
+     FileSpreadsheet,
+-    BarChart3,
+     Settings,
+-    ShieldCheck,
+-    ClipboardList,
+-    FolderCog,
+ } from 'lucide-vue-next';
+
+ import AppLogo from '@/components/AppLogo.vue';
+ import NavMain from '@/components/NavMain.vue';
+ import NavUser from '@/components/NavUser.vue';
+ import {
+     Sidebar,
+     SidebarContent,
+     SidebarFooter,
+     SidebarHeader,
+     SidebarMenu,
+     SidebarMenuButton,
+     SidebarMenuItem,
+ } from '@/components/ui/sidebar';
+
+ import { dashboard } from '@/routes';
+ import type { NavItem } from '@/types';
+
+ const mainNavItems: NavItem[] = [
+     {
+         title: 'Dashboard',
+         href: dashboard(),
+         icon: LayoutGrid,
+     },
+     {
+         title: 'Histórico general',
+         href: '/historico-general',
+         icon: Upload,
+     },
+     {
+         title: 'Periodos',
+         href: '/periodos',
+         icon: CalendarRange,
+     },
+     {
+-        title: 'Asignación sucursal',
++        title: 'Empleados',
+         href: '/asignaciones-empleado-sucursal',
+         icon: GitCompareArrows,
+     },
+-    {
+-        title: 'Validaciones',
+-        href: '/validaciones',
+-        icon: ShieldCheck,
+-    },
+     {
+         title: 'Reportes mensuales',
+         href: '/reportes-mensuales',
+         icon: FileSpreadsheet,
+     },
+     {
+         title: 'Configuración',
+         href: '/settings/profile',
+         icon: Settings,
+     },
+ ]
+
+ const footerNavItems: NavItem[] = [];
+ </script>
+
+ <template>
+     <Sidebar collapsible="icon" variant="inset">
+         <SidebarHeader>
+             <SidebarMenu>
+                 <SidebarMenuItem>
+                     <SidebarMenuButton size="lg" as-child>
+                         <Link :href="dashboard()">
+                             <AppLogo />
+                         </Link>
+                     </SidebarMenuButton>
+diff --git a/resources/js/components/historico-general/DatabaseUpdateStep.vue b/resources/js/components/historico-general/DatabaseUpdateStep.vue
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d12febb65e83d296324b9867be4b7ec49c60f7e
+--- /dev/null
++++ b/resources/js/components/historico-general/DatabaseUpdateStep.vue
+@@ -0,0 +1,5 @@
++<script setup lang="ts">
++defineProps<{ canUpdate: boolean }>();
++const emit = defineEmits(['update']);
++</script>
++<template><div class="rounded-xl border bg-white p-4"><button class="rounded bg-indigo-600 px-4 py-2 text-white disabled:opacity-50" :disabled="!canUpdate" @click="emit('update')">Actualizar BD</button></div></template>
+diff --git a/resources/js/components/historico-general/GeneratedReportActions.vue b/resources/js/components/historico-general/GeneratedReportActions.vue
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a489ca3d96a7e988d1095519e75a3f2550329e3
+--- /dev/null
++++ b/resources/js/components/historico-general/GeneratedReportActions.vue
+@@ -0,0 +1,5 @@
++<script setup lang="ts">
++defineProps<{ period: any }>();
++const emit = defineEmits(['generate']);
++</script>
++<template><div class="rounded-xl border bg-white p-4 text-sm text-slate-700">Componente en construcción para Fase 2/3.</div></template>
+diff --git a/resources/js/components/historico-general/IncidentsStep.vue b/resources/js/components/historico-general/IncidentsStep.vue
+new file mode 100644
+index 0000000000000000000000000000000000000000..d64529e3fb1e0ab3eddab0d32dee601f328bd1f6
+--- /dev/null
++++ b/resources/js/components/historico-general/IncidentsStep.vue
+@@ -0,0 +1,14 @@
++<script setup lang="ts">
++defineProps<{ incidents: any[] }>();
++const emit = defineEmits(['resolve']);
++</script>
++<template>
++  <div class="rounded-xl border bg-white p-4">
++    <h3 class="mb-3 font-semibold">Incidencias</h3>
++    <div v-if="incidents.length===0" class="text-sm text-emerald-600">Sin incidencias críticas.</div>
++    <div v-for="item in incidents" :key="item.id" class="mb-2 rounded border p-2 text-sm">
++      <div class="font-medium">{{ item.type }} - {{ item.message }}</div>
++      <button class="mt-2 rounded border px-2 py-1 text-xs" @click="emit('resolve', item.id)">Resolver</button>
++    </div>
++  </div>
++</template>
+diff --git a/resources/js/components/historico-general/PeriodSelector.vue b/resources/js/components/historico-general/PeriodSelector.vue
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3e61c395a144429341762e874c2682ba5cd3c21
+--- /dev/null
++++ b/resources/js/components/historico-general/PeriodSelector.vue
+@@ -0,0 +1,18 @@
++<script setup lang="ts">
++defineProps<{ periods: any[]; modelValue: number | null }>();
++const emit = defineEmits<{ (e: 'update:modelValue', v: number): void }>();
++</script>
++
++<template>
++  <div class="rounded-xl border bg-white p-4">
++    <label class="mb-2 block text-sm font-medium text-slate-700">Periodo</label>
++    <select
++      class="w-full rounded-lg border-slate-300"
++      :value="modelValue ?? ''"
++      @change="emit('update:modelValue', Number(($event.target as HTMLSelectElement).value))"
++    >
++      <option disabled value="">Selecciona un periodo</option>
++      <option v-for="period in periods" :key="period.id" :value="period.id">{{ period.label }}</option>
++    </select>
++  </div>
++</template>
+diff --git a/resources/js/components/historico-general/ReportConfigurationStep.vue b/resources/js/components/historico-general/ReportConfigurationStep.vue
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a489ca3d96a7e988d1095519e75a3f2550329e3
+--- /dev/null
++++ b/resources/js/components/historico-general/ReportConfigurationStep.vue
+@@ -0,0 +1,5 @@
++<script setup lang="ts">
++defineProps<{ period: any }>();
++const emit = defineEmits(['generate']);
++</script>
++<template><div class="rounded-xl border bg-white p-4 text-sm text-slate-700">Componente en construcción para Fase 2/3.</div></template>
+diff --git a/resources/js/components/historico-general/ReportGenerationStatus.vue b/resources/js/components/historico-general/ReportGenerationStatus.vue
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a489ca3d96a7e988d1095519e75a3f2550329e3
+--- /dev/null
++++ b/resources/js/components/historico-general/ReportGenerationStatus.vue
+@@ -0,0 +1,5 @@
++<script setup lang="ts">
++defineProps<{ period: any }>();
++const emit = defineEmits(['generate']);
++</script>
++<template><div class="rounded-xl border bg-white p-4 text-sm text-slate-700">Componente en construcción para Fase 2/3.</div></template>
+diff --git a/resources/js/components/historico-general/ReportPreview.vue b/resources/js/components/historico-general/ReportPreview.vue
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a489ca3d96a7e988d1095519e75a3f2550329e3
+--- /dev/null
++++ b/resources/js/components/historico-general/ReportPreview.vue
+@@ -0,0 +1,5 @@
++<script setup lang="ts">
++defineProps<{ period: any }>();
++const emit = defineEmits(['generate']);
++</script>
++<template><div class="rounded-xl border bg-white p-4 text-sm text-slate-700">Componente en construcción para Fase 2/3.</div></template>
+diff --git a/resources/js/components/historico-general/SourceUploadCard.vue b/resources/js/components/historico-general/SourceUploadCard.vue
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae5cc0cf72eb363a80d17caf775aa732bb8273e3
+--- /dev/null
++++ b/resources/js/components/historico-general/SourceUploadCard.vue
+@@ -0,0 +1,21 @@
++<script setup lang="ts">
++import { computed, ref } from 'vue';
++const props = defineProps<{ source: any; upload?: any; selectedPeriodId: number | null }>();
++const emit = defineEmits<{ (e: 'upload', payload: { sourceId: number; file: File }): void; (e: 'delete', id: number): void }>();
++const file = ref<File | null>(null);
++const statusLabel = computed(() => ({ pending:'Pendiente de procesar', processing:'Procesando', processed:'Procesado', failed:'Error al procesar' } as any)[props.upload?.status] ?? 'Pendiente');
++</script>
++<template>
++  <div class="rounded-xl border bg-white p-4">
++    <h3 class="font-semibold">{{ source.name }}</h3>
++    <p class="text-xs text-slate-500">{{ statusLabel }}</p>
++    <p class="mt-2 text-sm">{{ upload?.original_name ?? 'Sin archivo cargado' }}</p>
++    <p class="text-xs text-slate-500">{{ upload?.uploaded_at ?? '—' }}</p>
++    <p v-if="upload?.notes" class="mt-2 text-xs text-rose-600">{{ upload.notes }}</p>
++    <div class="mt-3 flex gap-2">
++      <input type="file" class="text-xs" @change="file = (($event.target as HTMLInputElement).files?.[0] ?? null)" />
++      <button class="rounded bg-indigo-600 px-3 py-1 text-xs text-white disabled:opacity-50" :disabled="!file || !selectedPeriodId" @click="file && emit('upload', { sourceId: source.id, file: file })">{{ upload ? 'Reemplazar' : 'Subir' }}</button>
++      <button v-if="upload" class="rounded border px-3 py-1 text-xs" @click="emit('delete', upload.id)">Eliminar</button>
++    </div>
++  </div>
++</template>
+diff --git a/resources/js/components/historico-general/UploadSourcesStep.vue b/resources/js/components/historico-general/UploadSourcesStep.vue
+new file mode 100644
+index 0000000000000000000000000000000000000000..b3c1fe90cb8b73db995c6551254cf461a5ad6269
+--- /dev/null
++++ b/resources/js/components/historico-general/UploadSourcesStep.vue
+@@ -0,0 +1,10 @@
++<script setup lang="ts">
++import SourceUploadCard from './SourceUploadCard.vue';
++defineProps<{ sources: any[]; uploadsBySource: Record<string, any>; selectedPeriodId: number | null }>();
++const emit = defineEmits(['upload', 'delete']);
++</script>
++<template>
++  <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
++    <SourceUploadCard v-for="source in sources" :key="source.id" :source="source" :upload="uploadsBySource[source.code]" :selected-period-id="selectedPeriodId" @upload="emit('upload', $event)" @delete="emit('delete', $event)" />
++  </div>
++</template>
+diff --git a/resources/js/components/historico-general/WorkflowStepper.vue b/resources/js/components/historico-general/WorkflowStepper.vue
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb8dc5ed3ece2da0ee0add172f01afcfd2a97a97
+--- /dev/null
++++ b/resources/js/components/historico-general/WorkflowStepper.vue
+@@ -0,0 +1,20 @@
++<script setup lang="ts">
++defineProps<{ steps: { key: string; label: string }[]; current: string }>();
++</script>
++
++<template>
++  <div class="rounded-xl border bg-white p-4">
++    <div class="grid gap-2 md:grid-cols-6">
++      <button
++        v-for="(step, i) in steps"
++        :key="step.key"
++        type="button"
++        class="rounded-lg border px-3 py-2 text-left text-sm"
++        :class="current === step.key ? 'border-indigo-600 bg-indigo-50 text-indigo-700' : 'border-slate-200 text-slate-600'"
++      >
++        <div class="text-xs font-semibold">Etapa {{ i + 1 }}</div>
++        <div>{{ step.label }}</div>
++      </button>
++    </div>
++  </div>
++</template>
+diff --git a/resources/js/pages/historico-general/index.vue b/resources/js/pages/historico-general/index.vue
+index 479990b9df35abb6626eb71d9ab2001e768b3569..9b9f4ce5b8b430f25784b06629b27bea6666905b 100644
+--- a/resources/js/pages/historico-general/index.vue
++++ b/resources/js/pages/historico-general/index.vue
+@@ -1,2530 +1,60 @@
+ <script setup lang="ts">
+ import { computed, ref, watch } from 'vue';
+ import { Head, router, useForm } from '@inertiajs/vue3';
+ import Swal from 'sweetalert2';
+-import {
+-    AlertCircle,
+-    ArrowUpRight,
+-    CalendarDays,
+-    CalendarRange,
+-    CheckCircle2,
+-    ChevronDown,
+-    ChevronRight,
+-    Clock3,
+-    FileSpreadsheet,
+-    FolderOpen,
+-    Inbox,
+-    Info,
+-    Layers3,
+-    LoaderCircle,
+-    Search,
+-    Sparkles,
+-    Trash2,
+-    UploadCloud,
+-} from 'lucide-vue-next';
+-
+-import InputError from '@/components/InputError.vue';
+ import AppLayout from '@/layouts/AppLayout.vue';
+-
+-type WeekOption = {
+-    id: number;
+-    label: string;
+-    sequence?: number | null;
+-    start_date?: string | null;
+-    end_date?: string | null;
+-};
+-
+-type PeriodItem = {
+-    id: number;
+-    code: string;
+-    label: string;
+-    type?:
+-        | 'weekly'
+-        | 'bimonthly'
+-        | 'quarterly'
+-        | 'semiannual'
+-        | 'annual'
+-        | string
+-        | null;
+-    year?: number | null;
+-    month?: number | null;
+-    sequence?: number | null;
+-    start_date?: string | null;
+-    end_date?: string | null;
+-    is_closed?: boolean;
+-    can_receive_uploads?: boolean;
+-    is_derived?: boolean;
+-    uploaded_sources_count?: number;
+-    required_sources_count?: number;
+-    missing_sources_count?: number;
+-    processed_count?: number;
+-    pending_count?: number;
+-    failed_count?: number;
+-    updated_at?: string | null;
+-    missing_sources?: string[];
+-    report_final_available?: boolean;
+-    database_updated?: boolean;
+-    database_invalidated?: boolean;
+-    pending_critical_incidents_count?: number;
+-    missing_database_sources?: string[];
+-    missing_radiography_sources?: string[];
+-    unprocessed_radiography_sources?: string[];
+-    radiography_ready?: boolean;
+-    can_update_database?: boolean;
+-    can_resolve_incidents?: boolean;
+-    can_generate_radiography?: boolean;
+-    can_export_radiography?: boolean;
+-    blocking_reasons?: string[];
+-    available_week_options?: WeekOption[];
+-};
+-
+-type SourceItem = {
+-    id: number;
+-    code: string;
+-    name: string;
+-    description?: string | null;
+-};
+-
+-type UploadItem = {
+-    id: number;
+-    original_name: string;
+-    status: 'pending' | 'processing' | 'processed' | 'failed';
+-    uploaded_at?: string | null;
+-    notes?: string | null;
+-    source_code?: string | null;
+-    source_name?: string | null;
+-    covered_period_ids?: number[];
+-    covered_period_labels?: string[];
+-    covered_week_ids?: number[];
+-    covered_week_labels?: string[];
+-    last_process_run?: {
+-        status?: 'pending' | 'running' | 'success' | 'failed' | string;
+-        rows_read?: number;
+-        rows_inserted?: number;
+-        rows_with_errors?: number;
+-        finished_at?: string | null;
+-    } | null;
+-};
+-
+-type GroupedPeriodUploads = {
+-    period_id: number;
+-    period_code: string;
+-    period_label: string;
+-    updated_at?: string | null;
+-    uploaded_sources_count?: number;
+-    required_sources_count?: number;
+-    missing_sources_count?: number;
+-    processed_count?: number;
+-    pending_count?: number;
+-    failed_count?: number;
+-    missing_sources?: string[];
+-    report_final_available?: boolean;
+-    radiography_status?: string;
+-    radiography_invalidated?: boolean;
+-    radiography_run_status?:
+-        | 'queued'
+-        | 'running'
+-        | 'success'
+-        | 'failed'
+-        | string
+-        | null;
+-    radiography_run_log?: string | null;
+-    radiography_run_finished_at?: string | null;
+-    database_updated?: boolean;
+-    database_invalidated?: boolean;
+-    pending_critical_incidents_count?: number;
+-    missing_database_sources?: string[];
+-    missing_radiography_sources?: string[];
+-    unprocessed_radiography_sources?: string[];
+-    radiography_ready?: boolean;
+-    radiography_running?: boolean;
+-    can_update_database?: boolean;
+-    can_resolve_incidents?: boolean;
+-    can_generate_radiography?: boolean;
+-    can_export_radiography?: boolean;
+-    blocking_reasons?: string[];
+-    uploads: UploadItem[];
++import WorkflowStepper from '@/components/historico-general/WorkflowStepper.vue';
++import PeriodSelector from '@/components/historico-general/PeriodSelector.vue';
++import UploadSourcesStep from '@/components/historico-general/UploadSourcesStep.vue';
++import DatabaseUpdateStep from '@/components/historico-general/DatabaseUpdateStep.vue';
++import IncidentsStep from '@/components/historico-general/IncidentsStep.vue';
++import ReportConfigurationStep from '@/components/historico-general/ReportConfigurationStep.vue';
++import ReportGenerationStatus from '@/components/historico-general/ReportGenerationStatus.vue';
++import ReportPreview from '@/components/historico-general/ReportPreview.vue';
++import GeneratedReportActions from '@/components/historico-general/GeneratedReportActions.vue';
++defineOptions({ layout: AppLayout });
++const props = defineProps<{ periods:any[]; sources:any[]; groupedUploads:any[]; currentPeriodId:number|null }>();
++const currentStep = ref('files');
++const selectedPeriodId = ref<number|null>(props.currentPeriodId ?? null);
++const incidents = ref<any[]>([]);
++const steps = [
++{ key:'files', label:'Periodo y archivos'}, { key:'bd', label:'Actualización BD'}, { key:'incidents', label:'Incidencias'}, { key:'config', label:'Configurar reporte'}, { key:'preview', label:'Vista previa'}, { key:'exports', label:'Exportación / archivos generados'}
++];
++const period = computed(()=> props.periods.find(p=>p.id===selectedPeriodId.value) ?? null);
++const grouped = computed(()=> props.groupedUploads.find(p=>p.period_id===selectedPeriodId.value) ?? null);
++const uploadsBySource = computed(()=> {
++  const map:Record<string, any> = {};
++  for (const u of grouped.value?.uploads ?? []) map[u.source_code]=u;
++  return map;
++});
++const form = useForm({ period_id:'', data_source_id:'', file:null as File | null, notes:'', covered_period_ids:[] as number[] });
++watch(selectedPeriodId, ()=> { incidents.value=[]; currentStep.value='files'; });
++const uploadFile = ({sourceId, file}:{sourceId:number; file:File}) => {
++  if (!selectedPeriodId.value) return;
++  form.period_id = String(selectedPeriodId.value); form.data_source_id = String(sourceId); form.file = file; form.covered_period_ids=[selectedPeriodId.value];
++  form.post('/historico-general', { forceFormData:true, onSuccess:()=>Swal.fire('Archivo cargado','Pendiente de procesar','success') });
+ };
+-
+-type PeriodRow = {
+-    id: number;
+-    code: string;
+-    label: string;
+-    type: string;
+-    year: number | null;
+-    month: number | null;
+-    sequence: number | null;
+-    start_date: string | null;
+-    end_date: string | null;
+-    can_receive_uploads: boolean;
+-    is_derived: boolean;
+-    updated_at: string | null;
+-    uploaded_sources_count: number;
+-    required_sources_count: number;
+-    missing_sources_count: number;
+-    processed_count: number;
+-    pending_count: number;
+-    failed_count: number;
+-    missing_sources: string[];
+-    report_final_available: boolean;
+-    radiography_status?: string;
+-    radiography_invalidated?: boolean;
+-    radiography_run_status?:
+-        | 'queued'
+-        | 'running'
+-        | 'success'
+-        | 'failed'
+-        | string
+-        | null;
+-    radiography_run_log?: string | null;
+-    radiography_run_finished_at?: string | null;
+-    radiography_running?: boolean;
+-    database_updated?: boolean;
+-    database_invalidated?: boolean;
+-    pending_critical_incidents_count?: number;
+-    missing_database_sources?: string[];
+-    missing_radiography_sources?: string[];
+-    unprocessed_radiography_sources?: string[];
+-    radiography_ready?: boolean;
+-    can_update_database?: boolean;
+-    can_resolve_incidents?: boolean;
+-    can_generate_radiography?: boolean;
+-    can_export_radiography?: boolean;
+-    blocking_reasons?: string[];
+-    uploads: UploadItem[];
+-    available_week_options: WeekOption[];
++const deleteUpload = (id:number)=> router.delete(`/historico-general/${id}`);
++const updateDatabase = ()=> selectedPeriodId.value && router.post(`/historico-general/${selectedPeriodId.value}/actualizar-bd`, {}, { onSuccess:()=>{ Swal.fire('BD actualizada','Revisa incidencias pendientes','success'); currentStep.value='incidents'; loadIncidents(); } });
++const loadIncidents = async () => {
++  if (!selectedPeriodId.value) return;
++  const response = await fetch(`/historico-general/${selectedPeriodId.value}/incidencias`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
++  const data = await response.json();
++  incidents.value = data.items ?? [];
+ };
+-
+-const props = withDefaults(
+-    defineProps<{
+-        periods: PeriodItem[];
+-        sources: SourceItem[];
+-        groupedUploads?: GroupedPeriodUploads[];
+-        currentPeriodId?: number | null;
+-    }>(),
+-    {
+-        groupedUploads: () => [],
+-        currentPeriodId: null,
+-    },
+-);
+-
+-defineOptions({
+-    layout: AppLayout,
+-});
+-
+-const monthNames = [
+-    '',
+-    'Enero',
+-    'Febrero',
+-    'Marzo',
+-    'Abril',
+-    'Mayo',
+-    'Junio',
+-    'Julio',
+-    'Agosto',
+-    'Septiembre',
+-    'Octubre',
+-    'Noviembre',
+-    'Diciembre',
+-];
+-
+-const fileInputRef = ref<HTMLInputElement | null>(null);
+-const dragActive = ref(false);
+-const deletingIds = ref<number[]>([]);
+-const quickFilter = ref('');
+-const periodSearch = ref('');
+-const collapsedWeeklyGroups = ref<Record<string, boolean>>({});
+-
+-const form = useForm<{
+-    period_id: string | number;
+-    data_source_id: string | number;
+-    file: File | null;
+-    notes: string;
+-    covered_period_ids: number[];
+-}>({
+-    period_id: props.currentPeriodId ?? '',
+-    data_source_id: '',
+-    file: null,
+-    notes: '',
+-    covered_period_ids: [],
+-});
+-
+-const groupedMap = computed(() => {
+-    const map = new Map<number, GroupedPeriodUploads>();
+-
+-    for (const item of props.groupedUploads ?? []) {
+-        map.set(item.period_id, item);
+-    }
+-
+-    return map;
+-});
+-
+-const weekOptionMap = computed(() => {
+-    const map = new Map<number, WeekOption>();
+-
+-    for (const period of props.periods) {
+-        const optionFromPeriod: WeekOption = {
+-            id: period.id,
+-            label: period.label,
+-            sequence: period.sequence ?? null,
+-            start_date: period.start_date ?? null,
+-            end_date: period.end_date ?? null,
+-        };
+-
+-        map.set(period.id, optionFromPeriod);
+-
+-        for (const option of period.available_week_options ?? []) {
+-            map.set(option.id, option);
+-        }
+-    }
+-
+-    return map;
+-});
+-
+-const periodRows = computed<PeriodRow[]>(() => {
+-    return props.periods.map((period) => {
+-        const grouped = groupedMap.value.get(period.id);
+-        const directWeekOption = weekOptionMap.value.get(period.id);
+-
+-        const workflowSource = grouped ?? period;
+-
+-        return {
+-            id: period.id,
+-            code: period.code,
+-            label: period.label,
+-            type: period.type ?? 'weekly',
+-            year: period.year ?? null,
+-            month: period.month ?? null,
+-            sequence: period.sequence ?? null,
+-            start_date:
+-                period.start_date ?? directWeekOption?.start_date ?? null,
+-            end_date: period.end_date ?? directWeekOption?.end_date ?? null,
+-            can_receive_uploads: Boolean(
+-                period.can_receive_uploads ?? period.type === 'weekly',
+-            ),
+-            is_derived: Boolean(period.is_derived ?? period.type !== 'weekly'),
+-            updated_at: grouped?.updated_at ?? period.updated_at ?? null,
+-            uploaded_sources_count:
+-                grouped?.uploaded_sources_count ??
+-                period.uploaded_sources_count ??
+-                0,
+-            required_sources_count:
+-                grouped?.required_sources_count ??
+-                period.required_sources_count ??
+-                props.sources.length,
+-            missing_sources_count:
+-                grouped?.missing_sources_count ??
+-                period.missing_sources_count ??
+-                props.sources.length,
+-            processed_count:
+-                grouped?.processed_count ?? period.processed_count ?? 0,
+-            pending_count: grouped?.pending_count ?? period.pending_count ?? 0,
+-            failed_count: grouped?.failed_count ?? period.failed_count ?? 0,
+-            missing_sources:
+-                grouped?.missing_sources ??
+-                period.missing_sources ??
+-                props.sources.map((s) => s.name),
+-            report_final_available:
+-                grouped?.report_final_available ??
+-                period.report_final_available ??
+-                false,
+-            radiography_status:
+-                (workflowSource as any)?.radiography_status ?? 'missing',
+-            radiography_invalidated: Boolean(
+-                (workflowSource as any)?.radiography_invalidated ?? false,
+-            ),
+-            radiography_run_status:
+-                (workflowSource as any)?.radiography_run_status ?? null,
+-            radiography_run_log:
+-                (workflowSource as any)?.radiography_run_log ?? null,
+-            radiography_run_finished_at:
+-                (workflowSource as any)?.radiography_run_finished_at ?? null,
+-            radiography_running: Boolean(
+-                (workflowSource as any)?.radiography_running ?? false,
+-            ),
+-            database_updated: Boolean(
+-                (workflowSource as any)?.database_updated ?? false,
+-            ),
+-            database_invalidated: Boolean(
+-                (workflowSource as any)?.database_invalidated ?? false,
+-            ),
+-            pending_critical_incidents_count: Number(
+-                (workflowSource as any)?.pending_critical_incidents_count ?? 0,
+-            ),
+-            missing_database_sources:
+-                (workflowSource as any)?.missing_database_sources ?? [],
+-            missing_radiography_sources:
+-                (workflowSource as any)?.missing_radiography_sources ?? [],
+-            unprocessed_radiography_sources:
+-                (workflowSource as any)?.unprocessed_radiography_sources ?? [],
+-            radiography_ready: Boolean(
+-                (workflowSource as any)?.radiography_ready ?? false,
+-            ),
+-            can_update_database: Boolean(
+-                (workflowSource as any)?.can_update_database ?? false,
+-            ),
+-            can_resolve_incidents: Boolean(
+-                (workflowSource as any)?.can_resolve_incidents ?? false,
+-            ),
+-            can_generate_radiography: Boolean(
+-                (workflowSource as any)?.can_generate_radiography ?? false,
+-            ),
+-            can_export_radiography: Boolean(
+-                (workflowSource as any)?.can_export_radiography ?? false,
+-            ),
+-            blocking_reasons: (workflowSource as any)?.blocking_reasons ?? [],
+-            uploads: grouped?.uploads ?? [],
+-            available_week_options: period.available_week_options ?? [],
+-        };
+-    });
+-});
+-
+-const weeklyPeriods = computed(() =>
+-    periodRows.value.filter((period) => period.type === 'weekly'),
+-);
+-
+-const automaticPeriods = computed(() =>
+-    periodRows.value.filter((period) => period.type !== 'weekly'),
+-);
+-
+-const filteredWeeklyPeriods = computed(() => {
+-    const query = periodSearch.value.trim().toLowerCase();
+-
+-    if (!query) return weeklyPeriods.value;
+-
+-    return weeklyPeriods.value.filter((period) => {
+-        return (
+-            period.label.toLowerCase().includes(query) ||
+-            period.code.toLowerCase().includes(query) ||
+-            formatRange(period.start_date, period.end_date)
+-                .toLowerCase()
+-                .includes(query)
+-        );
+-    });
+-});
+-
+-function weeklyMonthGroupTitle(period: PeriodRow) {
+-    if (period.month && period.year) {
+-        return `${monthNames[period.month]} ${period.year}`;
+-    }
+-
+-    if (period.start_date) {
+-        const parsed = new Date(`${period.start_date}T00:00:00`);
+-        if (!Number.isNaN(parsed.getTime())) {
+-            return new Intl.DateTimeFormat('es-MX', {
+-                month: 'long',
+-                year: 'numeric',
+-            }).format(parsed);
+-        }
+-    }
+-
+-    return 'Sin mes';
+-}
+-
+-const groupedWeeklyPeriods = computed(() => {
+-    const groups = filteredWeeklyPeriods.value.reduce<
+-        Array<{
+-            key: string;
+-            title: string;
+-            periods: PeriodRow[];
+-            totalUploads: number;
+-            completeCount: number;
+-        }>
+-    >((acc, period) => {
+-        const title = weeklyMonthGroupTitle(period);
+-        const key = `${period.year ?? 'x'}-${period.month ?? 'x'}-${title}`;
+-
+-        let found = acc.find((item) => item.key === key);
+-
+-        if (!found) {
+-            found = {
+-                key,
+-                title,
+-                periods: [],
+-                totalUploads: 0,
+-                completeCount: 0,
+-            };
+-            acc.push(found);
+-        }
+-
+-        found.periods.push(period);
+-        found.totalUploads += period.uploads.length;
+-
+-        if (
+-            period.uploaded_sources_count >= period.required_sources_count &&
+-            period.required_sources_count > 0
+-        ) {
+-            found.completeCount += 1;
+-        }
+-
+-        return acc;
+-    }, []);
+-
+-    return groups.map((group) => ({
+-        ...group,
+-        periods: [...group.periods].sort((a, b) => {
+-            const aSeq = a.sequence ?? 0;
+-            const bSeq = b.sequence ?? 0;
+-            return aSeq - bSeq;
+-        }),
+-    }));
+-});
+-
+-function toggleWeeklyGroup(key: string) {
+-    collapsedWeeklyGroups.value[key] = !collapsedWeeklyGroups.value[key];
+-}
+-
+-function isWeeklyGroupCollapsed(key: string) {
+-    return !!collapsedWeeklyGroups.value[key];
+-}
+-
+-const selectedPeriodRow = computed(() => {
+-    const id = String(form.period_id || '');
+-    return periodRows.value.find((period) => String(period.id) === id) ?? null;
+-});
+-
+-const selectedIsWeekly = computed(
+-    () => selectedPeriodRow.value?.type === 'weekly',
+-);
+-const selectedIsAutomatic = computed(() =>
+-    Boolean(selectedPeriodRow.value?.is_derived),
+-);
+-const totalPeriods = computed(() => periodRows.value.length);
+-
+-const totalUploads = computed(() =>
+-    periodRows.value.reduce((acc, period) => acc + period.uploads.length, 0),
+-);
+-
+-const completePeriods = computed(
+-    () =>
+-        weeklyPeriods.value.filter(
+-            (period) =>
+-                period.required_sources_count > 0 &&
+-                period.uploaded_sources_count >= period.required_sources_count,
+-        ).length,
+-);
+-
+-const incompletePeriods = computed(
+-    () => weeklyPeriods.value.length - completePeriods.value,
+-);
+-
+-function currentStatusLabel(period: PeriodRow) {
+-    if (period.is_derived) return 'Automático';
+-    if (period.uploaded_sources_count === 0) return 'Sin carga';
+-    if (period.failed_count > 0) return 'Con error';
+-    if (period.pending_count > 0) return 'Procesando';
+-    if (period.missing_sources_count > 0) return 'Incompleto';
+-    return 'Completo';
+-}
+-
+-function currentStatusClass(period: PeriodRow) {
+-    if (period.is_derived) {
+-        return 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300';
+-    }
+-
+-    if (period.uploaded_sources_count === 0) {
+-        return 'bg-slate-100 text-slate-700 dark:bg-slate-500/15 dark:text-slate-300';
+-    }
+-
+-    if (period.failed_count > 0) {
+-        return 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300';
+-    }
+-
+-    if (period.pending_count > 0) {
+-        return 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300';
+-    }
+-
+-    if (period.missing_sources_count > 0) {
+-        return 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300';
+-    }
+-
+-    return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300';
+-}
+-
+-function formatLongDate(date?: string | null) {
+-    if (!date) return 'Sin fecha';
+-
+-    const parsed = new Date(`${date}T00:00:00`);
+-    if (Number.isNaN(parsed.getTime())) return date;
+-
+-    return new Intl.DateTimeFormat('es-MX', {
+-        day: 'numeric',
+-        month: 'long',
+-        year: 'numeric',
+-    }).format(parsed);
+-}
+-
+-function formatShortDate(date?: string | null) {
+-    if (!date) return 'Sin fecha';
+-
+-    const parsed = new Date(`${date}T00:00:00`);
+-    if (Number.isNaN(parsed.getTime())) return date;
+-
+-    return new Intl.DateTimeFormat('es-MX', {
+-        day: 'numeric',
+-        month: 'short',
+-        year: 'numeric',
+-    }).format(parsed);
+-}
+-
+-function formatRange(start?: string | null, end?: string | null) {
+-    if (!start && !end) return 'Sin rango definido';
+-    if (start && !end) return `Desde ${formatLongDate(start)}`;
+-    if (!start && end) return `Hasta ${formatLongDate(end)}`;
+-    return `${formatLongDate(start)} al ${formatLongDate(end)}`;
+-}
+-
+-const currentProgress = computed(() => {
+-    if (!selectedPeriodRow.value) return 0;
+-
+-    return Math.round(
+-        (selectedPeriodRow.value.uploaded_sources_count /
+-            Math.max(selectedPeriodRow.value.required_sources_count, 1)) *
+-            100,
+-    );
+-});
+-
+-const selectedUploads = computed(() => {
+-    const uploads = selectedPeriodRow.value?.uploads ?? [];
+-    const query = quickFilter.value.trim().toLowerCase();
+-
+-    if (!query) return uploads;
+-
+-    return uploads.filter((upload) => {
+-        return (
+-            (upload.original_name ?? '').toLowerCase().includes(query) ||
+-            (upload.source_name ?? '').toLowerCase().includes(query) ||
+-            (upload.notes ?? '').toLowerCase().includes(query)
+-        );
+-    });
+-});
+-
+-const selectedFileName = computed(
+-    () => form.file?.name ?? 'Ningún archivo seleccionado',
+-);
+-
+-const selectedSourceCards = computed(() => {
+-    const uploads = selectedPeriodRow.value?.uploads ?? [];
+-
+-    return props.sources.map((source) => {
+-        const found = uploads.find(
+-            (upload) => upload.source_code === source.code,
+-        );
+-
+-        if (!found) {
+-            return {
+-                ...source,
+-                statusLabel: selectedIsAutomatic.value
+-                    ? 'Automático'
+-                    : 'Pendiente',
+-                statusClass: selectedIsAutomatic.value
+-                    ? 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300'
+-                    : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
+-            };
+-        }
+-
+-        if (found.status === 'processed') {
+-            return {
+-                ...source,
+-                statusLabel: 'Cargada',
+-                statusClass:
+-                    'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
+-            };
+-        }
+-
+-        if (found.status === 'failed') {
+-            return {
+-                ...source,
+-                statusLabel: 'Error',
+-                statusClass:
+-                    'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
+-            };
+-        }
+-
+-        return {
+-            ...source,
+-            statusLabel: 'En proceso',
+-            statusClass:
+-                'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300',
+-        };
+-    });
+-});
+-
+-const currentAvailableWeekOptions = computed<WeekOption[]>(() => {
+-    if (!selectedPeriodRow.value || !selectedIsWeekly.value) return [];
+-
+-    if (selectedPeriodRow.value.available_week_options.length) {
+-        return [...selectedPeriodRow.value.available_week_options].sort(
+-            (a, b) => {
+-                const aSeq = a.sequence ?? 0;
+-                const bSeq = b.sequence ?? 0;
+-                return aSeq - bSeq;
+-            },
+-        );
+-    }
+-
+-    return weeklyPeriods.value
+-        .filter(
+-            (week) =>
+-                week.year === selectedPeriodRow.value?.year &&
+-                week.month === selectedPeriodRow.value?.month,
+-        )
+-        .map((week) => ({
+-            id: week.id,
+-            label: week.label,
+-            sequence: week.sequence,
+-            start_date: week.start_date,
+-            end_date: week.end_date,
+-        }))
+-        .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+-});
+-
+-const selectedSourceCode = computed(() => {
+-    const selectedId = Number(form.data_source_id);
+-
+-    if (!selectedId) return null;
+-
+-    const source = props.sources.find((item) => item.id === selectedId);
+-    return source?.code ?? null;
+-});
+-
+-const takenCoveredPeriodIdsForSelectedSource = computed(() => {
+-    const sourceCode = selectedSourceCode.value;
+-    if (!sourceCode || !selectedPeriodRow.value || !selectedIsWeekly.value)
+-        return new Set<number>();
+-
+-    const sameMonthWeeks = weeklyPeriods.value.filter(
+-        (week) =>
+-            week.year === selectedPeriodRow.value?.year &&
+-            week.month === selectedPeriodRow.value?.month,
+-    );
+-
+-    const ids = new Set<number>();
+-
+-    for (const week of sameMonthWeeks) {
+-        for (const upload of week.uploads) {
+-            if (upload.source_code !== sourceCode) continue;
+-
+-            const coveredIds =
+-                upload.covered_period_ids ?? upload.covered_week_ids ?? [];
+-
+-            if (coveredIds.length) {
+-                for (const id of coveredIds) {
+-                    ids.add(id);
+-                }
+-            } else {
+-                ids.add(week.id);
+-            }
+-        }
+-    }
+-
+-    return ids;
+-});
+-
+-function isCoverageOptionDisabled(optionId: number) {
+-    return takenCoveredPeriodIdsForSelectedSource.value.has(optionId);
+-}
+-
+-function syncCoveredPeriodsWithSelectedPeriod() {
+-    if (!selectedIsWeekly.value) {
+-        form.covered_period_ids = [];
+-        return;
+-    }
+-
+-    if (!form.covered_period_ids.length && selectedPeriodRow.value) {
+-        form.covered_period_ids = [selectedPeriodRow.value.id];
+-    }
+-}
+-
+-watch(
+-    () => form.data_source_id,
+-    () => {
+-        form.covered_period_ids = form.covered_period_ids.filter(
+-            (id) => !isCoverageOptionDisabled(id),
+-        );
+-
+-        if (selectedPeriodRow.value && form.covered_period_ids.length === 0) {
+-            if (!isCoverageOptionDisabled(selectedPeriodRow.value.id)) {
+-                form.covered_period_ids = [selectedPeriodRow.value.id];
+-            }
+-        }
+-    },
+-);
+-
+-function selectPeriod(periodId: number) {
+-    form.period_id = periodId;
+-    form.data_source_id = '';
+-    form.file = null;
+-    form.notes = '';
+-    form.clearErrors();
+-    quickFilter.value = '';
+-
+-    const selected = periodRows.value.find((period) => period.id === periodId);
+-
+-    if (selected?.type === 'weekly') {
+-        form.covered_period_ids = [selected.id];
+-    } else {
+-        form.covered_period_ids = [];
+-    }
+-}
+-
+-if (props.currentPeriodId) {
+-    const initial = periodRows.value.find(
+-        (period) => period.id === props.currentPeriodId,
+-    );
+-    if (initial?.type === 'weekly') {
+-        form.covered_period_ids = [initial.id];
+-    }
+-}
+-
+-const canUploadCurrentPeriod = computed(() => {
+-    if (!selectedPeriodRow.value) return false;
+-    if (!selectedPeriodRow.value.can_receive_uploads) return false;
+-    return true;
+-});
+-
+-const uploadDisabledReason = computed(() => {
+-    if (!selectedPeriodRow.value) return 'Selecciona una semana.';
+-    if (!selectedPeriodRow.value.can_receive_uploads) {
+-        return 'Este periodo se alimenta automáticamente con semanas.';
+-    }
+-    return '';
+-});
+-
+-const submitLabel = computed(() =>
+-    form.processing ? 'Subiendo...' : 'Subir archivo',
+-);
+-
+-function formatUploadStatus(status: UploadItem['status']) {
+-    if (status === 'processed') return 'Procesado';
+-    if (status === 'failed') return 'Error';
+-    if (status === 'processing') return 'Procesando';
+-    return 'Pendiente';
+-}
+-
+-function uploadStatusClass(status: UploadItem['status']) {
+-    if (status === 'processed') {
+-        return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300';
+-    }
+-
+-    if (status === 'failed') {
+-        return 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300';
+-    }
+-
+-    if (status === 'processing') {
+-        return 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300';
+-    }
+-
+-    return 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300';
+-}
+-
+-function openFileDialog() {
+-    if (!canUploadCurrentPeriod.value || form.processing) return;
+-    fileInputRef.value?.click();
+-}
+-
+-function assignFile(file: File | null) {
+-    if (!file) return;
+-    form.file = file;
+-}
+-
+-function onFileChange(event: Event) {
+-    const input = event.target as HTMLInputElement | null;
+-    assignFile(input?.files?.[0] ?? null);
+-}
+-
+-function onDragEnter() {
+-    if (!canUploadCurrentPeriod.value || form.processing) return;
+-    dragActive.value = true;
+-}
+-
+-function onDragLeave() {
+-    dragActive.value = false;
+-}
+-
+-function onDragOver() {
+-    if (!canUploadCurrentPeriod.value || form.processing) return;
+-    dragActive.value = true;
+-}
+-
+-function onDrop(event: DragEvent) {
+-    dragActive.value = false;
+-
+-    if (!canUploadCurrentPeriod.value || form.processing) return;
+-
+-    const file = event.dataTransfer?.files?.[0] ?? null;
+-    assignFile(file);
+-}
+-
+-function firstErrorMessage() {
+-    const errors = form.errors as Record<string, string | undefined>;
+-    return (
+-        errors.file ||
+-        errors.data_source_id ||
+-        errors.covered_period_ids ||
+-        errors.notes ||
+-        'Revisa la fuente, archivo y semanas seleccionadas.'
+-    );
+-}
+-
+-async function submit() {
+-    if (!selectedPeriodRow.value || !selectedIsWeekly.value) return;
+-
+-    syncCoveredPeriodsWithSelectedPeriod();
+-
+-    if (!form.data_source_id) {
+-        await Swal.fire({
+-            title: 'Selecciona una fuente',
+-            text: 'Debes elegir si el archivo corresponde a NOI, Gastos, Lendus u otra fuente.',
+-            icon: 'warning',
+-            confirmButtonText: 'Entendido',
+-        });
+-        return;
+-    }
+-
+-    if (!form.covered_period_ids.length) {
+-        await Swal.fire({
+-            title: 'Selecciona semanas',
+-            text: 'Debes indicar qué semanas cubre este reporte.',
+-            icon: 'warning',
+-            confirmButtonText: 'Entendido',
+-        });
+-        return;
+-    }
+-
+-    if (!form.file) {
+-        await Swal.fire({
+-            title: 'Selecciona un archivo',
+-            text: 'Debes elegir el archivo que vas a subir.',
+-            icon: 'warning',
+-            confirmButtonText: 'Entendido',
+-        });
+-        return;
+-    }
+-
+-    Swal.fire({
+-        title: 'Subiendo archivo...',
+-        text: 'Estamos registrando el archivo y las semanas que cubre.',
+-        allowOutsideClick: false,
+-        allowEscapeKey: false,
+-        showConfirmButton: false,
+-        didOpen: () => {
+-            Swal.showLoading();
+-        },
+-    });
+-
+-    form.post('/historico-general', {
+-        forceFormData: true,
+-        preserveScroll: true,
+-        onSuccess: () => {
+-            form.reset('file', 'notes', 'data_source_id');
+-            form.covered_period_ids = selectedPeriodRow.value
+-                ? [selectedPeriodRow.value.id]
+-                : [];
+-            dragActive.value = false;
+-
+-            if (fileInputRef.value) {
+-                fileInputRef.value.value = '';
+-            }
+-
+-            Swal.fire({
+-                title: 'Archivo subido',
+-                text: 'El archivo se registró correctamente.',
+-                icon: 'success',
+-                confirmButtonText: 'Entendido',
+-            });
+-        },
+-        onError: async () => {
+-            await Swal.fire({
+-                title: 'No se pudo subir',
+-                text: firstErrorMessage(),
+-                icon: 'error',
+-                confirmButtonText: 'Cerrar',
+-            });
+-        },
+-    });
+-}
+-
+-async function deleteUpload(uploadId: number) {
+-    const result = await Swal.fire({
+-        title: '¿Eliminar archivo?',
+-        text: 'Podrás volver a subirlo después.',
+-        icon: 'warning',
+-        showCancelButton: true,
+-        confirmButtonText: 'Sí, eliminar',
+-        cancelButtonText: 'Cancelar',
+-        reverseButtons: true,
+-    });
+-
+-    if (!result.isConfirmed) return;
+-
+-    deletingIds.value.push(uploadId);
+-
+-    router.delete(`/historico-general/${uploadId}`, {
+-        preserveScroll: true,
+-        onSuccess: () => {
+-            Swal.fire({
+-                title: 'Archivo eliminado',
+-                text: 'El archivo se eliminó correctamente.',
+-                icon: 'success',
+-                confirmButtonText: 'Entendido',
+-            });
+-        },
+-        onFinish: () => {
+-            deletingIds.value = deletingIds.value.filter(
+-                (id) => id !== uploadId,
+-            );
+-        },
+-    });
+-}
+-
+-function isDeletingId(uploadId: number) {
+-    return deletingIds.value.includes(uploadId);
+-}
+-
+-function sourceNameFromCode(code: string) {
+-    const source = props.sources.find((item) => item.code === code);
+-    return source?.name ?? code;
+-}
+-
+-function radiographyBadge(period: PeriodRow) {
+-    if (
+-        period.radiography_running ||
+-        ['queued', 'running'].includes(
+-            String(period.radiography_run_status ?? ''),
+-        )
+-    ) {
+-        return {
+-            label: 'En proceso',
+-            cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300',
+-        };
+-    }
+-
+-    if (period.radiography_run_status === 'failed') {
+-        return {
+-            label: 'Error',
+-            cls: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
+-        };
+-    }
+-
+-    if (period.radiography_invalidated) {
+-        return {
+-            label: 'Invalidada',
+-            cls: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
+-        };
+-    }
+-
+-    if ((period.missing_radiography_sources ?? []).length > 0) {
+-        return {
+-            label: 'Faltan fuentes',
+-            cls: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
+-        };
+-    }
+-
+-    if (
+-        (period.unprocessed_radiography_sources ?? []).length > 0 ||
+-        period.pending_count > 0
+-    ) {
+-        return {
+-            label: 'Fuentes pendientes',
+-            cls: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
+-        };
+-    }
+-
+-    if (period.radiography_ready && period.can_export_radiography) {
+-        return {
+-            label: 'Lista',
+-            cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
+-        };
+-    }
+-
+-    return {
+-        label: 'Pendiente',
+-        cls: 'bg-slate-100 text-slate-700 dark:bg-slate-500/15 dark:text-slate-300',
+-    };
+-}
+-
+-function showBlockingReasons(
+-    period: PeriodRow,
+-    fallback = 'No se puede continuar todavía.',
+-): string {
+-    const reasons = period.blocking_reasons ?? [];
+-
+-    if (!reasons.length) return fallback;
+-
+-    return reasons.join('\n');
+-}
+-
+-function openProgressModal(title: string, steps: string[]) {
+-    let index = 0;
+-
+-    Swal.fire({
+-        title,
+-        html: `
+-            <div class="space-y-4 text-left">
+-                <p class="text-sm text-slate-600 dark:text-slate-300">
+-                    Esto puede tardar algunos minutos. No cierres esta ventana.
+-                </p>
+-
+-                <div class="h-3 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+-                    <div class="progress-indeterminate h-full rounded-full bg-emerald-500"></div>
+-                </div>
+-
+-                <p class="text-sm font-semibold text-slate-700 dark:text-slate-200" id="progress-step">
+-                    Iniciando proceso...
+-                </p>
+-            </div>
+-
+-            <style>
+-                .progress-indeterminate {
+-                    width: 35%;
+-                    animation: progress-slide 1.1s ease-in-out infinite;
+-                }
+-
+-                @keyframes progress-slide {
+-                    0% { transform: translateX(-120%); }
+-                    50% { transform: translateX(120%); }
+-                    100% { transform: translateX(320%); }
+-                }
+-            </style>
+-        `,
+-        allowOutsideClick: false,
+-        allowEscapeKey: false,
+-        showConfirmButton: false,
+-        didOpen: () => {
+-            Swal.showLoading();
+-
+-            const timer = window.setInterval(() => {
+-                const stepElement = document.getElementById('progress-step');
+-
+-                if (!stepElement) {
+-                    window.clearInterval(timer);
+-                    return;
+-                }
+-
+-                stepElement.textContent =
+-                    steps[index] ?? steps[steps.length - 1] ?? 'Procesando...';
+-                index = Math.min(index + 1, steps.length - 1);
+-            }, 900);
+-
+-            (Swal.getPopup() as any).__progressTimer = timer;
+-        },
+-        willClose: () => {
+-            const timer = (Swal.getPopup() as any)?.__progressTimer;
+-
+-            if (timer) {
+-                window.clearInterval(timer);
+-            }
+-        },
+-    });
+-}
+-
+-async function updateDatabase() {
+-    if (!selectedPeriodRow.value) return;
+-
+-    if (!selectedPeriodRow.value.can_update_database) {
+-        await Swal.fire({
+-            title: 'No se puede actualizar la BD',
+-            text: showBlockingReasons(
+-                selectedPeriodRow.value,
+-                'Primero sube NOI Nómina y Lendus Ingresos Cobranza.',
+-            ),
+-            icon: 'warning',
+-            confirmButtonText: 'Entendido',
+-        });
+-
+-        return;
+-    }
+-
+-    const result = await Swal.fire({
+-        title: '¿Actualizar BD?',
+-        text: 'Se actualizarán empleados, promotores, sucursales e incidencias base del periodo.',
+-        icon: 'question',
+-        showCancelButton: true,
+-        confirmButtonText: 'Sí, actualizar',
+-        cancelButtonText: 'Cancelar',
+-        reverseButtons: true,
+-    });
+-
+-    if (!result.isConfirmed) return;
+-
+-    openProgressModal('Actualizando BD...', [
+-        'Validando NOI Nómina',
+-        'Leyendo empleados',
+-        'Normalizando empleados',
+-        'Validando Lendus Ingresos Cobranza',
+-        'Detectando promotores',
+-        'Detectando oficinas/sucursales',
+-        'Cruzando promotores con sucursales',
+-        'Guardando datos operativos mínimos',
+-        'Detectando incidencias',
+-        'Finalizando actualización',
+-    ]);
+-
+-    router.post(
+-        `/historico-general/${selectedPeriodRow.value.id}/actualizar-bd`,
+-        {},
+-        {
+-            preserveScroll: true,
+-            onSuccess: () => {
+-                Swal.fire({
+-                    title: 'BD actualizada',
+-                    text: 'La información operativa del periodo fue actualizada. Revisa si existen incidencias pendientes.',
+-                    icon: 'success',
+-                    confirmButtonText: 'Entendido',
+-                });
+-            },
+-            onError: () => {
+-                Swal.fire({
+-                    title: 'No se pudo actualizar la BD',
+-                    text: 'Revisa que NOI Nómina y Lendus Ingresos Cobranza estén cargados y procesados correctamente.',
+-                    icon: 'error',
+-                    confirmButtonText: 'Cerrar',
+-                });
+-            },
+-        },
+-    );
+-}
+-
+-async function openIncidents() {
+-    if (!selectedPeriodRow.value) return;
+-
+-    try {
+-        const response = await fetch(
+-            `/historico-general/${selectedPeriodRow.value.id}/incidencias`,
+-            {
+-                headers: {
+-                    'X-Requested-With': 'XMLHttpRequest',
+-                    Accept: 'application/json',
+-                },
+-                credentials: 'same-origin',
+-            },
+-        );
+-
+-        if (!response.ok) {
+-            throw new Error('No se pudieron consultar las incidencias.');
+-        }
+-
+-        const payload = await response.json();
+-        const items = Array.isArray(payload.items) ? payload.items : [];
+-
+-        if (!items.length) {
+-            await Swal.fire({
+-                title: 'Sin incidencias críticas',
+-                text: 'No hay incidencias pendientes para este periodo.',
+-                icon: 'success',
+-                confirmButtonText: 'Entendido',
+-            });
+-
+-            return;
+-        }
+-
+-        const html = `
+-            <div class="space-y-3 text-left">
+-                ${items
+-                    .map((item: any) => {
+-                        return `
+-                            <div class="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 dark:border-amber-500/20 dark:bg-amber-500/10">
+-                                <p class="text-sm font-semibold text-amber-900 dark:text-amber-100">
+-                                    ${item.type ?? 'Incidencia'}
+-                                </p>
+-                                <p class="mt-1 text-xs text-amber-800 dark:text-amber-200">
+-                                    ${item.message ?? 'Requiere revisión manual.'}
+-                                </p>
+-                            </div>
+-                        `;
+-                    })
+-                    .join('')}
+-            </div>
+-        `;
+-
+-        await Swal.fire({
+-            title: 'Incidencias pendientes',
+-            html,
+-            icon: 'warning',
+-            confirmButtonText: 'Entendido',
+-        });
+-    } catch {
+-        await Swal.fire({
+-            title: 'No se pudieron cargar las incidencias',
+-            text: 'Intenta nuevamente en unos segundos.',
+-            icon: 'error',
+-            confirmButtonText: 'Cerrar',
+-        });
+-    }
+-}
+-
+-async function runFullRadiography() {
+-    if (!selectedPeriodRow.value) return;
+-
+-    if (!selectedPeriodRow.value.can_generate_radiography) {
+-        await Swal.fire({
+-            title: 'No se puede iniciar la Radiografía',
+-            text: showBlockingReasons(
+-                selectedPeriodRow.value,
+-                'Primero completa los archivos requeridos, actualiza la BD y resuelve incidencias pendientes.',
+-            ),
+-            icon: 'warning',
+-            confirmButtonText: 'Entendido',
+-        });
+-
+-        return;
+-    }
+-
+-    const result = await Swal.fire({
+-        title: '¿Enviar Radiografía a proceso?',
+-        text: 'El sistema analizará las fuentes pendientes y generará el Excel final en segundo plano. Puedes cerrar la ventana y volver más tarde.',
+-        icon: 'question',
+-        showCancelButton: true,
+-        confirmButtonText: 'Sí, iniciar proceso',
+-        cancelButtonText: 'Cancelar',
+-        reverseButtons: true,
+-    });
+-
+-    if (!result.isConfirmed) return;
+-
+-    Swal.fire({
+-        title: 'Registrando proceso...',
+-        text: 'Estamos enviando la Radiografía a la cola de trabajo.',
+-        allowOutsideClick: false,
+-        allowEscapeKey: false,
+-        showConfirmButton: false,
+-        didOpen: () => Swal.showLoading(),
+-    });
+-
+-    router.post(
+-        `/historico-general/${selectedPeriodRow.value.id}/generar-radiografia`,
+-        {},
+-        {
+-            onSuccess: () => {
+-                Swal.fire({
+-                    title: 'Radiografía en proceso',
+-                    html: `
+-                        <p style="margin:0 0 8px;">
+-                            El análisis quedó en cola. Puedes cerrar esta ventana y volver más tarde.
+-                        </p>
+-                        <p style="margin:0;">
+-                            Cuando el Excel final esté listo, se habilitará la descarga y se enviará una notificación al correo de tu usuario.
+-                        </p>
+-                    `,
+-                    icon: 'success',
+-                    confirmButtonText: 'Entendido',
+-                });
+-
+-                router.reload({
+-                    only: ['periods', 'groupedUploads'],
+-                });
+-            },
+-            onError: () => {
+-                Swal.fire({
+-                    title: 'No se pudo iniciar la Radiografía',
+-                    text: 'Revisa que la BD esté actualizada, no existan incidencias críticas y estén cargadas las 5 fuentes.',
+-                    icon: 'error',
+-                    confirmButtonText: 'Cerrar',
+-                });
+-            },
+-        },
+-    );
+-}
+-
+-async function exportRadiography() {
+-    if (!selectedPeriodRow.value) return;
+-
+-    if (!selectedPeriodRow.value.can_export_radiography) {
+-        const pending =
+-            selectedPeriodRow.value.unprocessed_radiography_sources ?? [];
+-        const missing =
+-            selectedPeriodRow.value.missing_radiography_sources ?? [];
+-        const details = [
+-            ...missing.map((code) => `Falta: ${sourceNameFromCode(code)}`),
+-            ...pending.map(
+-                (code) => `Pendiente de procesar: ${sourceNameFromCode(code)}`,
+-            ),
+-            ...(selectedPeriodRow.value.blocking_reasons ?? []),
+-        ];
+-
+-        await Swal.fire({
+-            title: 'Radiografía no disponible',
+-            text: details.length
+-                ? details.join('\n')
+-                : 'Primero genera la Radiografía del periodo y espera a que termine el proceso.',
+-            icon: 'warning',
+-            confirmButtonText: 'Entendido',
+-        });
+-
+-        return;
+-    }
+-
+-    const result = await Swal.fire({
+-        title: '¿Exportar Radiografía?',
+-        text: 'Se descargará el archivo Excel final del periodo.',
+-        icon: 'question',
+-        showCancelButton: true,
+-        confirmButtonText: 'Sí, exportar',
+-        cancelButtonText: 'Cancelar',
+-        reverseButtons: true,
+-    });
+-
+-    if (!result.isConfirmed) return;
+-
+-    Swal.fire({
+-        title: 'Preparando Excel...',
+-        text: 'Estamos preparando la descarga. No cierres esta ventana.',
+-        allowOutsideClick: false,
+-        allowEscapeKey: false,
+-        showConfirmButton: false,
+-        didOpen: () => Swal.showLoading(),
+-    });
+-
+-    window.location.href = `/reportes-mensuales/${selectedPeriodRow.value.id}/radiografia.xlsx`;
+-
+-    window.setTimeout(() => {
+-        Swal.close();
+-    }, 2500);
+-}
++const resolveIncident = (id:number)=> selectedPeriodId.value && router.post(`/historico-general/${selectedPeriodId.value}/incidencias/${id}/resolver`, { resolution_note:'Resuelta desde flujo.' }, { onSuccess:()=>{ Swal.fire('Incidencia resuelta','','success'); loadIncidents(); } });
+ </script>
+-
+ <template>
+-    <Head title="Histórico general" />
+-
+-    <div
+-        class="app-page px-3 py-3 sm:px-4 sm:py-4 md:px-5 lg:px-6 xl:px-7 2xl:px-8"
+-    >
+-        <div class="space-y-6">
+-            <section class="app-card overflow-hidden">
+-                <div class="relative">
+-                    <div
+-                        class="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-primary/5"
+-                    />
+-
+-                    <div class="relative p-4 sm:p-5 lg:p-6">
+-                        <div
+-                            class="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between"
+-                        >
+-                            <div class="space-y-4">
+-                                <div
+-                                    class="inline-flex w-fit items-center gap-2 rounded-full border border-primary/15 bg-primary/5 px-3 py-1.5 text-xs font-semibold text-primary"
+-                                >
+-                                    <Sparkles class="size-3.5" />
+-                                    Gestión de cargas por semanas
+-                                </div>
+-
+-                                <div class="space-y-2">
+-                                    <h1
+-                                        class="text-2xl font-extrabold tracking-tight sm:text-3xl lg:text-4xl"
+-                                    >
+-                                        Histórico General
+-                                    </h1>
+-                                    <p
+-                                        class="max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base"
+-                                    >
+-                                        Sube archivos por semanas. NOI y Lendus
+-                                        Cobranza alimentan el cruce de
+-                                        colaboradores, sucursales, altas, bajas
+-                                        e incidencias. Después del análisis,
+-                                        revisa
+-                                        <span
+-                                            class="font-semibold text-foreground"
+-                                            >Asignación sucursal</span
+-                                        >
+-                                        para validar el resultado del periodo.
+-                                    </p>
+-                                </div>
+-                            </div>
+-
+-                            <div class="grid grid-cols-2 gap-3 lg:w-[460px]">
+-                                <div class="app-card-soft px-4 py-3">
+-                                    <div
+-                                        class="flex items-center gap-2 text-xs text-muted-foreground"
+-                                    >
+-                                        <CalendarDays class="size-4" />
+-                                        Periodos
+-                                    </div>
+-                                    <p class="mt-2 text-xl font-extrabold">
+-                                        {{ totalPeriods }}
+-                                    </p>
+-                                </div>
+-
+-                                <div class="app-card-soft px-4 py-3">
+-                                    <div
+-                                        class="flex items-center gap-2 text-xs text-muted-foreground"
+-                                    >
+-                                        <FileSpreadsheet class="size-4" />
+-                                        Archivos
+-                                    </div>
+-                                    <p class="mt-2 text-xl font-extrabold">
+-                                        {{ totalUploads }}
+-                                    </p>
+-                                </div>
+-
+-                                <div class="app-card-soft px-4 py-3">
+-                                    <div
+-                                        class="flex items-center gap-2 text-xs text-muted-foreground"
+-                                    >
+-                                        <CheckCircle2 class="size-4" />
+-                                        Semanas completas
+-                                    </div>
+-                                    <p class="mt-2 text-xl font-extrabold">
+-                                        {{ completePeriods }}
+-                                    </p>
+-                                </div>
+-
+-                                <div class="app-card-soft px-4 py-3">
+-                                    <div
+-                                        class="flex items-center gap-2 text-xs text-muted-foreground"
+-                                    >
+-                                        <AlertCircle class="size-4" />
+-                                        Semanas pendientes
+-                                    </div>
+-                                    <p class="mt-2 text-xl font-extrabold">
+-                                        {{ incompletePeriods }}
+-                                    </p>
+-                                </div>
+-                            </div>
+-                        </div>
+-                    </div>
+-                </div>
+-            </section>
+-
+-            <div class="grid gap-6 xl:grid-cols-[340px_minmax(0,1fr)]">
+-                <aside class="space-y-4">
+-                    <section class="app-card overflow-hidden">
+-                        <div class="border-b px-4 py-4">
+-                            <div
+-                                class="flex items-center justify-between gap-3"
+-                            >
+-                                <div>
+-                                    <h2
+-                                        class="text-base font-bold tracking-tight"
+-                                    >
+-                                        Semanas por mes
+-                                    </h2>
+-                                    <p
+-                                        class="mt-1 text-xs text-muted-foreground"
+-                                    >
+-                                        Solo aquí se carga información
+-                                        directamente.
+-                                    </p>
+-                                </div>
+-
+-                                <span class="app-badge-muted">
+-                                    {{ filteredWeeklyPeriods.length }}
+-                                </span>
+-                            </div>
+-
+-                            <div class="relative mt-4">
+-                                <Search
+-                                    class="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+-                                />
+-                                <input
+-                                    v-model="periodSearch"
+-                                    type="text"
+-                                    class="app-input h-10 pl-10"
+-                                    placeholder="Buscar semana..."
+-                                />
+-                            </div>
+-                        </div>
+-
+-                        <div
+-                            class="max-h-[520px] space-y-3 overflow-y-auto p-3"
+-                        >
+-                            <section
+-                                v-for="group in groupedWeeklyPeriods"
+-                                :key="group.key"
+-                                class="rounded-[24px] border border-border/70 bg-background"
+-                            >
+-                                <button
+-                                    type="button"
+-                                    class="flex w-full items-center justify-between gap-3 px-4 py-4 text-left"
+-                                    @click="toggleWeeklyGroup(group.key)"
+-                                >
+-                                    <div>
+-                                        <p class="text-sm font-bold">
+-                                            {{ group.title }}
+-                                        </p>
+-                                        <p
+-                                            class="mt-1 text-xs text-muted-foreground"
+-                                        >
+-                                            {{ group.periods.length }} semana(s)
+-                                            ·
+-                                            {{ group.totalUploads }} archivo(s)
+-                                        </p>
+-                                    </div>
+-
+-                                    <div class="flex items-center gap-2">
+-                                        <span
+-                                            class="rounded-full bg-emerald-100 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
+-                                        >
+-                                            {{ group.completeCount }} completas
+-                                        </span>
+-
+-                                        <ChevronDown
+-                                            v-if="
+-                                                !isWeeklyGroupCollapsed(
+-                                                    group.key,
+-                                                )
+-                                            "
+-                                            class="size-4 text-muted-foreground"
+-                                        />
+-                                        <ChevronRight
+-                                            v-else
+-                                            class="size-4 text-muted-foreground"
+-                                        />
+-                                    </div>
+-                                </button>
+-
+-                                <div
+-                                    v-show="!isWeeklyGroupCollapsed(group.key)"
+-                                    class="space-y-2 border-t p-3"
+-                                >
+-                                    <button
+-                                        v-for="period in group.periods"
+-                                        :key="period.id"
+-                                        type="button"
+-                                        @click="selectPeriod(period.id)"
+-                                        class="group w-full rounded-[20px] border px-4 py-3 text-left shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
+-                                        :class="
+-                                            selectedPeriodRow?.id === period.id
+-                                                ? 'border-primary/30 bg-primary/5'
+-                                                : 'border-border bg-background hover:bg-muted/30'
+-                                        "
+-                                    >
+-                                        <div
+-                                            class="flex items-start justify-between gap-3"
+-                                        >
+-                                            <div class="min-w-0">
+-                                                <p
+-                                                    class="truncate text-sm font-semibold"
+-                                                >
+-                                                    {{ period.label }}
+-                                                </p>
+-                                                <p
+-                                                    class="mt-1 text-xs text-muted-foreground"
+-                                                >
+-                                                    {{
+-                                                        formatRange(
+-                                                            period.start_date,
+-                                                            period.end_date,
+-                                                        )
+-                                                    }}
+-                                                </p>
+-                                            </div>
+-
+-                                            <span
+-                                                class="inline-flex rounded-full px-2 py-1 text-[11px] font-semibold"
+-                                                :class="
+-                                                    currentStatusClass(period)
+-                                                "
+-                                            >
+-                                                {{ currentStatusLabel(period) }}
+-                                            </span>
+-                                        </div>
+-                                    </button>
+-                                </div>
+-                            </section>
+-
+-                            <div
+-                                v-if="!groupedWeeklyPeriods.length"
+-                                class="rounded-[22px] border border-dashed bg-background px-4 py-8 text-center"
+-                            >
+-                                <Inbox
+-                                    class="mx-auto size-5 text-muted-foreground"
+-                                />
+-                                <p class="mt-3 text-sm font-semibold">
+-                                    Sin semanas
+-                                </p>
+-                                <p class="mt-1 text-xs text-muted-foreground">
+-                                    Ajusta la búsqueda para encontrar otra
+-                                    semana.
+-                                </p>
+-                            </div>
+-                        </div>
+-                    </section>
+-
+-                    <section class="app-card overflow-hidden">
+-                        <div class="border-b px-4 py-4">
+-                            <div class="flex items-center gap-2">
+-                                <Layers3 class="size-4 text-primary" />
+-                                <h2 class="text-base font-bold tracking-tight">
+-                                    Periodos automáticos
+-                                </h2>
+-                            </div>
+-                            <p class="mt-1 text-xs text-muted-foreground">
+-                                Se alimentan solos con la data de semanas.
+-                            </p>
+-                        </div>
+-
+-                        <div
+-                            class="max-h-[320px] space-y-2 overflow-y-auto p-3"
+-                        >
+-                            <button
+-                                v-for="period in automaticPeriods"
+-                                :key="period.id"
+-                                type="button"
+-                                @click="selectPeriod(period.id)"
+-                                class="w-full rounded-[20px] border px-4 py-3 text-left transition-all duration-200"
+-                                :class="
+-                                    selectedPeriodRow?.id === period.id
+-                                        ? 'border-sky-300 bg-sky-50 dark:border-sky-500/30 dark:bg-sky-500/10'
+-                                        : 'border-border bg-background hover:bg-muted/30'
+-                                "
+-                            >
+-                                <div
+-                                    class="flex items-start justify-between gap-3"
+-                                >
+-                                    <div class="min-w-0">
+-                                        <p
+-                                            class="truncate text-sm font-semibold"
+-                                        >
+-                                            {{ period.label }}
+-                                        </p>
+-                                        <p
+-                                            class="mt-1 text-xs text-muted-foreground"
+-                                        >
+-                                            {{
+-                                                formatRange(
+-                                                    period.start_date,
+-                                                    period.end_date,
+-                                                )
+-                                            }}
+-                                        </p>
+-                                    </div>
+-
+-                                    <span
+-                                        class="inline-flex rounded-full bg-sky-100 px-2 py-1 text-[11px] font-semibold text-sky-700 dark:bg-sky-500/15 dark:text-sky-300"
+-                                    >
+-                                        Auto
+-                                    </span>
+-                                </div>
+-                            </button>
+-
+-                            <div
+-                                v-if="!automaticPeriods.length"
+-                                class="rounded-[22px] border border-dashed bg-background px-4 py-6 text-center"
+-                            >
+-                                <p class="text-sm font-semibold">
+-                                    Aún no hay agrupados
+-                                </p>
+-                                <p class="mt-1 text-xs text-muted-foreground">
+-                                    Aparecerán conforme existan semanas
+-                                    suficientes.
+-                                </p>
+-                            </div>
+-                        </div>
+-                    </section>
+-                </aside>
+-
+-                <section class="space-y-6">
+-                    <section
+-                        v-if="selectedPeriodRow"
+-                        class="app-card overflow-hidden"
+-                    >
+-                        <div class="border-b px-4 py-4 sm:px-5">
+-                            <div
+-                                class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between"
+-                            >
+-                                <div>
+-                                    <div
+-                                        class="flex flex-wrap items-center gap-2"
+-                                    >
+-                                        <h2
+-                                            class="text-xl font-bold tracking-tight"
+-                                        >
+-                                            {{ selectedPeriodRow.label }}
+-                                        </h2>
+-
+-                                        <span
+-                                            class="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold"
+-                                            :class="
+-                                                currentStatusClass(
+-                                                    selectedPeriodRow,
+-                                                )
+-                                            "
+-                                        >
+-                                            {{
+-                                                currentStatusLabel(
+-                                                    selectedPeriodRow,
+-                                                )
+-                                            }}
+-                                        </span>
+-
+-                                        <span
+-                                            class="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold"
+-                                            :class="
+-                                                radiographyBadge(
+-                                                    selectedPeriodRow,
+-                                                ).cls
+-                                            "
+-                                            >{{
+-                                                radiographyBadge(
+-                                                    selectedPeriodRow,
+-                                                ).label
+-                                            }}</span
+-                                        >
+-
+-                                        <span
+-                                            v-if="selectedIsAutomatic"
+-                                            class="inline-flex items-center gap-1 rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold text-sky-700 dark:bg-sky-500/15 dark:text-sky-300"
+-                                        >
+-                                            <Layers3 class="size-3.5" />
+-                                            Automático
+-                                        </span>
+-                                    </div>
+-
+-                                    <p
+-                                        class="mt-2 text-sm text-muted-foreground"
+-                                    >
+-                                        {{
+-                                            formatRange(
+-                                                selectedPeriodRow.start_date,
+-                                                selectedPeriodRow.end_date,
+-                                            )
+-                                        }}
+-                                    </p>
+-                                </div>
+-
+-                                <div
+-                                    class="grid gap-3 sm:grid-cols-3 lg:w-[430px]"
+-                                >
+-                                    <div
+-                                        class="rounded-2xl border bg-background px-3 py-3"
+-                                    >
+-                                        <p
+-                                            class="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase"
+-                                        >
+-                                            Cargados
+-                                        </p>
+-                                        <p class="mt-2 text-xl font-extrabold">
+-                                            {{
+-                                                selectedPeriodRow.uploaded_sources_count
+-                                            }}
+-                                        </p>
+-                                    </div>
+-
+-                                    <div
+-                                        class="rounded-2xl border bg-background px-3 py-3"
+-                                    >
+-                                        <p
+-                                            class="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase"
+-                                        >
+-                                            Faltantes
+-                                        </p>
+-                                        <p class="mt-2 text-xl font-extrabold">
+-                                            {{
+-                                                selectedPeriodRow.missing_sources_count
+-                                            }}
+-                                        </p>
+-                                    </div>
+-
+-                                    <div
+-                                        class="rounded-2xl border bg-background px-3 py-3"
+-                                    >
+-                                        <p
+-                                            class="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase"
+-                                        >
+-                                            Avance
+-                                        </p>
+-                                        <p class="mt-2 text-xl font-extrabold">
+-                                            {{ currentProgress }}%
+-                                        </p>
+-                                    </div>
+-                                </div>
+-                            </div>
+-
+-                            <div
+-                                class="mt-4 h-2 overflow-hidden rounded-full bg-muted"
+-                            >
+-                                <div
+-                                    class="h-full rounded-full bg-primary transition-all duration-500"
+-                                    :style="{ width: `${currentProgress}%` }"
+-                                />
+-                            </div>
+-                        </div>
+-
+-                        <div
+-                            class="grid gap-6 p-4 sm:p-5 2xl:grid-cols-[minmax(0,1fr)_320px]"
+-                        >
+-                            <div class="space-y-5">
+-                                <div
+-                                    v-if="selectedIsAutomatic"
+-                                    class="rounded-[26px] border border-sky-200 bg-sky-50 px-5 py-5 dark:border-sky-500/20 dark:bg-sky-500/10"
+-                                >
+-                                    <div class="flex items-start gap-3">
+-                                        <Info
+-                                            class="mt-0.5 size-5 text-sky-600 dark:text-sky-300"
+-                                        />
+-                                        <div>
+-                                            <p
+-                                                class="font-semibold text-sky-800 dark:text-sky-200"
+-                                            >
+-                                                Este periodo no recibe archivos
+-                                                directos
+-                                            </p>
+-                                            <p
+-                                                class="mt-2 text-sm leading-6 text-sky-700/90 dark:text-sky-200/90"
+-                                            >
+-                                                Los bimestres, trimestres,
+-                                                semestres y anual se construyen
+-                                                automáticamente con los reportes
+-                                                cargados en las semanas que
+-                                                forman parte del periodo.
+-                                            </p>
+-                                        </div>
+-                                    </div>
+-                                </div>
+-
+-                                <template v-else>
+-                                    <div
+-                                        class="grid gap-4 md:grid-cols-[1fr_1fr]"
+-                                    >
+-                                        <div class="space-y-2">
+-                                            <label class="text-sm font-semibold"
+-                                                >Semana base</label
+-                                            >
+-                                            <div
+-                                                class="app-input flex items-center"
+-                                            >
+-                                                {{ selectedPeriodRow.label }}
+-                                            </div>
+-                                        </div>
+-
+-                                        <div class="space-y-2">
+-                                            <label
+-                                                for="data_source_id"
+-                                                class="text-sm font-semibold"
+-                                                >Fuente</label
+-                                            >
+-                                            <select
+-                                                id="data_source_id"
+-                                                v-model="form.data_source_id"
+-                                                class="app-input"
+-                                                :disabled="
+-                                                    !canUploadCurrentPeriod ||
+-                                                    form.processing
+-                                                "
+-                                            >
+-                                                <option
+-                                                    v-for="source in props.sources"
+-                                                    :key="source.id"
+-                                                    :value="source.id"
+-                                                >
+-                                                    {{ source.name }}
+-                                                </option>
+-                                            </select>
+-                                            <InputError
+-                                                :message="
+-                                                    form.errors.data_source_id
+-                                                "
+-                                            />
+-                                        </div>
+-                                    </div>
+-
+-                                    <div class="space-y-3">
+-                                        <div class="flex items-center gap-2">
+-                                            <CalendarRange
+-                                                class="size-4 text-primary"
+-                                            />
+-                                            <label
+-                                                class="text-sm font-semibold"
+-                                            >
+-                                                Semanas cubiertas por este
+-                                                archivo
+-                                            </label>
+-                                        </div>
+-
+-                                        <p
+-                                            class="text-sm text-muted-foreground"
+-                                        >
+-                                            Selecciona exactamente las semanas
+-                                            incluidas en este reporte. Las ya
+-                                            cubiertas para la fuente elegida
+-                                            aparecen bloqueadas.
+-                                        </p>
+-
+-                                        <div
+-                                            class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3"
+-                                        >
+-                                            <label
+-                                                v-for="week in currentAvailableWeekOptions"
+-                                                :key="week.id"
+-                                                class="flex items-start gap-3 rounded-2xl border px-4 py-3 transition"
+-                                                :class="
+-                                                    isCoverageOptionDisabled(
+-                                                        week.id,
+-                                                    )
+-                                                        ? 'cursor-not-allowed border-border/60 bg-muted/30 opacity-60'
+-                                                        : 'cursor-pointer border-border/70 bg-background hover:bg-muted/30'
+-                                                "
+-                                            >
+-                                                <input
+-                                                    v-model="
+-                                                        form.covered_period_ids
+-                                                    "
+-                                                    type="checkbox"
+-                                                    :value="week.id"
+-                                                    class="mt-1"
+-                                                    :disabled="
+-                                                        form.processing ||
+-                                                        isCoverageOptionDisabled(
+-                                                            week.id,
+-                                                        )
+-                                                    "
+-                                                />
+-                                                <div>
+-                                                    <p
+-                                                        class="text-sm font-semibold"
+-                                                    >
+-                                                        {{ week.label }}
+-                                                    </p>
+-                                                    <p
+-                                                        class="mt-1 text-xs text-muted-foreground"
+-                                                    >
+-                                                        {{
+-                                                            formatRange(
+-                                                                week.start_date,
+-                                                                week.end_date,
+-                                                            )
+-                                                        }}
+-                                                    </p>
+-                                                    <p
+-                                                        v-if="
+-                                                            isCoverageOptionDisabled(
+-                                                                week.id,
+-                                                            )
+-                                                        "
+-                                                        class="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300"
+-                                                    >
+-                                                        Ya cubierta para esta
+-                                                        fuente
+-                                                    </p>
+-                                                </div>
+-                                            </label>
+-                                        </div>
+-                                        <InputError
+-                                            :message="
+-                                                form.errors.covered_period_ids
+-                                            "
+-                                        />
+-                                    </div>
+-
+-                                    <div
+-                                        class="rounded-[30px] border border-dashed px-5 py-6 shadow-sm transition-all duration-200"
+-                                        :class="
+-                                            dragActive
+-                                                ? 'border-primary bg-primary/5 ring-2 ring-primary/10'
+-                                                : 'border-border bg-background hover:border-primary/30 hover:bg-muted/20'
+-                                        "
+-                                        @drop.prevent="onDrop"
+-                                        @dragenter.prevent="onDragEnter"
+-                                        @dragleave.prevent="onDragLeave"
+-                                        @dragover.prevent="onDragOver"
+-                                    >
+-                                        <input
+-                                            ref="fileInputRef"
+-                                            type="file"
+-                                            class="hidden"
+-                                            accept=".xls,.xlsx,.xlsm"
+-                                            @change="onFileChange"
+-                                        />
+-
+-                                        <div
+-                                            class="flex flex-col items-center justify-center text-center"
+-                                        >
+-                                            <div
+-                                                class="flex size-16 items-center justify-center rounded-3xl bg-primary/10 text-primary transition-transform duration-200"
+-                                                :class="{
+-                                                    'scale-110':
+-                                                        dragActive ||
+-                                                        form.processing,
+-                                                }"
+-                                            >
+-                                                <LoaderCircle
+-                                                    v-if="form.processing"
+-                                                    class="size-7 animate-spin"
+-                                                />
+-                                                <UploadCloud
+-                                                    v-else
+-                                                    class="size-7"
+-                                                />
+-                                            </div>
+-
+-                                            <h3
+-                                                class="mt-4 text-base font-bold tracking-tight"
+-                                            >
+-                                                {{
+-                                                    form.processing
+-                                                        ? 'Subiendo archivo...'
+-                                                        : dragActive
+-                                                          ? 'Suelta tu archivo aquí'
+-                                                          : 'Arrastra y suelta tu archivo'
+-                                                }}
+-                                            </h3>
+-
+-                                            <p
+-                                                class="mt-2 max-w-xl text-sm text-muted-foreground"
+-                                            >
+-                                                Formatos permitidos: .xls,
+-                                                .xlsx, .xlsm
+-                                            </p>
+-
+-                                            <button
+-                                                type="button"
+-                                                class="mt-4 text-sm font-semibold text-primary transition hover:opacity-80"
+-                                                @click="openFileDialog"
+-                                                :disabled="
+-                                                    !canUploadCurrentPeriod ||
+-                                                    form.processing
+-                                                "
+-                                            >
+-                                                {{ selectedFileName }}
+-                                            </button>
+-                                        </div>
+-                                    </div>
+-
+-                                    <div class="space-y-2">
+-                                        <label
+-                                            for="notes"
+-                                            class="text-sm font-semibold"
+-                                            >Notas</label
+-                                        >
+-                                        <textarea
+-                                            id="notes"
+-                                            v-model="form.notes"
+-                                            rows="3"
+-                                            class="app-textarea"
+-                                            placeholder="Observaciones opcionales del archivo."
+-                                            :disabled="form.processing"
+-                                        />
+-                                        <InputError
+-                                            :message="form.errors.notes"
+-                                        />
+-                                        <InputError
+-                                            :message="form.errors.file"
+-                                        />
+-                                    </div>
+-
+-                                    <div
+-                                        class="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between"
+-                                    >
+-                                        <div
+-                                            class="text-xs text-muted-foreground"
+-                                        >
+-                                            {{ selectedUploads.length }}
+-                                            archivo{{
+-                                                selectedUploads.length === 1
+-                                                    ? ''
+-                                                    : 's'
+-                                            }}
+-                                            cargado{{
+-                                                selectedUploads.length === 1
+-                                                    ? ''
+-                                                    : 's'
+-                                            }}
+-                                            en este periodo
+-                                        </div>
+-
+-                                        <button
+-                                            type="button"
+-                                            class="app-btn app-btn-primary h-11 px-5 transition-all duration-200 hover:-translate-y-0.5"
+-                                            :disabled="
+-                                                !canUploadCurrentPeriod ||
+-                                                form.processing
+-                                            "
+-                                            @click="submit"
+-                                        >
+-                                            <LoaderCircle
+-                                                v-if="form.processing"
+-                                                class="size-4 animate-spin"
+-                                            />
+-                                            <UploadCloud
+-                                                v-else
+-                                                class="size-4"
+-                                            />
+-                                            {{ submitLabel }}
+-                                        </button>
+-                                    </div>
+-                                </template>
+-                            </div>
+-
+-                            <aside class="space-y-4">
+-                                <div
+-                                    class="rounded-[28px] border border-border/70 bg-background px-4 py-4 shadow-sm"
+-                                >
+-                                    <p class="text-sm font-semibold">
+-                                        Fuentes del periodo
+-                                    </p>
+-
+-                                    <div class="mt-4 space-y-3">
+-                                        <div
+-                                            v-for="source in selectedSourceCards"
+-                                            :key="source.id"
+-                                            class="rounded-2xl border border-border/70 bg-muted/20 px-3 py-3"
+-                                        >
+-                                            <div
+-                                                class="flex items-start justify-between gap-3"
+-                                            >
+-                                                <div class="min-w-0">
+-                                                    <p
+-                                                        class="text-sm font-semibold"
+-                                                    >
+-                                                        {{ source.name }}
+-                                                    </p>
+-                                                    <p
+-                                                        class="mt-1 text-xs text-muted-foreground"
+-                                                    >
+-                                                        {{
+-                                                            source.description ||
+-                                                            'Fuente base'
+-                                                        }}
+-                                                    </p>
+-                                                </div>
+-
+-                                                <span
+-                                                    class="inline-flex rounded-full px-2 py-1 text-[11px] font-semibold"
+-                                                    :class="source.statusClass"
+-                                                >
+-                                                    {{ source.statusLabel }}
+-                                                </span>
+-                                            </div>
+-                                        </div>
+-                                    </div>
+-                                </div>
+-
+-                                <div
+-                                    class="rounded-[28px] border border-border/70 bg-background px-4 py-4 shadow-sm"
+-                                >
+-                                    <div
+-                                        class="flex items-center justify-between gap-2"
+-                                    >
+-                                        <p class="text-sm font-semibold">
+-                                            Salida final
+-                                        </p>
+-                                        <ArrowUpRight
+-                                            class="size-4 text-muted-foreground"
+-                                        />
+-                                    </div>
+-
+-                                    <p
+-                                        class="mt-2 text-sm text-muted-foreground"
+-                                    >
+-                                        Cuando NOI, cobranza y demás fuentes
+-                                        base estén analizadas y validadas en
+-                                        Asignación sucursal, podrás pasar al
+-                                        reporte final.
+-                                    </p>
+-
+-                                    <a
+-                                        :href="
+-                                            selectedPeriodRow
+-                                                ? `/reportes-mensuales?period=${selectedPeriodRow.id}`
+-                                                : '#'
+-                                        "
+-                                        class="app-btn app-btn-secondary mt-4 h-11 w-full justify-between px-4"
+-                                    >
+-                                        <span>Ir a reporte final</span>
+-                                        <ChevronRight class="size-4" />
+-                                    </a>
+-                                </div>
+-                            </aside>
+-                        </div>
+-                    </section>
+-
+-                    <section
+-                        v-if="selectedPeriodRow"
+-                        class="app-card overflow-hidden"
+-                    >
+-                        <div class="border-b px-4 py-4 sm:px-5">
+-                            <div
+-                                class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"
+-                            >
+-                                <div>
+-                                    <h3
+-                                        class="text-lg font-bold tracking-tight"
+-                                    >
+-                                        Archivos del periodo
+-                                    </h3>
+-                                    <p
+-                                        class="mt-1 text-sm text-muted-foreground"
+-                                    >
+-                                        Revisa o elimina archivos ya cargados.
+-                                    </p>
+-                                </div>
+-
+-                                <div class="relative w-full lg:max-w-sm">
+-                                    <Search
+-                                        class="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+-                                    />
+-                                    <input
+-                                        v-model="quickFilter"
+-                                        type="text"
+-                                        class="app-input h-10 pl-10"
+-                                        placeholder="Buscar archivo o fuente..."
+-                                    />
+-                                </div>
+-                            </div>
+-                        </div>
+-
+-                        <div
+-                            v-if="selectedUploads.length"
+-                            class="grid gap-3 p-4 sm:p-5 md:grid-cols-2 2xl:grid-cols-3"
+-                        >
+-                            <article
+-                                v-for="upload in selectedUploads"
+-                                :key="upload.id"
+-                                class="group rounded-[26px] border border-border/70 bg-background px-4 py-4 shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-md"
+-                            >
+-                                <div
+-                                    class="flex items-start justify-between gap-3"
+-                                >
+-                                    <div class="min-w-0">
+-                                        <p class="text-sm font-semibold">
+-                                            {{
+-                                                upload.source_name ||
+-                                                'Sin fuente'
+-                                            }}
+-                                        </p>
+-                                        <p
+-                                            class="mt-1 truncate text-xs text-muted-foreground"
+-                                        >
+-                                            {{ upload.original_name }}
+-                                        </p>
+-                                    </div>
+-
+-                                    <span
+-                                        class="inline-flex rounded-full px-2 py-1 text-[11px] font-semibold"
+-                                        :class="
+-                                            uploadStatusClass(upload.status)
+-                                        "
+-                                    >
+-                                        {{ formatUploadStatus(upload.status) }}
+-                                    </span>
+-                                </div>
+-
+-                                <div
+-                                    class="mt-4 flex items-center gap-2 text-xs text-muted-foreground"
+-                                >
+-                                    <Clock3 class="size-3.5" />
+-                                    {{
+-                                        upload.uploaded_at ??
+-                                        'Sin fecha registrada'
+-                                    }}
+-                                </div>
+-
+-                                <div
+-                                    v-if="
+-                                        upload.covered_period_labels?.length ||
+-                                        upload.covered_week_labels?.length
+-                                    "
+-                                    class="mt-3 rounded-xl border border-border/70 bg-muted/20 px-3 py-3"
+-                                >
+-                                    <p
+-                                        class="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase"
+-                                    >
+-                                        Cubre semanas
+-                                    </p>
+-                                    <div class="mt-2 flex flex-wrap gap-2">
+-                                        <span
+-                                            v-for="weekLabel in upload
+-                                                .covered_period_labels?.length
+-                                                ? upload.covered_period_labels
+-                                                : upload.covered_week_labels"
+-                                            :key="weekLabel"
+-                                            class="rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-semibold text-primary"
+-                                        >
+-                                            {{ weekLabel }}
+-                                        </span>
+-                                    </div>
+-                                </div>
+-
+-                                <p
+-                                    v-if="upload.notes"
+-                                    class="mt-3 line-clamp-2 text-xs leading-5 text-muted-foreground"
+-                                >
+-                                    {{ upload.notes }}
+-                                </p>
+-
+-                                <div
+-                                    v-if="upload.last_process_run"
+-                                    class="mt-3 rounded-xl border border-border/70 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground"
+-                                >
+-                                    <p>
+-                                        Análisis:
+-                                        {{
+-                                            upload.last_process_run.status ||
+-                                            '—'
+-                                        }}
+-                                        · Leídas
+-                                        {{
+-                                            upload.last_process_run.rows_read ??
+-                                            0
+-                                        }}
+-                                        · Insertadas
+-                                        {{
+-                                            upload.last_process_run
+-                                                .rows_inserted ?? 0
+-                                        }}
+-                                        · Errores
+-                                        {{
+-                                            upload.last_process_run
+-                                                .rows_with_errors ?? 0
+-                                        }}
+-                                    </p>
+-                                </div>
+-
+-                                <div
+-                                    class="mt-4 flex items-center justify-end gap-2 border-t pt-4"
+-                                >
+-                                    <button
+-                                        type="button"
+-                                        class="app-btn h-10 border border-rose-200 bg-rose-50 px-4 text-rose-700 transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-100 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300"
+-                                        :disabled="isDeletingId(upload.id)"
+-                                        @click="deleteUpload(upload.id)"
+-                                    >
+-                                        <LoaderCircle
+-                                            v-if="isDeletingId(upload.id)"
+-                                            class="size-4 animate-spin"
+-                                        />
+-                                        <Trash2 v-else class="size-4" />
+-                                        Quitar
+-                                    </button>
+-                                </div>
+-                            </article>
+-                        </div>
+-
+-                        <div v-else class="px-4 py-10 text-center sm:px-5">
+-                            <FolderOpen
+-                                class="mx-auto size-6 text-muted-foreground"
+-                            />
+-                            <p class="mt-3 text-sm font-semibold">
+-                                Aún no hay archivos cargados
+-                            </p>
+-                            <p class="mt-1 text-sm text-muted-foreground">
+-                                {{
+-                                    selectedIsAutomatic
+-                                        ? 'Este periodo se alimenta automáticamente con semanas.'
+-                                        : 'Sube primero una fuente para comenzar esta semana.'
+-                                }}
+-                            </p>
+-                        </div>
+-
+-                        <div
+-                            v-if="selectedPeriodRow"
+-                            class="border-t px-4 py-4 sm:px-5"
+-                        >
+-                            <div
+-                                class="grid gap-2 sm:grid-cols-2 lg:grid-cols-5"
+-                            >
+-                                <button
+-                                    type="button"
+-                                    class="app-btn app-btn-primary h-11 px-4 disabled:opacity-50"
+-                                    :disabled="
+-                                        !selectedPeriodRow.can_update_database
+-                                    "
+-                                    @click="updateDatabase"
+-                                >
+-                                    Actualizar BD
+-                                </button>
+-                                <button
+-                                    type="button"
+-                                    class="app-btn h-11 border px-4 disabled:opacity-50"
+-                                    :disabled="
+-                                        !selectedPeriodRow.can_resolve_incidents
+-                                    "
+-                                    @click="openIncidents"
+-                                >
+-                                    Resolver incidencias
+-                                </button>
+-                                <button
+-                                    type="button"
+-                                    class="app-btn h-11 border px-4 disabled:opacity-50"
+-                                    :disabled="
+-                                        !selectedPeriodRow.can_generate_radiography
+-                                    "
+-                                    @click="runFullRadiography"
+-                                >
+-                                    Analizar y generar Radiografía
+-                                </button>
+-                                <button
+-                                    type="button"
+-                                    class="app-btn h-11 border px-4 disabled:opacity-50"
+-                                    :disabled="
+-                                        !selectedPeriodRow.radiography_ready ||
+-                                        selectedPeriodRow.radiography_running ||
+-                                        (selectedPeriodRow
+-                                            .unprocessed_radiography_sources
+-                                            ?.length ?? 0) > 0
+-                                    "
+-                                    @click="
+-                                        selectedPeriodRow.radiography_ready &&
+-                                        !selectedPeriodRow.radiography_running &&
+-                                        router.visit(
+-                                            `/reportes-mensuales?period=${selectedPeriodRow.id}`,
+-                                        )
+-                                    "
+-                                >
+-                                    Consultar Radiografía
+-                                </button>
+-                                <button
+-                                    type="button"
+-                                    class="app-btn h-11 border px-4 disabled:opacity-50"
+-                                    :disabled="
+-                                        !selectedPeriodRow.can_export_radiography
+-                                    "
+-                                    @click="exportRadiography"
+-                                >
+-                                    Exportar Excel
+-                                </button>
+-                            </div>
+-                            <div
+-                                v-if="
+-                                    selectedPeriodRow.radiography_running ||
+-                                    selectedPeriodRow.radiography_run_status
+-                                "
+-                                class="mt-3 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-800 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-200"
+-                            >
+-                                <p class="font-semibold">
+-                                    Estado de Radiografía:
+-                                    {{
+-                                        selectedPeriodRow.radiography_run_status ??
+-                                        'pendiente'
+-                                    }}
+-                                </p>
+-                                <p
+-                                    v-if="selectedPeriodRow.radiography_run_log"
+-                                    class="mt-1"
+-                                >
+-                                    {{ selectedPeriodRow.radiography_run_log }}
+-                                </p>
+-                                <p
+-                                    v-if="
+-                                        selectedPeriodRow.radiography_run_finished_at
+-                                    "
+-                                    class="mt-1"
+-                                >
+-                                    Finalizado:
+-                                    {{
+-                                        selectedPeriodRow.radiography_run_finished_at
+-                                    }}
+-                                </p>
+-                            </div>
+-
+-                            <ul
+-                                v-if="
+-                                    selectedPeriodRow.blocking_reasons?.length
+-                                "
+-                                class="mt-3 list-disc space-y-1 pl-5 text-xs text-amber-600"
+-                            >
+-                                <li
+-                                    v-for="reason in selectedPeriodRow.blocking_reasons"
+-                                    :key="reason"
+-                                >
+-                                    {{ reason }}
+-                                </li>
+-                            </ul>
+-                        </div>
+-                    </section>
+-                </section>
+-            </div>
+-        </div>
+-    </div>
++  <Head title="Histórico general" />
++  <div class="space-y-4 p-4">
++    <WorkflowStepper :steps="steps" :current="currentStep" />
++    <PeriodSelector v-model="selectedPeriodId" :periods="periods" />
++    <UploadSourcesStep :sources="sources" :uploads-by-source="uploadsBySource" :selected-period-id="selectedPeriodId" @upload="uploadFile" @delete="deleteUpload" />
++    <DatabaseUpdateStep :can-update="Boolean(period?.can_update_database)" @update="updateDatabase" />
++    <IncidentsStep :incidents="incidents" @resolve="resolveIncident" />
++    <ReportConfigurationStep :period="period" />
++    <ReportGenerationStatus :period="period" />
++    <ReportPreview :period="period" />
++    <GeneratedReportActions :period="period" />
++  </div>
+ </template>
