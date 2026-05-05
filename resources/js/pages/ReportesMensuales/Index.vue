@@ -111,49 +111,36 @@ const money = (value: number) =>
 <template>
     <Head title="Reportes por periodo" />
 
-    <div class="app-page px-4 py-4 sm:px-6">
-        <div class="space-y-6">
-            <section class="app-card p-5 sm:p-6">
-                <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                    <div class="space-y-3">
-                        <div
-                            class="inline-flex w-fit items-center gap-2 rounded-full border border-primary/15 bg-primary/5 px-3 py-1.5 text-xs font-semibold text-primary"
-                        >
-                            <FileBarChart2 class="size-3.5" />
-                            Consolidado operativo por periodo
-                        </div>
-
-                        <div>
-                            <h1 class="text-2xl font-extrabold tracking-tight sm:text-3xl">
-                                Reportes por periodo
-                            </h1>
-                            <p class="mt-2 max-w-3xl text-sm text-muted-foreground">
-                                {{ message }}
-                            </p>
-                        </div>
+    <div class="min-h-screen bg-gradient-to-br from-slate-50 via-white to-indigo-50/40 p-4 sm:p-6 lg:p-8">
+        <div class="mx-auto max-w-screen-2xl space-y-6">
+            <section class="overflow-hidden rounded-[2rem] bg-slate-950 p-6 text-white shadow-2xl shadow-slate-300 sm:p-8">
+                <div class="flex items-center gap-3">
+                    <div class="flex size-10 items-center justify-center rounded-2xl bg-emerald-500">
+                        <FileBarChart2 class="size-5 text-white" />
                     </div>
-
-                    <div class="flex flex-col gap-3 sm:flex-row">
-                        <button
-                            type="button"
-                            class="app-btn app-btn-secondary h-11 px-5"
-                            :disabled="!selectedPeriodId || consolidateForm.processing"
-                            @click="consolidate"
-                        >
-                            <FolderSync class="mr-2 size-4" />
-                            {{ consolidateForm.processing ? 'Consolidando...' : 'Consolidar periodo' }}
-                        </button>
-
-                        <button
-                            type="button"
-                            class="app-btn h-11 px-5"
-                            :disabled="!selectedPeriodId || !summaryRows.length"
-                            @click="exportSummary"
-                        >
-                            <Download class="mr-2 size-4" />
-                            Exportar consolidado
-                        </button>
-                    </div>
+                    <p class="text-xs font-black uppercase tracking-[0.28em] text-emerald-300">Reportes mensuales</p>
+                </div>
+                <h1 class="mt-3 text-3xl font-black tracking-tight sm:text-4xl">Reportes por periodo</h1>
+                <p class="mt-3 max-w-3xl text-sm leading-6 text-slate-300">{{ message }}</p>
+                <div class="mt-5 flex flex-wrap gap-3">
+                    <button
+                        type="button"
+                        class="inline-flex h-11 items-center gap-2 rounded-2xl border border-white/20 bg-white/10 px-5 text-sm font-black text-white transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-50"
+                        :disabled="!selectedPeriodId || consolidateForm.processing"
+                        @click="consolidate"
+                    >
+                        <FolderSync class="size-4" />
+                        {{ consolidateForm.processing ? 'Consolidando...' : 'Consolidar periodo' }}
+                    </button>
+                    <button
+                        type="button"
+                        class="inline-flex h-11 items-center gap-2 rounded-2xl bg-emerald-500 px-5 text-sm font-black text-white transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+                        :disabled="!selectedPeriodId || !summaryRows.length"
+                        @click="exportSummary"
+                    >
+                        <Download class="size-4" />
+                        Exportar consolidado
+                    </button>
                 </div>
             </section>
 

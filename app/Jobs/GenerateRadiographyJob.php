@@ -2,6 +2,8 @@
 
 namespace App\Jobs;
 
+use App\Mail\ReportGeneratedMail;
+use App\Mail\ReportGenerationFailedMail;
 use App\Models\Period;
 use App\Models\PeriodRadiographyExport;
 use App\Models\PeriodRadiographyRun;
@@ -146,17 +148,27 @@ class GenerateRadiographyJob implements ShouldQueue
             return;
         }
 
+        $run = $this->runId
+            ? PeriodRadiographyRun::query()->find($this->runId)
+            : PeriodRadiographyRun::query()->where('period_id', $period->id)->latest('id')->first();
+
         try {
             $downloadUrl = route('reportes-mensuales.index') . '?period=' . $period->id;
 
-            Mail::raw($message . PHP_EOL . PHP_EOL . 'Descargar: ' . $downloadUrl, function ($mail) use ($user, $subject) {
-                $mail->to($user->email)->subject($subject);
-            });
+            if (str_contains($subject, 'Error') || str_contains($subject, 'error')) {
+                Mail::to($user->email)->send(
+                    new ReportGenerationFailedMail($period, $user, $run, $message)
+                );
+            } else {
+                Mail::to($user->email)->send(
+                    new ReportGeneratedMail($period, $user, $run, $downloadUrl)
+                );
+            }
         } catch (\Throwable $exception) {
             Log::warning('No se pudo enviar correo de Radiografía.', [
-                'user_id' => $this->userId,
+                'user_id'   => $this->userId,
                 'period_id' => $period->id,
-                'error' => $exception->getMessage(),
+                'error'     => $exception->getMessage(),
             ]);
         }
     }

@@ -361,8 +361,21 @@ function getStatusClasses(period: {
 <template>
     <Head title="Periodos" />
 
-    <div class="app-page px-4 py-4 sm:px-6">
-        <div class="space-y-6">
+    <div class="min-h-screen bg-gradient-to-br from-slate-50 via-white to-indigo-50/40 p-4 sm:p-6 lg:p-8">
+        <div class="mx-auto max-w-screen-2xl space-y-6">
+
+            <section class="overflow-hidden rounded-[2rem] bg-slate-950 p-6 text-white shadow-2xl shadow-slate-300 sm:p-8">
+                <div class="flex items-center gap-3">
+                    <div class="flex size-10 items-center justify-center rounded-2xl bg-violet-500">
+                        <CalendarDays class="size-5 text-white" />
+                    </div>
+                    <p class="text-xs font-black uppercase tracking-[0.28em] text-violet-300">Gestión de periodos</p>
+                </div>
+                <h1 class="mt-3 text-3xl font-black tracking-tight sm:text-4xl">Periodos</h1>
+                <p class="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
+                    Genera semanas manualmente. Bimestres, trimestres, semestres y anual se crean automáticamente según las semanas existentes.
+                </p>
+            </section>
 
             <section class="app-card overflow-hidden">
                 <div class="border-b px-4 py-4 sm:px-5">

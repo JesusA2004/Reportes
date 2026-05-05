@@ -4,14 +4,18 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreReportUploadRequest;
 use App\Jobs\GenerateRadiographyJob;
+use App\Jobs\UpdatePeriodDatabaseJob;
+use App\Models\Branch;
 use App\Models\DataSource;
+use App\Models\Employee;
 use App\Models\Period;
+use App\Models\PeriodDatabaseUpdateRun;
 use App\Models\PeriodIncident;
 use App\Models\PeriodRadiographyRun;
 use App\Models\MonthlyEmployeeSummary;
 use App\Models\PeriodSummary;
 use App\Models\ReportUpload;
-use App\Services\DatabaseUpdateService;
+use App\Services\ReportAnalysisService;
 use App\Services\ReportUploadService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -27,17 +31,19 @@ class ReportUploadController extends Controller {
         $requiredSourcesCount = $sources->count();
         $summariesByPeriod = PeriodSummary::query()->with('incidents')->get()->keyBy('period_id');
         $runsByPeriod = PeriodRadiographyRun::query()->orderByDesc('id')->get()->unique('period_id')->keyBy('period_id');
+        $dbRunsByPeriod = PeriodDatabaseUpdateRun::query()->orderByDesc('id')->get()->unique('period_id')->keyBy('period_id');
 
         $periodModels = Period::query()->orderByDesc('year')->orderByDesc('month')->orderByDesc('sequence')->get();
         $weeklyPeriods = $periodModels->where('type', 'weekly')->values();
 
-        $periods = $periodModels->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount, $summariesByPeriod, $runsByPeriod) {
+        $periods = $periodModels->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount, $summariesByPeriod, $runsByPeriod, $dbRunsByPeriod) {
             $coveredWeeks = $this->resolveCoveredWeeks($period, $weeklyPeriods);
             $uploads = $this->resolveUploadsForPeriod($coveredWeeks);
             $uploadedSourceCodes = $uploads->pluck('dataSource.code')->filter()->unique()->values();
             $missingSources = $sources->whereNotIn('code', $uploadedSourceCodes)->pluck('name')->values();
             $summary = $summariesByPeriod->get($period->id);
             $run = $runsByPeriod->get($period->id);
+            $dbRun = $dbRunsByPeriod->get($period->id);
 
             return [
                 'id' => $period->id,
@@ -65,7 +71,7 @@ class ReportUploadController extends Controller {
                 'radiography_run_status' => $run?->status,
                 'radiography_run_log' => $run?->log,
                 'radiography_run_finished_at' => optional($run?->finished_at)->format('d/m/Y H:i'),
-                ...$this->resolveWorkflowState($uploads, $summary, $run, $period->type !== 'weekly'),
+                ...$this->resolveWorkflowState($uploads, $summary, $run, $period->type !== 'weekly', $dbRun),
                 'available_week_options' => $period->type === 'weekly' ? $weeklyPeriods->where('year', $period->year)->where('month', $period->month)->sortBy('sequence')->map(fn ($week) => [
                     'id' => $week->id,
                     'label' => $week->label,
@@ -85,13 +91,14 @@ class ReportUploadController extends Controller {
             ];
         })->values();
 
-        $groupedUploads = $periodModels->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount, $summariesByPeriod, $runsByPeriod) {
+        $groupedUploads = $periodModels->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount, $summariesByPeriod, $runsByPeriod, $dbRunsByPeriod) {
             $coveredWeeks = $this->resolveCoveredWeeks($period, $weeklyPeriods);
             $uploads = $this->resolveUploadsForPeriod($coveredWeeks);
             $uploadedSourceCodes = $uploads->pluck('dataSource.code')->filter()->unique()->values();
             $missingSources = $sources->whereNotIn('code', $uploadedSourceCodes)->pluck('name')->values();
             $summary = $summariesByPeriod->get($period->id);
             $run = $runsByPeriod->get($period->id);
+            $dbRun = $dbRunsByPeriod->get($period->id);
 
             return [
                 'period_id' => $period->id,
@@ -111,7 +118,7 @@ class ReportUploadController extends Controller {
                 'radiography_run_status' => $run?->status,
                 'radiography_run_log' => $run?->log,
                 'radiography_run_finished_at' => optional($run?->finished_at)->format('d/m/Y H:i'),
-                ...$this->resolveWorkflowState($uploads, $summary, $run, $period->type !== 'weekly'),
+                ...$this->resolveWorkflowState($uploads, $summary, $run, $period->type !== 'weekly', $dbRun),
                 'uploads' => $uploads->unique('id')->values()->map(fn ($upload) => [
                     'id' => $upload->id,
                     'original_name' => $upload->original_name,
@@ -128,12 +135,24 @@ class ReportUploadController extends Controller {
 
         $currentPeriodId = ($periods->firstWhere('can_receive_uploads', true)['id'] ?? null) ?: ($periods->first()['id'] ?? null);
 
+        $branches = Branch::query()->where('is_active', true)->orderBy('name')->get(['id', 'name']);
+        $employees = Employee::query()->where('is_active', true)->orderBy('full_name')
+            ->with(['employeeBranchAssignments.branch:id,name'])
+            ->get(['id', 'full_name'])
+            ->map(fn (Employee $e) => [
+                'id'          => $e->id,
+                'full_name'   => $e->full_name,
+                'branch_name' => $e->employeeBranchAssignments->first()?->branch?->name,
+            ]);
+
         return Inertia::render('Historico-General/index', [
-            'periods' => $periods,
-            'sources' => $sources,
+            'periods'        => $periods,
+            'sources'        => $sources,
             'groupedUploads' => $groupedUploads,
             'currentPeriodId' => $currentPeriodId,
-            'preview' => $this->previewPayload($periodModels->firstWhere('id', $currentPeriodId)),
+            'preview'        => $this->previewPayload($periodModels->firstWhere('id', $currentPeriodId)),
+            'branches'       => $branches,
+            'employees'      => $employees,
         ]);
     }
 
@@ -157,17 +176,40 @@ class ReportUploadController extends Controller {
         return back()->with('success', 'Archivo eliminado correctamente.');
     }
 
-    public function updateDatabase(Period $period, DatabaseUpdateService $service): RedirectResponse
+    public function updateDatabase(Period $period): RedirectResponse
     {
+        $existingRun = PeriodDatabaseUpdateRun::query()
+            ->where('period_id', $period->id)
+            ->whereIn('status', ['queued', 'running'])
+            ->first();
+
+        if ($existingRun) {
+            return back()->with('error', 'Ya hay una actualización en proceso para este periodo. Espera a que termine.');
+        }
+
         $coveredWeeks = $this->resolveCoveredWeeks($period, Period::query()->where('type', 'weekly')->get());
         $uploads = $this->resolveUploadsForPeriod($coveredWeeks);
-        $workflow = $this->resolveWorkflowState($uploads, PeriodSummary::query()->where('period_id', $period->id)->first(), null, $period->type !== 'weekly');
+        $summary = PeriodSummary::query()->where('period_id', $period->id)->first();
+        $workflow = $this->resolveWorkflowState($uploads, $summary, null, $period->type !== 'weekly');
+
         if (!$workflow['can_update_database']) {
             return back()->with('error', implode(' ', $workflow['blocking_reasons']) ?: 'Faltan NOI y Cobranza procesables.');
         }
 
-        $service->updateForPeriod($period);
-        return back()->with('success', 'BD actualizada correctamente. Revisa incidencias pendientes.');
+        $run = PeriodDatabaseUpdateRun::query()->create([
+            'period_id'  => $period->id,
+            'created_by' => auth()->id(),
+            'status'     => 'queued',
+            'log'        => 'Actualización de base de datos en cola.',
+            'started_at' => now(),
+        ]);
+
+        UpdatePeriodDatabaseJob::dispatch($period->id, $run->id, auth()->id());
+
+        return back()->with(
+            'success',
+            'El proceso fue enviado a cola. Puedes cerrar esta ventana; te avisaremos por correo cuando termine.'
+        );
     }
 
     public function incidents(Period $period)
@@ -222,6 +264,26 @@ class ReportUploadController extends Controller {
         );
     }
 
+    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $service): RedirectResponse
+    {
+        try {
+            $service->analyze($reportUpload);
+
+            PeriodSummary::query()
+                ->where('period_id', $reportUpload->period_id)
+                ->whereNull('invalidated_at')
+                ->update([
+                    'invalidated_at'     => now(),
+                    'invalidated_by'     => auth()->id(),
+                    'invalidated_reason' => 'Fuente reprocesada: ' . ($reportUpload->dataSource?->name ?? 'desconocida'),
+                ]);
+
+            return back()->with('success', 'Archivo reprocesado correctamente. Revisa incidencias antes de generar el reporte.');
+        } catch (\Throwable $e) {
+            return back()->with('error', 'No se pudo reprocesar el archivo: ' . mb_strimwidth($e->getMessage(), 0, 300));
+        }
+    }
+
     private function previewPayload(?Period $period): array
     {
         if (!$period) {
@@ -267,7 +329,7 @@ class ReportUploadController extends Controller {
         return ReportUpload::query()->with('dataSource:id,code,name')->get()->filter(fn (ReportUpload $upload) => collect($upload->covered_period_ids ?? [])->map(fn ($id) => (int) $id)->intersect($weekIds)->isNotEmpty())->sortByDesc('created_at')->values();
     }
 
-    private function resolveWorkflowState(Collection $uploads, ?PeriodSummary $summary, ?PeriodRadiographyRun $run = null, bool $derivedPeriod = false): array
+    private function resolveWorkflowState(Collection $uploads, ?PeriodSummary $summary, ?PeriodRadiographyRun $run = null, bool $derivedPeriod = false, ?PeriodDatabaseUpdateRun $dbRun = null): array
     {
         $requiredRadiographySources = ['noi_nomina', 'lendus_ingresos_cobranza', 'gastos', 'lendus_ministraciones', 'lendus_saldos_cliente'];
         $sourceCodes = $uploads->pluck('dataSource.code')->filter()->unique()->values();
@@ -287,9 +349,13 @@ class ReportUploadController extends Controller {
         $radiographyReady = ($summary?->status === 'generated') && !$summary?->invalidated_at;
         $runStatus = $run?->status;
         $running = in_array($runStatus, ['queued', 'running'], true);
+        $dbRunStatus = $dbRun?->status;
+        $dbRunning = in_array($dbRunStatus, ['queued', 'running'], true);
+
         $blockingReasons = [];
         if (!empty($missingDb)) $blockingReasons[] = 'No se puede actualizar la BD. Faltan archivos obligatorios: NOI Nómina, Lendus Ingresos Cobranza.';
         if (!empty($failedDb)) $blockingReasons[] = 'No se puede actualizar la BD porque NOI o Cobranza tienen error de procesamiento.';
+        if ($dbRunning) $blockingReasons[] = 'La actualización de base de datos está en proceso.';
         if (!$databaseUpdated) $blockingReasons[] = 'Primero actualiza la BD.';
         if ($pendingCritical > 0) $blockingReasons[] = 'Hay incidencias pendientes antes de generar la Radiografía.';
         if (!empty($missingRadiography)) $blockingReasons[] = 'Faltan fuentes para analizar y generar Radiografía.';
@@ -297,19 +363,24 @@ class ReportUploadController extends Controller {
         if ($running) $blockingReasons[] = 'La Radiografía está en proceso. Puedes cerrar esta ventana y volver más tarde.';
 
         return [
-            'database_updated' => $databaseUpdated,
+            'database_updated'   => $databaseUpdated,
             'database_invalidated' => (bool) $summary?->invalidated_at,
+            'database_update_run_status'      => $dbRunStatus,
+            'database_update_run_log'         => $dbRun?->log ? mb_strimwidth($dbRun->log, 0, 300) : null,
+            'database_update_run_error'       => $dbRun?->error_message ? mb_strimwidth($dbRun->error_message, 0, 300) : null,
+            'database_update_run_started_at'  => optional($dbRun?->started_at)->format('d/m/Y H:i'),
+            'database_update_run_finished_at' => optional($dbRun?->finished_at)->format('d/m/Y H:i'),
             'pending_critical_incidents_count' => $pendingCritical,
             'missing_database_sources' => $missingDb,
             'missing_radiography_sources' => $missingRadiography,
             'unprocessed_radiography_sources' => $unprocessedRadiography,
-            'radiography_ready' => $radiographyReady,
+            'radiography_ready'      => $radiographyReady,
             'radiography_invalidated' => (bool) $summary?->invalidated_at,
-            'radiography_running' => $running,
-            'can_update_database' => empty($missingDb) && empty($failedDb),
-            'can_resolve_incidents' => $databaseUpdated,
+            'radiography_running'    => $running,
+            'can_update_database'    => empty($missingDb) && empty($failedDb) && !$dbRunning,
+            'can_resolve_incidents'  => $databaseUpdated,
             'can_generate_radiography' => $databaseUpdated && $pendingCritical === 0 && empty($missingRadiography) && empty($unprocessedRadiography) && !$running,
-            'can_export_radiography' => $radiographyReady && empty($missingRadiography) && empty($unprocessedRadiography) && !$running,
+            'can_export_radiography'   => $radiographyReady && empty($missingRadiography) && empty($unprocessedRadiography) && !$running,
             'blocking_reasons' => array_values(array_unique($blockingReasons)),
         ];
     }

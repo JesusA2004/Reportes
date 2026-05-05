@@ -241,136 +241,82 @@ const hasNoAssignments = computed(() => props.assignments.length === 0)
 <template>
     <Head title="Asignación sucursal" />
 
-    <div class="app-page px-3 py-3 sm:px-4 sm:py-4 md:px-5 lg:px-6 xl:px-7 2xl:px-8">
-        <div class="space-y-6">
-            <section class="app-card overflow-hidden">
-                <div class="relative">
-                    <div class="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-primary/5" />
-
-                    <div class="relative p-4 sm:p-5 lg:p-6">
-                        <div class="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-                            <div class="space-y-3">
-                                <div
-                                    class="inline-flex w-fit items-center gap-2 rounded-full border border-primary/15 bg-primary/5 px-3 py-1.5 text-xs font-semibold text-primary"
-                                >
-                                    <GitCompareArrows class="size-3.5" />
-                                    Cruce NOI ↔ operación
-                                </div>
-
-                                <div>
-                                    <h1 class="text-2xl font-extrabold tracking-tight sm:text-3xl">
-                                        Asignación sucursal
-                                    </h1>
-                                    <p class="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base">
-                                        Toma los colaboradores detectados en el periodo, intenta asignar sucursal,
-                                        separa incidencias y deja lista la revisión manual para altas, bajas y nombres
-                                        que no empaten correctamente.
-                                    </p>
-                                </div>
-
-                                <div class="flex flex-wrap items-center gap-3">
-                                    <select
-                                        v-model="selectedPeriodId"
-                                        class="app-input h-11 min-w-[260px]"
-                                    >
-                                        <option value="">Selecciona un periodo</option>
-                                        <option
-                                            v-for="period in periods"
-                                            :key="period.id"
-                                            :value="String(period.id)"
-                                        >
-                                            {{ period.label }}
-                                        </option>
-                                    </select>
-
-                                    <button
-                                        type="button"
-                                        class="app-btn h-11 px-5"
-                                        :disabled="autoMatchForm.processing || !selected_period_id"
-                                        @click="runAutoMatch"
-                                    >
-                                        <Wand2 class="mr-2 size-4" />
-                                        {{ autoMatchForm.processing ? 'Procesando...' : 'Cruzar y actualizar' }}
-                                    </button>
-                                </div>
-
-                                <p class="text-xs text-muted-foreground">
-                                    Periodo actual:
-                                    <span class="font-semibold text-foreground">
-                                        {{ selected_period_label || 'Sin periodo seleccionado' }}
-                                    </span>
-                                </p>
-
-                                <div
-                                    v-if="hasNoAssignments"
-                                    class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200"
-                                >
-                                    <div class="flex items-start gap-2">
-                                        <Info class="mt-0.5 size-4" />
-                                        <div>
-                                            <p class="font-semibold">Aún no hay asignaciones generadas</p>
-                                            <p class="mt-1 leading-6">
-                                                Si ya analizaste NOI y otras fuentes del periodo, ejecuta
-                                                <span class="font-semibold">Cruzar y actualizar</span> para poblar este módulo.
-                                            </p>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="grid grid-cols-2 gap-3 lg:w-[460px]">
-                                <div class="app-card-soft px-4 py-3">
-                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                        <UserRound class="size-4" />
-                                        Activos del periodo
-                                    </div>
-                                    <p class="mt-2 text-xl font-extrabold">{{ summary.total }}</p>
-                                </div>
-
-                                <div class="app-card-soft px-4 py-3">
-                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                        <CheckCircle2 class="size-4" />
-                                        Con sucursal
-                                    </div>
-                                    <p class="mt-2 text-xl font-extrabold">{{ summary.with_branch }}</p>
-                                </div>
-
-                                <div class="app-card-soft px-4 py-3">
-                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                        <AlertTriangle class="size-4" />
-                                        Incidencias
-                                    </div>
-                                    <p class="mt-2 text-xl font-extrabold">{{ summary.needs_review }}</p>
-                                </div>
-
-                                <div class="app-card-soft px-4 py-3">
-                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                        <Sparkles class="size-4" />
-                                        Manuales
-                                    </div>
-                                    <p class="mt-2 text-xl font-extrabold">{{ summary.manual }}</p>
-                                </div>
-
-                                <div class="app-card-soft px-4 py-3">
-                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                        <UserPlus class="size-4" />
-                                        Altas
-                                    </div>
-                                    <p class="mt-2 text-xl font-extrabold">{{ summary.hires }}</p>
-                                </div>
-
-                                <div class="app-card-soft px-4 py-3">
-                                    <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                                        <UserMinus class="size-4" />
-                                        Bajas
-                                    </div>
-                                    <p class="mt-2 text-xl font-extrabold">{{ summary.leavers }}</p>
-                                </div>
-                            </div>
-                        </div>
+    <div class="min-h-screen bg-gradient-to-br from-slate-50 via-white to-indigo-50/40 p-4 sm:p-6 lg:p-8">
+        <div class="mx-auto max-w-screen-2xl space-y-6">
+            <section class="overflow-hidden rounded-[2rem] bg-slate-950 p-6 text-white shadow-2xl shadow-slate-300 sm:p-8">
+                <div class="flex items-center gap-3">
+                    <div class="flex size-10 items-center justify-center rounded-2xl bg-sky-500">
+                        <GitCompareArrows class="size-5 text-white" />
                     </div>
+                    <p class="text-xs font-black uppercase tracking-[0.28em] text-sky-300">Empleados</p>
+                </div>
+                <h1 class="mt-3 text-3xl font-black tracking-tight sm:text-4xl">Asignación empleado → sucursal</h1>
+                <p class="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
+                    Cruza los colaboradores del periodo con las sucursales. Corrige incidencias, revisa altas y bajas, y ajusta manualmente los nombres que no empaten.
+                </p>
+                <div class="mt-5 flex flex-wrap items-center gap-3">
+                    <select
+                        v-model="selectedPeriodId"
+                        class="h-11 min-w-[240px] rounded-2xl border border-white/20 bg-white/10 px-4 text-sm text-white focus:outline-none focus:ring-2 focus:ring-white/30"
+                    >
+                        <option value="" class="text-slate-900">Selecciona un periodo</option>
+                        <option
+                            v-for="period in periods"
+                            :key="period.id"
+                            :value="String(period.id)"
+                            class="text-slate-900"
+                        >
+                            {{ period.label }}
+                        </option>
+                    </select>
+                    <button
+                        type="button"
+                        class="inline-flex h-11 items-center gap-2 rounded-2xl bg-sky-500 px-5 text-sm font-black text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
+                        :disabled="autoMatchForm.processing || !selected_period_id"
+                        @click="runAutoMatch"
+                    >
+                        <Wand2 class="size-4" />
+                        {{ autoMatchForm.processing ? 'Procesando...' : 'Cruzar y actualizar' }}
+                    </button>
+                </div>
+                <p v-if="selected_period_label" class="mt-3 text-xs text-slate-400">
+                    Periodo: <span class="font-bold text-white">{{ selected_period_label }}</span>
+                </p>
+                <div
+                    v-if="hasNoAssignments && selected_period_id"
+                    class="mt-4 rounded-2xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-200"
+                >
+                    <p class="font-bold">Sin asignaciones para este periodo.</p>
+                    <p class="mt-1 text-amber-300">Ejecuta <span class="font-bold">Cruzar y actualizar</span> para poblar este módulo.</p>
                 </div>
             </section>
+
+            <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-6">
+                <div class="rounded-[1.75rem] border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="flex items-center gap-2 text-xs text-slate-500"><UserRound class="size-4" /> Activos</div>
+                    <p class="mt-2 text-2xl font-black text-slate-950">{{ summary.total }}</p>
+                </div>
+                <div class="rounded-[1.75rem] border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="flex items-center gap-2 text-xs text-slate-500"><CheckCircle2 class="size-4" /> Con sucursal</div>
+                    <p class="mt-2 text-2xl font-black text-slate-950">{{ summary.with_branch }}</p>
+                </div>
+                <div class="rounded-[1.75rem] border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="flex items-center gap-2 text-xs text-slate-500"><AlertTriangle class="size-4" /> Incidencias</div>
+                    <p class="mt-2 text-2xl font-black text-slate-950">{{ summary.needs_review }}</p>
+                </div>
+                <div class="rounded-[1.75rem] border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="flex items-center gap-2 text-xs text-slate-500"><Sparkles class="size-4" /> Manuales</div>
+                    <p class="mt-2 text-2xl font-black text-slate-950">{{ summary.manual }}</p>
+                </div>
+                <div class="rounded-[1.75rem] border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="flex items-center gap-2 text-xs text-slate-500"><UserPlus class="size-4" /> Altas</div>
+                    <p class="mt-2 text-2xl font-black text-slate-950">{{ summary.hires }}</p>
+                </div>
+                <div class="rounded-[1.75rem] border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="flex items-center gap-2 text-xs text-slate-500"><UserMinus class="size-4" /> Bajas</div>
+                    <p class="mt-2 text-2xl font-black text-slate-950">{{ summary.leavers }}</p>
+                </div>
+            </div>
 
             <section class="grid gap-6 xl:grid-cols-3">
                 <div class="app-card overflow-hidden">
