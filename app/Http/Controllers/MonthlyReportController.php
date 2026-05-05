@@ -50,11 +50,33 @@ class MonthlyReportController extends Controller {
                 'exclusion_reason' => $summary->exclusion_reason,
             ])->values();
         }
+        $generatedReports = PeriodSummary::query()
+            ->with(['period:id,name,code,type,year,month,sequence,start_date,end_date'])
+            ->where('status', 'generated')
+            ->latest('generated_at')
+            ->get()
+            ->map(fn (PeriodSummary $summary) => [
+                'id' => $summary->id,
+                'name' => 'Radiografía ' . $summary->period?->label,
+                'period_id' => $summary->period_id,
+                'period' => $summary->period?->label,
+                'period_code' => $summary->period?->code,
+                'type' => 'Radiografía simple / configurada',
+                'scope' => 'General',
+                'generated_at' => optional($summary->generated_at)->format('d/m/Y H:i'),
+                'generated_by' => $summary->generated_by,
+                'status' => $summary->invalidated_at ? 'invalidated' : 'generated',
+                'excel_url' => route('reportes-mensuales.export-radiography', $summary->period_id),
+                'pdf_url' => route('reportes-mensuales.export-radiography-pdf', $summary->period_id),
+                'preview_url' => route('reportes-mensuales.show', $summary->period_id),
+            ])->values();
+
         return Inertia::render('ReportesMensuales/Index', [
             'periods' => $periods,
             'selectedPeriodId' => $selectedPeriodId,
             'summaryRows' => $summaryRows,
             'message' => 'Selecciona un periodo para consolidar y revisar el resumen por empleado.',
+            'generatedReports' => $generatedReports,
         ]);
     }
 
@@ -101,7 +123,7 @@ class MonthlyReportController extends Controller {
         if (!empty($sources['missing']) || !empty($sources['errors'])) {
             return back()->with('error', 'No se puede exportar. Faltan fuentes procesadas: ' . implode(', ', array_merge($sources['missing'], $sources['errors'])) . '.');
         }
-        $existingExport = PeriodRadiographyExport::query()->where('period_summary_id', $summary->id)->latest('id')->first();
+        $existingExport = PeriodRadiographyExport::query()->where('period_summary_id', $summary->id)->where('file_type', 'excel')->latest('id')->first();
         if ($existingExport && is_string($existingExport->export_path) && File::exists($existingExport->export_path)) {
             return response()->download($existingExport->export_path, basename($existingExport->export_path));
         }
@@ -109,10 +131,43 @@ class MonthlyReportController extends Controller {
         PeriodRadiographyExport::query()->create([
             'period_summary_id' => $summary->id,
             'export_path' => $path,
+            'file_type' => 'excel',
             'template_version' => config('app.version'),
+            'metadata' => ['period_id' => $period->id, 'period_label' => $period->label],
             'exported_at' => now(),
             'exported_by' => auth()->id(),
         ]);
+        return response()->download($path, basename($path));
+    }
+
+    public function exportRadiographyPdf(Period $period, RadiografiaExportService $service)
+    {
+        $summary = PeriodSummary::query()->where('period_id', $period->id)->first();
+        if (!$summary || $summary->status !== 'generated' || $summary->invalidated_at) {
+            return back()->with('error', 'No existe un PDF vigente para esta radiografía.');
+        }
+
+        $existingExport = PeriodRadiographyExport::query()
+            ->where('period_summary_id', $summary->id)
+            ->where('file_type', 'pdf')
+            ->latest('id')
+            ->first();
+
+        if ($existingExport && is_string($existingExport->export_path) && File::exists($existingExport->export_path)) {
+            return response()->download($existingExport->export_path, basename($existingExport->export_path));
+        }
+
+        $path = $service->exportPdf($period);
+        PeriodRadiographyExport::query()->create([
+            'period_summary_id' => $summary->id,
+            'export_path' => $path,
+            'file_type' => 'pdf',
+            'template_version' => config('app.version'),
+            'metadata' => ['period_id' => $period->id, 'period_label' => $period->label],
+            'exported_at' => now(),
+            'exported_by' => auth()->id(),
+        ]);
+
         return response()->download($path, basename($path));
     }
 
