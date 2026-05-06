@@ -5,11 +5,13 @@ namespace App\Services\Imports;
 use App\Models\Branch;
 use App\Models\Employee;
 use App\Models\EmployeeBranchAssignment;
+use App\Models\PeriodDatabaseUpdateRun;
 use App\Models\Recovery;
 use App\Models\ReportUpload;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Reader\IReadFilter;
 use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
@@ -227,72 +229,275 @@ class LendusIngresosCobranzaImportService {
         ];
     }
 
-    public function scanForDatabaseUpdate(ReportUpload $upload): array
-    {
+    public function scanForDatabaseUpdate(
+        ReportUpload $upload,
+        ?PeriodDatabaseUpdateRun $run = null,
+        int $progressStart = 55,
+        int $progressEnd = 78,
+    ): array {
+        if (!$upload->stored_path) {
+            throw new \RuntimeException('El archivo de cobranza no tiene ruta de almacenamiento.');
+        }
+
+        if (!Storage::disk('public')->exists($upload->stored_path)) {
+            throw new \RuntimeException('El archivo físico de cobranza no existe en storage/public.');
+        }
+
+        @set_time_limit(0);
+
+        $startTime    = microtime(true);
         $absolutePath = Storage::disk('public')->path($upload->stored_path);
-        $reader = IOFactory::createReaderForFile($absolutePath);
-        $reader->setReadDataOnly(true);
-        $info = $reader->listWorksheetInfo($absolutePath)[0] ?? null;
-        if (!$info) {
-            throw new \RuntimeException('No se encontró hoja en cobranza.');
-        }
-        $previewRows = $this->readChunk($absolutePath, $info['worksheetName'], 1, min(30, (int) $info['totalRows']), (string) $info['lastColumnLetter']);
-        $headerRowIndex = $this->detectHeaderRowIndex($previewRows);
-        $headerMap = $this->buildHeaderMap($previewRows[$headerRowIndex] ?? []);
-        $rows = $this->readChunk($absolutePath, $info['worksheetName'], $headerRowIndex + 2, (int) $info['totalRows'], (string) $info['lastColumnLetter']);
-        $promoters = 0; $branches = 0; $incidents = [];
 
-        foreach ($rows as $row) {
-            if (!is_array($row) || $this->isEmptyRow($row)) continue;
-            $mapped = $this->mapRow($row, $headerMap);
-            $promoterName = trim((string) ($mapped['promoter_name'] ?? ''));
-            $branchName = trim((string) ($mapped['branch_name'] ?? ''));
-            if ($promoterName === '') continue;
+        // ── 1. Metadata-only read for row-count estimate (progress bar) ────
+        $this->updateRun($run, $progressStart, 'Preparando Cobranza…');
+        $infoReader = IOFactory::createReaderForFile($absolutePath);
+        $infoReader->setReadDataOnly(true);
+        $sheetsInfo = $infoReader->listWorksheetInfo($absolutePath);
 
-            $promoter = Employee::query()->firstOrCreate(
-                ['normalized_name' => $this->normalizeHumanName($promoterName)],
-                ['full_name' => $promoterName, 'is_active' => true, 'source_system' => 'lendus_cobranza']
-            );
-            $promoters++;
-
-            if ($branchName === '') {
-                $incidents[] = ['type' => 'promoter_without_branch', 'message' => "Promotor sin sucursal: {$promoterName}"];
-                continue;
-            }
-
-            $normalizedBranch = $this->normalizeHumanName($branchName);
-            $branchCode = Str::upper(
-                Str::limit(
-                    preg_replace('/[^A-Za-z0-9]+/', '_', Str::ascii($normalizedBranch)),
-                    60,
-                    ''
-                )
-            );
-
-            $branch = Branch::query()->firstOrCreate(
-                ['normalized_name' => $normalizedBranch],
-                [
-                    'code' => $branchCode ?: 'SUCURSAL_' . substr(md5($normalizedBranch), 0, 8),
-                    'name' => $branchName,
-                    'is_active' => true,
-                ]
-            );
-
-            if (!$branch->code) {
-                $branch->update([
-                    'code' => $branchCode ?: 'SUCURSAL_' . substr(md5($normalizedBranch), 0, 8),
-                ]);
-            }
-
-            $branches++;
-
-            EmployeeBranchAssignment::query()->updateOrCreate(
-                ['period_id' => $upload->period_id, 'employee_id' => $promoter->id, 'source_type' => 'lendus'],
-                ['branch_id' => $branch->id, 'match_type' => 'normalized', 'confidence' => 0.8, 'was_manual_reviewed' => false]
-            );
+        if (empty($sheetsInfo)) {
+            throw new \RuntimeException('No se encontró hoja en el archivo de cobranza.');
         }
 
-        return ['promoters_detected' => $promoters, 'branches_detected' => $branches, 'incidents' => $incidents];
+        $totalRowsEstimate = min(max(0, (int) ($sheetsInfo[0]['totalRows'] ?? 0)), 100_000);
+
+        if ($totalRowsEstimate <= 1) {
+            throw new \RuntimeException('El archivo de cobranza no contiene filas con datos.');
+        }
+
+        // ── 2. Single-pass streaming with OpenSpout (one file open total) ──
+        // Buffer the first 30 non-empty rows to detect the header, then stream
+        // the rest row-by-row without ever reopening the file.
+        $this->updateRun($run, $progressStart + 2, 'Abriendo Cobranza en modo streaming…');
+
+        $spoutOptions = new \OpenSpout\Reader\XLSX\Options(
+            SHOULD_FORMAT_DATES: false,
+            SHOULD_PRESERVE_EMPTY_ROWS: false,
+        );
+        $spoutReader = new \OpenSpout\Reader\XLSX\Reader($spoutOptions);
+        $spoutReader->open($absolutePath);
+
+        $headerBuffer     = []; // first ≤30 non-empty rows for header detection
+        $headerDetected   = false;
+        $promoterColIndex = null;
+        $branchColIndex   = null;
+
+        $rowsRead          = 0;
+        $rowsSkipped       = 0;
+        $streamedCount     = 0; // non-empty rows yielded by OpenSpout
+        $promoterBranchMap = [];
+        $noAnyBranch       = [];
+
+        try {
+            foreach ($spoutReader->getSheetIterator() as $sheet) {
+                foreach ($sheet->getRowIterator() as $row) {
+                    $streamedCount++;
+                    // OpenSpout Row::toArray() returns a sparse 0-indexed array
+                    // keyed by the actual column position — same indices as buildHeaderMap.
+                    $values = $row->toArray();
+
+                    // ── Phase A: collect buffer until we can detect the header ─
+                    if (!$headerDetected) {
+                        $headerBuffer[] = $values;
+
+                        if (count($headerBuffer) >= 30) {
+                            [$promoterColIndex, $branchColIndex] = $this->detectCobranzaColumns($headerBuffer);
+                            $headerDetected = true;
+                            $this->updateRun($run, $progressStart + 5, 'Leyendo Lendus Cobranza…');
+                        }
+                        continue;
+                    }
+
+                    // ── Phase B: stream data rows directly ─────────────────────
+                    $this->accumulateCobranzaRow(
+                        $values, $promoterColIndex, $branchColIndex,
+                        $promoterBranchMap, $noAnyBranch, $rowsRead, $rowsSkipped
+                    );
+
+                    // Every 1000 data rows: progress update + cancellation + time check
+                    if ($rowsRead % 1_000 === 0 && $rowsRead > 0) {
+
+                        if ($run) {
+                            $run->refresh();
+                            if (!in_array($run->status, ['running', 'queued'], true)) {
+                                throw new \RuntimeException('El proceso fue cancelado durante la lectura de Cobranza.');
+                            }
+                        }
+
+                        if ((microtime(true) - $startTime) > 1500) {
+                            throw new \RuntimeException(sprintf(
+                                'Cobranza: lectura superó 25 min. Filas leídas: %d. El archivo puede ser demasiado grande.',
+                                $rowsRead
+                            ));
+                        }
+
+                        if ($run && $totalRowsEstimate > 1) {
+                            $pct  = (int) ($progressStart + ($streamedCount / $totalRowsEstimate) * ($progressEnd - $progressStart));
+                            $pct  = min($progressEnd, max($progressStart + 5, $pct));
+                            $uniq = count($promoterBranchMap);
+                            $run->update([
+                                'log'      => "Leyendo Cobranza… {$rowsRead} filas, {$uniq} promotores únicos.",
+                                'metadata' => array_merge($run->metadata ?? [], [
+                                    'current_step'     => "Leyendo Lendus Cobranza… {$uniq} promotores",
+                                    'progress_percent' => $pct,
+                                    'cobranza_rows_read'          => $rowsRead,
+                                    'cobranza_rows_skipped'       => $rowsSkipped,
+                                    'cobranza_total_rows'         => $totalRowsEstimate,
+                                    'cobranza_promoters_detected' => $uniq,
+                                ]),
+                            ]);
+                        }
+                    }
+                }
+                break; // only first sheet
+            }
+
+            // ── Handle files with fewer than 30 non-empty rows ─────────────
+            if (!$headerDetected && !empty($headerBuffer)) {
+                [$promoterColIndex, $branchColIndex] = $this->detectCobranzaColumns($headerBuffer);
+            }
+
+            // Process the data rows that were buffered during header detection
+            // (rows after the header line within the 30-row buffer)
+            if ($promoterColIndex !== null) {
+                $headerBufferIndex = $this->detectHeaderRowIndex($headerBuffer);
+                foreach (array_slice($headerBuffer, $headerBufferIndex + 1) as $bufferedValues) {
+                    $this->accumulateCobranzaRow(
+                        $bufferedValues, $promoterColIndex, $branchColIndex,
+                        $promoterBranchMap, $noAnyBranch, $rowsRead, $rowsSkipped
+                    );
+                }
+            }
+
+        } finally {
+            $spoutReader->close();
+        }
+
+        // ── 4. Incidents: promoters that never appeared with a branch ──────
+        $incidents = [];
+        foreach ($noAnyBranch as $normalized => $rawName) {
+            if (empty($promoterBranchMap[$normalized]['branches'])) {
+                $incidents[] = ['type' => 'promoter_without_branch', 'message' => "Promotor sin sucursal: {$rawName}"];
+            }
+        }
+
+        // ── 5. Bulk-insert new Employees (preload to avoid per-row queries) ─
+        // employees table has no unique constraint on (normalized_name, source_system),
+        // so we load existing IDs first and only insert genuinely new rows.
+        $existingEmployees = !empty($promoterBranchMap)
+            ? Employee::query()
+                ->where('source_system', 'lendus_cobranza')
+                ->whereIn('normalized_name', array_keys($promoterBranchMap))
+                ->pluck('id', 'normalized_name')
+                ->all()
+            : [];
+
+        $newEmployeeRows = [];
+        foreach ($promoterBranchMap as $normalized => $data) {
+            if (!isset($existingEmployees[$normalized])) {
+                $newEmployeeRows[] = [
+                    'full_name'       => $data['full_name'],
+                    'normalized_name' => $normalized,
+                    'is_active'       => true,
+                    'source_system'   => 'lendus_cobranza',
+                    'created_at'      => now(),
+                    'updated_at'      => now(),
+                ];
+            }
+        }
+
+        foreach (array_chunk($newEmployeeRows, 300) as $chunk) {
+            Employee::query()->insert($chunk);
+        }
+
+        $employeeIdMap = !empty($promoterBranchMap)
+            ? Employee::query()
+                ->where('source_system', 'lendus_cobranza')
+                ->whereIn('normalized_name', array_keys($promoterBranchMap))
+                ->pluck('id', 'normalized_name')
+                ->all()
+            : [];
+
+        // ── 6. Bulk upsert Branches (code has DB unique constraint) ────────
+        $branchRows = [];
+        foreach ($promoterBranchMap as $data) {
+            foreach ($data['branches'] as $normalizedBranch => $rawBranchName) {
+                if (!isset($branchRows[$normalizedBranch])) {
+                    $code = Str::upper(Str::limit(
+                        preg_replace('/[^A-Za-z0-9]+/', '_', Str::ascii($normalizedBranch)),
+                        60, ''
+                    ));
+                    $branchRows[$normalizedBranch] = [
+                        'code'            => $code ?: 'SUCURSAL_' . substr(md5($normalizedBranch), 0, 8),
+                        'name'            => $rawBranchName,
+                        'normalized_name' => $normalizedBranch,
+                        'is_active'       => true,
+                        'created_at'      => now(),
+                        'updated_at'      => now(),
+                    ];
+                }
+            }
+        }
+
+        if (!empty($branchRows)) {
+            foreach (array_chunk(array_values($branchRows), 300) as $chunk) {
+                Branch::query()->upsert($chunk, ['code'], ['name', 'normalized_name', 'is_active', 'updated_at']);
+            }
+        }
+
+        $branchIdMap = !empty($branchRows)
+            ? Branch::query()
+                ->whereIn('code', array_column(array_values($branchRows), 'code'))
+                ->pluck('id', 'normalized_name')
+                ->all()
+            : [];
+
+        // ── 7. Bulk upsert EmployeeBranchAssignments ───────────────────────
+        // DB unique constraint: (period_id, employee_id)
+        $assignmentRows = [];
+        foreach ($promoterBranchMap as $normalizedPromoter => $data) {
+            $employeeId = $employeeIdMap[$normalizedPromoter] ?? null;
+            if (!$employeeId) continue;
+
+            foreach ($data['branches'] as $normalizedBranch => $_) {
+                $branchId = $branchIdMap[$normalizedBranch] ?? null;
+                if (!$branchId) continue;
+
+                $assignmentRows[] = [
+                    'period_id'           => $upload->period_id,
+                    'employee_id'         => $employeeId,
+                    'branch_id'           => $branchId,
+                    'source_type'         => 'lendus',
+                    'match_type'          => 'normalized',
+                    'confidence'          => '0.80',
+                    'was_manual_reviewed' => false,
+                    'created_at'          => now(),
+                    'updated_at'          => now(),
+                ];
+            }
+        }
+
+        foreach (array_chunk($assignmentRows, 300) as $chunk) {
+            EmployeeBranchAssignment::query()->upsert(
+                $chunk,
+                ['period_id', 'employee_id'],
+                ['branch_id', 'source_type', 'match_type', 'confidence', 'was_manual_reviewed', 'updated_at'],
+            );
+        }
+
+        $duration = round(microtime(true) - $startTime, 1);
+
+        return [
+            'promoters_detected'           => count($promoterBranchMap),
+            'branches_detected'            => count($branchRows),
+            'cobranza_rows_read'           => $rowsRead,
+            'cobranza_rows_skipped'        => $rowsSkipped,
+            'cobranza_promoters_detected'  => count($promoterBranchMap),
+            'cobranza_branches_detected'   => count($branchRows),
+            'cobranza_assignments_created' => count($assignmentRows),
+            'cobranza_incidents_created'   => count($incidents),
+            'cobranza_duration_seconds'    => $duration,
+            'incidents'                    => $incidents,
+        ];
     }
 
     private function readChunk(
@@ -342,6 +547,88 @@ class LendusIngresosCobranzaImportService {
         return $rows;
     }
 
+    /**
+     * Detect promoter and branch column indices from a buffer of header rows.
+     * Returns [promoterColIndex, branchColIndex] using 0-based column positions.
+     */
+    private function detectCobranzaColumns(array $rows): array
+    {
+        $headerRowIndex   = $this->detectHeaderRowIndex($rows);
+        $headerRow        = $rows[$headerRowIndex] ?? [];
+        $headerMap        = $this->buildHeaderMap($headerRow);
+        $promoterColIndex = $headerMap['promoter_name'] ?? null;
+        $branchColIndex   = $headerMap['branch_name'] ?? null;
+
+        if ($promoterColIndex === null) {
+            $detected = implode(', ', array_filter(array_map(fn($v) => $this->cellToString($v), $headerRow), fn($v) => $v !== ''));
+            throw new \RuntimeException(
+                "No se encontró columna de promotor/asesor en cobranza. Encabezados detectados: {$detected}"
+            );
+        }
+
+        return [$promoterColIndex, $branchColIndex];
+    }
+
+    /**
+     * Accumulate one data row into the promoterBranchMap (in-place, by reference).
+     * Called once per streamed row; no DB queries.
+     */
+    private function accumulateCobranzaRow(
+        array $values,
+        int $promoterColIndex,
+        ?int $branchColIndex,
+        array &$promoterBranchMap,
+        array &$noAnyBranch,
+        int &$rowsRead,
+        int &$rowsSkipped,
+    ): void {
+        $promoterRaw = $this->cleanString($values[$promoterColIndex] ?? null);
+
+        if ($promoterRaw === null) {
+            $rowsSkipped++;
+            return;
+        }
+
+        $normalizedPromoter = $this->normalizeHumanName($promoterRaw);
+        if ($normalizedPromoter === '') {
+            $rowsSkipped++;
+            return;
+        }
+
+        $rowsRead++;
+
+        if (!isset($promoterBranchMap[$normalizedPromoter])) {
+            $promoterBranchMap[$normalizedPromoter] = ['full_name' => $promoterRaw, 'branches' => []];
+        }
+
+        $branchRaw = $branchColIndex !== null
+            ? $this->cleanString($values[$branchColIndex] ?? null)
+            : null;
+
+        if ($branchRaw !== null) {
+            $normalizedBranch = $this->normalizeHumanName($branchRaw);
+            if ($normalizedBranch !== '') {
+                $promoterBranchMap[$normalizedPromoter]['branches'][$normalizedBranch] = $branchRaw;
+                unset($noAnyBranch[$normalizedPromoter]);
+            }
+        } elseif (empty($promoterBranchMap[$normalizedPromoter]['branches'])) {
+            $noAnyBranch[$normalizedPromoter] = $promoterRaw;
+        }
+    }
+
+    private function updateRun(?PeriodDatabaseUpdateRun $run, int $pct, string $step): void
+    {
+        if (!$run) return;
+
+        $run->update([
+            'log'      => $step,
+            'metadata' => array_merge($run->metadata ?? [], [
+                'current_step'     => $step,
+                'progress_percent' => $pct,
+            ]),
+        ]);
+    }
+
     private function detectHeaderRowIndex(array $rows): int
     {
         $bestIndex = 0;
@@ -353,7 +640,7 @@ class LendusIngresosCobranzaImportService {
             }
 
             $normalized = array_map(
-                fn ($value) => $this->normalizeHeader((string) $value),
+                fn ($value) => $this->normalizeHeader($this->cellToString($value)),
                 $row
             );
 
@@ -396,7 +683,7 @@ class LendusIngresosCobranzaImportService {
         $normalizedHeaders = [];
 
         foreach ($headerRow as $index => $header) {
-            $normalizedHeaders[(int) $index] = $this->normalizeHeader((string) $header);
+            $normalizedHeaders[(int) $index] = $this->normalizeHeader($this->cellToString($header));
         }
 
         $aliases = [
@@ -558,9 +845,26 @@ class LendusIngresosCobranzaImportService {
             return null;
         }
 
-        $value = trim((string) $value);
+        $value = $this->cellToString($value);
 
         return $value !== '' ? $value : null;
+    }
+
+    private function cellToString(mixed $value): string
+    {
+        if ($value === null) {
+            return '';
+        }
+        if ($value instanceof \DateTimeInterface) {
+            return $value->format('Y-m-d');
+        }
+        if (is_bool($value)) {
+            return $value ? '1' : '0';
+        }
+        if (is_scalar($value)) {
+            return trim((string) $value);
+        }
+        return trim((string) json_encode($value, JSON_UNESCAPED_UNICODE));
     }
 
     private function toDecimal(mixed $value): ?float

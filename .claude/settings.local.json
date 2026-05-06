@@ -1,7 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(php -l app/Http/Controllers/ReportUploadController.php)",
+      "Bash(php -l app/Jobs/UpdatePeriodDatabaseJob.php)",
+      "Bash(php -l app/Services/DatabaseUpdateService.php)",
+      "Bash(php -l app/Models/PeriodDatabaseUpdateRun.php)",
+      "Bash(php -l routes/web.php)",
+      "Bash(php artisan *)",
+      "Bash(php -l app/Services/Imports/LendusIngresosCobranzaImportService.php)",
+      "Bash(php -l app/Console/Commands/DebugCobranzaCommand.php)",
+      "Bash(php *)",
+      "Bash(composer require *)",
+      "Bash(xargs grep -l \"EmptyCell\")"
     ]
   }
 }

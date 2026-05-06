@@ -13,6 +13,7 @@ class PeriodDatabaseUpdateRun extends Model
         'status',
         'log',
         'error_message',
+        'metadata',
         'started_at',
         'finished_at',
     ];
@@ -20,6 +21,7 @@ class PeriodDatabaseUpdateRun extends Model
     protected $casts = [
         'started_at'  => 'datetime',
         'finished_at' => 'datetime',
+        'metadata'    => 'array',
     ];
 
     public function period(): BelongsTo

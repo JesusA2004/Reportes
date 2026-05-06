@@ -264,24 +264,68 @@ class ReportUploadController extends Controller {
         );
     }
 
+    private const DB_SOURCES = ['noi_nomina', 'lendus_ingresos_cobranza'];
+
     public function analyze(ReportUpload $reportUpload, ReportAnalysisService $service): RedirectResponse
     {
         try {
             $service->analyze($reportUpload);
 
-            PeriodSummary::query()
+            $sourceCode = $reportUpload->dataSource?->code ?? '';
+            $sourceName = $reportUpload->dataSource?->name ?? 'La fuente';
+            $isBdSource = in_array($sourceCode, self::DB_SOURCES, true);
+
+            $summary = PeriodSummary::query()
                 ->where('period_id', $reportUpload->period_id)
                 ->whereNull('invalidated_at')
-                ->update([
+                ->first();
+
+            if ($summary && $isBdSource) {
+                // Fuente de BD reprocesada → invalidar todo; la BD necesita re-ejecutarse
+                $summary->update([
                     'invalidated_at'     => now(),
                     'invalidated_by'     => auth()->id(),
-                    'invalidated_reason' => 'Fuente reprocesada: ' . ($reportUpload->dataSource?->name ?? 'desconocida'),
+                    'invalidated_reason' => "Fuente de BD reprocesada: {$sourceName}. La actualización de BD debe ejecutarse nuevamente.",
                 ]);
+                return back()->with('success', "{$sourceName} fue reprocesada. La actualización de BD debe ejecutarse nuevamente.");
+            }
 
-            return back()->with('success', 'Archivo reprocesado correctamente. Revisa incidencias antes de generar el reporte.');
+            if ($summary && !$isBdSource && $summary->status === 'generated') {
+                // Fuente solo de Radiografía reprocesada después de generar reporte → revertir a estado de BD activo
+                $summary->update([
+                    'status'             => 'database_updated',
+                    'invalidated_reason' => "Fuente reprocesada: {$sourceName}. Re-genera la Radiografía para reflejar los cambios.",
+                ]);
+                return back()->with('success', "{$sourceName} fue reprocesada. La actualización de BD se conserva; re-genera la Radiografía para reflejar los cambios.");
+            }
+
+            return back()->with('success', "{$sourceName} fue reprocesada. La actualización de BD se mantiene intacta.");
         } catch (\Throwable $e) {
             return back()->with('error', 'No se pudo reprocesar el archivo: ' . mb_strimwidth($e->getMessage(), 0, 300));
         }
+    }
+
+    public function cancelDatabaseUpdate(Period $period): RedirectResponse
+    {
+        $run = PeriodDatabaseUpdateRun::query()
+            ->where('period_id', $period->id)
+            ->whereIn('status', ['queued', 'running'])
+            ->latest('id')
+            ->first();
+
+        if (!$run) {
+            return back()->with('error', 'No hay un proceso activo para cancelar en este periodo.');
+        }
+
+        $cancelledBy = auth()->user()?->name ?? 'usuario';
+        $run->update([
+            'status'        => 'failed',
+            'finished_at'   => now(),
+            'log'           => "Proceso cancelado manualmente por {$cancelledBy}.",
+            'error_message' => 'Cancelado manualmente.',
+        ]);
+
+        return back()->with('success', 'El proceso fue cancelado. Puedes reintentarlo cuando estés listo.');
     }
 
     private function previewPayload(?Period $period): array
@@ -352,6 +396,21 @@ class ReportUploadController extends Controller {
         $dbRunStatus = $dbRun?->status;
         $dbRunning = in_array($dbRunStatus, ['queued', 'running'], true);
 
+        // Stuck detection — queued sin iniciar > 5 min, running > 30 min
+        $dbElapsedMinutes = null;
+        $dbStuckWarning   = false;
+        if ($dbRun && $dbRunning) {
+            if ($dbRunStatus === 'queued') {
+                $ref = $dbRun->created_at;
+                $dbElapsedMinutes = $ref ? max(0, (int) now()->diffInMinutes($ref)) : null;
+                $dbStuckWarning   = $dbElapsedMinutes !== null && $dbElapsedMinutes >= 5;
+            } else {
+                $ref = $dbRun->started_at ?? $dbRun->created_at;
+                $dbElapsedMinutes = $ref ? max(0, (int) now()->diffInMinutes($ref)) : null;
+                $dbStuckWarning   = $dbElapsedMinutes !== null && $dbElapsedMinutes >= 30;
+            }
+        }
+
         $blockingReasons = [];
         if (!empty($missingDb)) $blockingReasons[] = 'No se puede actualizar la BD. Faltan archivos obligatorios: NOI Nómina, Lendus Ingresos Cobranza.';
         if (!empty($failedDb)) $blockingReasons[] = 'No se puede actualizar la BD porque NOI o Cobranza tienen error de procesamiento.';
@@ -370,6 +429,9 @@ class ReportUploadController extends Controller {
             'database_update_run_error'       => $dbRun?->error_message ? mb_strimwidth($dbRun->error_message, 0, 300) : null,
             'database_update_run_started_at'  => optional($dbRun?->started_at)->format('d/m/Y H:i'),
             'database_update_run_finished_at' => optional($dbRun?->finished_at)->format('d/m/Y H:i'),
+            'database_update_run_metadata'    => $dbRun?->metadata,
+            'database_update_elapsed_minutes' => $dbElapsedMinutes,
+            'database_update_stuck_warning'   => $dbStuckWarning,
             'pending_critical_incidents_count' => $pendingCritical,
             'missing_database_sources' => $missingDb,
             'missing_radiography_sources' => $missingRadiography,

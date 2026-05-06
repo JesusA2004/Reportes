@@ -20,7 +20,7 @@ class UpdatePeriodDatabaseJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 900;
+    public int $timeout = 1800;
     public int $tries = 1;
     public int $maxExceptions = 1;
 
@@ -33,24 +33,36 @@ class UpdatePeriodDatabaseJob implements ShouldQueue
     public function handle(DatabaseUpdateService $service): void
     {
         @ini_set('memory_limit', '512M');
-        @ini_set('max_execution_time', '900');
-        @set_time_limit(900);
+        @ini_set('max_execution_time', '1800');
+        @set_time_limit(1800);
 
         $period = Period::query()->findOrFail($this->periodId);
         $run    = PeriodDatabaseUpdateRun::query()->findOrFail($this->runId);
+
+        // If already cancelled before the worker picked it up, abort silently
+        if (!in_array($run->status, ['queued', 'running'], true)) {
+            Log::info('UpdatePeriodDatabaseJob: run ya no está activo al iniciar.', ['run_id' => $this->runId, 'status' => $run->status]);
+            return;
+        }
 
         $run->update([
             'status'     => 'running',
             'started_at' => $run->started_at ?? now(),
             'log'        => 'Procesando NOI Nómina y Cobranza…',
+            'metadata'   => ['current_step' => 'Iniciando proceso…', 'progress_percent' => 0],
         ]);
 
         try {
-            $service->updateForPeriod($period);
+            $service->updateForPeriod($period, $run);
 
-            $warnings = $period->fresh()
-                ?->periodSummary
-                ?->warnings['db_update'] ?? [];
+            // Re-check cancellation after service (in case it was cancelled during the last step)
+            $run->refresh();
+            if (!in_array($run->status, ['running'], true)) {
+                Log::info('UpdatePeriodDatabaseJob: run cancelado durante procesamiento.', ['run_id' => $this->runId]);
+                return;
+            }
+
+            $warnings = $period->fresh()?->periodSummary?->warnings['db_update'] ?? [];
 
             $run->update([
                 'status'      => 'success',
@@ -58,8 +70,16 @@ class UpdatePeriodDatabaseJob implements ShouldQueue
                 'log'         => 'Base de datos actualizada correctamente.',
             ]);
 
-            $this->notifyUser('success', $period, $run, $warnings);
+            $emailNote = $this->notifyUser('success', $period, $run, $warnings);
+            $run->update(['log' => 'Base de datos actualizada correctamente. ' . $emailNote]);
         } catch (\Throwable $exception) {
+            // Don't overwrite a manual cancel
+            $run->refresh();
+            if (!in_array($run->status, ['running'], true)) {
+                Log::info('UpdatePeriodDatabaseJob: run cancelado, omitiendo marca de error.', ['run_id' => $this->runId]);
+                return;
+            }
+
             $errorMsg = mb_strimwidth($exception->getMessage(), 0, 2000);
 
             $run->update([
@@ -69,7 +89,8 @@ class UpdatePeriodDatabaseJob implements ShouldQueue
                 'error_message' => $errorMsg,
             ]);
 
-            $this->notifyUser('failed', $period, $run, [], $errorMsg);
+            $emailNote = $this->notifyUser('failed', $period, $run, [], $errorMsg);
+            $run->update(['log' => 'El proceso terminó con error. ' . $emailNote]);
 
             throw $exception;
         }
@@ -81,15 +102,19 @@ class UpdatePeriodDatabaseJob implements ShouldQueue
         PeriodDatabaseUpdateRun $run,
         array $stats = [],
         string $errorMessage = '',
-    ): void {
+    ): string {
         if (!$this->userId) {
-            return;
+            return 'Sin usuario asignado — correo no enviado.';
         }
 
         $user = User::query()->find($this->userId);
 
         if (!$user || !$user->email) {
-            return;
+            Log::warning('UpdatePeriodDatabaseJob: usuario sin correo.', [
+                'user_id'   => $this->userId,
+                'period_id' => $this->periodId,
+            ]);
+            return 'Usuario sin correo configurado — notificación omitida.';
         }
 
         try {
@@ -102,13 +127,23 @@ class UpdatePeriodDatabaseJob implements ShouldQueue
                     new DatabaseUpdateFailedMail($period, $user, $run, $errorMessage)
                 );
             }
+
+            Log::info('UpdatePeriodDatabaseJob: correo enviado.', [
+                'email'     => $user->email,
+                'result'    => $result,
+                'period_id' => $this->periodId,
+            ]);
+
+            return "Correo enviado a {$user->email}.";
         } catch (\Throwable $mailException) {
-            Log::warning('No se pudo enviar correo de actualización BD.', [
+            Log::warning('UpdatePeriodDatabaseJob: no se pudo enviar correo.', [
                 'user_id'   => $this->userId,
+                'email'     => $user->email,
                 'period_id' => $this->periodId,
                 'result'    => $result,
                 'error'     => $mailException->getMessage(),
             ]);
+            return 'No se pudo enviar correo a ' . $user->email . ': ' . mb_strimwidth($mailException->getMessage(), 0, 200);
         }
     }
 }

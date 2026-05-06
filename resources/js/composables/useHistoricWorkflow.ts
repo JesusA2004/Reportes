@@ -26,7 +26,7 @@ export function useHistoricWorkflow(period: any, incidents: any) {
                         : 'blocked'
 
         const incidentsStatus = !dbDone
-            ? (dbRunning ? 'running' : 'blocked')
+            ? 'blocked'
             : critical > 0
                 ? 'error'
                 : 'completed'
