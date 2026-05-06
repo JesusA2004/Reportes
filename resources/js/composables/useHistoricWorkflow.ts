@@ -4,16 +4,19 @@ export function useHistoricWorkflow(period: any, incidents: any) {
     const currentStep = ref('files')
 
     const steps = computed(() => {
-        const selected = period.value
-        const dbReady   = !!selected?.can_update_database
-        const dbDone    = !!selected?.database_updated
-        const dbRunStatus = selected?.database_update_run_status ?? null
-        const dbRunning = ['queued', 'running'].includes(dbRunStatus)
-        const dbFailed  = dbRunStatus === 'failed'
-        const critical  = (incidents.value ?? []).filter((item: any) => item.severity === 'high').length
-        const canConfig = dbDone && critical === 0
-        const generated = !!selected?.radiography_ready
-        const radioRunning = !!selected?.radiography_running
+        const selected      = period.value
+        const dbReady       = !!selected?.can_update_database
+        const dbDone        = !!selected?.database_updated
+        const dbRunStatus   = selected?.database_update_run_status ?? null
+        const dbRunning     = ['queued', 'running'].includes(dbRunStatus)
+        const dbFailed      = dbRunStatus === 'failed'
+        const critical      = (incidents.value ?? []).filter((item: any) => item.severity === 'high').length
+        const canConfig     = dbDone && critical === 0
+        const radioRunning  = !!selected?.radiography_running
+        // Preview step: only "completed" when there's a real generated summary (preview_summary exists)
+        const hasRealPreview = !!selected?.preview_summary
+        // Exports step: only "completed" when can_export is true (files really exist)
+        const canExport     = !!selected?.can_export_radiography
 
         const bdStatus = dbDone
             ? 'completed'
@@ -31,11 +34,19 @@ export function useHistoricWorkflow(period: any, incidents: any) {
                 ? 'error'
                 : 'completed'
 
+        const configStatus = !canConfig
+            ? 'blocked'
+            : radioRunning
+                ? 'running'
+                : hasRealPreview
+                    ? 'completed'
+                    : 'ready'
+
         return [
             {
                 key: 'files',
                 label: 'Periodo y archivos',
-                description: 'Selecciona periodo y carga fuentes base.',
+                description: 'Selecciona periodo y carga las 5 fuentes.',
                 status: selected
                     ? (selected.missing_radiography_sources?.length ? 'ready' : 'completed')
                     : 'pending',
@@ -43,36 +54,34 @@ export function useHistoricWorkflow(period: any, incidents: any) {
             {
                 key: 'bd',
                 label: 'Actualización BD',
-                description: 'Actualiza con NOI y Cobranza.',
+                description: 'Actualiza empleados y sucursales con NOI y Cobranza.',
                 status: bdStatus,
             },
             {
                 key: 'incidents',
                 label: 'Incidencias',
-                description: 'Resuelve críticos antes de generar.',
+                description: 'Resuelve incidencias críticas antes de generar.',
                 status: incidentsStatus,
             },
             {
                 key: 'config',
                 label: 'Configurar reporte',
-                description: 'Tipo, alcance y filtros.',
-                status: canConfig ? 'ready' : 'blocked',
+                description: 'Tipo, alcance y filtros del reporte.',
+                status: configStatus,
             },
             {
                 key: 'preview',
                 label: 'Vista previa',
-                description: 'Reporte web navegable.',
-                status: generated ? 'completed' : radioRunning ? 'running' : 'blocked',
+                description: 'Resumen del reporte generado.',
+                // Only "completed" when a real summary exists, not just because run was queued
+                status: hasRealPreview ? 'completed' : radioRunning ? 'running' : 'blocked',
             },
             {
                 key: 'exports',
                 label: 'Exportación / archivos',
-                description: 'Excel, PDF y metadata.',
-                status: selected?.can_export_radiography
-                    ? 'completed'
-                    : radioRunning
-                        ? 'running'
-                        : 'blocked',
+                description: 'Excel, PDF y vista completa del reporte.',
+                // Only "completed" when files actually exist
+                status: canExport ? 'completed' : radioRunning ? 'running' : 'blocked',
             },
         ] as any[]
     })

@@ -137,8 +137,10 @@ class ReportUploadController extends Controller {
 
         $branches = Branch::query()->where('is_active', true)->orderBy('name')->get(['id', 'name']);
         $employees = Employee::query()->where('is_active', true)->orderBy('full_name')
-            ->with(['employeeBranchAssignments.branch:id,name'])
-            ->get(['id', 'full_name'])
+            ->with(['employeeBranchAssignments' => fn ($q) => $q->with('branch:id,name')->latest()])
+            ->get(['id', 'full_name', 'normalized_name'])
+            ->unique(fn (Employee $e) => $e->normalized_name ?: mb_strtolower(trim($e->full_name)))
+            ->values()
             ->map(fn (Employee $e) => [
                 'id'          => $e->id,
                 'full_name'   => $e->full_name,
@@ -254,9 +256,10 @@ class ReportUploadController extends Controller {
             'log' => 'Radiografía en cola. Puedes cerrar esta ventana.',
         ]);
 
-        $run->forceFill(['log' => 'Radiografía en cola. Configuración: ' . json_encode($request->input('config', []), JSON_UNESCAPED_UNICODE)])->save();
+        $config = $request->input('config', []);
+        $run->forceFill(['log' => 'Radiografía en cola. Configuración: ' . json_encode($config, JSON_UNESCAPED_UNICODE)])->save();
 
-        GenerateRadiographyJob::dispatch($period->id, auth()->id(), $run->id);
+        GenerateRadiographyJob::dispatch($period->id, auth()->id(), $run->id, $config);
 
         return back()->with(
             'success',
@@ -421,6 +424,16 @@ class ReportUploadController extends Controller {
         if (!empty($unprocessedRadiography)) $blockingReasons[] = 'Hay fuentes pendientes, procesando o con error. Todas deben quedar procesadas.';
         if ($running) $blockingReasons[] = 'La Radiografía está en proceso. Puedes cerrar esta ventana y volver más tarde.';
 
+        $previewSummary = null;
+        if ($radiographyReady && $summary) {
+            $gm = $summary->global_metrics ?? [];
+            $previewSummary = [
+                'global_metrics' => $gm,
+                'generated_at'   => optional($summary->generated_at)->format('d/m/Y H:i'),
+                'version'        => $summary->version,
+            ];
+        }
+
         return [
             'database_updated'   => $databaseUpdated,
             'database_invalidated' => (bool) $summary?->invalidated_at,
@@ -443,7 +456,8 @@ class ReportUploadController extends Controller {
             'can_resolve_incidents'  => $databaseUpdated,
             'can_generate_radiography' => $databaseUpdated && $pendingCritical === 0 && empty($missingRadiography) && empty($unprocessedRadiography) && !$running,
             'can_export_radiography'   => $radiographyReady && empty($missingRadiography) && empty($unprocessedRadiography) && !$running,
-            'blocking_reasons' => array_values(array_unique($blockingReasons)),
+            'blocking_reasons'         => array_values(array_unique($blockingReasons)),
+            'preview_summary'          => $previewSummary,
         ];
     }
 }

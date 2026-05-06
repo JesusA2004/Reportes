@@ -4,7 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Enums\DataSourceCode;
 use App\Models\MonthlyEmployeeSummary;
+use App\Models\Branch;
 use App\Models\Period;
+use App\Models\PeriodBranchSummary;
 use App\Models\PeriodRadiographyExport;
 use App\Models\PeriodRadiographyRun;
 use App\Models\PeriodSummary;
@@ -61,14 +63,14 @@ class MonthlyReportController extends Controller {
                 'period_id' => $summary->period_id,
                 'period' => $summary->period?->label,
                 'period_code' => $summary->period?->code,
-                'type' => 'Radiografía simple / configurada',
+                'type' => 'Radiografía simple',
                 'scope' => 'General',
                 'generated_at' => optional($summary->generated_at)->format('d/m/Y H:i'),
                 'generated_by' => $summary->generated_by,
                 'status' => $summary->invalidated_at ? 'invalidated' : 'generated',
                 'excel_url' => route('reportes-mensuales.export-radiography', $summary->period_id),
                 'pdf_url' => route('reportes-mensuales.export-radiography-pdf', $summary->period_id),
-                'preview_url' => route('reportes-mensuales.show', $summary->period_id),
+                'preview_url' => route('reportes-mensuales.preview', $summary->period_id),
             ])->values();
 
         return Inertia::render('ReportesMensuales/Index', [
@@ -82,6 +84,125 @@ class MonthlyReportController extends Controller {
 
     public function show(Period $period): RedirectResponse {
         return redirect()->route('reportes-mensuales.index', ['period' => $period->id]);
+    }
+
+    public function previewPage(Period $period): Response
+    {
+        $summary = PeriodSummary::query()
+            ->with(['branchSummaries', 'incidents'])
+            ->where('period_id', $period->id)
+            ->where('status', 'generated')
+            ->whereNull('invalidated_at')
+            ->first();
+
+        $run = PeriodRadiographyRun::query()
+            ->where('period_id', $period->id)
+            ->whereIn('status', ['success'])
+            ->latest('id')
+            ->first();
+
+        $hasExcelExport = false;
+        $hasPdfExport   = false;
+
+        if ($summary) {
+            $excelExport = PeriodRadiographyExport::query()
+                ->where('period_summary_id', $summary->id)
+                ->where('file_type', 'excel')
+                ->latest('id')
+                ->first();
+            $pdfExport = PeriodRadiographyExport::query()
+                ->where('period_summary_id', $summary->id)
+                ->where('file_type', 'pdf')
+                ->latest('id')
+                ->first();
+            $hasExcelExport = $excelExport && is_string($excelExport->export_path) && File::exists($excelExport->export_path);
+            $hasPdfExport   = $pdfExport && is_string($pdfExport->export_path) && File::exists($pdfExport->export_path);
+        }
+
+        $employees = $summary
+            ? MonthlyEmployeeSummary::query()
+                ->with(['employee:id,full_name', 'branch:id,name'])
+                ->where('period_id', $period->id)
+                ->orderByDesc('total_payments')
+                ->get()
+                ->map(fn (MonthlyEmployeeSummary $row) => [
+                    'id'               => $row->id,
+                    'employee_name'    => $row->employee?->full_name ?? 'Sin empleado',
+                    'branch_name'      => $row->branch?->name,
+                    'total_payments'   => (float) $row->total_payments,
+                    'total_bonuses'    => (float) $row->total_bonuses,
+                    'total_discounts'  => (float) $row->total_discounts,
+                    'total_expenses'   => (float) $row->total_expenses,
+                    'net_amount'       => (float) $row->net_amount,
+                    'included_in_report' => (bool) $row->included_in_report,
+                    'exclusion_reason' => $row->exclusion_reason,
+                ])->values()
+            : collect()->values();
+
+        $branchSummaries = $summary
+            ? $summary->branchSummaries->map(function (PeriodBranchSummary $bs) {
+                $branch = Branch::query()->find($bs->branch_id);
+                return [
+                    'branch_id'   => $bs->branch_id,
+                    'branch_name' => $branch?->name ?? "Sucursal #{$bs->branch_id}",
+                    'metrics'     => $bs->metrics ?? [],
+                ];
+            })->values()
+            : collect()->values();
+
+        $incidents = $summary
+            ? $summary->incidents->map(fn ($i) => [
+                'id'       => $i->id,
+                'type'     => $i->type,
+                'severity' => $i->severity,
+                'message'  => $i->message,
+                'context'  => $i->context,
+            ])->values()
+            : collect()->values();
+
+        $emp = $summary
+            ? MonthlyEmployeeSummary::query()
+                ->where('period_id', $period->id)
+                ->selectRaw('COUNT(*) as total, SUM(total_payments) as pagos, SUM(total_bonuses) as bonos, SUM(total_discounts) as descuentos, SUM(total_expenses) as gastos, SUM(net_amount) as neto')
+                ->first()
+            : null;
+
+        return Inertia::render('ReportesMensuales/Preview', [
+            'period' => [
+                'id'         => $period->id,
+                'label'      => $period->label,
+                'code'       => $period->code,
+                'type'       => $period->type,
+                'start_date' => optional($period->start_date)->format('Y-m-d'),
+                'end_date'   => optional($period->end_date)->format('Y-m-d'),
+            ],
+            'summary' => $summary ? [
+                'id'             => $summary->id,
+                'global_metrics' => $summary->global_metrics ?? [],
+                'generated_at'   => optional($summary->generated_at)->format('d/m/Y H:i'),
+                'version'        => $summary->version,
+            ] : null,
+            'payrollSummary' => [
+                'total_empleados' => (int) ($emp?->total ?? 0),
+                'pagos'           => (float) ($emp?->pagos ?? 0),
+                'bonos'           => (float) ($emp?->bonos ?? 0),
+                'descuentos'      => (float) ($emp?->descuentos ?? 0),
+                'gastos'          => (float) ($emp?->gastos ?? 0),
+                'neto'            => (float) ($emp?->neto ?? 0),
+            ],
+            'employees'      => $employees,
+            'branchSummaries' => $branchSummaries,
+            'incidents'      => $incidents,
+            'run'            => $run ? [
+                'status'      => $run->status,
+                'started_at'  => optional($run->started_at)->format('d/m/Y H:i'),
+                'finished_at' => optional($run->finished_at)->format('d/m/Y H:i'),
+            ] : null,
+            'hasExcelExport' => $hasExcelExport,
+            'hasPdfExport'   => $hasPdfExport,
+            'excelUrl'       => route('reportes-mensuales.export-radiography', $period->id),
+            'pdfUrl'         => route('reportes-mensuales.export-radiography-pdf', $period->id),
+        ]);
     }
 
     public function consolidate(Period $period, PeriodRadiographyService $service): RedirectResponse

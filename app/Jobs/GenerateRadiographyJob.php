@@ -9,6 +9,7 @@ use App\Models\PeriodRadiographyExport;
 use App\Models\PeriodRadiographyRun;
 use App\Models\PeriodSummary;
 use App\Models\User;
+use App\Services\PeriodConsolidationService;
 use App\Services\PeriodRadiographyService;
 use App\Services\RadiografiaExportService;
 use Illuminate\Bus\Queueable;
@@ -34,12 +35,14 @@ class GenerateRadiographyJob implements ShouldQueue
         public int $periodId,
         public ?int $userId = null,
         public ?int $runId = null,
+        public array $config = [],
     ) {
     }
 
     public function handle(
         PeriodRadiographyService $radiographyService,
         RadiografiaExportService $exportService,
+        PeriodConsolidationService $consolidationService,
     ): void {
         @ini_set('memory_limit', '1024M');
         @ini_set('max_execution_time', '1800');
@@ -53,90 +56,112 @@ class GenerateRadiographyJob implements ShouldQueue
 
         if (!$run) {
             $run = PeriodRadiographyRun::query()->create([
-                'period_id' => $period->id,
-                'status' => 'queued',
+                'period_id'  => $period->id,
+                'status'     => 'queued',
                 'started_at' => now(),
                 'created_by' => $this->userId,
-                'log' => 'Radiografía en cola.',
+                'log'        => 'Radiografía en cola.',
             ]);
         }
 
         $run->update([
-            'status' => 'running',
+            'status'     => 'running',
             'started_at' => $run->started_at ?: now(),
             'finished_at' => null,
-            'log' => 'Analizando fuentes pendientes.',
+            'log'        => 'Analizando fuentes y calculando métricas.',
         ]);
 
         try {
+            // ── 1. Generate summary (metrics from Expense/Recovery/Placement/Portfolio) ──
             $summary = $radiographyService->generate($period, $this->userId);
 
             $run->update([
-                'status' => 'running',
+                'status'            => 'running',
                 'period_summary_id' => $summary->id,
-                'log' => 'Generando Excel final.',
+                'log'               => 'Consolidando empleados y nómina.',
             ]);
 
+            // ── 2. Consolidate employee summaries (populates fact_monthly_employee_summary) ──
+            $consolidationService->consolidate($period);
+
+            $run->update([
+                'log' => 'Generando Excel.',
+            ]);
+
+            // ── 3. Export Excel (from scratch, no template) ──
             $path = $exportService->export($period);
+
+            $run->update([
+                'log' => 'Generando PDF.',
+            ]);
+
+            // ── 4. Export PDF (via Blade + dompdf) ──
             $pdfPath = $exportService->exportPdf($period);
 
+            // ── 5. Reload summary and register exports ──
             $summary = PeriodSummary::query()
                 ->where('period_id', $period->id)
                 ->first();
 
             if ($summary) {
+                // Remove previous exports for this summary before creating new ones
+                PeriodRadiographyExport::query()
+                    ->where('period_summary_id', $summary->id)
+                    ->delete();
+
                 PeriodRadiographyExport::query()->create([
                     'period_summary_id' => $summary->id,
-                    'export_path' => $path,
-                    'file_type' => 'excel',
-                    'template_version' => config('app.version'),
-                    'metadata' => ['period_id' => $period->id, 'period_label' => $period->label],
-                    'exported_at' => now(),
-                    'exported_by' => $this->userId,
+                    'export_path'       => $path,
+                    'file_type'         => 'excel',
+                    'template_version'  => config('app.version'),
+                    'metadata'          => ['period_id' => $period->id, 'period_label' => $period->label, 'config' => $this->config],
+                    'exported_at'       => now(),
+                    'exported_by'       => $this->userId,
                 ]);
 
                 PeriodRadiographyExport::query()->create([
                     'period_summary_id' => $summary->id,
-                    'export_path' => $pdfPath,
-                    'file_type' => 'pdf',
-                    'template_version' => config('app.version'),
-                    'metadata' => ['period_id' => $period->id, 'period_label' => $period->label],
-                    'exported_at' => now(),
-                    'exported_by' => $this->userId,
+                    'export_path'       => $pdfPath,
+                    'file_type'         => 'pdf',
+                    'template_version'  => config('app.version'),
+                    'metadata'          => ['period_id' => $period->id, 'period_label' => $period->label, 'config' => $this->config],
+                    'exported_at'       => now(),
+                    'exported_by'       => $this->userId,
                 ]);
             }
 
             $run->update([
-                'status' => 'success',
+                'status'            => 'success',
                 'period_summary_id' => $summary?->id,
-                'finished_at' => now(),
-                'log' => 'Radiografía generada con Excel y PDF listos para descargar.',
+                'finished_at'       => now(),
+                'log'               => 'Radiografía generada. Excel y PDF listos para descargar.',
             ]);
 
             $this->notifyUser(
-                subject: 'Radiografía lista para descargar',
-                message: "La Radiografía del periodo {$period->label} ya está lista. Puedes consultarla en Reportes mensuales y descargar Excel o PDF.",
+                subject: 'Radiografía lista',
+                message: "La Radiografía del periodo {$period->label} ya está lista. Puedes consultarla en Reportes mensuales.",
                 period: $period,
+                success: true,
             );
         } catch (\Throwable $exception) {
             $run->update([
-                'status' => 'failed',
+                'status'     => 'failed',
                 'finished_at' => now(),
-                'log' => mb_strimwidth($exception->getMessage(), 0, 2000),
+                'log'        => mb_strimwidth($exception->getMessage(), 0, 2000),
             ]);
 
             $this->notifyUser(
                 subject: 'Error al generar Radiografía',
-                message: "No se pudo generar la Radiografía del periodo {$period->label}. Error: "
-                    . mb_strimwidth($exception->getMessage(), 0, 1000),
+                message: "No se pudo generar la Radiografía del periodo {$period->label}. Error: " . mb_strimwidth($exception->getMessage(), 0, 500),
                 period: $period,
+                success: false,
             );
 
             throw $exception;
         }
     }
 
-    private function notifyUser(string $subject, string $message, Period $period): void
+    private function notifyUser(string $subject, string $message, Period $period, bool $success): void
     {
         if (!$this->userId) {
             return;
@@ -153,9 +178,9 @@ class GenerateRadiographyJob implements ShouldQueue
             : PeriodRadiographyRun::query()->where('period_id', $period->id)->latest('id')->first();
 
         try {
-            $downloadUrl = route('reportes-mensuales.index') . '?period=' . $period->id;
+            $downloadUrl = route('reportes-mensuales.preview', $period->id);
 
-            if (str_contains($subject, 'Error') || str_contains($subject, 'error')) {
+            if (!$success) {
                 Mail::to($user->email)->send(
                     new ReportGenerationFailedMail($period, $user, $run, $message)
                 );
