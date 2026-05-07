@@ -127,7 +127,7 @@ class NoiNominaImportService
                     'employee_id' => $employee->id,
                     'report_upload_id' => $upload->id,
                     'concept' => $mapped['concept'] ?: 'Sin concepto',
-                    'concept_type' => $mapped['concept_type'],
+                    'concept_type' => $mapped['concept_type'] ?: $this->inferConceptType($mapped['concept']),
                     'amount' => $mapped['amount'],
                     'quantity' => 1,
                     'payroll_type' => $mapped['payroll_type'] ?: 'NOI',
@@ -650,6 +650,46 @@ class NoiNominaImportService
             $parts[1] ?? null,
             $parts[2] ?? null,
         ];
+    }
+
+    /**
+     * Infer concept type from NOI concept code prefix when concept_type column is missing.
+     * NOI typically uses: P### for percepciones, D### for deducciones.
+     */
+    private function inferConceptType(?string $concept): ?string
+    {
+        if (!$concept) {
+            return null;
+        }
+
+        $normalized = strtoupper(trim($concept));
+
+        // P### NOMBRE → percepcion
+        if (preg_match('/^P\d{3}\b/', $normalized)) {
+            return 'percepcion';
+        }
+
+        // D### NOMBRE → deduccion
+        if (preg_match('/^D\d{3}\b/', $normalized)) {
+            return 'deduccion';
+        }
+
+        // Keyword fallback
+        $lower = strtolower($normalized);
+        if (str_contains($lower, 'sueldo') || str_contains($lower, 'salario') ||
+            str_contains($lower, 'vacacion') || str_contains($lower, 'bono') ||
+            str_contains($lower, 'prima') || str_contains($lower, 'compensacion') ||
+            str_contains($lower, 'percepcion')) {
+            return 'percepcion';
+        }
+
+        if (str_contains($lower, 'descuento') || str_contains($lower, 'prestamo') ||
+            str_contains($lower, 'deduccion') || str_contains($lower, 'imss') ||
+            str_contains($lower, 'isr') || str_contains($lower, 'impuesto')) {
+            return 'deduccion';
+        }
+
+        return null;
     }
 
     private function cleanString(mixed $value): ?string

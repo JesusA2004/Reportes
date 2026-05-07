@@ -6,11 +6,13 @@ use App\Models\Branch;
 use App\Models\Employee;
 use App\Models\Expense;
 use App\Models\ReportUpload;
+use App\Services\BranchResolverService;
 use Illuminate\Support\Facades\Storage;
 use Maatwebsite\Excel\Facades\Excel;
 
 class GastosImportService
 {
+    public function __construct(private readonly BranchResolverService $branchResolver) {}
     public function handle(ReportUpload $upload, ?callable $progress = null): array
     {
         if (!$upload->stored_path) {
@@ -84,7 +86,12 @@ class GastosImportService
                 }
 
                 $employee = $this->resolveEmployee($mapped['employee_name']);
+
+                // Try branch from column first, then from employee period assignment
                 $branch = $this->resolveBranch($mapped['branch_name']);
+                if (!$branch && $employee) {
+                    $branch = $this->resolveBranchFromEmployee($employee->id, $upload->period_id);
+                }
 
                 Expense::query()->create([
                     'period_id' => $upload->period_id,
@@ -364,6 +371,21 @@ class GastosImportService
         return true;
     }
 
+    private function resolveBranchFromEmployee(int $employeeId, int $periodId): ?Branch
+    {
+        $assignment = \App\Models\EmployeeBranchAssignment::query()
+            ->where('employee_id', $employeeId)
+            ->where('period_id', $periodId)
+            ->whereNotNull('branch_id')
+            ->first();
+
+        if ($assignment?->branch_id) {
+            return Branch::query()->find($assignment->branch_id);
+        }
+
+        return null;
+    }
+
     private function resolveEmployee(?string $fullName): ?Employee
     {
         if (!$fullName) {
@@ -383,12 +405,20 @@ class GastosImportService
             return null;
         }
 
+        // Try to resolve real branch from prefix first (e.g., "ORIZABA" might already be a name)
         $normalizedName = $this->normalizeName($branchName);
 
-        return Branch::query()
+        $existing = Branch::query()
             ->where('normalized_name', $normalizedName)
             ->orWhereRaw('LOWER(name) = ?', [mb_strtolower($branchName)])
             ->first();
+
+        if ($existing) {
+            return $existing;
+        }
+
+        // Try BranchResolverService (in case the value is a code like "ORI" or "ORI09247")
+        return $this->branchResolver->findOrCreateBranchByCode($branchName);
     }
 
     private function extractBranchFromText(?string $value): ?string

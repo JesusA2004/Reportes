@@ -5,12 +5,15 @@ namespace App\Services\Imports;
 use App\Models\Branch;
 use App\Models\Portfolio;
 use App\Models\ReportUpload;
+use App\Services\BranchResolverService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Maatwebsite\Excel\Facades\Excel;
 
 class LendusSaldosClienteImportService
 {
+    public function __construct(private readonly BranchResolverService $branchResolver) {}
+
     public function handle(ReportUpload $upload, ?callable $progress = null): array
     {
         if (!$upload->stored_path) {
@@ -40,7 +43,7 @@ class LendusSaldosClienteImportService
         if (!array_key_exists('balance', $map) && !array_key_exists('past_due_balance', $map)) {
             throw new \RuntimeException(
                 'El archivo de saldos no contiene columnas reconocibles de saldo/cartera. Encabezados detectados: '
-                . implode(', ', array_values(array_filter(array_map(fn ($value) => trim((string) $value), $header))))
+                . implode(', ', array_values(array_filter(array_map(fn ($v) => trim((string) $v), $header))))
             );
         }
 
@@ -48,10 +51,12 @@ class LendusSaldosClienteImportService
             ->where('report_upload_id', $upload->id)
             ->delete();
 
+        $this->branchResolver->clearCache();
+
         $stats = [
-            'rows_read' => 0,
-            'rows_inserted' => 0,
-            'rows_skipped' => 0,
+            'rows_read'        => 0,
+            'rows_inserted'    => 0,
+            'rows_skipped'     => 0,
             'rows_with_errors' => 0,
         ];
 
@@ -64,29 +69,80 @@ class LendusSaldosClienteImportService
             $stats['rows_read']++;
 
             try {
-                $balance = $this->toDecimal($this->valueFromRow($row, $map, 'balance')) ?? 0;
-                $pastDue = $this->toDecimal($this->valueFromRow($row, $map, 'past_due_balance')) ?? 0;
+                $balance = $this->toDecimal($this->value($row, $map, 'balance')) ?? 0;
+                $pastDue = $this->toDecimal($this->value($row, $map, 'past_due_balance')) ?? 0;
 
                 if ($balance <= 0 && $pastDue <= 0) {
                     $stats['rows_skipped']++;
                     continue;
                 }
 
-                $branchName = $this->clean($this->valueFromRow($row, $map, 'branch_name'));
-                $clientName = $this->clean($this->valueFromRow($row, $map, 'client_name'));
-                $branch = $this->resolveBranch($branchName);
+                // Contract/client code — used for real branch resolution
+                $contract = $this->clean($this->value($row, $map, 'contract'));
+
+                // Promoter fields
+                $promoterCode = $this->clean($this->value($row, $map, 'promoter_code'));
+                $promoterName = $this->clean($this->value($row, $map, 'promoter_name'));
+
+                // If only one promoter column was found and it looks like a code, swap
+                if ($promoterName && !$promoterCode && $this->looksLikeCode($promoterName)) {
+                    $promoterCode = $promoterName;
+                    $promoterName = null;
+                }
+
+                // Route name (office/ruta — NOT the real branch)
+                $routeName = $this->clean($this->value($row, $map, 'route_name'));
+
+                // Product data
+                $rawProduct  = $this->clean($this->value($row, $map, 'product_name'));
+                $numPayments = (int) ($this->toDecimal($this->value($row, $map, 'num_payments')) ?? 0) ?: null;
+                $periodicity = $this->clean($this->value($row, $map, 'periodicity'));
+
+                $productName = $rawProduct
+                    ? $this->branchResolver->normalizeProduct($rawProduct, $numPayments, $periodicity)
+                    : null;
+
+                // Exclude insurance and restructures from main records
+                if ($productName && $this->branchResolver->isInsuranceProduct($productName)) {
+                    $stats['rows_skipped']++;
+                    continue;
+                }
+
+                // Capital atrasado (more precise overdue amount)
+                $capitalDue = $this->toDecimal($this->value($row, $map, 'capital_due'));
+
+                // Days past due — use Días Vencido column
+                $daysPastDue = (int) ($this->toDecimal($this->value($row, $map, 'days_past_due')) ?? 0);
+
+                // If capital_due is null but days_past_due > 0, derive from past_due_balance
+                if ($capitalDue === null && $daysPastDue > 0 && $pastDue > 0) {
+                    $capitalDue = $pastDue;
+                }
+
+                // Branch resolution: prefer contract code prefix → then promoter code → then route column
+                $branch = $this->resolveBranchFromSources($contract, $promoterCode, $routeName);
+
+                $clientName = $this->clean($this->value($row, $map, 'client_name'));
 
                 Portfolio::query()->create([
-                    'period_id' => $upload->period_id,
-                    'report_upload_id' => $upload->id,
-                    'branch_id' => $branch?->id,
-                    'client_name' => $clientName,
+                    'period_id'              => $upload->period_id,
+                    'report_upload_id'       => $upload->id,
+                    'branch_id'              => $branch?->id,
+                    'client_name'            => $clientName,
                     'normalized_client_name' => $this->normalize($clientName),
-                    'balance' => $balance,
-                    'past_due_balance' => $pastDue,
-                    'days_past_due' => (int) ($this->toDecimal($this->valueFromRow($row, $map, 'days_past_due')) ?? 0),
-                    'portfolio_date' => $this->toDate($this->valueFromRow($row, $map, 'portfolio_date')),
-                    'raw_payload' => null,
+                    'contract'               => $contract,
+                    'promoter_name'          => $promoterName,
+                    'promoter_code'          => $promoterCode,
+                    'product_name'           => $productName,
+                    'num_payments'           => $numPayments,
+                    'periodicity'            => $periodicity,
+                    'route_name'             => $routeName,
+                    'balance'                => $balance,
+                    'past_due_balance'       => $pastDue,
+                    'capital_due'            => $capitalDue,
+                    'days_past_due'          => $daysPastDue,
+                    'portfolio_date'         => $this->toDate($this->value($row, $map, 'portfolio_date')),
+                    'raw_payload'            => null,
                 ]);
 
                 $stats['rows_inserted']++;
@@ -118,6 +174,39 @@ class LendusSaldosClienteImportService
         ];
     }
 
+    private function resolveBranchFromSources(
+        ?string $contract,
+        ?string $promoterCode,
+        ?string $routeName,
+    ): ?Branch {
+        // 1. Try contract code prefix (e.g., "ORI09247" → ORIZABA)
+        if ($contract) {
+            $branch = $this->branchResolver->findOrCreateBranchByCode($contract);
+            if ($branch) {
+                return $branch;
+            }
+        }
+
+        // 2. Try promoter code prefix (e.g., "ORI09247" → ORIZABA)
+        if ($promoterCode) {
+            $branch = $this->branchResolver->findOrCreateBranchByCode($promoterCode);
+            if ($branch) {
+                return $branch;
+            }
+        }
+
+        // 3. Fall back to route/office column name (existing behavior)
+        if ($routeName) {
+            $normalized = $this->normalize($routeName);
+            return Branch::query()
+                ->where('normalized_name', $normalized)
+                ->orWhereRaw('LOWER(name) = ?', [mb_strtolower($routeName)])
+                ->first();
+        }
+
+        return null;
+    }
+
     private function detectHeaderRowIndex(array $rows): int
     {
         $bestIndex = 0;
@@ -129,20 +218,21 @@ class LendusSaldosClienteImportService
             }
 
             $normalized = array_map(
-                fn ($value) => $this->normalizeHeader((string) $value),
+                fn ($v) => $this->normalizeHeader((string) $v),
                 $row,
             );
 
             $score = 0;
-
-            foreach ($normalized as $value) {
-                if (in_array($value, [
+            foreach ($normalized as $v) {
+                if (in_array($v, [
                     'cliente',
                     'nombre_del_cliente',
                     'oficina',
                     'zona',
                     'promotor',
                     'nombre_promotor',
+                    'nombre_promotor2',
+                    'nombre_gestor_de_cobranza',
                     'gestor_de_cobranza',
                     'saldo_actual',
                     'saldo_capital',
@@ -150,6 +240,16 @@ class LendusSaldosClienteImportService
                     'total_pagado',
                     'estatus',
                     'substatus',
+                    'contrato',
+                    'no_contrato',
+                    'num_contrato',
+                    'dias_vencido',
+                    'dias_vencidos',
+                    'capital_atrasado',
+                    'producto_de_credito',
+                    'numero_de_pagos',
+                    'pagos',
+                    'periodicidad',
                 ], true)) {
                     $score++;
                 }
@@ -160,7 +260,7 @@ class LendusSaldosClienteImportService
                 $bestIndex = (int) $index;
             }
 
-            if ($score >= 6) {
+            if ($score >= 5) {
                 return (int) $index;
             }
         }
@@ -171,21 +271,58 @@ class LendusSaldosClienteImportService
     private function buildHeaderMap(array $header): array
     {
         $aliases = [
-            'branch_name' => [
-                'sucursal',
-                'oficina',
-                'ruta',
-                'ruta_u_oficina',
-                'branch',
-                'nombre_sucursal',
-            ],
-            'client_name' => [
+            // In Lendus Saldos, "Cliente" column = the client/contract CODE (e.g., "HUAM001663")
+            // "Contrato" column = full contract number (e.g., "24HUAM032294")
+            'contract' => [
                 'cliente',
+                'contrato',
+                'no_contrato',
+                'num_contrato',
+                'numero_contrato',
+                'numero_de_contrato',
+                'no_de_contrato',
+                'clave_cliente',
+                'codigo_cliente',
+                'cliente_id',
+                'id_cliente',
+                'clave',
+            ],
+            // The actual human name comes from "Nombre del cliente" / "Acreditado"
+            'client_name' => [
                 'nombre_del_cliente',
                 'nombre_cliente',
                 'acreditado',
                 'nombre_acreditado',
                 'socio',
+                'nombre_completo',
+            ],
+            'route_name' => [
+                'oficina',
+                'ruta',
+                'ruta_u_oficina',
+                'zona',
+                'oficina_zona',
+                'centro',
+                'sucursal',
+                'nombre_sucursal',
+            ],
+            // Promoter code column in Lendus: "Promotor" or "Gestor de cobranza" (codes)
+            'promoter_code' => [
+                'promotor',
+                'gestor_de_cobranza',
+                'cobrador',
+                'clave_promotor',
+                'codigo_promotor',
+                'no_promotor',
+                'id_promotor',
+            ],
+            // Promoter name comes from "Nombre promotor" / "Nombre gestor de cobranza"
+            'promoter_name' => [
+                'nombre_promotor2',
+                'nombre_promotor',
+                'nombre_cobrador',
+                'nombre_gestor',
+                'nombre_gestor_de_cobranza',
             ],
             'balance' => [
                 'saldo_actual',
@@ -201,6 +338,9 @@ class LendusSaldosClienteImportService
                 'total_a_pagar',
             ],
             'past_due_balance' => [
+                'capital_atrasado',
+                'saldo_capital_atrasado',
+                'total_atrasado',
                 'saldo_vencido',
                 'cartera_vencida',
                 'monto_vencido',
@@ -209,12 +349,42 @@ class LendusSaldosClienteImportService
                 'saldo_mora',
                 'mora',
             ],
+            'capital_due' => [
+                'capital_atrasado',
+                'capital_mora',
+                'importe_atrasado',
+                'importe_vencido',
+                'saldo_atrasado',
+            ],
             'days_past_due' => [
-                'dias_mora',
                 'dias_vencido',
                 'dias_vencidos',
-                'dias_de_mora',
+                'dias_mora',
                 'dias_atraso',
+                'dias_de_mora',
+                'dias_de_atraso',
+            ],
+            'product_name' => [
+                'producto_de_credito',
+                'producto',
+                'tipo_credito',
+                'tipo_de_credito',
+                'nombre_producto',
+            ],
+            'num_payments' => [
+                'pagos',
+                'numero_de_pagos',
+                'num_pagos',
+                'no_pagos',
+                'no_pagos_1',
+                'plazo',
+                'numero_pagos',
+            ],
+            'periodicity' => [
+                'periodicidad',
+                'frecuencia',
+                'frecuencia_pago',
+                'tipo_pago',
             ],
             'portfolio_date' => [
                 'fecha',
@@ -222,21 +392,35 @@ class LendusSaldosClienteImportService
                 'fecha_de_corte',
                 'fecha_saldo',
                 'fecha_desembolso',
+                'fecha_apertura',
             ],
         ];
 
         $normalizedHeaders = [];
-
         foreach ($header as $index => $value) {
             $normalizedHeaders[$index] = $this->normalizeHeader((string) $value);
         }
 
+        // Alias-priority scan: try each alias in declared order, pick first column that matches.
+        // This ensures e.g. 'dias_vencido' is preferred over 'dias_mora' even if the latter
+        // appears earlier in the spreadsheet.
         $map = [];
-
         foreach ($aliases as $field => $possibleHeaders) {
-            foreach ($normalizedHeaders as $index => $normalizedHeader) {
-                if (in_array($normalizedHeader, $possibleHeaders, true)) {
+            foreach ($possibleHeaders as $alias) {
+                $found = false;
+                foreach ($normalizedHeaders as $index => $normalizedHeader) {
+                    if ($normalizedHeader !== $alias) {
+                        continue;
+                    }
+                    // capital_due must not reuse the same column already assigned to past_due_balance
+                    if ($field === 'capital_due' && isset($map['past_due_balance']) && $map['past_due_balance'] === $index) {
+                        continue;
+                    }
                     $map[$field] = $index;
+                    $found = true;
+                    break;
+                }
+                if ($found) {
                     break;
                 }
             }
@@ -245,27 +429,18 @@ class LendusSaldosClienteImportService
         return $map;
     }
 
-    private function resolveBranch(?string $name): ?Branch
-    {
-        if (!$name) {
-            return null;
-        }
-
-        $normalized = $this->normalize($name);
-
-        return Branch::query()
-            ->where('normalized_name', $normalized)
-            ->orWhereRaw('LOWER(name) = ?', [mb_strtolower($name)])
-            ->first();
-    }
-
-    private function valueFromRow(array $row, array $map, string $field): mixed
+    private function value(array $row, array $map, string $field): mixed
     {
         if (!array_key_exists($field, $map)) {
             return null;
         }
 
         return $row[$map[$field]] ?? null;
+    }
+
+    private function looksLikeCode(string $value): bool
+    {
+        return (bool) preg_match('/^[A-Z]{2,4}\d{4,}/i', trim($value));
     }
 
     private function normalizeHeader(string $value): string

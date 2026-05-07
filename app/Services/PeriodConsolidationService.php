@@ -99,7 +99,7 @@ class PeriodConsolidationService
 
         $totalExpenses = (float) $expenses->sum('amount');
 
-        $netAmount = round(($totalPayments + $totalBonuses) - $totalDiscounts - $totalExpenses, 2);
+        $netAmount = round(($totalPayments + $totalBonuses) - $totalDiscounts, 2);
 
         $hasUsefulMovement = $noiMovements->isNotEmpty() || $expenses->isNotEmpty();
 

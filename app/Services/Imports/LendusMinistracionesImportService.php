@@ -5,12 +5,15 @@ namespace App\Services\Imports;
 use App\Models\Branch;
 use App\Models\Placement;
 use App\Models\ReportUpload;
+use App\Services\BranchResolverService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Maatwebsite\Excel\Facades\Excel;
 
 class LendusMinistracionesImportService
 {
+    public function __construct(private readonly BranchResolverService $branchResolver) {}
+
     public function handle(ReportUpload $upload, ?callable $progress = null): array
     {
         if (!$upload->stored_path) {
@@ -71,25 +74,47 @@ class LendusMinistracionesImportService
                     continue;
                 }
 
-                $promoter = $this->clean($this->valueFromRow($row, $map, 'promoter_name'));
-                $branchName = $this->clean($this->valueFromRow($row, $map, 'branch_name'));
-                $clientName = $this->clean($this->valueFromRow($row, $map, 'client_name'));
+                $promoterName  = $this->clean($this->valueFromRow($row, $map, 'promoter_name'));
+                $promoterCode  = $this->clean($this->valueFromRow($row, $map, 'promoter_code'));
+                $productName   = $this->clean($this->valueFromRow($row, $map, 'product_name'));
+                $numPayments   = (int) ($this->toDecimal($this->valueFromRow($row, $map, 'num_payments')) ?? 0) ?: null;
+                $periodicity   = $this->clean($this->valueFromRow($row, $map, 'periodicity'));
+                $branchName    = $this->clean($this->valueFromRow($row, $map, 'branch_name'));
+                $clientName    = $this->clean($this->valueFromRow($row, $map, 'client_name'));
                 $coordinatorName = $this->clean($this->valueFromRow($row, $map, 'coordinator_name'));
 
-                $branch = $this->resolveBranch($branchName);
+                // If promoter_name slot has a code-looking value, move it to code slot
+                if ($promoterName && !$promoterCode && preg_match('/^[A-Z]{2,6}\d{4,}$/i', $promoterName)) {
+                    $promoterCode = $promoterName;
+                    $promoterName = null;
+                }
+                // If both slots have the same code value, clear the name slot
+                if ($promoterName && $promoterCode && $promoterName === $promoterCode) {
+                    $promoterName = null;
+                }
+
+                // Normalize product using BranchResolverService (with num_payments and periodicity for disambiguation)
+                $normalizedProduct = $productName
+                    ? $this->branchResolver->normalizeProduct($productName, $numPayments, $periodicity)
+                    : null;
+
+                // Branch resolution: try promoter_code prefix first, then branchName column
+                $branch = $this->resolveBranchSmart($branchName, $promoterCode);
 
                 Placement::query()->create([
-                    'period_id' => $upload->period_id,
-                    'report_upload_id' => $upload->id,
-                    'branch_id' => $branch?->id,
-                    'client_name' => $clientName,
+                    'period_id'              => $upload->period_id,
+                    'report_upload_id'       => $upload->id,
+                    'branch_id'              => $branch?->id,
+                    'client_name'            => $clientName,
                     'normalized_client_name' => $this->normalize($clientName),
-                    'promoter_name' => $promoter,
-                    'normalized_promoter_name' => $this->normalize($promoter),
-                    'coordinator_name' => $coordinatorName,
-                    'amount' => $amount,
-                    'operation_date' => $this->toDate($this->valueFromRow($row, $map, 'operation_date')),
-                    'raw_payload' => null,
+                    'promoter_name'          => $promoterName,
+                    'promoter_code'          => $promoterCode,
+                    'normalized_promoter_name' => $this->normalize($promoterName ?? $promoterCode),
+                    'coordinator_name'       => $coordinatorName,
+                    'product_name'           => $normalizedProduct,
+                    'amount'                 => $amount,
+                    'operation_date'         => $this->toDate($this->valueFromRow($row, $map, 'operation_date')),
+                    'raw_payload'            => null,
                 ]);
 
                 $stats['rows_inserted']++;
@@ -189,17 +214,43 @@ class LendusMinistracionesImportService
                 'nombre_sucursal',
             ],
             'promoter_name' => [
-                'promotor',
                 'nombre_promotor',
-                'cobrador',
                 'nombre_cobrador',
-                'gestor',
                 'nombre_gestor',
+                'nombre_promotor_cobrador',
+                'nombre_asesor',
+                'nombre_empleado',
+            ],
+            'promoter_code' => [
+                'promotor',
+                'cobrador',
+                'gestor',
                 'asesor',
                 'empleado',
-                'nombre_promotor_cobrador',
+                'clave_promotor',
+                'codigo_promotor',
                 'promotor_cobrador',
                 'promotor_gestor',
+            ],
+            'product_name' => [
+                'linea_de_credito',   // specific code: I30, S12, CRECE12, etc.
+                'producto_de_credito',
+                'producto',
+                'tipo_credito',
+                'tipo_de_credito',
+                'producto_credito',
+            ],
+            'num_payments' => [
+                'no_pagos',
+                'numero_de_pagos',
+                'num_pagos',
+                'plazo',
+                'pagos',
+            ],
+            'periodicity' => [
+                'periodicidad',
+                'frecuencia',
+                'tipo_pago',
             ],
             'amount' => [
                 'monto_desembolsado',
@@ -261,12 +312,19 @@ class LendusMinistracionesImportService
             $normalizedHeaders[$index] = $this->normalizeHeader((string) $value);
         }
 
+        // Alias-priority: try each alias in declared order so higher-priority aliases win.
         $map = [];
-
         foreach ($aliases as $field => $possibleHeaders) {
-            foreach ($normalizedHeaders as $index => $normalizedHeader) {
-                if (in_array($normalizedHeader, $possibleHeaders, true)) {
-                    $map[$field] = $index;
+            foreach ($possibleHeaders as $alias) {
+                $found = false;
+                foreach ($normalizedHeaders as $index => $normalizedHeader) {
+                    if ($normalizedHeader === $alias) {
+                        $map[$field] = $index;
+                        $found = true;
+                        break;
+                    }
+                }
+                if ($found) {
                     break;
                 }
             }
@@ -275,17 +333,26 @@ class LendusMinistracionesImportService
         return $map;
     }
 
-    private function resolveBranch(?string $name): ?Branch
+    private function resolveBranchSmart(?string $branchName, ?string $promoterCode): ?Branch
     {
-        if (!$name) {
+        // Try promoter_code prefix first (e.g., "ORI09247" → ORIZABA)
+        if ($promoterCode) {
+            $branch = $this->branchResolver->findOrCreateBranchByCode($promoterCode);
+            if ($branch) {
+                return $branch;
+            }
+        }
+
+        // Fall back to branchName column
+        if (!$branchName) {
             return null;
         }
 
-        $normalized = $this->normalize($name);
+        $normalized = $this->normalize($branchName);
 
         return Branch::query()
             ->where('normalized_name', $normalized)
-            ->orWhereRaw('LOWER(name) = ?', [mb_strtolower($name)])
+            ->orWhereRaw('LOWER(name) = ?', [mb_strtolower($branchName)])
             ->first();
     }
 

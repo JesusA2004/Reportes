@@ -54,8 +54,9 @@
 
           @if($errorMessage)
           <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;padding:16px 18px;margin-bottom:28px;">
-            <p style="margin:0 0 6px;font-size:12px;font-weight:700;color:#dc2626;text-transform:uppercase;letter-spacing:.08em;">Motivo del error</p>
-            <p style="margin:0;font-size:13px;color:#7f1d1d;font-family:'Courier New',monospace;line-height:1.6;word-break:break-all;">{{ $errorMessage }}</p>
+            <p style="margin:0 0 6px;font-size:12px;font-weight:700;color:#dc2626;text-transform:uppercase;letter-spacing:.08em;">Motivo</p>
+            <p style="margin:0 0 12px;font-size:14px;color:#7f1d1d;line-height:1.6;">{{ $errorMessage }}</p>
+            <p style="margin:0;font-size:11px;color:#94a3b8;">Código de referencia: Run #{{ $run->id }}</p>
           </div>
           @endif
 

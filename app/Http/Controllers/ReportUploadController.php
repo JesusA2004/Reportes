@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreReportUploadRequest;
 use App\Jobs\GenerateRadiographyJob;
+use App\Jobs\ReprocessPeriodUploadsJob;
+use App\Jobs\ReprocessReportUploadJob;
 use App\Jobs\UpdatePeriodDatabaseJob;
 use App\Models\Branch;
 use App\Models\DataSource;
@@ -12,10 +14,10 @@ use App\Models\Period;
 use App\Models\PeriodDatabaseUpdateRun;
 use App\Models\PeriodIncident;
 use App\Models\PeriodRadiographyRun;
+use App\Models\PeriodReprocessRun;
 use App\Models\MonthlyEmployeeSummary;
 use App\Models\PeriodSummary;
 use App\Models\ReportUpload;
-use App\Services\ReportAnalysisService;
 use App\Services\ReportUploadService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -32,11 +34,12 @@ class ReportUploadController extends Controller {
         $summariesByPeriod = PeriodSummary::query()->with('incidents')->get()->keyBy('period_id');
         $runsByPeriod = PeriodRadiographyRun::query()->orderByDesc('id')->get()->unique('period_id')->keyBy('period_id');
         $dbRunsByPeriod = PeriodDatabaseUpdateRun::query()->orderByDesc('id')->get()->unique('period_id')->keyBy('period_id');
+        $reprocessRunsByPeriod = PeriodReprocessRun::query()->orderByDesc('id')->get()->unique('period_id')->keyBy('period_id');
 
         $periodModels = Period::query()->orderByDesc('year')->orderByDesc('month')->orderByDesc('sequence')->get();
         $weeklyPeriods = $periodModels->where('type', 'weekly')->values();
 
-        $periods = $periodModels->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount, $summariesByPeriod, $runsByPeriod, $dbRunsByPeriod) {
+        $periods = $periodModels->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount, $summariesByPeriod, $runsByPeriod, $dbRunsByPeriod, $reprocessRunsByPeriod) {
             $coveredWeeks = $this->resolveCoveredWeeks($period, $weeklyPeriods);
             $uploads = $this->resolveUploadsForPeriod($coveredWeeks);
             $uploadedSourceCodes = $uploads->pluck('dataSource.code')->filter()->unique()->values();
@@ -44,6 +47,7 @@ class ReportUploadController extends Controller {
             $summary = $summariesByPeriod->get($period->id);
             $run = $runsByPeriod->get($period->id);
             $dbRun = $dbRunsByPeriod->get($period->id);
+            $reprocessRun = $reprocessRunsByPeriod->get($period->id);
 
             return [
                 'id' => $period->id,
@@ -70,7 +74,12 @@ class ReportUploadController extends Controller {
                 'radiography_invalidated' => (bool) $summary?->invalidated_at,
                 'radiography_run_status' => $run?->status,
                 'radiography_run_log' => $run?->log,
+                'radiography_run_id' => $run?->id,
                 'radiography_run_finished_at' => optional($run?->finished_at)->format('d/m/Y H:i'),
+                'reprocess_run_status'   => $reprocessRun?->status,
+                'reprocess_run_log'      => $reprocessRun?->log,
+                'reprocess_run_progress' => $reprocessRun?->metadata['progress'] ?? null,
+                'reprocess_run_id'       => $reprocessRun?->id,
                 ...$this->resolveWorkflowState($uploads, $summary, $run, $period->type !== 'weekly', $dbRun),
                 'available_week_options' => $period->type === 'weekly' ? $weeklyPeriods->where('year', $period->year)->where('month', $period->month)->sortBy('sequence')->map(fn ($week) => [
                     'id' => $week->id,
@@ -91,7 +100,7 @@ class ReportUploadController extends Controller {
             ];
         })->values();
 
-        $groupedUploads = $periodModels->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount, $summariesByPeriod, $runsByPeriod, $dbRunsByPeriod) {
+        $groupedUploads = $periodModels->map(function (Period $period) use ($weeklyPeriods, $sources, $requiredSourcesCount, $summariesByPeriod, $runsByPeriod, $dbRunsByPeriod, $reprocessRunsByPeriod) {
             $coveredWeeks = $this->resolveCoveredWeeks($period, $weeklyPeriods);
             $uploads = $this->resolveUploadsForPeriod($coveredWeeks);
             $uploadedSourceCodes = $uploads->pluck('dataSource.code')->filter()->unique()->values();
@@ -99,6 +108,7 @@ class ReportUploadController extends Controller {
             $summary = $summariesByPeriod->get($period->id);
             $run = $runsByPeriod->get($period->id);
             $dbRun = $dbRunsByPeriod->get($period->id);
+            $reprocessRun = $reprocessRunsByPeriod->get($period->id);
 
             return [
                 'period_id' => $period->id,
@@ -117,7 +127,12 @@ class ReportUploadController extends Controller {
                 'radiography_invalidated' => (bool) $summary?->invalidated_at,
                 'radiography_run_status' => $run?->status,
                 'radiography_run_log' => $run?->log,
+                'radiography_run_id' => $run?->id,
                 'radiography_run_finished_at' => optional($run?->finished_at)->format('d/m/Y H:i'),
+                'reprocess_run_status'   => $reprocessRun?->status,
+                'reprocess_run_log'      => $reprocessRun?->log,
+                'reprocess_run_progress' => $reprocessRun?->metadata['progress'] ?? null,
+                'reprocess_run_id'       => $reprocessRun?->id,
                 ...$this->resolveWorkflowState($uploads, $summary, $run, $period->type !== 'weekly', $dbRun),
                 'uploads' => $uploads->unique('id')->values()->map(fn ($upload) => [
                     'id' => $upload->id,
@@ -257,7 +272,9 @@ class ReportUploadController extends Controller {
         ]);
 
         $config = $request->input('config', []);
-        $run->forceFill(['log' => 'Radiografía en cola. Configuración: ' . json_encode($config, JSON_UNESCAPED_UNICODE)])->save();
+        $scope = $config['scope'] ?? 'general';
+        $type = ($config['report_type'] ?? 'simple') === 'simple' ? 'Radiografía simple' : 'Reporte comparativo';
+        $run->forceFill(['log' => "Radiografía en cola. Se generará un {$type} con alcance {$scope}."])->save();
 
         GenerateRadiographyJob::dispatch($period->id, auth()->id(), $run->id, $config);
 
@@ -269,43 +286,80 @@ class ReportUploadController extends Controller {
 
     private const DB_SOURCES = ['noi_nomina', 'lendus_ingresos_cobranza'];
 
-    public function analyze(ReportUpload $reportUpload, ReportAnalysisService $service): RedirectResponse
+    public function analyze(ReportUpload $reportUpload): RedirectResponse
     {
-        try {
-            $service->analyze($reportUpload);
+        $sourceCode = $reportUpload->dataSource?->code ?? '';
+        $sourceName = $reportUpload->dataSource?->name ?? 'La fuente';
+        $isBdSource = in_array($sourceCode, self::DB_SOURCES, true);
 
-            $sourceCode = $reportUpload->dataSource?->code ?? '';
-            $sourceName = $reportUpload->dataSource?->name ?? 'La fuente';
-            $isBdSource = in_array($sourceCode, self::DB_SOURCES, true);
+        // Invalidate summary immediately so the UI reflects the correct state right away
+        $summary = PeriodSummary::query()
+            ->where('period_id', $reportUpload->period_id)
+            ->whereNull('invalidated_at')
+            ->first();
 
-            $summary = PeriodSummary::query()
-                ->where('period_id', $reportUpload->period_id)
-                ->whereNull('invalidated_at')
-                ->first();
-
-            if ($summary && $isBdSource) {
-                // Fuente de BD reprocesada → invalidar todo; la BD necesita re-ejecutarse
-                $summary->update([
-                    'invalidated_at'     => now(),
-                    'invalidated_by'     => auth()->id(),
-                    'invalidated_reason' => "Fuente de BD reprocesada: {$sourceName}. La actualización de BD debe ejecutarse nuevamente.",
-                ]);
-                return back()->with('success', "{$sourceName} fue reprocesada. La actualización de BD debe ejecutarse nuevamente.");
-            }
-
-            if ($summary && !$isBdSource && $summary->status === 'generated') {
-                // Fuente solo de Radiografía reprocesada después de generar reporte → revertir a estado de BD activo
-                $summary->update([
-                    'status'             => 'database_updated',
-                    'invalidated_reason' => "Fuente reprocesada: {$sourceName}. Re-genera la Radiografía para reflejar los cambios.",
-                ]);
-                return back()->with('success', "{$sourceName} fue reprocesada. La actualización de BD se conserva; re-genera la Radiografía para reflejar los cambios.");
-            }
-
-            return back()->with('success', "{$sourceName} fue reprocesada. La actualización de BD se mantiene intacta.");
-        } catch (\Throwable $e) {
-            return back()->with('error', 'No se pudo reprocesar el archivo: ' . mb_strimwidth($e->getMessage(), 0, 300));
+        if ($summary && $isBdSource) {
+            $summary->update([
+                'invalidated_at'     => now(),
+                'invalidated_by'     => auth()->id(),
+                'invalidated_reason' => "Fuente de BD reprocesada: {$sourceName}. La actualización de BD debe ejecutarse nuevamente.",
+            ]);
+        } elseif ($summary && !$isBdSource && $summary->status === 'generated') {
+            $summary->update([
+                'status'             => 'database_updated',
+                'invalidated_reason' => "Fuente reprocesada: {$sourceName}. Re-genera la Radiografía para reflejar los cambios.",
+            ]);
         }
+
+        ReprocessReportUploadJob::dispatch($reportUpload->id, auth()->id());
+
+        return back()->with('success', "'{$sourceName}' fue enviado a reprocesamiento en cola. Recibirás un correo cuando termine.");
+    }
+
+    public function reprocessAll(Period $period): RedirectResponse
+    {
+        $existing = PeriodReprocessRun::query()
+            ->where('period_id', $period->id)
+            ->whereIn('status', ['queued', 'running'])
+            ->first();
+
+        if ($existing) {
+            return back()->with('error', 'Ya hay un reprocesamiento en curso para este periodo. Espera a que termine.');
+        }
+
+        // Invalidate summary immediately
+        $summary = PeriodSummary::query()
+            ->where('period_id', $period->id)
+            ->whereNull('invalidated_at')
+            ->first();
+
+        if ($summary) {
+            $summary->update([
+                'invalidated_at'     => now(),
+                'invalidated_by'     => auth()->id(),
+                'invalidated_reason' => 'Todo el periodo fue enviado a reprocesamiento. La actualización de BD debe ejecutarse nuevamente.',
+            ]);
+        }
+
+        $weeklyPeriods   = Period::query()->where('type', 'weekly')->get();
+        $coveredWeeks    = $this->resolveCoveredWeeks($period, $weeklyPeriods);
+        $coveredPeriodIds = $coveredWeeks->pluck('id')->map(fn ($id) => (int) $id)->values()->all();
+
+        $run = PeriodReprocessRun::query()->create([
+            'period_id'  => $period->id,
+            'created_by' => auth()->id(),
+            'status'     => 'queued',
+            'log'        => 'Reprocesamiento completo del periodo en cola.',
+            'metadata'   => ['progress' => 0],
+            'started_at' => now(),
+        ]);
+
+        ReprocessPeriodUploadsJob::dispatch($period->id, $run->id, $coveredPeriodIds, auth()->id());
+
+        return back()->with(
+            'success',
+            'El reprocesamiento completo fue enviado a cola. Recibirás un correo cuando todas las fuentes terminen.'
+        );
     }
 
     public function cancelDatabaseUpdate(Period $period): RedirectResponse

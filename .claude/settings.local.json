@@ -12,7 +12,9 @@
       "Bash(php -l app/Console/Commands/DebugCobranzaCommand.php)",
       "Bash(php *)",
       "Bash(composer require *)",
-      "Bash(xargs grep -l \"EmptyCell\")"
+      "Bash(xargs grep -l \"EmptyCell\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\wamp64\\\\www\\\\Reportes\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)"
     ]
   }
 }

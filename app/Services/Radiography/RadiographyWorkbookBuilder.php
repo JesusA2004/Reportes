@@ -2,8 +2,6 @@
 
 namespace App\Services\Radiography;
 
-use App\Models\Branch;
-use App\Models\MonthlyEmployeeSummary;
 use App\Models\Period;
 use App\Models\PeriodSummary;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
@@ -12,277 +10,193 @@ use PhpOffice\PhpSpreadsheet\Style\Border;
 use PhpOffice\PhpSpreadsheet\Style\Fill;
 use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
+/**
+ * Builds Excel workbook from scratch using a pre-built snapshot.
+ * NO template loading — creates new Spreadsheet() every time.
+ */
 class RadiographyWorkbookBuilder
 {
-    private const BG_DARK    = 'FF0F172A';
-    private const BG_BLUE    = 'FF1D4ED8';
-    private const BG_HDR     = 'FFDBEAFE';
-    private const FG_HDR     = 'FF1E3A8A';
-    private const BG_META    = 'FFF1F5F9';
-    private const FG_META    = 'FF475569';
-    private const BG_ALT     = 'FFF8FAFC';
-    private const BG_TOTAL   = 'FF334155';
-    private const FG_WHITE   = 'FFFFFFFF';
-    private const FG_RED     = 'FFB91C1C';
-    private const BG_EVEN    = 'FFFFFFFF';
-    private const BORDER_LT  = 'FFE2E8F0';
-    private const CURRENCY   = '"$"#,##0.00';
-    private const PERCENT    = '0.00"%"';
+    // Color palette
+    private const BG_DARK   = 'FF0F172A';
+    private const BG_BLUE   = 'FF1D4ED8';
+    private const BG_HDR    = 'FFDBEAFE';
+    private const FG_HDR    = 'FF1E3A8A';
+    private const BG_META   = 'FFF1F5F9';
+    private const FG_META   = 'FF475569';
+    private const BG_ALT    = 'FFF8FAFC';
+    private const BG_TOTAL  = 'FF334155';
+    private const FG_WHITE  = 'FFFFFFFF';
+    private const FG_RED    = 'FFB91C1C';
+    private const BG_EVEN   = 'FFFFFFFF';
+    private const BORDER_LT = 'FFE2E8F0';
+    private const CURRENCY  = '"$"#,##0.00';
+    private const PERCENT   = '0.00"%"';
+    private const INTEGER   = '#,##0';
 
-    public function build(Period $period, PeriodSummary $summary): Spreadsheet
+    public function buildFromSnapshot(Period $period, PeriodSummary $summary, array $snap): Spreadsheet
     {
         $spreadsheet = new Spreadsheet();
         $spreadsheet->getProperties()
             ->setTitle('Radiografía ' . $period->label)
             ->setCreator('Sistema de Reportes')
             ->setSubject('Radiografía Financiera')
-            ->setDescription('Generado automáticamente');
+            ->setDescription('Generado automáticamente — sin plantilla');
 
-        $this->buildGlobalSheet($spreadsheet, $period, $summary);
-        $this->buildEmployeesSheet($spreadsheet, $period);
-        $this->buildBranchesSheet($spreadsheet, $period, $summary);
+        $this->buildResumenSheet($spreadsheet, $period, $snap);
+        $this->buildProductosSheet($spreadsheet, $period, $snap);
+        $this->buildSucursalesSheet($spreadsheet, $period, $snap);
+        $this->buildGestoresSheet($spreadsheet, $period, $snap);
+        $this->buildCarteraSheet($spreadsheet, $period, $snap);
+        $this->buildGastosSheet($spreadsheet, $period, $snap);
+        $this->buildNominaSheet($spreadsheet, $period, $snap);
+        $this->buildMetadataSheet($spreadsheet, $period, $snap);
 
         $spreadsheet->setActiveSheetIndex(0);
 
         return $spreadsheet;
     }
 
-    // ── Sheet 1: RESUMEN GLOBAL ──────────────────────────────────────────────
-
-    private function buildGlobalSheet(Spreadsheet $spreadsheet, Period $period, PeriodSummary $summary): void
+    /** @deprecated use buildFromSnapshot */
+    public function build(Period $period, PeriodSummary $summary): Spreadsheet
     {
-        $sheet = $spreadsheet->getActiveSheet();
-        $sheet->setTitle('RESUMEN GLOBAL');
-
-        $gm = $summary->global_metrics ?? [];
-
-        // Row 1 — Title
-        $sheet->mergeCells('A1:G1');
-        $sheet->setCellValue('A1', 'RADIOGRAFÍA — ' . strtoupper($period->label));
-        $this->titleStyle($sheet, 'A1:G1');
-        $sheet->getRowDimension(1)->setRowHeight(32);
-
-        // Row 2 — Metadata
-        $sheet->mergeCells('A2:G2');
-        $sheet->setCellValue('A2', 'Sistema de Reportes | Periodo: ' . ($period->code ?: $period->id) . ' | Generado: ' . now()->format('d/m/Y H:i'));
-        $this->metaStyle($sheet, 'A2:G2');
-        $sheet->getRowDimension(2)->setRowHeight(16);
-
-        // Row 3 — Type/scope
-        $sheet->mergeCells('A3:G3');
-        $sheet->setCellValue('A3', 'Tipo: Radiografía simple · Alcance: General');
-        $this->metaStyle($sheet, 'A3:G3', self::FG_META);
-        $sheet->getRowDimension(3)->setRowHeight(15);
-
-        // Row 5 — Section header: Financial
-        $sheet->mergeCells('A5:G5');
-        $sheet->setCellValue('A5', 'MÉTRICAS FINANCIERAS');
-        $this->sectionStyle($sheet, 'A5:G5');
-        $sheet->getRowDimension(5)->setRowHeight(22);
-
-        // Row 6 — Column headers
-        $sheet->setCellValue('A6', 'CONCEPTO');
-        $sheet->setCellValue('B6', 'VALOR');
-        $this->colHeaderStyle($sheet, 'A6:G6');
-
-        // Financial rows 7–12
-        $finRows = [
-            7  => ['Recuperación total',   (float)($gm['recuperacion_total'] ?? 0),   'currency'],
-            8  => ['Colocación total',      (float)($gm['colocacion_total'] ?? 0),     'currency'],
-            9  => ['Valor cartera total',   (float)($gm['valor_cartera_total'] ?? 0),  'currency'],
-            10 => ['Cartera vencida',       (float)($gm['cartera_vencida_total'] ?? 0),'currency'],
-            11 => ['Índice de mora',        (float)($gm['mora_porcentaje'] ?? 0),      'percent'],
-            12 => ['Gastos totales',        (float)($gm['gasto_total'] ?? 0),          'currency'],
-        ];
-
-        foreach ($finRows as $row => [$label, $value, $fmt]) {
-            $sheet->mergeCells("B{$row}:G{$row}");
-            $sheet->setCellValue("A{$row}", $label);
-            $sheet->setCellValue("B{$row}", $value);
-            $this->dataRowStyle($sheet, "A{$row}:G{$row}", ($row % 2 === 1));
-            if ($fmt === 'currency') {
-                $sheet->getStyle("B{$row}")->getNumberFormat()->setFormatCode(self::CURRENCY);
-            } else {
-                $sheet->getStyle("B{$row}")->getNumberFormat()->setFormatCode(self::PERCENT);
-                if ($value > 25) {
-                    $sheet->getStyle("B{$row}")->getFont()->getColor()->setARGB(self::FG_RED);
-                    $sheet->getStyle("B{$row}")->getFont()->setBold(true);
-                }
-            }
-        }
-
-        // Row 14 — Section header: Payroll
-        $sheet->mergeCells('A14:G14');
-        $sheet->setCellValue('A14', 'NÓMINA / EMPLEADOS');
-        $this->sectionStyle($sheet, 'A14:G14');
-        $sheet->getRowDimension(14)->setRowHeight(22);
-
-        // Row 15 — Column headers
-        $sheet->setCellValue('A15', 'CONCEPTO');
-        $sheet->setCellValue('B15', 'VALOR');
-        $this->colHeaderStyle($sheet, 'A15:G15');
-
-        $emp = MonthlyEmployeeSummary::query()
-            ->where('period_id', $period->id)
-            ->selectRaw('COUNT(*) as total, SUM(total_payments) as pagos, SUM(total_bonuses) as bonos, SUM(total_discounts) as descuentos, SUM(total_expenses) as gastos, SUM(net_amount) as neto')
-            ->first();
-
-        $payRows = [
-            16 => ['Total empleados',    (int)($emp?->total ?? 0),          'number'],
-            17 => ['Total pagos',        (float)($emp?->pagos ?? 0),         'currency'],
-            18 => ['Total bonos',        (float)($emp?->bonos ?? 0),         'currency'],
-            19 => ['Total descuentos',   (float)($emp?->descuentos ?? 0),    'currency'],
-            20 => ['Total gastos',       (float)($emp?->gastos ?? 0),        'currency'],
-            21 => ['Neto acumulado',     (float)($emp?->neto ?? 0),          'currency'],
-        ];
-
-        foreach ($payRows as $row => [$label, $value, $fmt]) {
-            $sheet->mergeCells("B{$row}:G{$row}");
-            $sheet->setCellValue("A{$row}", $label);
-            $sheet->setCellValue("B{$row}", $value);
-            $this->dataRowStyle($sheet, "A{$row}:G{$row}", ($row % 2 === 1));
-            if ($fmt === 'currency') {
-                $sheet->getStyle("B{$row}")->getNumberFormat()->setFormatCode(self::CURRENCY);
-            }
-        }
-
-        // Column widths
-        $sheet->getColumnDimension('A')->setWidth(30);
-        $sheet->getColumnDimension('B')->setWidth(22);
-        foreach (['C', 'D', 'E', 'F', 'G'] as $col) {
-            $sheet->getColumnDimension($col)->setWidth(10);
-        }
+        // Stub to avoid breaking existing callers until fully migrated
+        $snap = (new RadiographySnapshotBuilder())->build($period, $summary);
+        return $this->buildFromSnapshot($period, $summary, $snap);
     }
 
-    // ── Sheet 2: EMPLEADOS ───────────────────────────────────────────────────
+    // ── HOJA 1: RESUMEN ──────────────────────────────────────────────────────
 
-    private function buildEmployeesSheet(Spreadsheet $spreadsheet, Period $period): void
+    private function buildResumenSheet(Spreadsheet $ss, Period $period, array $snap): void
     {
-        $sheet = $spreadsheet->createSheet();
-        $sheet->setTitle('EMPLEADOS');
+        $sheet = $ss->getActiveSheet()->setTitle('RESUMEN');
+        $sum   = $snap['summary'];
+        $pay   = $snap['sections']['payroll'];
 
-        $rows = MonthlyEmployeeSummary::query()
-            ->with(['employee:id,full_name', 'branch:id,name'])
-            ->where('period_id', $period->id)
-            ->orderByDesc('total_payments')
-            ->get();
+        $this->sheetTitle($sheet, 'A1:F1', 'RADIOGRAFÍA — ' . strtoupper($period->label));
+        $sheet->mergeCells('A2:F2');
+        $sheet->setCellValue('A2', 'Sistema de Reportes  |  Periodo: ' . ($period->code ?: $period->id) . '  |  Generado: ' . $snap['generated_at']);
+        $this->metaStyle($sheet, 'A2:F2');
 
-        if ($rows->isEmpty()) {
-            $sheet->setCellValue('A1', 'Sin datos de empleados para este periodo.');
-            return;
-        }
+        // ── Financial metrics section
+        $this->sectionHeader($sheet, 'A4:F4', 'MÉTRICAS FINANCIERAS');
+        $this->colHeaders($sheet, 5, ['A' => 'CONCEPTO', 'B' => 'VALOR']);
 
-        // Title
-        $sheet->mergeCells('A1:H1');
-        $sheet->setCellValue('A1', 'EMPLEADOS — ' . strtoupper($period->label));
-        $this->titleStyle($sheet, 'A1:H1');
-        $sheet->getRowDimension(1)->setRowHeight(28);
+        $finRows = [
+            ['Recuperación total',  $sum['recovery_total'],    'currency'],
+            ['Colocación total',    $sum['placement_total'],   'currency'],
+            ['Valor cartera total', $sum['portfolio_total'],   'currency'],
+            ['Cartera vencida',     $sum['overdue_portfolio'],  'currency'],
+            ['Índice de mora',      $sum['mora_index'],        'percent'],
+            ['Gastos totales',      $sum['expenses_total'],    'currency'],
+        ];
 
-        // Column headers
-        $headers = ['EMPLEADO', 'SUCURSAL', 'PAGOS', 'BONOS', 'DESCUENTOS', 'GASTOS', 'NETO', 'ESTADO'];
-        foreach ($headers as $i => $h) {
-            $col = chr(ord('A') + $i);
-            $sheet->setCellValue("{$col}2", $h);
-        }
-        $this->colHeaderStyle($sheet, 'A2:H2');
-
-        // Data rows
-        $totPagos = $totBonos = $totDesc = $totGastos = $totNeto = 0.0;
-        $r = 3;
-        foreach ($rows as $i => $row) {
-            $sheet->setCellValue("A{$r}", $row->employee?->full_name ?? 'Sin empleado');
-            $sheet->setCellValue("B{$r}", $row->branch?->name ?? '—');
-            $sheet->setCellValue("C{$r}", (float)$row->total_payments);
-            $sheet->setCellValue("D{$r}", (float)$row->total_bonuses);
-            $sheet->setCellValue("E{$r}", (float)$row->total_discounts);
-            $sheet->setCellValue("F{$r}", (float)$row->total_expenses);
-            $sheet->setCellValue("G{$r}", (float)$row->net_amount);
-            $sheet->setCellValue("H{$r}", $row->included_in_report ? 'Incluido' : 'Excluido');
-            $this->dataRowStyle($sheet, "A{$r}:H{$r}", $i % 2 === 0);
-            foreach (['C', 'D', 'E', 'F', 'G'] as $col) {
-                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
-                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-            }
-            $totPagos   += (float)$row->total_payments;
-            $totBonos   += (float)$row->total_bonuses;
-            $totDesc    += (float)$row->total_discounts;
-            $totGastos  += (float)$row->total_expenses;
-            $totNeto    += (float)$row->net_amount;
+        $r = 6;
+        foreach ($finRows as $i => [$label, $value, $fmt]) {
+            $sheet->mergeCells("B{$r}:F{$r}");
+            $sheet->setCellValue("A{$r}", $label);
+            $sheet->setCellValue("B{$r}", $value);
+            $this->dataRow($sheet, "A{$r}:F{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $value);
             $r++;
         }
 
-        // Totals
-        $sheet->setCellValue("A{$r}", 'TOTALES');
-        $sheet->setCellValue("C{$r}", $totPagos);
-        $sheet->setCellValue("D{$r}", $totBonos);
-        $sheet->setCellValue("E{$r}", $totDesc);
-        $sheet->setCellValue("F{$r}", $totGastos);
-        $sheet->setCellValue("G{$r}", $totNeto);
-        $this->totalsStyle($sheet, "A{$r}:H{$r}");
-        foreach (['C', 'D', 'E', 'F', 'G'] as $col) {
-            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
-            $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+        // ── Payroll section
+        $r++;
+        $this->sectionHeader($sheet, "A{$r}:F{$r}", 'NÓMINA / EMPLEADOS');
+        $r++;
+        $this->colHeaders($sheet, $r, ['A' => 'CONCEPTO', 'B' => 'VALOR']);
+        $r++;
+
+        $payRows = [
+            ['Total empleados',   $pay['total_empleados'], 'integer'],
+            ['Total pagos',       $pay['pagos'],           'currency'],
+            ['Total bonos',       $pay['bonos'],           'currency'],
+            ['Total descuentos',  $pay['descuentos'],      'currency'],
+            ['Total gastos',      $pay['gastos'],          'currency'],
+            ['Neto acumulado',    $pay['neto'],            'currency'],
+        ];
+
+        foreach ($payRows as $i => [$label, $value, $fmt]) {
+            $sheet->mergeCells("B{$r}:F{$r}");
+            $sheet->setCellValue("A{$r}", $label);
+            $sheet->setCellValue("B{$r}", $value);
+            $this->dataRow($sheet, "A{$r}:F{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $value);
+            $r++;
         }
 
-        // Widths
-        $sheet->getColumnDimension('A')->setWidth(36);
+        $sheet->getColumnDimension('A')->setWidth(30);
         $sheet->getColumnDimension('B')->setWidth(22);
-        foreach (['C', 'D', 'E', 'F', 'G'] as $col) {
-            $sheet->getColumnDimension($col)->setWidth(16);
-        }
-        $sheet->getColumnDimension('H')->setWidth(11);
-
-        $sheet->setAutoFilter("A2:H2");
-        $sheet->freezePane('A3');
     }
 
-    // ── Sheet 3: SUCURSALES ──────────────────────────────────────────────────
+    // ── HOJA 2: PRODUCTOS ────────────────────────────────────────────────────
 
-    private function buildBranchesSheet(Spreadsheet $spreadsheet, Period $period, PeriodSummary $summary): void
+    private function buildProductosSheet(Spreadsheet $ss, Period $period, array $snap): void
     {
-        $sheet = $spreadsheet->createSheet();
-        $sheet->setTitle('SUCURSALES');
+        $sheet    = $ss->createSheet()->setTitle('PRODUCTOS');
+        $products = $snap['sections']['products'] ?? [];
 
-        $branchSummaries = $summary->branchSummaries;
+        $this->sheetTitle($sheet, 'A1:D1', 'COLOCACIÓN POR PRODUCTO — ' . strtoupper($period->label));
 
-        if ($branchSummaries->isEmpty()) {
-            $sheet->setCellValue('A1', 'Sin datos por sucursal para este periodo.');
+        if (empty($products)) {
+            $sheet->setCellValue('A2', 'Sin datos de colocación por producto para este periodo.');
             return;
         }
 
-        // Title
-        $sheet->mergeCells('A1:G1');
-        $sheet->setCellValue('A1', 'SUCURSALES — ' . strtoupper($period->label));
-        $this->titleStyle($sheet, 'A1:G1');
-        $sheet->getRowDimension(1)->setRowHeight(28);
-
-        // Column headers
-        $headers = ['SUCURSAL', 'RECUPERACIÓN', 'COLOCACIÓN', 'CARTERA', 'C. VENCIDA', 'MORA %', 'GASTOS'];
-        foreach ($headers as $i => $h) {
-            $col = chr(ord('A') + $i);
-            $sheet->setCellValue("{$col}2", $h);
-        }
-        $this->colHeaderStyle($sheet, 'A2:G2');
+        $this->colHeaders($sheet, 2, ['A' => 'PRODUCTO', 'B' => 'OPERACIONES', 'C' => 'COLOCACIÓN', 'D' => 'OBSERVACIÓN']);
 
         $r = 3;
-        $branchCache = [];
-        foreach ($branchSummaries as $i => $bs) {
-            $branchId = $bs->branch_id;
-            if (!isset($branchCache[$branchId])) {
-                $branchCache[$branchId] = Branch::query()->find($branchId)?->name ?? "Sucursal #{$branchId}";
-            }
-            $m = $bs->metrics ?? [];
-            $mora = (float)($m['mora_porcentaje'] ?? 0);
+        foreach ($products as $i => $p) {
+            $sheet->setCellValue("A{$r}", $p['producto']);
+            $sheet->setCellValue("B{$r}", $p['operaciones']);
+            $sheet->setCellValue("C{$r}", $p['colocacion']);
+            $sheet->setCellValue("D{$r}", $p['recuperacion'] === null ? 'Sin dato recuperación' : '');
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::INTEGER);
+            $sheet->getStyle("C{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("C{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            $r++;
+        }
 
-            $sheet->setCellValue("A{$r}", $branchCache[$branchId]);
-            $sheet->setCellValue("B{$r}", (float)($m['recuperacion_total'] ?? 0));
-            $sheet->setCellValue("C{$r}", (float)($m['colocacion_total'] ?? 0));
-            $sheet->setCellValue("D{$r}", (float)($m['valor_cartera'] ?? 0));
-            $sheet->setCellValue("E{$r}", (float)($m['cartera_vencida'] ?? 0));
+        $sheet->getColumnDimension('A')->setWidth(35);
+        $sheet->getColumnDimension('B')->setWidth(14);
+        $sheet->getColumnDimension('C')->setWidth(20);
+        $sheet->getColumnDimension('D')->setWidth(30);
+        $sheet->setAutoFilter("A2:D2");
+        $sheet->freezePane('A3');
+    }
+
+    // ── HOJA 3: SUCURSALES ───────────────────────────────────────────────────
+
+    private function buildSucursalesSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet    = $ss->createSheet()->setTitle('SUCURSALES');
+        $branches = $snap['sections']['branches'] ?? [];
+
+        $this->sheetTitle($sheet, 'A1:G1', 'DESGLOSE POR SUCURSAL — ' . strtoupper($period->label));
+
+        if (empty($branches)) {
+            $sheet->setCellValue('A2', 'Sin datos por sucursal para este periodo.');
+            return;
+        }
+
+        $this->colHeaders($sheet, 2, [
+            'A' => 'SUCURSAL', 'B' => 'RECUPERACIÓN', 'C' => 'COLOCACIÓN',
+            'D' => 'CARTERA', 'E' => 'C. VENCIDA', 'F' => 'MORA %', 'G' => 'GASTOS',
+        ]);
+
+        $r = 3;
+        $totRec = $totPla = $totCar = $totVen = $totGas = 0.0;
+        foreach ($branches as $i => $b) {
+            $mora = (float)$b['mora'];
+            $sheet->setCellValue("A{$r}", $b['nombre']);
+            $sheet->setCellValue("B{$r}", (float)$b['recuperacion']);
+            $sheet->setCellValue("C{$r}", (float)$b['colocacion']);
+            $sheet->setCellValue("D{$r}", (float)$b['cartera']);
+            $sheet->setCellValue("E{$r}", (float)$b['vencida']);
             $sheet->setCellValue("F{$r}", $mora);
-            $sheet->setCellValue("G{$r}", (float)($m['gasto_total'] ?? 0));
-            $this->dataRowStyle($sheet, "A{$r}:G{$r}", $i % 2 === 0);
-
+            $sheet->setCellValue("G{$r}", (float)$b['gastos']);
+            $this->dataRow($sheet, "A{$r}:G{$r}", $i % 2 === 0);
             foreach (['B', 'C', 'D', 'E', 'G'] as $col) {
                 $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
                 $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
@@ -291,67 +205,351 @@ class RadiographyWorkbookBuilder
             $sheet->getStyle("F{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
             if ($mora > 25) {
                 $sheet->getStyle("F{$r}")->getFont()->getColor()->setARGB(self::FG_RED);
-                $sheet->getStyle("F{$r}")->getFont()->setBold(true);
             }
+            $totRec += (float)$b['recuperacion'];
+            $totPla += (float)$b['colocacion'];
+            $totCar += (float)$b['cartera'];
+            $totVen += (float)$b['vencida'];
+            $totGas += (float)$b['gastos'];
             $r++;
         }
 
-        // Widths
+        $sheet->setCellValue("A{$r}", 'TOTALES');
+        $sheet->setCellValue("B{$r}", $totRec);
+        $sheet->setCellValue("C{$r}", $totPla);
+        $sheet->setCellValue("D{$r}", $totCar);
+        $sheet->setCellValue("E{$r}", $totVen);
+        $sheet->setCellValue("F{$r}", $totCar > 0 ? round($totVen / $totCar * 100, 2) : 0);
+        $sheet->setCellValue("G{$r}", $totGas);
+        $this->totalsRow($sheet, "A{$r}:G{$r}");
+        foreach (['B', 'C', 'D', 'E', 'G'] as $col) {
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        }
+        $sheet->getStyle("F{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+
         $sheet->getColumnDimension('A')->setWidth(28);
         foreach (['B', 'C', 'D', 'E', 'G'] as $col) {
             $sheet->getColumnDimension($col)->setWidth(18);
         }
         $sheet->getColumnDimension('F')->setWidth(10);
-
         $sheet->setAutoFilter("A2:G2");
         $sheet->freezePane('A3');
     }
 
-    // ── Style helpers ────────────────────────────────────────────────────────
+    // ── HOJA 4: GESTORES ────────────────────────────────────────────────────
 
-    private function titleStyle(Worksheet $sheet, string $range): void
+    private function buildGestoresSheet(Spreadsheet $ss, Period $period, array $snap): void
     {
+        $sheet     = $ss->createSheet()->setTitle('GESTORES');
+        $promoters = $snap['sections']['promoters'] ?? [];
+
+        $this->sheetTitle($sheet, 'A1:D1', 'GESTORES / PROMOTORES — ' . strtoupper($period->label));
+        $sheet->setCellValue('A2', 'Fuente: ministraciones/colocación. La recuperación por gestor no está disponible en el esquema actual.');
+        $sheet->getStyle('A2')->getFont()->setItalic(true)->setSize(8)->getColor()->setARGB(self::FG_META);
+        $sheet->mergeCells('A2:D2');
+
+        if (empty($promoters)) {
+            $sheet->setCellValue('A3', 'Sin promotores registrados en colocación para este periodo.');
+            return;
+        }
+
+        $this->colHeaders($sheet, 3, ['A' => 'GESTOR / PROMOTOR', 'B' => 'SUCURSAL', 'C' => 'OPERACIONES', 'D' => 'COLOCACIÓN']);
+
+        $r = 4;
+        foreach ($promoters as $i => $p) {
+            $sheet->setCellValue("A{$r}", $p['gestor']);
+            $sheet->setCellValue("B{$r}", $p['sucursal']);
+            $sheet->setCellValue("C{$r}", $p['operaciones']);
+            $sheet->setCellValue("D{$r}", $p['colocacion']);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $sheet->getStyle("C{$r}")->getNumberFormat()->setFormatCode(self::INTEGER);
+            $sheet->getStyle("D{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("D{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            $r++;
+        }
+
+        $sheet->getColumnDimension('A')->setWidth(36);
+        $sheet->getColumnDimension('B')->setWidth(24);
+        $sheet->getColumnDimension('C')->setWidth(14);
+        $sheet->getColumnDimension('D')->setWidth(20);
+        $sheet->setAutoFilter("A3:D3");
+        $sheet->freezePane('A4');
+    }
+
+    // ── HOJA 5: CARTERA Y MORA ───────────────────────────────────────────────
+
+    private function buildCarteraSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet   = $ss->createSheet()->setTitle('CARTERA Y MORA');
+        $buckets = $snap['sections']['portfolio_buckets'] ?? [];
+        $sum     = $snap['summary'];
+
+        $this->sheetTitle($sheet, 'A1:E1', 'CARTERA Y MORA — ' . strtoupper($period->label));
+
+        // Global portfolio summary
+        $this->sectionHeader($sheet, 'A3:E3', 'RESUMEN CARTERA GLOBAL');
+        $this->colHeaders($sheet, 4, ['A' => 'MÉTRICA', 'B' => 'VALOR']);
+
+        $globalRows = [
+            ['Cartera total',       $sum['portfolio_total'],   'currency'],
+            ['Cartera vencida',     $sum['overdue_portfolio'],  'currency'],
+            ['Índice de mora',      $sum['mora_index'],        'percent'],
+        ];
+        $r = 5;
+        foreach ($globalRows as $i => [$label, $value, $fmt]) {
+            $sheet->mergeCells("B{$r}:E{$r}");
+            $sheet->setCellValue("A{$r}", $label);
+            $sheet->setCellValue("B{$r}", $value);
+            $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $value);
+            $r++;
+        }
+
+        // Bucket breakdown
+        $r += 2;
+        $this->sectionHeader($sheet, "A{$r}:E{$r}", 'DISTRIBUCIÓN POR DÍAS VENCIDOS (BUCKETS)');
+        $r++;
+        $this->colHeaders($sheet, $r, ['A' => 'BUCKET', 'B' => 'CONTRATOS', 'C' => 'BALANCE', 'D' => 'VENCIDO', 'E' => '% DEL TOTAL']);
+        $r++;
+
+        if (empty($buckets)) {
+            $sheet->setCellValue("A{$r}", 'Sin datos de días vencidos en cartera. Verifica que el archivo de Saldos incluya columna "días_mora" o "días_vencidos".');
+        } else {
+            $totBal = collect($buckets)->sum('balance');
+            $totVen = collect($buckets)->sum('vencida');
+            foreach ($buckets as $i => $b) {
+                $pct = $totBal > 0 ? round($b['balance'] / $totBal * 100, 1) : 0;
+                $sheet->setCellValue("A{$r}", $b['label']);
+                $sheet->setCellValue("B{$r}", $b['contratos']);
+                $sheet->setCellValue("C{$r}", $b['balance']);
+                $sheet->setCellValue("D{$r}", $b['vencida']);
+                $sheet->setCellValue("E{$r}", $pct);
+                $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
+                $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::INTEGER);
+                $sheet->getStyle("C{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("D{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("E{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+                foreach (['C', 'D', 'E'] as $col) {
+                    $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+                }
+                $r++;
+            }
+            // Totals
+            $sheet->setCellValue("A{$r}", 'TOTALES');
+            $sheet->setCellValue("C{$r}", $totBal);
+            $sheet->setCellValue("D{$r}", $totVen);
+            $this->totalsRow($sheet, "A{$r}:E{$r}");
+            foreach (['C', 'D'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            }
+        }
+
+        $sheet->getColumnDimension('A')->setWidth(18);
+        $sheet->getColumnDimension('B')->setWidth(12);
+        $sheet->getColumnDimension('C')->setWidth(20);
+        $sheet->getColumnDimension('D')->setWidth(20);
+        $sheet->getColumnDimension('E')->setWidth(12);
+    }
+
+    // ── HOJA 6: GASTOS ───────────────────────────────────────────────────────
+
+    private function buildGastosSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet  = $ss->createSheet()->setTitle('GASTOS');
+        $detail = $snap['sections']['expenses_detail'] ?? [];
+
+        $this->sheetTitle($sheet, 'A1:D1', 'GASTOS — ' . strtoupper($period->label));
+
+        if (empty($detail)) {
+            $sheet->setCellValue('A2', 'Sin gastos registrados para este periodo.');
+            return;
+        }
+
+        $this->colHeaders($sheet, 2, ['A' => 'CATEGORÍA', 'B' => 'SUCURSAL', 'C' => 'REGISTROS', 'D' => 'TOTAL']);
+
+        $r = 3;
+        $totGas = 0.0;
+        foreach ($detail as $i => $d) {
+            $sheet->setCellValue("A{$r}", $d['categoria']);
+            $sheet->setCellValue("B{$r}", $d['sucursal']);
+            $sheet->setCellValue("C{$r}", $d['count']);
+            $sheet->setCellValue("D{$r}", $d['total']);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $sheet->getStyle("C{$r}")->getNumberFormat()->setFormatCode(self::INTEGER);
+            $sheet->getStyle("D{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("D{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            $totGas += $d['total'];
+            $r++;
+        }
+
+        $sheet->setCellValue("A{$r}", 'TOTAL GASTOS');
+        $sheet->setCellValue("D{$r}", $totGas);
+        $this->totalsRow($sheet, "A{$r}:D{$r}");
+        $sheet->getStyle("D{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+
+        $sheet->getColumnDimension('A')->setWidth(30);
+        $sheet->getColumnDimension('B')->setWidth(24);
+        $sheet->getColumnDimension('C')->setWidth(12);
+        $sheet->getColumnDimension('D')->setWidth(20);
+        $sheet->setAutoFilter("A2:D2");
+        $sheet->freezePane('A3');
+    }
+
+    // ── HOJA 7: NÓMINA ───────────────────────────────────────────────────────
+
+    private function buildNominaSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet     = $ss->createSheet()->setTitle('NÓMINA');
+        $employees = $snap['sections']['employees'] ?? [];
+        $pay       = $snap['sections']['payroll'];
+
+        $this->sheetTitle($sheet, 'A1:H1', 'NÓMINA — ' . strtoupper($period->label));
+
+        if (empty($employees)) {
+            $sheet->setCellValue('A2', 'Sin datos de empleados para este periodo. Verifica que se procesó el archivo NOI de nómina.');
+            return;
+        }
+
+        $this->colHeaders($sheet, 2, [
+            'A' => 'EMPLEADO', 'B' => 'SUCURSAL',
+            'C' => 'PAGOS', 'D' => 'BONOS', 'E' => 'DESCUENTOS',
+            'F' => 'GASTOS', 'G' => 'NETO', 'H' => 'ESTADO',
+        ]);
+
+        $r = 3;
+        foreach ($employees as $i => $emp) {
+            $sheet->setCellValue("A{$r}", $emp['name']);
+            $sheet->setCellValue("B{$r}", $emp['branch'] ?? '—');
+            $sheet->setCellValue("C{$r}", $emp['pagos']);
+            $sheet->setCellValue("D{$r}", $emp['bonos']);
+            $sheet->setCellValue("E{$r}", $emp['descuentos']);
+            $sheet->setCellValue("F{$r}", $emp['gastos']);
+            $sheet->setCellValue("G{$r}", $emp['neto']);
+            $sheet->setCellValue("H{$r}", $emp['included'] ? 'Incluido' : 'Excluido');
+            $this->dataRow($sheet, "A{$r}:H{$r}", $i % 2 === 0);
+            foreach (['C', 'D', 'E', 'F', 'G'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            }
+            $r++;
+        }
+
+        // Totals row
+        $sheet->setCellValue("A{$r}", 'TOTALES');
+        $sheet->setCellValue("C{$r}", $pay['pagos']);
+        $sheet->setCellValue("D{$r}", $pay['bonos']);
+        $sheet->setCellValue("E{$r}", $pay['descuentos']);
+        $sheet->setCellValue("F{$r}", $pay['gastos']);
+        $sheet->setCellValue("G{$r}", $pay['neto']);
+        $this->totalsRow($sheet, "A{$r}:H{$r}");
+        foreach (['C', 'D', 'E', 'F', 'G'] as $col) {
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        }
+
+        $sheet->getColumnDimension('A')->setWidth(36);
+        $sheet->getColumnDimension('B')->setWidth(22);
+        foreach (['C', 'D', 'E', 'F', 'G'] as $col) {
+            $sheet->getColumnDimension($col)->setWidth(16);
+        }
+        $sheet->getColumnDimension('H')->setWidth(11);
+        $sheet->setAutoFilter("A2:H2");
+        $sheet->freezePane('A3');
+    }
+
+    // ── HOJA 8: METADATA ─────────────────────────────────────────────────────
+
+    private function buildMetadataSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet = $ss->createSheet()->setTitle('METADATA');
+
+        $this->sheetTitle($sheet, 'A1:C1', 'METADATA DEL REPORTE');
+
+        $rows = [
+            ['Periodo',          $snap['period']['label']],
+            ['Código',           $snap['period']['code'] ?? $snap['period']['id']],
+            ['Fecha inicio',     $snap['period']['start_date'] ?? '—'],
+            ['Fecha fin',        $snap['period']['end_date'] ?? '—'],
+            ['Generado',         $snap['generated_at']],
+            ['Versión',          $snap['version']],
+            ['Tipo reporte',     'Radiografía simple'],
+            ['Fuente nómina',    $snap['sections']['payroll']['source'] ?? 'desconocida'],
+            ['Empleados contados', $snap['summary']['employees_count']],
+            ['Total sucursales', count($snap['sections']['branches'])],
+            ['Total productos',  count($snap['sections']['products'])],
+            ['Total gestores',   count($snap['sections']['promoters'])],
+        ];
+
+        $this->colHeaders($sheet, 2, ['A' => 'CAMPO', 'B' => 'VALOR']);
+        $r = 3;
+        foreach ($rows as $i => [$k, $v]) {
+            $sheet->setCellValue("A{$r}", $k);
+            $sheet->setCellValue("B{$r}", $v);
+            $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
+            $r++;
+        }
+
+        $sheet->getColumnDimension('A')->setWidth(28);
+        $sheet->getColumnDimension('B')->setWidth(30);
+    }
+
+    // ── Style helpers ─────────────────────────────────────────────────────────
+
+    private function sheetTitle(Worksheet $sheet, string $range, string $text): void
+    {
+        $sheet->mergeCells($range);
+        $sheet->setCellValue(explode(':', $range)[0], $text);
         $sheet->getStyle($range)->applyFromArray([
-            'font'      => ['bold' => true, 'size' => 14, 'color' => ['argb' => self::FG_WHITE]],
+            'font'      => ['bold' => true, 'size' => 13, 'color' => ['argb' => self::FG_WHITE]],
             'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => self::BG_DARK]],
             'alignment' => ['horizontal' => Alignment::HORIZONTAL_LEFT, 'vertical' => Alignment::VERTICAL_CENTER, 'indent' => 1],
         ]);
+        preg_match('/(\d+)/', $range, $m);
+        if (!empty($m[1])) {
+            $sheet->getRowDimension((int)$m[1])->setRowHeight(30);
+        }
     }
 
-    private function metaStyle(Worksheet $sheet, string $range, string $fgArgb = 'FF334155'): void
+    private function metaStyle(Worksheet $sheet, string $range): void
     {
         $sheet->getStyle($range)->applyFromArray([
-            'font'      => ['size' => 9, 'color' => ['argb' => $fgArgb]],
+            'font'      => ['size' => 9, 'color' => ['argb' => self::FG_META]],
             'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => self::BG_META]],
             'alignment' => ['horizontal' => Alignment::HORIZONTAL_LEFT, 'vertical' => Alignment::VERTICAL_CENTER, 'indent' => 1],
         ]);
     }
 
-    private function sectionStyle(Worksheet $sheet, string $range): void
+    private function sectionHeader(Worksheet $sheet, string $range, string $text): void
     {
+        $sheet->mergeCells($range);
+        $sheet->setCellValue(explode(':', $range)[0], $text);
         $sheet->getStyle($range)->applyFromArray([
-            'font'      => ['bold' => true, 'size' => 11, 'color' => ['argb' => self::FG_WHITE]],
+            'font'      => ['bold' => true, 'size' => 10, 'color' => ['argb' => self::FG_WHITE]],
             'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => self::BG_BLUE]],
             'alignment' => ['horizontal' => Alignment::HORIZONTAL_LEFT, 'vertical' => Alignment::VERTICAL_CENTER, 'indent' => 1],
         ]);
-    }
-
-    private function colHeaderStyle(Worksheet $sheet, string $range): void
-    {
-        $sheet->getStyle($range)->applyFromArray([
-            'font'      => ['bold' => true, 'size' => 9, 'color' => ['argb' => self::FG_HDR]],
-            'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => self::BG_HDR]],
-            'borders'   => ['bottom' => ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => '
-FF93C5FD']]],
-            'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
-        ]);
         preg_match('/(\d+)/', $range, $m);
         if (!empty($m[1])) {
-            $sheet->getRowDimension((int)$m[1])->setRowHeight(18);
+            $sheet->getRowDimension((int)$m[1])->setRowHeight(20);
         }
     }
 
-    private function dataRowStyle(Worksheet $sheet, string $range, bool $even): void
+    private function colHeaders(Worksheet $sheet, int $row, array $cols): void
+    {
+        foreach ($cols as $col => $label) {
+            $sheet->setCellValue("{$col}{$row}", $label);
+        }
+        $keys = array_keys($cols);
+        $range = reset($keys) . $row . ':' . end($keys) . $row;
+        $sheet->getStyle($range)->applyFromArray([
+            'font'      => ['bold' => true, 'size' => 9, 'color' => ['argb' => self::FG_HDR]],
+            'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => self::BG_HDR]],
+            'borders'   => ['bottom' => ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => 'FF93C5FD']]],
+            'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
+        ]);
+        $sheet->getRowDimension($row)->setRowHeight(18);
+    }
+
+    private function dataRow(Worksheet $sheet, string $range, bool $even): void
     {
         $bg = $even ? self::BG_EVEN : self::BG_ALT;
         $sheet->getStyle($range)->applyFromArray([
@@ -360,7 +558,6 @@ FF93C5FD']]],
             'alignment' => ['vertical' => Alignment::VERTICAL_CENTER],
         ]);
         $sheet->getStyle($range)->getFont()->setSize(9);
-        // Bold label in first column
         preg_match('/[A-Z](\d+)/', $range, $m);
         if (!empty($m[1])) {
             $row = (int)$m[1];
@@ -369,7 +566,7 @@ FF93C5FD']]],
         }
     }
 
-    private function totalsStyle(Worksheet $sheet, string $range): void
+    private function totalsRow(Worksheet $sheet, string $range): void
     {
         $sheet->getStyle($range)->applyFromArray([
             'font'      => ['bold' => true, 'size' => 9, 'color' => ['argb' => self::FG_WHITE]],
@@ -380,6 +577,24 @@ FF93C5FD']]],
         preg_match('/[A-Z](\d+)/', $range, $m);
         if (!empty($m[1])) {
             $sheet->getRowDimension((int)$m[1])->setRowHeight(20);
+        }
+    }
+
+    private function applyFmt(Worksheet $sheet, string $cell, string $fmt, mixed $value): void
+    {
+        match ($fmt) {
+            'currency' => $sheet->getStyle($cell)->getNumberFormat()->setFormatCode(self::CURRENCY),
+            'percent'  => $sheet->getStyle($cell)->getNumberFormat()->setFormatCode(self::PERCENT),
+            'integer'  => $sheet->getStyle($cell)->getNumberFormat()->setFormatCode(self::INTEGER),
+            default    => null,
+        };
+        if ($fmt === 'percent' && (float)$value > 25) {
+            $font = $sheet->getStyle($cell)->getFont();
+            $font->setBold(true);
+            $font->getColor()->setARGB(self::FG_RED);
+        }
+        if (in_array($fmt, ['currency', 'percent', 'integer'])) {
+            $sheet->getStyle($cell)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
         }
     }
 }

@@ -8,6 +8,7 @@ use App\Models\EmployeeBranchAssignment;
 use App\Models\PeriodDatabaseUpdateRun;
 use App\Models\Recovery;
 use App\Models\ReportUpload;
+use App\Services\BranchResolverService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -19,6 +20,8 @@ use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 class LendusIngresosCobranzaImportService {
 
     private array $branchCache = [];
+
+    public function __construct(private readonly BranchResolverService $branchResolver) {}
 
     public function handle(ReportUpload $upload, ?callable $progress = null): array
     {
@@ -144,7 +147,7 @@ class LendusIngresosCobranzaImportService {
                         continue;
                     }
 
-                    $branch = $this->resolveBranch($mapped['branch_name']);
+                    $branch = $this->resolveBranchSmart($mapped['promoter_name'], $mapped['branch_name']);
 
                     $batch[] = [
                         'period_id' => $upload->period_id,
@@ -156,6 +159,8 @@ class LendusIngresosCobranzaImportService {
                         'normalized_client_name' => $mapped['client_name']
                             ? $this->normalizeHumanName($mapped['client_name'])
                             : null,
+                        'promoter_name' => $mapped['promoter_name'],
+                        'product_name' => $mapped['product_name'],
                         'capital' => $mapped['capital'],
                         'interest' => $mapped['interest'],
                         'tax' => $mapped['tax'],
@@ -418,8 +423,37 @@ class LendusIngresosCobranzaImportService {
             : [];
 
         // ── 6. Bulk upsert Branches (code has DB unique constraint) ────────
+        // First pass: collect all branches. For each promoter that looks like a code
+        // (e.g., "ORI09247"), resolve the real branch name using BranchResolverService.
         $branchRows = [];
-        foreach ($promoterBranchMap as $data) {
+        foreach ($promoterBranchMap as $normalizedPromoter => $data) {
+            $promoterRaw = $data['full_name'] ?? $normalizedPromoter;
+
+            // If promoter name looks like a code, resolve real branch from its prefix
+            $realBranchFromCode = null;
+            if (preg_match('/^[A-Z]{2,4}\d{4,}/i', $promoterRaw)) {
+                $resolvedName = $this->branchResolver->resolveBranchNameFromCode($promoterRaw);
+                if ($resolvedName) {
+                    $realNormalized = $this->normalizeHumanName($resolvedName);
+                    if ($realNormalized !== '' && !isset($branchRows[$realNormalized])) {
+                        $code = Str::upper(Str::limit(
+                            preg_replace('/[^A-Za-z0-9]+/', '_', Str::ascii($realNormalized)),
+                            60, ''
+                        ));
+                        $branchRows[$realNormalized] = [
+                            'code'            => $code ?: 'SUCURSAL_' . substr(md5($realNormalized), 0, 8),
+                            'name'            => $resolvedName,
+                            'normalized_name' => $realNormalized,
+                            'is_active'       => true,
+                            'created_at'      => now(),
+                            'updated_at'      => now(),
+                        ];
+                        $realBranchFromCode = $realNormalized;
+                    }
+                }
+            }
+
+            // Also register the raw office/route branches (used as fallback)
             foreach ($data['branches'] as $normalizedBranch => $rawBranchName) {
                 if (!isset($branchRows[$normalizedBranch])) {
                     $code = Str::upper(Str::limit(
@@ -435,6 +469,11 @@ class LendusIngresosCobranzaImportService {
                         'updated_at'      => now(),
                     ];
                 }
+            }
+
+            // Override the 'branches' map to use the real branch if resolved
+            if ($realBranchFromCode) {
+                $promoterBranchMap[$normalizedPromoter]['real_branch_normalized'] = $realBranchFromCode;
             }
         }
 
@@ -453,12 +492,19 @@ class LendusIngresosCobranzaImportService {
 
         // ── 7. Bulk upsert EmployeeBranchAssignments ───────────────────────
         // DB unique constraint: (period_id, employee_id)
+        // Prefer real branch (resolved from promoter code prefix) over route/office branch.
         $assignmentRows = [];
         foreach ($promoterBranchMap as $normalizedPromoter => $data) {
             $employeeId = $employeeIdMap[$normalizedPromoter] ?? null;
             if (!$employeeId) continue;
 
-            foreach ($data['branches'] as $normalizedBranch => $_) {
+            // Use real branch if resolved from promoter code prefix
+            $realBranchNormalized = $data['real_branch_normalized'] ?? null;
+            $branchesToAssign = $realBranchNormalized
+                ? [$realBranchNormalized => true]
+                : $data['branches'];
+
+            foreach ($branchesToAssign as $normalizedBranch => $_) {
                 $branchId = $branchIdMap[$normalizedBranch] ?? null;
                 if (!$branchId) continue;
 
@@ -807,6 +853,23 @@ class LendusIngresosCobranzaImportService {
         }
 
         return $this->branchCache[$normalized] = $branch;
+    }
+
+    /**
+     * Resolves the REAL branch from a promoter code prefix (e.g., "ORI09247" → ORIZABA).
+     * If the code prefix is not recognized, falls back to the office/route column value.
+     */
+    private function resolveBranchSmart(?string $promoterName, ?string $officeName): ?Branch
+    {
+        // If promoter name looks like a code, try to resolve real branch from prefix
+        if ($promoterName && preg_match('/^[A-Z]{2,4}\d{4,}/i', $promoterName)) {
+            $branch = $this->branchResolver->findOrCreateBranchByCode($promoterName);
+            if ($branch) {
+                return $branch;
+            }
+        }
+
+        return $this->resolveBranch($officeName);
     }
 
     private function valueFromRow(array $row, array $headerMap, string $field): mixed

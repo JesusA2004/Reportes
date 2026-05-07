@@ -68,6 +68,7 @@ watch(selectedPeriodId, () => {
 // ── Polling ──────────────────────────────────────────────────────────
 const isDbUpdating      = computed(() => ['queued', 'running'].includes(period.value?.database_update_run_status))
 const isRadioGenerating = computed(() => ['queued', 'running'].includes(period.value?.radiography_run_status))
+const isReprocessing    = computed(() => ['queued', 'running'].includes(period.value?.reprocess_run_status))
 
 let pollInterval: ReturnType<typeof setInterval> | null = null
 
@@ -82,8 +83,8 @@ function stopPolling() {
     if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
 }
 
-watch([isDbUpdating, isRadioGenerating], ([db, radio]) => {
-    if (db || radio) startPolling()
+watch([isDbUpdating, isRadioGenerating, isReprocessing], ([db, radio, reprocess]) => {
+    if (db || radio || reprocess) startPolling()
     else stopPolling()
 }, { immediate: true })
 
@@ -116,6 +117,33 @@ watch(() => period.value?.database_update_run_status, (newStatus, oldStatus) => 
     }
 })
 
+// Notificar cuando reprocesamiento termina
+watch(() => period.value?.reprocess_run_status, (newStatus, oldStatus) => {
+    const wasRunning = ['queued', 'running'].includes(String(oldStatus ?? ''))
+    if (!wasRunning) return
+
+    if (newStatus === 'success') {
+        Swal.fire({
+            title: 'Reprocesamiento completado',
+            html: `Todas las fuentes del periodo <strong>${period.value?.label ?? ''}</strong> fueron reprocesadas.<br><br>Puedes actualizar la BD y generar la Radiografía nuevamente.`,
+            icon: 'success',
+            confirmButtonText: 'Ir a actualizar BD',
+            showCancelButton: true,
+            cancelButtonText: 'Después',
+            reverseButtons: true,
+        }).then((r) => {
+            if (r.isConfirmed) selectStep('bd')
+        })
+    } else if (newStatus === 'failed') {
+        Swal.fire({
+            title: 'Reprocesamiento con errores',
+            text: period.value?.reprocess_run_log ?? 'El proceso terminó con errores. Revisa el detalle.',
+            icon: 'error',
+            confirmButtonText: 'Entendido',
+        })
+    }
+})
+
 onUnmounted(stopPolling)
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -141,10 +169,41 @@ const deleteUpload = async (id: number) => {
 }
 
 const reprocessUpload = async (id: number) => {
-    const result = await Swal.fire({ title: '¿Reprocesar archivo?', text: 'Se volverá a analizar la fuente. Los datos anteriores serán reemplazados.', icon: 'warning', showCancelButton: true, confirmButtonText: 'Sí, reprocesar', cancelButtonText: 'Cancelar', reverseButtons: true })
+    const result = await Swal.fire({
+        title: '¿Reprocesar archivo?',
+        text: 'Se enviará el análisis a cola. Los datos anteriores serán reemplazados y recibirás un correo cuando termine.',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'Enviar a cola',
+        cancelButtonText: 'Cancelar',
+        reverseButtons: true,
+    })
     if (!result.isConfirmed) return
-    Swal.fire({ title: 'Reprocesando…', text: 'El archivo se está analizando.', allowOutsideClick: false, showConfirmButton: false, didOpen: () => Swal.showLoading() })
-    router.post(`/historico-general/${id}/analizar`, {}, { preserveScroll: true, onSuccess: () => Swal.fire('Reprocesado', 'La fuente fue analizada nuevamente.', 'success'), onError: () => Swal.fire('Error al reprocesar', 'Revisa el archivo fuente.', 'error') })
+    router.post(`/historico-general/${id}/analizar`, {}, {
+        preserveScroll: true,
+        onSuccess: () => Swal.fire({ title: 'En cola', text: 'El archivo será reprocesado en segundo plano. Recibirás un correo al terminar.', icon: 'success', confirmButtonText: 'Entendido' }),
+        onError: () => Swal.fire('Error', 'No se pudo enviar a cola el reprocesamiento.', 'error'),
+    })
+}
+
+const reprocessAll = async () => {
+    if (!selectedPeriodId.value) return
+    const result = await Swal.fire({
+        title: 'Reprocesar todo el periodo',
+        html: `Se volverán a analizar <strong>todas las fuentes</strong> del periodo <strong>${period.value?.label ?? ''}</strong>.<br><br>Los datos actuales serán reemplazados y el reporte quedará invalidado. Recibirás un correo cuando termine.`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, reprocesar todo',
+        cancelButtonText: 'Cancelar',
+        reverseButtons: true,
+        confirmButtonColor: '#dc2626',
+    })
+    if (!result.isConfirmed) return
+    router.post(`/historico-general/${selectedPeriodId.value}/reprocesar-todo`, {}, {
+        preserveScroll: true,
+        onSuccess: () => Swal.fire({ title: 'Reprocesamiento en cola', text: 'Todas las fuentes serán reprocesadas en segundo plano. Recibirás un correo cuando termine.', icon: 'success', confirmButtonText: 'Entendido' }),
+        onError: () => Swal.fire('No se pudo iniciar', 'Ya hay un reprocesamiento en curso o no hay fuentes disponibles.', 'error'),
+    })
 }
 
 const updateDatabase = async () => {
@@ -243,17 +302,59 @@ const generateReport = () => {
 
                 <!-- ③ Contenido de la etapa actual -->
                 <transition name="fade" mode="out-in">
-                    <UploadSourcesStep
-                        v-if="currentStep === 'files'"
-                        :key="`files-${selectedPeriodId}`"
-                        :period="period"
-                        :sources="sources"
-                        :uploads-by-source="uploadsBySource"
-                        :selected-period-id="selectedPeriodId"
-                        @upload="uploadFile"
-                        @delete="deleteUpload"
-                        @reprocess="reprocessUpload"
-                    />
+                    <div v-if="currentStep === 'files'" :key="`files-${selectedPeriodId}`" class="space-y-4">
+                        <UploadSourcesStep
+                            :period="period"
+                            :sources="sources"
+                            :uploads-by-source="uploadsBySource"
+                            :selected-period-id="selectedPeriodId"
+                            @upload="uploadFile"
+                            @delete="deleteUpload"
+                            @reprocess="reprocessUpload"
+                        />
+
+                        <!-- Reprocesar todo el periodo -->
+                        <div v-if="grouped?.uploads?.length && !period?.is_derived" class="overflow-hidden rounded-[2rem] border border-white/70 bg-white shadow-xl shadow-slate-200/70">
+                            <div class="flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
+                                <div>
+                                    <p class="text-xs font-black uppercase tracking-[0.22em] text-slate-500">Acción global del periodo</p>
+                                    <h3 class="mt-1 text-base font-black text-slate-950">Reprocesar todo el periodo</h3>
+                                    <p class="mt-1 text-sm leading-6 text-slate-500">
+                                        Vuelve a analizar todas las fuentes cargadas en este periodo. Los datos actuales serán
+                                        reemplazados y el reporte quedará invalidado. Útil cuando cambian los archivos fuente.
+                                    </p>
+                                </div>
+                                <div class="shrink-0">
+                                    <button
+                                        v-if="!isReprocessing"
+                                        type="button"
+                                        class="inline-flex h-10 items-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-5 text-sm font-black text-rose-700 transition hover:bg-rose-100 hover:border-rose-300"
+                                        @click="reprocessAll"
+                                    >
+                                        <svg class="size-4" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
+                                        Reprocesar todo
+                                    </button>
+                                    <div v-else class="inline-flex h-10 items-center gap-2 rounded-2xl border border-violet-200 bg-violet-50 px-5 text-sm font-semibold text-violet-700">
+                                        <svg class="size-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                                        {{ period?.reprocess_run_status === 'queued' ? 'En cola…' : `Reprocesando… ${period?.reprocess_run_progress ?? 0}%` }}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Progress bar when running -->
+                            <div v-if="isReprocessing && period?.reprocess_run_progress != null" class="h-1 bg-slate-100">
+                                <div
+                                    class="h-full bg-violet-500 transition-all duration-700"
+                                    :style="{ width: `${period.reprocess_run_progress}%` }"
+                                />
+                            </div>
+
+                            <!-- Log message when running -->
+                            <div v-if="isReprocessing && period?.reprocess_run_log" class="border-t border-slate-100 bg-slate-50 px-6 py-3">
+                                <p class="text-xs text-slate-500">{{ period.reprocess_run_log }}</p>
+                            </div>
+                        </div>
+                    </div>
                     <DatabaseUpdateStep
                         v-else-if="currentStep === 'bd'"
                         :period="period"
@@ -279,7 +380,7 @@ const generateReport = () => {
                             :can-generate="Boolean(period?.can_generate_radiography)"
                             @generate="generateReport"
                         />
-                        <ReportGenerationStatus :period="period" />
+                        <ReportGenerationStatus :period="period" @retry="generateReport" />
                     </div>
                     <ReportPreview
                         v-else-if="currentStep === 'preview'"

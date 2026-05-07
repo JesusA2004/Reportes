@@ -142,18 +142,32 @@ class GenerateRadiographyJob implements ShouldQueue
                 message: "La Radiografía del periodo {$period->label} ya está lista. Puedes consultarla en Reportes mensuales.",
                 period: $period,
                 success: true,
+                run: $run,
             );
         } catch (\Throwable $exception) {
+            Log::error('GenerateRadiographyJob falló.', [
+                'period_id'  => $period->id,
+                'run_id'     => $run->id,
+                'exception'  => get_class($exception),
+                'message'    => $exception->getMessage(),
+                'file'       => $exception->getFile(),
+                'line'       => $exception->getLine(),
+                'trace'      => $exception->getTraceAsString(),
+            ]);
+
+            $publicError = $this->publicErrorMessage($exception);
+
             $run->update([
-                'status'     => 'failed',
+                'status'      => 'failed',
                 'finished_at' => now(),
-                'log'        => mb_strimwidth($exception->getMessage(), 0, 2000),
+                'log'         => $publicError,
             ]);
 
             $this->notifyUser(
                 subject: 'Error al generar Radiografía',
-                message: "No se pudo generar la Radiografía del periodo {$period->label}. Error: " . mb_strimwidth($exception->getMessage(), 0, 500),
+                message: $publicError,
                 period: $period,
+                run: $run,
                 success: false,
             );
 
@@ -161,7 +175,7 @@ class GenerateRadiographyJob implements ShouldQueue
         }
     }
 
-    private function notifyUser(string $subject, string $message, Period $period, bool $success): void
+    private function notifyUser(string $subject, string $message, Period $period, bool $success, ?PeriodRadiographyRun $run = null): void
     {
         if (!$this->userId) {
             return;
@@ -173,7 +187,7 @@ class GenerateRadiographyJob implements ShouldQueue
             return;
         }
 
-        $run = $this->runId
+        $run ??= $this->runId
             ? PeriodRadiographyRun::query()->find($this->runId)
             : PeriodRadiographyRun::query()->where('period_id', $period->id)->latest('id')->first();
 
@@ -196,5 +210,49 @@ class GenerateRadiographyJob implements ShouldQueue
                 'error'     => $exception->getMessage(),
             ]);
         }
+    }
+
+    private function publicErrorMessage(\Throwable $exception): string
+    {
+        $msg = $exception->getMessage();
+
+        if (
+            str_contains($msg, 'PhpOffice') ||
+            str_contains($msg, 'PhpSpreadsheet') ||
+            str_contains($msg, 'Call to undefined method') ||
+            str_contains($msg, 'Spreadsheet') ||
+            str_contains(get_class($exception), 'PhpOffice')
+        ) {
+            return 'No se pudo preparar el archivo Excel del reporte. Revisa la configuración del formato e inténtalo nuevamente.';
+        }
+
+        if (
+            str_contains($msg, 'SQLSTATE') ||
+            str_contains($msg, 'QueryException') ||
+            str_contains(get_class($exception), 'QueryException')
+        ) {
+            return 'No se pudo consultar la información del reporte. Verifica que los datos del periodo estén procesados correctamente.';
+        }
+
+        if (
+            str_contains($msg, 'Dompdf') ||
+            str_contains($msg, 'dompdf') ||
+            str_contains(get_class($exception), 'Dompdf')
+        ) {
+            return 'No se pudo generar el PDF del reporte. Inténtalo nuevamente o descarga el Excel si está disponible.';
+        }
+
+        if (
+            str_contains($msg, 'Faltan fuentes') ||
+            str_contains($msg, 'No se puede generar la Radiografía')
+        ) {
+            return $msg;
+        }
+
+        if (str_contains($msg, 'no quedó procesada') || str_contains($msg, 'no tiene ruta de almacenamiento')) {
+            return $msg;
+        }
+
+        return 'No se pudo generar la Radiografía. Revisa las fuentes cargadas, incidencias y configuración del reporte.';
     }
 }

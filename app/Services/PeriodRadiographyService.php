@@ -14,6 +14,8 @@ use App\Models\Placement;
 use App\Models\Portfolio;
 use App\Models\Recovery;
 use App\Models\ReportUpload;
+use App\Models\MonthlyEmployeeSummary;
+use App\Models\NoiMovement;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -198,21 +200,110 @@ class PeriodRadiographyService
             ->where('period_id', $period->id)
             ->sum('past_due_balance');
 
+        // Fallback: if past_due_balance is all zero but days_past_due > 0 exists, use balance of overdue records
+        if ($carteraVencida === 0.0 && $valorCartera > 0) {
+            $hasOverdueDays = Portfolio::query()->where('period_id', $period->id)->where('days_past_due', '>', 0)->exists();
+            if ($hasOverdueDays) {
+                $carteraVencida = (float) Portfolio::query()->where('period_id', $period->id)->where('days_past_due', '>', 0)->sum('balance');
+            }
+        }
+
+        // ── Payroll aggregates (for preview cards) ──
+        $payroll = $this->payrollMetrics($period);
+
         return [
-            'gasto_total' => (float) Expense::query()
-                ->where('period_id', $period->id)
-                ->sum('amount'),
-            'recuperacion_total' => (float) Recovery::query()
-                ->where('period_id', $period->id)
-                ->sum('total_amount'),
-            'colocacion_total' => (float) Placement::query()
-                ->where('period_id', $period->id)
-                ->sum('amount'),
-            'valor_cartera_total' => $valorCartera,
+            'gasto_total'          => (float) Expense::query()->where('period_id', $period->id)->sum('amount'),
+            'recuperacion_total'   => (float) Recovery::query()->where('period_id', $period->id)->sum('total_amount'),
+            'colocacion_total'     => (float) Placement::query()->where('period_id', $period->id)->sum('amount'),
+            'valor_cartera_total'  => $valorCartera,
             'cartera_vencida_total' => $carteraVencida,
-            'mora_porcentaje' => $valorCartera > 0
+            'mora_porcentaje'      => $valorCartera > 0
                 ? round(($carteraVencida / $valorCartera) * 100, 2)
                 : 0,
+            // Payroll (used by web preview cards)
+            'total_empleados'      => $payroll['total_empleados'],
+            'pagos_total'          => $payroll['pagos'],
+            'bonos_total'          => $payroll['bonos'],
+            'descuentos_total'     => $payroll['descuentos'],
+            'gastos_nomina'        => $payroll['gastos'],
+            'neto_total'           => $payroll['neto'],
+        ];
+    }
+
+    private function payrollMetrics(Period $period): array
+    {
+        // Prefer consolidated summaries if they exist and have data
+        $mes = DB::table('fact_monthly_employee_summary')
+            ->where('period_id', $period->id)
+            ->selectRaw('COUNT(*) as cnt, SUM(total_payments) as pagos, SUM(total_bonuses) as bonos, SUM(total_discounts) as descuentos, SUM(total_expenses) as gastos, SUM(net_amount) as neto')
+            ->first();
+
+        if ((int)($mes?->cnt ?? 0) > 0 && ((float)($mes?->pagos ?? 0) + (float)($mes?->bonos ?? 0)) > 0) {
+            return [
+                'total_empleados' => (int)$mes->cnt,
+                'pagos'           => round((float)$mes->pagos, 2),
+                'bonos'           => round((float)$mes->bonos, 2),
+                'descuentos'      => round((float)$mes->descuentos, 2),
+                'gastos'          => round((float)$mes->gastos, 2),
+                'neto'            => round((float)$mes->neto, 2),
+            ];
+        }
+
+        // Fallback: aggregate from fact_noi_movements
+        $empCount = (int) DB::table('fact_noi_movements')
+            ->where('period_id', $period->id)
+            ->whereNotNull('employee_id')
+            ->distinct('employee_id')
+            ->count('employee_id');
+
+        $pagos = (float) DB::table('fact_noi_movements')
+            ->where('period_id', $period->id)
+            ->whereNotNull('employee_id')
+            ->whereRaw("LOWER(COALESCE(concept_type,'')) = 'percepcion'")
+            ->whereRaw("LOWER(COALESCE(concept,'')) NOT LIKE '%bono%'")
+            ->sum('amount');
+
+        $bonos = (float) DB::table('fact_noi_movements')
+            ->where('period_id', $period->id)
+            ->whereNotNull('employee_id')
+            ->whereRaw("LOWER(COALESCE(concept_type,'')) = 'percepcion'")
+            ->whereRaw("LOWER(COALESCE(concept,'')) LIKE '%bono%'")
+            ->sum('amount');
+
+        $descuentos = (float) DB::table('fact_noi_movements')
+            ->where('period_id', $period->id)
+            ->whereNotNull('employee_id')
+            ->whereRaw("LOWER(COALESCE(concept_type,'')) IN ('deduccion','descuento')")
+            ->sum('amount');
+
+        $gastos = (float) DB::table('fact_expenses')
+            ->where('period_id', $period->id)
+            ->whereNotNull('employee_id')
+            ->sum('amount');
+
+        // Last resort: if concept_type not recognized, use raw total
+        if ($pagos === 0.0 && $bonos === 0.0 && $descuentos === 0.0) {
+            $pagos = (float) DB::table('fact_noi_movements')
+                ->where('period_id', $period->id)
+                ->whereNotNull('employee_id')
+                ->sum('amount');
+        }
+
+        if ($empCount === 0) {
+            $empCount = (int) DB::table('employee_branch_assignments')
+                ->where('period_id', $period->id)
+                ->whereNotNull('branch_id')
+                ->distinct('employee_id')
+                ->count('employee_id');
+        }
+
+        return [
+            'total_empleados' => $empCount,
+            'pagos'           => round($pagos, 2),
+            'bonos'           => round($bonos, 2),
+            'descuentos'      => round($descuentos, 2),
+            'gastos'          => round($gastos, 2),
+            'neto'            => round($pagos + $bonos - $descuentos, 2),
         ];
     }
 

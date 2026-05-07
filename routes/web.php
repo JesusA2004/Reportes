@@ -25,11 +25,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::get('/{period}/incidencias', [ReportUploadController::class, 'incidents'])->name('incidents');
             Route::post('/{period}/incidencias/{incident}/resolver', [ReportUploadController::class, 'resolveIncident'])->name('incidents.resolve');
             Route::post('/{period}/generar-radiografia', [ReportUploadController::class, 'generateRadiography'])->name('generate-radiography');
-
-            // Déjalas solo cuando ya existan de verdad
-            // Route::get('/{reportUpload}', [ReportUploadController::class, 'show'])->name('show');
-            // Route::post('/{reportUpload}/reprocess', [ReportUploadController::class, 'reprocess'])->name('reprocess');
-            // Route::get('/{reportUpload}/download', [ReportUploadController::class, 'download'])->name('download');
+            Route::post('/{period}/reprocesar-todo', [ReportUploadController::class, 'reprocessAll'])->name('reprocess-all');
         });
 
     Route::prefix('periodos')

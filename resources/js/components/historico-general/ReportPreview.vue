@@ -11,29 +11,21 @@ const tabs = [{ k: 'metricas', l: 'Métricas' }, { k: 'empleados', l: 'Empleados
 const money = (value: number) =>
     new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(Number(value || 0))
 
-// Prefer PeriodSummary.global_metrics embedded in period (populated after generation)
+// global_metrics now includes payroll fields (total_empleados, pagos_total, neto_total, etc.)
 const gm = computed(() => props.period?.preview_summary?.global_metrics ?? props.preview?.metrics ?? {})
 const previewUrl = computed(() =>
     props.period?.radiography_ready ? `/reportes-mensuales/${props.period.id}/preview` : null
 )
 
-// Payroll from preview prop (MonthlyEmployeeSummary aggregates)
-const payroll = computed(() => ({
-    total_empleados: props.preview?.metrics?.total_empleados ?? 0,
-    pagos_total:     props.preview?.metrics?.pagos_total ?? 0,
-    gasto_total:     props.gm?.gasto_total ?? props.preview?.metrics?.gasto_total ?? 0,
-    neto_total:      props.preview?.metrics?.neto_total ?? 0,
-}))
-
 const metricCards = computed(() => [
-    { l: 'Empleados',      v: payroll.value.total_empleados },
-    { l: 'Pagos',          v: money(payroll.value.pagos_total) },
+    { l: 'Empleados',      v: (gm.value.total_empleados ?? 0) },
+    { l: 'Pagos',          v: money(gm.value.pagos_total ?? 0) },
     { l: 'Recuperación',   v: money(gm.value.recuperacion_total ?? 0) },
     { l: 'Colocación',     v: money(gm.value.colocacion_total ?? 0) },
     { l: 'Cartera',        v: money(gm.value.valor_cartera_total ?? 0) },
     { l: 'Mora %',         v: (gm.value.mora_porcentaje ?? 0).toFixed(2) + '%' },
     { l: 'Gastos totales', v: money(gm.value.gasto_total ?? 0) },
-    { l: 'Neto nómina',    v: money(payroll.value.neto_total) },
+    { l: 'Neto nómina',    v: money(gm.value.neto_total ?? 0) },
 ])
 </script>
 
