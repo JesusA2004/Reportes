@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Models\DataSource;
 use App\Models\Period;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -35,7 +36,7 @@ class StoreReportUploadRequest extends FormRequest
             'file' => [
                 'required',
                 'file',
-                'mimes:xls,xlsx,xlsm',
+                $this->allowedMimes(),
                 'max:20480',
             ],
             'notes' => [
@@ -43,6 +44,15 @@ class StoreReportUploadRequest extends FormRequest
                 'string',
             ],
         ];
+    }
+
+    private function allowedMimes(): string
+    {
+        $source = DataSource::query()->find($this->integer('data_source_id'));
+        if ($source?->code === 'gastos_lendus') {
+            return 'mimes:pdf';
+        }
+        return 'mimes:xls,xlsx,xlsm';
     }
 
     public function withValidator($validator): void
@@ -99,7 +109,7 @@ class StoreReportUploadRequest extends FormRequest
             'covered_period_ids.min' => 'Selecciona al menos una semana.',
             'data_source_id.required' => 'Debes seleccionar una fuente.',
             'file.required' => 'Debes seleccionar un archivo.',
-            'file.mimes' => 'El archivo debe ser xls, xlsx o xlsm.',
+            'file.mimes' => 'El archivo no tiene el formato correcto. Gastos Lendus requiere PDF; las demás fuentes requieren XLS/XLSX.',
         ];
     }
 }

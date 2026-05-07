@@ -8,6 +8,7 @@ use App\Models\Period;
 use App\Models\PeriodReprocessRun;
 use App\Models\ReportUpload;
 use App\Models\User;
+use App\Services\PeriodDerivedDataCleaner;
 use App\Services\ReportAnalysisService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -30,11 +31,13 @@ class ReprocessPeriodUploadsJob implements ShouldQueue
 
     // Progress milestone per source code after completing that source
     private const SOURCE_PROGRESS = [
-        'noi_nomina'               => 20,
-        'lendus_ingresos_cobranza' => 35,
-        'lendus_ministraciones'    => 55,
-        'lendus_saldos_cliente'    => 75,
-        'gastos'                   => 90,
+        'noi_nomina'               => 15,
+        'lendus_ministraciones'    => 30,
+        'lendus_ingresos_cobranza' => 45,
+        'lendus_saldos_cliente'    => 60,
+        'gastos_lendus'            => 75,
+        'gastos_erp'               => 88,
+        'gastos'                   => 88, // legacy fallback
     ];
 
     public function __construct(
@@ -44,7 +47,7 @@ class ReprocessPeriodUploadsJob implements ShouldQueue
         public ?int $userId = null,
     ) {}
 
-    public function handle(ReportAnalysisService $service): void
+    public function handle(ReportAnalysisService $service, PeriodDerivedDataCleaner $cleaner): void
     {
         @ini_set('memory_limit', '1024M');
         @ini_set('max_execution_time', '3600');
@@ -54,7 +57,10 @@ class ReprocessPeriodUploadsJob implements ShouldQueue
         $run    = PeriodReprocessRun::query()->findOrFail($this->runId);
         $user   = $this->userId ? User::query()->find($this->userId) : null;
 
-        $run->update(['status' => 'running', 'started_at' => now()]);
+        $run->update(['status' => 'running', 'started_at' => now(), 'log' => 'Limpiando datos previos del periodo…']);
+
+        // Wipe ALL derived data for the period before inserting new data (idempotency)
+        $cleaner->clearForPeriod($period);
 
         try {
             $uploads = ReportUpload::query()

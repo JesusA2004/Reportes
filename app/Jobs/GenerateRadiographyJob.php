@@ -10,6 +10,7 @@ use App\Models\PeriodRadiographyRun;
 use App\Models\PeriodSummary;
 use App\Models\User;
 use App\Services\PeriodConsolidationService;
+use App\Services\PeriodDerivedDataCleaner;
 use App\Services\PeriodRadiographyService;
 use App\Services\RadiografiaExportService;
 use Illuminate\Bus\Queueable;
@@ -43,6 +44,7 @@ class GenerateRadiographyJob implements ShouldQueue
         PeriodRadiographyService $radiographyService,
         RadiografiaExportService $exportService,
         PeriodConsolidationService $consolidationService,
+        PeriodDerivedDataCleaner $cleaner,
     ): void {
         @ini_set('memory_limit', '1024M');
         @ini_set('max_execution_time', '1800');
@@ -72,6 +74,9 @@ class GenerateRadiographyJob implements ShouldQueue
         ]);
 
         try {
+            // Remove previous export files before generating new ones
+            $cleaner->clearGeneratedReports($period);
+
             // ── 1. Generate summary (metrics from Expense/Recovery/Placement/Portfolio) ──
             $summary = $radiographyService->generate($period, $this->userId);
 
@@ -104,11 +109,6 @@ class GenerateRadiographyJob implements ShouldQueue
                 ->first();
 
             if ($summary) {
-                // Remove previous exports for this summary before creating new ones
-                PeriodRadiographyExport::query()
-                    ->where('period_summary_id', $summary->id)
-                    ->delete();
-
                 PeriodRadiographyExport::query()->create([
                     'period_summary_id' => $summary->id,
                     'export_path'       => $path,

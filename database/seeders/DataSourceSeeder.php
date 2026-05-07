@@ -35,8 +35,20 @@ class DataSourceSeeder extends Seeder {
             ],
             [
                 'code' => 'gastos',
-                'name' => 'Gastos',
-                'description' => 'Archivo de gastos operativos',
+                'name' => 'Gastos (legado)',
+                'description' => 'Fuente genérica de gastos — reemplazada por Gastos Lendus y Gastos ERP',
+                'is_active' => false,
+            ],
+            [
+                'code' => 'gastos_lendus',
+                'name' => 'Gastos Lendus (PDF)',
+                'description' => 'Reporte de gastos operativos exportado desde Lendus en formato PDF',
+                'is_active' => true,
+            ],
+            [
+                'code' => 'gastos_erp',
+                'name' => 'Gastos ERP (Requisiciones)',
+                'description' => 'Reporte de requisiciones aprobadas exportado desde el ERP en formato Excel',
                 'is_active' => true,
             ],
         ];

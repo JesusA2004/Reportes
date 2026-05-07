@@ -7,6 +7,7 @@ use App\Mail\ReprocessUploadFailedMail;
 use App\Models\Period;
 use App\Models\ReportUpload;
 use App\Models\User;
+use App\Services\PeriodDerivedDataCleaner;
 use App\Services\ReportAnalysisService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -32,7 +33,7 @@ class ReprocessReportUploadJob implements ShouldQueue
         public ?int $userId = null,
     ) {}
 
-    public function handle(ReportAnalysisService $service): void
+    public function handle(ReportAnalysisService $service, PeriodDerivedDataCleaner $cleaner): void
     {
         @ini_set('memory_limit', '1024M');
         @ini_set('max_execution_time', '1800');
@@ -43,6 +44,9 @@ class ReprocessReportUploadJob implements ShouldQueue
         $user   = $this->userId ? User::query()->find($this->userId) : null;
 
         try {
+            // Wipe previous rows for this upload before inserting new ones
+            $cleaner->clearForUpload($upload);
+
             $processRun = $service->analyze($upload);
 
             $stats = [

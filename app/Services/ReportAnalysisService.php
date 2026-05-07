@@ -8,7 +8,9 @@ use App\Enums\ProcessType;
 use App\Enums\ReportUploadStatus;
 use App\Models\ProcessRun;
 use App\Models\ReportUpload;
+use App\Services\Imports\GastosErpExcelImportService;
 use App\Services\Imports\GastosImportService;
+use App\Services\Imports\GastosLendusPdfImportService;
 use App\Services\Imports\LendusIngresosCobranzaImportService;
 use App\Services\Imports\NoiNominaImportService;
 use App\Services\Imports\LendusMinistracionesImportService;
@@ -20,6 +22,8 @@ class ReportAnalysisService
     public function __construct(
         protected NoiNominaImportService $noiNominaImportService,
         protected GastosImportService $gastosImportService,
+        protected GastosLendusPdfImportService $gastosLendusPdfImportService,
+        protected GastosErpExcelImportService $gastosErpExcelImportService,
         protected LendusIngresosCobranzaImportService $lendusIngresosCobranzaImportService,
         protected LendusMinistracionesImportService $lendusMinistracionesImportService,
         protected LendusSaldosClienteImportService $lendusSaldosClienteImportService,
@@ -59,11 +63,13 @@ class ReportAnalysisService
                     ]);
                 };
                 return match ($sourceCode) {
-                    DataSourceCode::NoiNomina->value => $this->noiNominaImportService->handle($upload, $progress),
-                    DataSourceCode::Gastos->value => $this->gastosImportService->handle($upload, $progress),
+                    DataSourceCode::NoiNomina->value              => $this->noiNominaImportService->handle($upload, $progress),
+                    DataSourceCode::Gastos->value                 => $this->gastosImportService->handle($upload, $progress),
+                    DataSourceCode::GastosLendus->value           => $this->gastosLendusPdfImportService->handle($upload, $progress),
+                    DataSourceCode::GastosErp->value              => $this->gastosErpExcelImportService->handle($upload, $progress),
                     DataSourceCode::LendusIngresosCobranza->value => $this->lendusIngresosCobranzaImportService->handle($upload, $progress),
-                    DataSourceCode::LendusMinistraciones->value => $this->lendusMinistracionesImportService->handle($upload, $progress),
-                    DataSourceCode::LendusSaldosCliente->value => $this->lendusSaldosClienteImportService->handle($upload, $progress),
+                    DataSourceCode::LendusMinistraciones->value   => $this->lendusMinistracionesImportService->handle($upload, $progress),
+                    DataSourceCode::LendusSaldosCliente->value    => $this->lendusSaldosClienteImportService->handle($upload, $progress),
                     default => throw new \RuntimeException("La fuente [{$sourceCode}] aún no tiene importador implementado."),
                 };
             });

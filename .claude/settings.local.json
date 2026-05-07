@@ -14,7 +14,10 @@
       "Bash(composer require *)",
       "Bash(xargs grep -l \"EmptyCell\")",
       "Bash(Get-ChildItem -Path \"C:\\\\wamp64\\\\www\\\\Reportes\" -Recurse -Directory)",
-      "Bash(Select-Object -ExpandProperty FullName)"
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "PowerShell(Get-ChildItem \"C:\\\\wamp64\\\\www\\\\Reportes\\\\documentosEjemplo\" -ErrorAction SilentlyContinue | ForEach-Object { \"$\\($_.Name\\) - $\\($_.Length\\) bytes\" })",
+      "Bash(composer show *)",
+      "Bash(Remove-Item read_gastos_erp.php, read_gastos_pdf.php, test_gastos_lendus.php, debug_gastos_pdf.php, debug_orizaba.php, debug_skipped.php, debug_a2_a3.php -ErrorAction SilentlyContinue)"
     ]
   }
 }

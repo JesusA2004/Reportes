@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\Period;
 use App\Models\ReportUpload;
+use App\Services\PeriodDerivedDataCleaner;
 use App\Services\ReportAnalysisService;
 use Illuminate\Console\Command;
 
@@ -16,8 +17,10 @@ class ReimportUploadsCommand extends Command
 
     protected $description = 'Reprocesa uno o más archivos subidos, regenerando todos los registros en las tablas fact_*.';
 
-    public function __construct(private readonly ReportAnalysisService $analysisService)
-    {
+    public function __construct(
+        private readonly ReportAnalysisService $analysisService,
+        private readonly PeriodDerivedDataCleaner $cleaner,
+    ) {
         parent::__construct();
     }
 
@@ -64,6 +67,12 @@ class ReimportUploadsCommand extends Command
                 return self::SUCCESS;
             }
 
+            // Full-period clear when no source filter; per-upload clear handled inside processUpload
+            if (!$source) {
+                $this->line("  Limpiando datos derivados del periodo #{$period->id}…");
+                $this->cleaner->clearForPeriod($period);
+            }
+
             $this->info("Reprocesando " . $uploads->count() . " archivo(s) del periodo #{$periodId} — {$period->label}");
             $this->line('');
 
@@ -88,6 +97,7 @@ class ReimportUploadsCommand extends Command
         $this->info("▶ Upload #{$upload->id} — {$sourceName} (periodo {$upload->period_id})");
 
         try {
+            $this->cleaner->clearForUpload($upload);
             $run = $this->analysisService->analyze($upload);
             $this->line("  ✓ Completado: {$run->log}");
             $this->line("  Leídas: {$run->rows_read} | Insertadas: {$run->rows_inserted} | Omitidas: {$run->rows_skipped} | Errores: {$run->rows_with_errors}");
