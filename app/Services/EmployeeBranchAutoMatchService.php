@@ -12,6 +12,7 @@ use App\Models\Period;
 use App\Models\Recovery;
 use App\Models\ReportUpload;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class EmployeeBranchAutoMatchService
@@ -79,6 +80,14 @@ class EmployeeBranchAutoMatchService
             }
 
             $candidate = $this->resolveBranchCandidate($period, $employee, $cobranzaUploadIds);
+
+            if (!$candidate) {
+                $candidate = $this->resolveCandidateFromPlacements($period, $employee);
+            }
+
+            if (!$candidate) {
+                $candidate = $this->resolveCandidateFromPortfolios($period, $employee);
+            }
 
             if (!$candidate) {
                 $candidate = $this->resolveCandidateFromExpenses($period, $employee);
@@ -285,6 +294,70 @@ class EmployeeBranchAutoMatchService
             'match_type' => $matchType,
             'confidence' => $confidence,
             'notes' => $notes,
+        ];
+    }
+
+    private function resolveCandidateFromPlacements(Period $period, Employee $employee): ?array
+    {
+        $rows = DB::table('fact_placements as p')
+            ->join('branches as b', 'p.branch_id', '=', 'b.id')
+            ->where('p.period_id', $period->id)
+            ->where('p.normalized_promoter_name', $employee->normalized_name)
+            ->whereNotNull('p.branch_id')
+            ->selectRaw('p.branch_id, b.name as branch_name, COUNT(*) as cnt')
+            ->groupBy('p.branch_id', 'b.name')
+            ->orderByDesc('cnt')
+            ->get();
+
+        if ($rows->isEmpty()) {
+            return null;
+        }
+
+        $top    = $rows->first();
+        $second = $rows->get(1);
+        $tie    = $second && $top->cnt === $second->cnt;
+
+        return [
+            'branch_id'        => $top->branch_id,
+            'source_type'      => SourceType::Lendus,
+            'source_reference' => 'fact_placements',
+            'match_type'       => $tie ? MatchType::Normalized : MatchType::Exact,
+            'confidence'       => $tie ? 0.70 : 0.90,
+            'notes'            => $tie
+                ? 'Sucursal inferida por colocación (empate entre sucursales). Conviene validar.'
+                : 'Sucursal asignada con base en colocación del periodo.',
+        ];
+    }
+
+    private function resolveCandidateFromPortfolios(Period $period, Employee $employee): ?array
+    {
+        $rows = DB::table('fact_portfolios as p')
+            ->join('branches as b', 'p.branch_id', '=', 'b.id')
+            ->where('p.period_id', $period->id)
+            ->whereRaw('LOWER(p.promoter_name) = ?', [$employee->normalized_name])
+            ->whereNotNull('p.branch_id')
+            ->selectRaw('p.branch_id, b.name as branch_name, COUNT(*) as cnt, SUM(p.balance) as balance')
+            ->groupBy('p.branch_id', 'b.name')
+            ->orderByDesc('balance')
+            ->get();
+
+        if ($rows->isEmpty()) {
+            return null;
+        }
+
+        $top    = $rows->first();
+        $second = $rows->get(1);
+        $tie    = $second && $top->cnt === $second->cnt;
+
+        return [
+            'branch_id'        => $top->branch_id,
+            'source_type'      => SourceType::Lendus,
+            'source_reference' => 'fact_portfolios',
+            'match_type'       => $tie ? MatchType::Normalized : MatchType::Normalized,
+            'confidence'       => $tie ? 0.65 : 0.82,
+            'notes'            => $tie
+                ? 'Sucursal inferida por cartera (empate). Conviene validar.'
+                : 'Sucursal asignada con base en cartera del periodo.',
         ];
     }
 

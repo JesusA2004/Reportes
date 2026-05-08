@@ -12,10 +12,14 @@ class DataSource extends Model {
         'name',
         'description',
         'is_active',
+        'is_required_for_bd',
+        'is_required_for_report',
     ];
 
     protected $casts = [
-        'is_active' => 'boolean',
+        'is_active'              => 'boolean',
+        'is_required_for_bd'     => 'boolean',
+        'is_required_for_report' => 'boolean',
     ];
 
     public function reportUploads(): HasMany {

@@ -13,6 +13,10 @@ return new class extends Migration {
             $table->string('name', 160);
             $table->text('description')->nullable();
             $table->boolean('is_active')->default(true);
+            // Obligatoria para poder ejecutar Actualizar BD
+            $table->boolean('is_required_for_bd')->default(false);
+            // Obligatoria para poder generar Radiografía
+            $table->boolean('is_required_for_report')->default(false);
             $table->timestamps();
             $table->index('name');
         });

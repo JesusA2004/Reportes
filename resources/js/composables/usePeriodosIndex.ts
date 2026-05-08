@@ -14,6 +14,10 @@ type PeriodItem = {
     start_date?: string | null
     end_date?: string | null
     is_closed?: boolean
+    is_compound?: boolean
+    can_receive_uploads?: boolean
+    component_period_ids?: number[]
+    component_labels?: string[]
     uploaded_sources_count?: number
     required_sources_count?: number
     can_close?: boolean
@@ -21,8 +25,19 @@ type PeriodItem = {
     close_issues_preview?: string[]
 }
 
+type WeekItem = {
+    id: number
+    label: string
+    year: number
+    month: number
+    sequence: number
+    start_date?: string
+    end_date?: string
+}
+
 type Props = {
     periods: PeriodItem[]
+    availableWeeks?: WeekItem[]
 }
 
 const monthNames: Record<number, string> = {
@@ -53,6 +68,25 @@ export function usePeriodosIndex(props: Props) {
         type: 'weekly',
         year: '',
         month: '',
+    })
+
+    const monthlyForm = useForm<{
+        type: string
+        year: string | number
+        month: string | number
+        week_ids: number[]
+    }>({
+        type: 'monthly',
+        year: new Date().getFullYear(),
+        month: '',
+        week_ids: [],
+    })
+
+    const filteredWeeksForMonth = computed(() => {
+        const year  = Number(monthlyForm.year)
+        const month = Number(monthlyForm.month)
+        if (!year || !month) return []
+        return (props.availableWeeks ?? []).filter((w) => w.year === year && w.month === month)
     })
 
     const filteredPeriods = computed(() => {
@@ -91,8 +125,12 @@ export function usePeriodosIndex(props: Props) {
             return `Semanas de ${monthNames[month] ?? 'Periodo'} ${year}`
         }
 
+        if (type === 'monthly') {
+            return `Periodo mensual: ${monthNames[month] ?? 'Periodo'} ${year}`
+        }
+
         if (type === 'bimonthly') {
-            return `Quincenas de ${monthNames[month] ?? 'Periodo'} ${year}`
+            return `Bimestres de ${year}`
         }
 
         if (type === 'quarterly') {
@@ -134,6 +172,50 @@ export function usePeriodosIndex(props: Props) {
         })
     }
 
+    const submitConfigureMonth = async () => {
+        const year  = Number(monthlyForm.year)
+        const month = Number(monthlyForm.month)
+        const monthLabel = monthNames[month] ?? 'Periodo'
+
+        if (!year || !month) {
+            await Swal.fire({
+                title: 'Datos incompletos',
+                text: 'Selecciona el año y el mes antes de continuar.',
+                icon: 'warning',
+                confirmButtonText: 'Entendido',
+            })
+            return
+        }
+
+        if (monthlyForm.week_ids.length === 0) {
+            await Swal.fire({
+                title: 'Sin semanas seleccionadas',
+                text: 'Selecciona al menos una semana para el mes operativo.',
+                icon: 'warning',
+                confirmButtonText: 'Entendido',
+            })
+            return
+        }
+
+        const result = await Swal.fire({
+            title: '¿Configurar mes operativo?',
+            text: `Se creará el periodo mensual de ${monthLabel} ${year} con ${monthlyForm.week_ids.length} semana(s) seleccionada(s).`,
+            icon: 'question',
+            showCancelButton: true,
+            confirmButtonText: 'Sí, crear',
+            cancelButtonText: 'Cancelar',
+        })
+
+        if (!result.isConfirmed) return
+
+        monthlyForm.post('/periodos', {
+            preserveScroll: true,
+            onSuccess: () => {
+                monthlyForm.reset('month', 'week_ids')
+            },
+        })
+    }
+
     const togglePeriod = async (period: PeriodItem) => {
         const isClosing = !period.is_closed
 
@@ -166,6 +248,8 @@ export function usePeriodosIndex(props: Props) {
     return {
         filters,
         form,
+        monthlyForm,
+        filteredWeeksForMonth,
         filteredPeriods,
         totalPeriods,
         closedPeriods,
@@ -173,6 +257,7 @@ export function usePeriodosIndex(props: Props) {
         blockedPeriods,
         createLabel,
         submitCreate,
+        submitConfigureMonth,
         togglePeriod,
     }
 }

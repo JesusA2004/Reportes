@@ -7,6 +7,7 @@ use App\Models\Employee;
 use App\Models\Expense;
 use App\Models\ReportUpload;
 use App\Services\BranchResolverService;
+use App\Support\ExpenseStatusNormalizer;
 use Illuminate\Support\Facades\Storage;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 
@@ -48,17 +49,12 @@ class GastosErpExcelImportService
 
         Expense::query()->where('report_upload_id', $upload->id)->delete();
 
-        $rowsRead     = 0;
-        $rowsInserted = 0;
-        $rowsSkipped  = 0;
-        $rowsErrors   = 0;
-
-        $lastFolio       = null;
-        $lastBranchId    = null;
-        $lastEmployeeId  = null;
-        $lastConcept     = null;
-        $lastDate        = null;
-        $lastObservation = null;
+        $rowsRead              = 0;
+        $rowsInserted          = 0;
+        $rowsSkipped           = 0;
+        $rowsSkippedByStatus   = 0;
+        $rowsErrors            = 0;
+        $statusCounts          = [];
 
         foreach (array_slice($allRows, $headerRowIndex + 1) as $row) {
             if ($this->isEmptyRow($row)) {
@@ -77,12 +73,22 @@ class GastosErpExcelImportService
             $rowsRead++;
 
             try {
-                $sucursal  = $this->str($row[$colMap['sucursal']] ?? null);
+                $rawStatus = $this->str($row[$colMap['estatus']] ?? null);
+                $normStatus = $rawStatus ? ExpenseStatusNormalizer::normalize($rawStatus) : 'SIN ESTATUS';
+
+                $statusCounts[$normStatus] = ($statusCounts[$normStatus] ?? 0) + 1;
+
+                if ($rawStatus !== null && !ExpenseStatusNormalizer::isBillable($rawStatus)) {
+                    $rowsSkippedByStatus++;
+                    continue;
+                }
+
+                $sucursal    = $this->str($row[$colMap['sucursal']] ?? null);
                 $solicitante = $this->str($row[$colMap['solicitante']] ?? null);
-                $concepto  = $this->str($row[$colMap['concepto']] ?? null);
-                $observ    = $this->str($row[$colMap['observaciones']] ?? null);
-                $fechaStr  = $row[$colMap['fecha_captura']] ?? null;
-                $total     = $this->toDecimal($row[$colMap['total_final']] ?? null);
+                $concepto    = $this->str($row[$colMap['concepto']] ?? null);
+                $observ      = $this->str($row[$colMap['observaciones']] ?? null);
+                $fechaStr    = $row[$colMap['fecha_captura']] ?? null;
+                $total       = $this->toDecimal($row[$colMap['total_final']] ?? null);
 
                 // Skip rows with zero or null total
                 if ($total === null || $total == 0.0) {
@@ -99,17 +105,17 @@ class GastosErpExcelImportService
                     ->implode(' | ');
 
                 Expense::query()->create([
-                    'period_id'       => $upload->period_id,
-                    'report_upload_id'=> $upload->id,
-                    'employee_id'     => $employee?->id,
-                    'branch_id'       => $branch?->id,
-                    'category'        => 'ERP',
-                    'concept'         => $concepto ?? 'Sin concepto',
-                    'amount'          => $total,
-                    'paid_amount'     => $total,
-                    'expense_date'    => $date,
-                    'observations'    => $notes ?: null,
-                    'raw_payload'     => null,
+                    'period_id'        => $upload->period_id,
+                    'report_upload_id' => $upload->id,
+                    'employee_id'      => $employee?->id,
+                    'branch_id'        => $branch?->id,
+                    'category'         => 'ERP',
+                    'concept'          => $concepto ?? 'Sin concepto',
+                    'amount'           => $total,
+                    'paid_amount'      => $total,
+                    'expense_date'     => $date,
+                    'observations'     => $notes ?: null,
+                    'raw_payload'      => ['estatus' => $rawStatus],
                 ]);
 
                 $rowsInserted++;
@@ -119,23 +125,26 @@ class GastosErpExcelImportService
 
             if ($progress && $rowsRead % 100 === 0) {
                 $progress([
-                    'rows_read'       => $rowsRead,
-                    'rows_inserted'   => $rowsInserted,
-                    'rows_skipped'    => $rowsSkipped,
-                    'rows_with_errors'=> $rowsErrors,
-                    'log'             => "Gastos ERP: {$rowsRead} requisiciones leídas…",
+                    'rows_read'             => $rowsRead,
+                    'rows_inserted'         => $rowsInserted,
+                    'rows_skipped'          => $rowsSkipped,
+                    'rows_skipped_by_status'=> $rowsSkippedByStatus,
+                    'rows_with_errors'      => $rowsErrors,
+                    'log'                   => "Gastos ERP: {$rowsRead} requisiciones leídas…",
                 ]);
             }
         }
 
         return [
-            'rows_read'       => $rowsRead,
-            'rows_inserted'   => $rowsInserted,
-            'rows_skipped'    => $rowsSkipped,
-            'rows_with_errors'=> $rowsErrors,
-            'log'             => sprintf(
-                'Gastos ERP importados. Leídas: %d, insertadas: %d, omitidas: %d, errores: %d.',
-                $rowsRead, $rowsInserted, $rowsSkipped, $rowsErrors
+            'rows_read'              => $rowsRead,
+            'rows_inserted'          => $rowsInserted,
+            'rows_skipped'           => $rowsSkipped,
+            'rows_skipped_by_status' => $rowsSkippedByStatus,
+            'rows_with_errors'       => $rowsErrors,
+            'status_counts'          => $statusCounts,
+            'log'                    => sprintf(
+                'Gastos ERP importados. Leídas: %d, contabilizadas: %d, ignoradas por estatus: %d, omitidas: %d, errores: %d.',
+                $rowsRead, $rowsInserted, $rowsSkippedByStatus, $rowsSkipped, $rowsErrors
             ),
         ];
     }
@@ -156,6 +165,7 @@ class GastosErpExcelImportService
     {
         $aliases = [
             'folio'          => ['folio'],
+            'estatus'        => ['estatus', 'estado', 'status'],
             'sucursal'       => ['sucursal', 'oficina', 'unidad'],
             'codigo_sucursal'=> ['código sucursal', 'codigo sucursal', 'código sucursal'],
             'solicitante'    => ['solicitante', 'empleado', 'responsable'],
@@ -193,8 +203,10 @@ class GastosErpExcelImportService
         if (!$name) return null;
 
         $norm = mb_strtolower(trim($name));
+
+        // CORPORATIVO: create/find as a real branch (not null)
         if (in_array($norm, ['corporativo', 'corp', 'corporate'], true)) {
-            return null; // Corporate expenses not tied to a branch
+            return $this->branchResolver->findOrCreateBranchByName('CORPORATIVO');
         }
 
         $branch = Branch::query()
@@ -202,7 +214,7 @@ class GastosErpExcelImportService
             ->orWhereRaw('LOWER(normalized_name) = ?', [$this->normalize($name)])
             ->first();
 
-        return $branch ?? $this->branchResolver->findOrCreateBranchByCode($name);
+        return $branch ?? $this->branchResolver->findOrCreateBranchByName($name);
     }
 
     private function resolveEmployee(?string $name): ?Employee

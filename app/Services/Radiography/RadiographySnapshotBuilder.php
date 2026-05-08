@@ -50,7 +50,7 @@ class RadiographySnapshotBuilder
                 'start_date' => optional($period->start_date)->format('d/m/Y'),
                 'end_date'   => optional($period->end_date)->format('d/m/Y'),
             ],
-            'generated_at' => now()->format('d/m/Y H:i'),
+            'generated_at' => now('America/Mexico_City')->format('d/m/Y H:i'),
             'version'      => $summary->version ?? 1,
             'summary' => [
                 'employees_count'       => $payroll['total_empleados'],
@@ -64,14 +64,15 @@ class RadiographySnapshotBuilder
                 'net_payroll'           => $payroll['neto'],
             ],
             'sections' => [
-                'payroll'          => $payroll,
-                'products'         => $this->buildProducts($period),
-                'branches'         => $this->buildBranches($period, $summary),
-                'employees'        => $this->buildEmployees($period),
-                'promoters'        => $this->buildPromoters($period),
-                'portfolio_buckets' => $this->buildPortfolioBuckets($period),
-                'expenses_detail'  => $this->buildExpensesDetail($period),
-                'incidents'        => $this->buildIncidents($summary),
+                'payroll'            => $payroll,
+                'products'           => $this->buildProducts($period),
+                'branches'           => $this->buildBranches($period, $summary),
+                'employees'          => $this->buildEmployees($period),
+                'promoters'          => $this->buildPromoters($period),
+                'employees_gestores' => $this->buildEmployeesGestores($period),
+                'portfolio_buckets'  => $this->buildPortfolioBuckets($period),
+                'expenses_detail'    => $this->buildExpensesDetail($period),
+                'incidents'          => $this->buildIncidents($summary),
             ],
             'charts' => [
                 'recovery_by_branch'      => $this->chartByBranch($period, 'recuperacion'),
@@ -87,8 +88,8 @@ class RadiographySnapshotBuilder
 
     private function buildPayroll(Period $period): array
     {
-        // First try fact_monthly_employee_summary (post-consolidation)
-        $mes = DB::table('fact_monthly_employee_summary')
+        // First try fact_period_employee_summary (post-consolidation)
+        $mes = DB::table('fact_period_employee_summary')
             ->where('period_id', $period->id)
             ->selectRaw('COUNT(*) as cnt, SUM(total_payments) as pagos, SUM(total_bonuses) as bonos, SUM(total_discounts) as descuentos, SUM(total_expenses) as gastos, SUM(net_amount) as neto')
             ->first();
@@ -267,59 +268,88 @@ class RadiographySnapshotBuilder
 
     // ── PRODUCTS ─────────────────────────────────────────────────────────────
 
+    // Regex patterns for product classification
+    private const PRODUCT_SPECIAL_PATTERN    = 'CRECE|A LA MEDIDA|DIARIO|CREDITO CONSUMO';
+    private const PRODUCT_RESTRUCTURE_PATTERN = 'REESTRUCTURA|UNIFICACION|MIGRACION|INSOLUTOS';
+
     private function buildProducts(Period $period): array
     {
-        // Colocación agrupada por product_name, excluyendo reestructuras/seguros
+        $excludeAll = self::PRODUCT_SPECIAL_PATTERN . '|' . self::PRODUCT_RESTRUCTURE_PATTERN . '|SEGURO';
+
+        // Colocación — only operational products
         $placements = DB::table('fact_placements')
             ->where('period_id', $period->id)
+            ->whereRaw("(product_name NOT REGEXP ? OR product_name IS NULL)", [$excludeAll])
             ->selectRaw('COALESCE(NULLIF(product_name, ""), "Sin producto") as producto, COUNT(*) as operaciones, SUM(amount) as colocacion')
-            ->whereRaw('(product_name NOT REGEXP "REESTRUCTURA|UNIFICACION|SEGURO" OR product_name IS NULL)')
             ->groupBy('product_name')
             ->orderByDesc('colocacion')
             ->get()
             ->keyBy('producto');
 
-        // Recuperación agrupada por product_name
+        // Recuperación — operational only
         $recoveries = DB::table('fact_recoveries')
             ->where('period_id', $period->id)
             ->whereNotNull('product_name')
             ->where('product_name', '<>', '')
-            ->whereRaw('product_name NOT REGEXP "REESTRUCTURA|UNIFICACION|SEGURO"')
+            ->whereRaw("product_name NOT REGEXP ?", [$excludeAll])
             ->selectRaw('product_name as producto, SUM(total_amount) as recuperacion')
             ->groupBy('product_name')
             ->get()
             ->keyBy('producto');
 
-        // Also aggregate from portfolios (normalized products per contract)
-        $portfolioProducts = DB::table('fact_portfolios')
+        // Operational portfolio products
+        $portfolioMain = DB::table('fact_portfolios')
             ->where('period_id', $period->id)
             ->whereNotNull('product_name')
             ->where('product_name', '<>', '')
-            ->whereRaw('product_name NOT REGEXP "REESTRUCTURA|UNIFICACION|SEGURO"')
+            ->whereRaw("product_name NOT REGEXP ?", [$excludeAll])
             ->selectRaw('product_name as producto, COUNT(*) as contratos, SUM(balance) as cartera, SUM(CASE WHEN days_past_due > 0 THEN COALESCE(capital_due, past_due_balance, balance) ELSE 0 END) as vencida')
             ->groupBy('product_name')
             ->get()
             ->keyBy('producto');
 
+        // "Otros de cartera" — CRECE, A LA MEDIDA, DIARIO, etc. (portfolio only)
+        $portfolioOtros = DB::table('fact_portfolios')
+            ->where('period_id', $period->id)
+            ->whereNotNull('product_name')
+            ->where('product_name', '<>', '')
+            ->whereRaw("product_name REGEXP ? AND product_name NOT REGEXP ?", [self::PRODUCT_SPECIAL_PATTERN, self::PRODUCT_RESTRUCTURE_PATTERN])
+            ->selectRaw('product_name as producto, COUNT(*) as contratos, SUM(balance) as cartera, SUM(CASE WHEN days_past_due > 0 THEN COALESCE(capital_due, past_due_balance, balance) ELSE 0 END) as vencida')
+            ->groupBy('product_name')
+            ->orderByDesc('cartera')
+            ->get();
+
+        // Reestructuras/Migraciones — portfolio only
+        $portfolioReestructuras = DB::table('fact_portfolios')
+            ->where('period_id', $period->id)
+            ->whereNotNull('product_name')
+            ->where('product_name', '<>', '')
+            ->whereRaw("product_name REGEXP ?", [self::PRODUCT_RESTRUCTURE_PATTERN])
+            ->selectRaw('product_name as producto, COUNT(*) as contratos, SUM(balance) as cartera, SUM(CASE WHEN days_past_due > 0 THEN COALESCE(capital_due, past_due_balance, balance) ELSE 0 END) as vencida')
+            ->groupBy('product_name')
+            ->orderByDesc('cartera')
+            ->get();
+
         $allProducts = $placements->keys()
             ->merge($recoveries->keys())
-            ->merge($portfolioProducts->keys())
+            ->merge($portfolioMain->keys())
             ->unique()
             ->values();
 
-        if ($allProducts->isEmpty()) {
-            return [];
-        }
-
         $totalColocacion = $placements->sum('colocacion') ?: 1;
 
-        return $allProducts->map(function (string $producto) use ($placements, $recoveries, $portfolioProducts, $totalColocacion) {
-            $p = $placements->get($producto);
-            $r = $recoveries->get($producto);
-            $pp = $portfolioProducts->get($producto);
+        $buildRow = function (string $producto, string $tipo) use ($placements, $recoveries, $portfolioMain, $portfolioOtros, $portfolioReestructuras, $totalColocacion) {
+            $p  = $placements->get($producto);
+            $r  = $recoveries->get($producto);
+            $pp = match ($tipo) {
+                'otro_cartera' => $portfolioOtros->firstWhere('producto', $producto),
+                'reestructura' => $portfolioReestructuras->firstWhere('producto', $producto),
+                default        => $portfolioMain->get($producto),
+            };
             $col = (float)($p?->colocacion ?? 0);
             return [
                 'producto'     => $producto,
+                'tipo'         => $tipo,
                 'operaciones'  => (int)($p?->operaciones ?? 0),
                 'colocacion'   => $col,
                 'recuperacion' => (float)($r?->recuperacion ?? 0),
@@ -327,7 +357,26 @@ class RadiographySnapshotBuilder
                 'contratos'    => (int)($pp?->contratos ?? 0),
                 'pct'          => round($col / $totalColocacion * 100, 1),
             ];
-        })->sortByDesc('colocacion')->values()->all();
+        };
+
+        $operativos = $allProducts->map(fn (string $p) => $buildRow($p, 'operativo'))
+            ->filter(fn ($p) => $p['operaciones'] > 0 || $p['colocacion'] > 0 || $p['recuperacion'] > 0 || $p['cartera'] > 0 || $p['contratos'] > 0)
+            ->sortByDesc('colocacion')
+            ->values();
+
+        $otrosCartera = $portfolioOtros
+            ->map(fn ($row) => $buildRow($row->producto, 'otro_cartera'))
+            ->filter(fn ($p) => $p['cartera'] > 0 || $p['contratos'] > 0)
+            ->sortByDesc('cartera')
+            ->values();
+
+        $reestructuras = $portfolioReestructuras
+            ->map(fn ($row) => $buildRow($row->producto, 'reestructura'))
+            ->filter(fn ($p) => $p['cartera'] > 0 || $p['contratos'] > 0)
+            ->sortByDesc('cartera')
+            ->values();
+
+        return $operativos->concat($otrosCartera)->concat($reestructuras)->all();
     }
 
     // ── BRANCHES ─────────────────────────────────────────────────────────────
@@ -527,24 +576,258 @@ class RadiographySnapshotBuilder
         return $results;
     }
 
-    // ── EXPENSES DETAIL ──────────────────────────────────────────────────────
+    // ── EXPENSES DETAIL (expanded) ───────────────────────────────────────────
 
     private function buildExpensesDetail(Period $period): array
     {
-        return DB::table('fact_expenses as e')
-            ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
+        // Effective amount: paid_amount when > 0, else amount (handles Lendus PDF vs ERP)
+        $amtExpr = 'COALESCE(NULLIF(e.paid_amount, 0), e.amount)';
+
+        $total = (float) DB::table('fact_expenses as e')
             ->where('e.period_id', $period->id)
-            ->selectRaw('COALESCE(e.category, "Sin categoría") as categoria, COALESCE(b.name, "Sin sucursal") as sucursal, COUNT(*) as cnt, SUM(e.amount) as total')
-            ->groupBy('e.category', 'b.name')
+            ->selectRaw("SUM($amtExpr) as t")
+            ->value('t');
+
+        $byCategory = DB::table('fact_expenses as e')
+            ->where('e.period_id', $period->id)
+            ->selectRaw("COALESCE(e.category,'Sin categoría') as categoria, COUNT(*) as cnt, SUM($amtExpr) as total")
+            ->groupBy('e.category')
+            ->orderByDesc('total')
+            ->get()
+            ->map(fn ($r) => ['categoria' => $r->categoria, 'count' => (int)$r->cnt, 'total' => (float)$r->total])
+            ->values()->all();
+
+        $byConcept = DB::table('fact_expenses as e')
+            ->where('e.period_id', $period->id)
+            ->selectRaw("COALESCE(e.concept, e.category,'Sin concepto') as concepto, COUNT(*) as cnt, SUM($amtExpr) as total")
+            ->groupBy('e.concept', 'e.category')
             ->orderByDesc('total')
             ->limit(50)
             ->get()
-            ->map(fn ($r) => [
-                'categoria' => $r->categoria,
-                'sucursal'  => $r->sucursal,
-                'count'     => (int)$r->cnt,
-                'total'     => (float)$r->total,
-            ])->values()->all();
+            ->map(fn ($r) => ['concepto' => $r->concepto, 'count' => (int)$r->cnt, 'total' => (float)$r->total])
+            ->values()->all();
+
+        $byBranch = DB::table('fact_expenses as e')
+            ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
+            ->where('e.period_id', $period->id)
+            ->selectRaw("COALESCE(b.name,'Sin sucursal') as sucursal, COUNT(*) as cnt, SUM($amtExpr) as total")
+            ->groupBy('e.branch_id', 'b.name')
+            ->orderByDesc('total')
+            ->get()
+            ->map(fn ($r) => ['sucursal' => $r->sucursal, 'count' => (int)$r->cnt, 'total' => (float)$r->total])
+            ->values()->all();
+
+        $byEmployee = DB::table('fact_expenses as e')
+            ->join('employees as emp', 'e.employee_id', '=', 'emp.id')
+            ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
+            ->where('e.period_id', $period->id)
+            ->whereNotNull('e.employee_id')
+            ->selectRaw("emp.full_name as empleado, COALESCE(b.name,'Sin sucursal') as sucursal, SUM($amtExpr) as total")
+            ->groupBy('e.employee_id', 'emp.full_name', 'b.name')
+            ->orderByDesc('total')
+            ->limit(50)
+            ->get()
+            ->map(fn ($r) => ['empleado' => $r->empleado, 'sucursal' => $r->sucursal, 'total' => (float)$r->total])
+            ->values()->all();
+
+        $bySource = DB::table('fact_expenses as e')
+            ->leftJoin('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+            ->leftJoin('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+            ->where('e.period_id', $period->id)
+            ->selectRaw("COALESCE(ds.code,'Desconocida') as fuente, COUNT(*) as cnt, SUM($amtExpr) as total")
+            ->groupBy('e.report_upload_id', 'ds.id', 'ds.code')
+            ->orderByDesc('total')
+            ->get()
+            ->map(fn ($r) => ['fuente' => $r->fuente, 'count' => (int)$r->cnt, 'total' => (float)$r->total])
+            ->values()->all();
+
+        return compact('total', 'byCategory', 'byConcept', 'byBranch', 'byEmployee', 'bySource');
+    }
+
+    // ── EMPLOYEES + GESTORES (merged) ────────────────────────────────────────
+
+    private function buildEmployeesGestores(Period $period): array
+    {
+        // 1. Payroll keyed by normalized employee name
+        $payroll = [];
+        $mesRows = MonthlyEmployeeSummary::query()
+            ->with(['employee:id,full_name,normalized_name', 'branch:id,name'])
+            ->where('period_id', $period->id)
+            ->get();
+
+        if ($mesRows->isNotEmpty()) {
+            foreach ($mesRows as $mes) {
+                $norm = $mes->employee?->normalized_name
+                    ?? $this->normalizeHumanName($mes->employee?->full_name ?? '');
+                if (!$norm) {
+                    continue;
+                }
+                $payroll[$norm] = [
+                    'name'       => $mes->employee?->full_name ?? 'Sin empleado',
+                    'code'       => null,
+                    'branch_src' => $mes->branch?->name ?? null,
+                    'pagos'      => (float)$mes->total_payments,
+                    'bonos'      => (float)$mes->total_bonuses,
+                    'descuentos' => (float)$mes->total_discounts,
+                    'gastos'     => (float)$mes->total_expenses,
+                    'neto'       => (float)$mes->net_amount,
+                ];
+            }
+        } else {
+            $noiRows = DB::table('fact_noi_movements as n')
+                ->join('employees as e', 'n.employee_id', '=', 'e.id')
+                ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period) {
+                    $j->on('eba.employee_id', '=', 'n.employee_id')
+                      ->where('eba.period_id', '=', $period->id);
+                })
+                ->leftJoin('branches as b', 'eba.branch_id', '=', 'b.id')
+                ->where('n.period_id', $period->id)
+                ->whereNotNull('n.employee_id')
+                ->selectRaw("
+                    e.normalized_name as norm_key, e.full_name as name, b.name as branch,
+                    SUM(CASE WHEN LOWER(COALESCE(n.concept_type,''))='percepcion' AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%bono%' THEN n.amount ELSE 0 END) as pagos,
+                    SUM(CASE WHEN LOWER(COALESCE(n.concept_type,''))='percepcion' AND LOWER(COALESCE(n.concept,'')) LIKE '%bono%' THEN n.amount ELSE 0 END) as bonos,
+                    SUM(CASE WHEN LOWER(COALESCE(n.concept_type,'')) IN ('deduccion','descuento') THEN n.amount ELSE 0 END) as descuentos
+                ")
+                ->groupBy('e.normalized_name', 'e.full_name', 'b.name')
+                ->get();
+
+            foreach ($noiRows as $row) {
+                $norm = $row->norm_key ?? $this->normalizeHumanName($row->name ?? '');
+                if (!$norm) {
+                    continue;
+                }
+                $neto = (float)$row->pagos + (float)$row->bonos - (float)$row->descuentos;
+                $payroll[$norm] = [
+                    'name'       => $row->name,
+                    'code'       => null,
+                    'branch_src' => $row->branch ?? null,
+                    'pagos'      => (float)$row->pagos,
+                    'bonos'      => (float)$row->bonos,
+                    'descuentos' => (float)$row->descuentos,
+                    'gastos'     => 0.0,
+                    'neto'       => $neto,
+                ];
+            }
+        }
+
+        // 2. Placement/colocacion keyed by normalized_promoter_name
+        $gestorPlacements = DB::table('fact_placements as p')
+            ->leftJoin('branches as b', 'p.branch_id', '=', 'b.id')
+            ->where('p.period_id', $period->id)
+            ->where(fn ($q) => $q->whereNotNull('p.promoter_name')->orWhereNotNull('p.promoter_code'))
+            ->selectRaw("
+                p.normalized_promoter_name as norm_key,
+                COALESCE(p.promoter_name, p.promoter_code,'Sin nombre') as gestor,
+                COALESCE(p.promoter_code,'') as codigo,
+                b.name as sucursal,
+                COUNT(*) as operaciones,
+                SUM(p.amount) as colocacion
+            ")
+            ->groupBy('p.normalized_promoter_name', 'p.promoter_name', 'p.promoter_code', 'b.name')
+            ->get()
+            ->keyBy('norm_key');
+
+        // 3. Portfolio data (cartera/vencida) keyed by normalized promoter name
+        $portfolioByNorm = [];
+        $poRows = DB::table('fact_portfolios as po')
+            ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
+            ->where('po.period_id', $period->id)
+            ->where(fn ($q) => $q->whereNotNull('po.promoter_name')->orWhereNotNull('po.promoter_code'))
+            ->selectRaw("
+                COALESCE(po.promoter_name, po.promoter_code) as raw_name,
+                b.name as sucursal, po.route_name as ruta,
+                SUM(po.balance) as cartera,
+                SUM(CASE WHEN po.days_past_due>0 THEN COALESCE(po.capital_due,po.past_due_balance,po.balance) ELSE 0 END) as vencida
+            ")
+            ->groupBy('po.promoter_name', 'po.promoter_code', 'b.name', 'po.route_name')
+            ->get();
+
+        foreach ($poRows as $po) {
+            $norm = $this->normalizeHumanName($po->raw_name ?? '');
+            if (!$norm) {
+                continue;
+            }
+            if (!isset($portfolioByNorm[$norm])) {
+                $portfolioByNorm[$norm] = ['cartera' => 0.0, 'vencida' => 0.0, 'sucursal' => null, 'ruta' => null];
+            }
+            $portfolioByNorm[$norm]['cartera'] += (float)$po->cartera;
+            $portfolioByNorm[$norm]['vencida'] += (float)$po->vencida;
+            $portfolioByNorm[$norm]['sucursal'] ??= $po->sucursal;
+            $portfolioByNorm[$norm]['ruta']     ??= $po->ruta;
+        }
+
+        // 4. Recovery per promoter (normalized)
+        $recoveryByNorm = [];
+        DB::table('fact_recoveries')
+            ->where('period_id', $period->id)
+            ->whereNotNull('promoter_name')
+            ->selectRaw('promoter_name, SUM(total_amount) as recuperacion')
+            ->groupBy('promoter_name')
+            ->get()
+            ->each(function ($r) use (&$recoveryByNorm) {
+                $norm = $this->normalizeHumanName($r->promoter_name);
+                if ($norm) {
+                    $recoveryByNorm[$norm] = ($recoveryByNorm[$norm] ?? 0.0) + (float)$r->recuperacion;
+                }
+            });
+
+        // 5. Expenses per employee (normalized)
+        $expensesByNorm = [];
+        DB::table('fact_expenses as e')
+            ->join('employees as emp', 'e.employee_id', '=', 'emp.id')
+            ->where('e.period_id', $period->id)
+            ->whereNotNull('e.employee_id')
+            ->selectRaw('emp.normalized_name as norm_key, SUM(COALESCE(NULLIF(e.paid_amount,0),e.amount)) as gastos')
+            ->groupBy('emp.normalized_name')
+            ->get()
+            ->each(function ($ex) use (&$expensesByNorm) {
+                if ($ex->norm_key) {
+                    $expensesByNorm[$ex->norm_key] = (float)$ex->gastos;
+                }
+            });
+
+        // 6. Merge all unique keys
+        $allKeys = collect(array_keys($payroll))
+            ->merge($gestorPlacements->keys())
+            ->merge(array_keys($portfolioByNorm))
+            ->unique()
+            ->filter(fn ($k) => $k !== '')
+            ->values();
+
+        return $allKeys->map(function (string $key) use ($payroll, $gestorPlacements, $portfolioByNorm, $recoveryByNorm, $expensesByNorm) {
+            $emp = $payroll[$key] ?? null;
+            $ges = $gestorPlacements->get($key);
+            $po  = $portfolioByNorm[$key] ?? null;
+            $rec = $recoveryByNorm[$key] ?? 0.0;
+            $gasEmp = $expensesByNorm[$key] ?? ($emp['gastos'] ?? 0.0);
+
+            $name   = $emp['name'] ?? $ges?->gestor ?? $key;
+            $code   = ($emp['code'] ?? null) ?: ($ges?->codigo ?: null);
+            $branch = ($emp['branch_src'] ?? null) ?? ($ges?->sucursal ?? null) ?? ($po['sucursal'] ?? null);
+            $route  = $po['ruta'] ?? null;
+
+            $cartera = (float)($po['cartera'] ?? 0);
+            $vencida = (float)($po['vencida'] ?? 0);
+
+            return [
+                'name'        => $name,
+                'code'        => $code,
+                'branch'      => $branch ?? 'Sin sucursal',
+                'route'       => $route,
+                'pagos'       => $emp['pagos'] ?? 0.0,
+                'bonos'       => $emp['bonos'] ?? 0.0,
+                'descuentos'  => $emp['descuentos'] ?? 0.0,
+                'neto'        => $emp['neto'] ?? 0.0,
+                'gastos'      => round($gasEmp, 2),
+                'colocacion'  => (float)($ges?->colocacion ?? 0),
+                'operaciones' => (int)($ges?->operaciones ?? 0),
+                'recuperacion'=> round($rec, 2),
+                'cartera'     => $cartera,
+                'vencida'     => $vencida,
+                'mora'        => $cartera > 0 ? round($vencida / $cartera * 100, 2) : 0.0,
+            ];
+        })->sortByDesc(fn ($r) => $r['colocacion'] + $r['pagos'])->values()->all();
     }
 
     // ── INCIDENTS ────────────────────────────────────────────────────────────

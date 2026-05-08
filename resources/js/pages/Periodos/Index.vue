@@ -39,15 +39,28 @@ const props = withDefaults(
             start_date?: string | null
             end_date?: string | null
             is_closed?: boolean
+            is_compound?: boolean
+            can_receive_uploads?: boolean
+            component_labels?: string[]
             uploaded_sources_count?: number
             required_sources_count?: number
             can_close?: boolean
             close_issues_count?: number
             close_issues_preview?: string[]
         }>
+        availableWeeks?: Array<{
+            id: number
+            label: string
+            year: number
+            month: number
+            sequence: number
+            start_date?: string
+            end_date?: string
+        }>
     }>(),
     {
         periods: () => [],
+        availableWeeks: () => [],
     },
 )
 
@@ -70,6 +83,8 @@ defineOptions({
 const {
     filters,
     form,
+    monthlyForm,
+    filteredWeeksForMonth,
     filteredPeriods,
     totalPeriods,
     closedPeriods,
@@ -77,6 +92,7 @@ const {
     blockedPeriods,
     createLabel,
     submitCreate,
+    submitConfigureMonth,
     togglePeriod,
 } = usePeriodosIndex(props)
 
@@ -228,8 +244,12 @@ const weeklyPeriods = computed(() =>
     filteredPeriods.value.filter((period) => period.type === 'weekly'),
 )
 
+const monthlyPeriods = computed(() =>
+    filteredPeriods.value.filter((period) => period.type === 'monthly'),
+)
+
 const nonWeeklyPeriods = computed(() =>
-    filteredPeriods.value.filter((period) => period.type !== 'weekly'),
+    filteredPeriods.value.filter((period) => period.type !== 'weekly' && period.type !== 'monthly'),
 )
 
 const groupedWeeklyPeriods = computed(() => {
@@ -407,7 +427,7 @@ function getStatusClasses(period: {
                         <div class="space-y-2 sm:col-span-2">
                             <label class="text-sm font-semibold">Tipo</label>
                             <select v-model="form.type" class="app-input">
-                                <option value="weekly">Semanal</option>
+                                <option value="weekly">Semanal (base)</option>
                             </select>
                             <InputError :message="form.errors.type" />
                         </div>
@@ -454,7 +474,7 @@ function getStatusClasses(period: {
                             </span>
                         </p>
                         <p class="mt-1 text-xs text-muted-foreground">
-                            También se actualizarán automáticamente los periodos agrupados que ya puedan existir para ese año.
+                            Se crean semanas base para ese mes. Los bimestres/trimestres/etc. se recalculan automáticamente.
                         </p>
                     </div>
 
@@ -462,6 +482,115 @@ function getStatusClasses(period: {
                         <button type="submit" class="app-btn h-11 px-5" :disabled="form.processing">
                             <Plus class="mr-2 size-4" />
                             {{ form.processing ? 'Generando...' : 'Generar semanas y sincronizar' }}
+                        </button>
+                    </div>
+                </form>
+            </section>
+
+            <!-- ── Configurar mes operativo ── -->
+            <section class="app-card overflow-hidden">
+                <div class="border-b px-4 py-4 sm:px-5">
+                    <div class="flex items-start justify-between gap-4">
+                        <div>
+                            <h2 class="text-lg font-bold tracking-tight">Configurar mes operativo</h2>
+                            <p class="mt-2 text-sm text-muted-foreground">
+                                Selecciona el año, mes y las semanas que formarán el periodo mensual operativo.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <form @submit.prevent="submitConfigureMonth" class="space-y-5 p-4 sm:p-5">
+                    <div class="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
+                        <div class="flex items-start gap-3">
+                            <Info class="mt-0.5 size-4 text-emerald-600 dark:text-emerald-400" />
+                            <div class="text-sm text-muted-foreground">
+                                <p class="font-semibold text-foreground">Agrupa semanas en un mes operativo</p>
+                                <p class="mt-1">
+                                    Primero genera las semanas del mes. Luego selecciónalas aquí para
+                                    crear el periodo mensual que permitirá subir archivos y generar reportes mensuales.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid gap-4 sm:grid-cols-2">
+                        <div class="space-y-2">
+                            <label class="text-sm font-semibold">Año</label>
+                            <input
+                                v-model="monthlyForm.year"
+                                type="number"
+                                class="app-input"
+                                min="2020"
+                                max="2100"
+                                placeholder="2026"
+                            />
+                            <InputError :message="monthlyForm.errors.year" />
+                        </div>
+
+                        <div class="space-y-2">
+                            <label class="text-sm font-semibold">Mes</label>
+                            <select v-model="monthlyForm.month" class="app-input">
+                                <option value="">Selecciona un mes</option>
+                                <option value="1">Enero</option>
+                                <option value="2">Febrero</option>
+                                <option value="3">Marzo</option>
+                                <option value="4">Abril</option>
+                                <option value="5">Mayo</option>
+                                <option value="6">Junio</option>
+                                <option value="7">Julio</option>
+                                <option value="8">Agosto</option>
+                                <option value="9">Septiembre</option>
+                                <option value="10">Octubre</option>
+                                <option value="11">Noviembre</option>
+                                <option value="12">Diciembre</option>
+                            </select>
+                            <InputError :message="monthlyForm.errors.month" />
+                        </div>
+                    </div>
+
+                    <div v-if="monthlyForm.year && monthlyForm.month" class="space-y-3">
+                        <label class="text-sm font-semibold">Semanas del mes</label>
+
+                        <div v-if="filteredWeeksForMonth.length" class="space-y-2">
+                            <label
+                                v-for="week in filteredWeeksForMonth"
+                                :key="week.id"
+                                class="flex cursor-pointer items-center gap-3 rounded-2xl border border-border/70 bg-muted/20 px-4 py-3 transition hover:border-primary/25 hover:bg-primary/5"
+                            >
+                                <input
+                                    type="checkbox"
+                                    :value="week.id"
+                                    v-model="monthlyForm.week_ids"
+                                    class="size-4 rounded accent-primary"
+                                />
+                                <div class="min-w-0">
+                                    <p class="text-sm font-semibold">{{ week.label }}</p>
+                                    <p v-if="week.start_date || week.end_date" class="text-xs text-muted-foreground">
+                                        {{ week.start_date ?? '—' }} al {{ week.end_date ?? '—' }}
+                                    </p>
+                                </div>
+                            </label>
+                        </div>
+
+                        <div v-else class="rounded-2xl border border-dashed border-amber-300/60 bg-amber-50/40 px-4 py-4 dark:border-amber-500/20 dark:bg-amber-500/5">
+                            <p class="text-sm text-amber-700 dark:text-amber-300">
+                                No hay semanas disponibles para el año y mes seleccionados.
+                                Genera primero las semanas de ese mes.
+                            </p>
+                        </div>
+
+                        <InputError :message="monthlyForm.errors.week_ids" />
+                    </div>
+
+                    <div>
+                        <button
+                            type="submit"
+                            class="app-btn h-11 px-5"
+                            :disabled="monthlyForm.processing || monthlyForm.week_ids.length === 0"
+                        >
+                            <Plus class="mr-2 size-4" />
+                            {{ monthlyForm.processing ? 'Creando...' : 'Crear mes operativo' }}
                         </button>
                     </div>
                 </form>
@@ -712,6 +841,59 @@ function getStatusClasses(period: {
                         </section>
                     </div>
 
+                    <!-- ── Periodos mensuales operativos ── -->
+                    <div v-if="monthlyPeriods.length" class="space-y-5">
+                        <div class="flex items-center gap-3">
+                            <div class="flex size-11 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
+                                <CalendarDays class="size-5" />
+                            </div>
+                            <div>
+                                <h3 class="text-base font-bold tracking-tight">Periodos mensuales operativos</h3>
+                                <p class="text-sm text-muted-foreground">
+                                    Agrupan semanas base y habilitan reportes mensuales, bimestrales, etc.
+                                </p>
+                            </div>
+                        </div>
+
+                        <div class="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+                            <article
+                                v-for="period in monthlyPeriods"
+                                :key="period.id"
+                                class="group relative overflow-hidden rounded-[26px] border border-border/70 bg-background p-5 shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-emerald-400/40 hover:shadow-xl"
+                            >
+                                <div class="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-emerald-400/80 via-teal-400/80 to-emerald-200/20" />
+
+                                <div class="flex items-start justify-between gap-3">
+                                    <div class="min-w-0">
+                                        <span class="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                                            {{ period.label }}
+                                        </span>
+                                        <p class="mt-3 text-sm font-semibold text-foreground">
+                                            {{ formatRange(period.start_date, period.end_date) }}
+                                        </p>
+                                        <p v-if="period.component_labels?.length" class="mt-1 text-xs text-muted-foreground">
+                                            Semanas: {{ period.component_labels.join(', ') }}
+                                        </p>
+                                    </div>
+                                    <span class="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold" :class="getStatusClasses(period)">
+                                        {{ getStatusLabel(period) }}
+                                    </span>
+                                </div>
+
+                                <div class="mt-5 flex items-center justify-end border-t border-border/60 pt-4">
+                                    <button
+                                        type="button"
+                                        class="app-btn app-btn-secondary h-11 rounded-full px-5"
+                                        @click="togglePeriod(period)"
+                                    >
+                                        <MoreHorizontal class="mr-2 size-4" />
+                                        {{ period.is_closed ? 'Reabrir' : 'Cambiar estado' }}
+                                    </button>
+                                </div>
+                            </article>
+                        </div>
+                    </div>
+
                     <div v-if="groupedOtherPeriods.length" class="space-y-5">
                         <div class="flex items-center gap-3">
                             <div class="flex size-11 items-center justify-center rounded-2xl bg-slate-500/10 text-slate-700 dark:text-slate-300">
@@ -760,7 +942,10 @@ function getStatusClasses(period: {
                                                 {{ getPeriodSubtitle(period) }}
                                             </p>
 
-                                            <p class="mt-1 text-xs text-muted-foreground">
+                                            <p v-if="period.component_labels?.length" class="mt-1 text-xs text-muted-foreground">
+                                                Compuesto de: {{ period.component_labels.join(', ') }}
+                                            </p>
+                                            <p v-else class="mt-1 text-xs text-muted-foreground">
                                                 Agrupación automática basada en semanas ya existentes.
                                             </p>
                                         </div>

@@ -5,6 +5,7 @@ use Laravel\Fortify\Features;
 use App\Http\Controllers\PeriodController;
 use App\Http\Controllers\ReportUploadController;
 use App\Http\Controllers\EmployeeBranchAssignmentController;
+use App\Http\Controllers\EmployeeController;
 use App\Http\Controllers\ValidationController;
 use App\Http\Controllers\MonthlyReportController;
 
@@ -45,6 +46,12 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::post('/match-automatico', [EmployeeBranchAssignmentController::class, 'autoMatch'])->name('auto-match');
             Route::post('/{assignment}/match-manual', [EmployeeBranchAssignmentController::class, 'manualMatch'])->name('manual-match');
             Route::put('/{assignment}', [EmployeeBranchAssignmentController::class, 'update'])->name('update');
+        });
+
+    Route::prefix('empleados')
+        ->name('empleados.')
+        ->group(function () {
+            Route::post('/{employee}/asignar-sucursal', [EmployeeController::class, 'assignBranch'])->name('assign-branch');
         });
 
     Route::prefix('validaciones')

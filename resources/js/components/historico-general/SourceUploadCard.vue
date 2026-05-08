@@ -18,7 +18,8 @@ const inputRef = ref<HTMLInputElement | null>(null)
 const isPdf = computed(() => props.source.code === 'gastos_lendus')
 const acceptAttr = computed(() => isPdf.value ? '.pdf' : '.xls,.xlsx,.xlsm')
 const acceptText = computed(() => isPdf.value ? '.pdf' : '.xls, .xlsx, .xlsm')
-const isRequiredForDb = computed(() => ['noi_nomina', 'lendus_ingresos_cobranza'].includes(props.source.code))
+const isRequiredForDb      = computed(() => Boolean(props.source.is_required_for_bd))
+const isRequiredForReport  = computed(() => Boolean(props.source.is_required_for_report))
 const status = computed(() => props.upload?.status ?? 'pending')
 const statusLabel = computed(() => ({ pending: props.upload ? 'Sin procesar' : 'Sin cargar', processing: 'Procesando', processed: 'Procesado', failed: 'Con error' } as Record<string, string>)[status.value] ?? 'Sin cargar')
 
@@ -63,8 +64,9 @@ const doUpload = () => {
                 <div>
                     <div class="flex flex-wrap items-center gap-2">
                         <h3 class="font-black text-slate-950">{{ source.name }}</h3>
-                        <span v-if="isRequiredForDb" class="rounded-full bg-indigo-50 px-2 py-1 text-[11px] font-black text-indigo-700">BD</span>
-                        <span class="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-black text-slate-600">Obligatoria Radiografía</span>
+                        <span v-if="isRequiredForDb" class="rounded-full bg-indigo-50 px-2 py-1 text-[11px] font-black text-indigo-700">Req. BD</span>
+                        <span v-if="isRequiredForReport" class="rounded-full bg-violet-50 px-2 py-1 text-[11px] font-black text-violet-700">Req. Radiografía</span>
+                        <span v-if="!isRequiredForDb && !isRequiredForReport" class="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-black text-slate-500">Opcional</span>
                     </div>
                     <p class="mt-1 text-xs leading-5 text-slate-500">{{ source.description }}</p>
                 </div>

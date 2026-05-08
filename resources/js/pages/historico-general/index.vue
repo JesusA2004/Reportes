@@ -153,11 +153,15 @@ const toastError = (title: string, text: string) =>
 // ── Acciones ──────────────────────────────────────────────────────────
 const uploadFile = async ({ sourceId, file }: { sourceId: number; file: File }) => {
     if (!period.value) return toastError('Selecciona periodo', 'Elige un periodo antes de cargar archivos.')
-    if (period.value.is_derived || !period.value.can_receive_uploads) return toastError('Periodo automático', 'Este periodo es automático y no recibe archivos directos.')
+    if (period.value.type === 'weekly') return toastError('Semana base', 'Los archivos se suben al mes operativo que agrupa esta semana. Selecciona el mes operativo correspondiente.')
+    if (period.value.is_derived) return toastError('Periodo automático', 'Este periodo es automático (bimestral/trimestral/etc.) y no recibe archivos directos.')
+    if (!period.value.can_receive_uploads) return toastError('Mes sin configurar', 'Este mes operativo no tiene semanas asociadas. Ve a Periodos para configurarlo primero.')
     form.period_id         = String(selectedPeriodId.value)
     form.data_source_id    = String(sourceId)
     form.file              = file
-    form.covered_period_ids = [selectedPeriodId.value as number]
+    form.covered_period_ids = period.value?.component_period_ids?.length
+        ? (period.value.component_period_ids as number[])
+        : [selectedPeriodId.value as number]
     Swal.fire({ title: 'Subiendo archivo', text: 'Validando formato y guardando fuente.', allowOutsideClick: false, showConfirmButton: false, didOpen: () => Swal.showLoading() })
     form.post('/historico-general', { forceFormData: true, preserveScroll: true, onSuccess: () => Swal.fire('Archivo subido', 'La fuente quedó registrada para este periodo.', 'success'), onError: () => Swal.fire('Error de carga', 'Revisa formato, periodo y fuente seleccionada.', 'error') })
 }
@@ -270,7 +274,7 @@ const generateReport = () => {
                         </h1>
                     </div>
                     <p class="max-w-sm text-xs leading-5 text-slate-400 sm:text-right">
-                        Selecciona el periodo, carga las 5 fuentes, actualiza la BD,<br class="hidden sm:block" />
+                        Selecciona el periodo, carga las {{ sources.length }} fuentes activas, actualiza la BD,<br class="hidden sm:block" />
                         revisa incidencias y genera reportes Excel y PDF.
                     </p>
                 </div>
@@ -289,7 +293,7 @@ const generateReport = () => {
                 </div>
                 <h2 class="mt-5 text-xl font-black text-slate-800">Selecciona un periodo para iniciar</h2>
                 <p class="mt-2 max-w-sm text-sm leading-6 text-slate-500">
-                    Usa el selector de arriba para elegir una semana base o periodo automático.<br />
+                    Elige un mes operativo para cargar archivos y generar reportes, o un periodo compuesto (bimestre, etc.) para reportes agregados.<br />
                     El flujo guiado se desplegará aquí.
                 </p>
             </div>

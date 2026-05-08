@@ -294,51 +294,74 @@ $fmtn   = fn($v) => number_format((float)$v, 0);
 </table>
 @endif
 
-<!-- ═══ GESTORES (tabla detalle) ════════════════════════════════════ -->
-@if(!empty($snap['sections']['promoters']))
-<div class="section-title">GESTORES / PROMOTORES — COLOCACIÓN</div>
+<!-- ═══ EMPLEADOS / GESTORES (fusionado, top 25) ═════════════════════ -->
+@php $empGest = $snap['sections']['employees_gestores'] ?? []; @endphp
+@if(!empty($empGest))
+<div class="pb"></div>
+<div class="section-title">EMPLEADOS / GESTORES — TOP {{ min(25, count($empGest)) }} POR COLOCACIÓN + NÓMINA</div>
 <table class="data">
     <tr>
-        <th>Gestor</th>
+        <th>Empleado / Gestor</th>
         <th>Sucursal</th>
-        <th class="r">Operaciones</th>
-        <th class="r">Total colocado</th>
+        <th class="r">Pagos</th>
+        <th class="r">Neto nómina</th>
+        <th class="r">Colocación</th>
+        <th class="r">Ops</th>
+        <th class="r">Cartera</th>
+        <th class="r">Mora %</th>
     </tr>
-    @foreach(array_slice($snap['sections']['promoters'], 0, 20) as $p)
+    @foreach(array_slice($empGest, 0, 25) as $e)
     <tr>
-        <td class="b">{{ $p['gestor'] }}</td>
-        <td>{{ $p['sucursal'] }}</td>
-        <td class="r">{{ $fmtn($p['operaciones']) }}</td>
-        <td class="r">{{ $fmt($p['colocacion']) }}</td>
+        <td class="b">{{ $e['name'] }}</td>
+        <td>{{ $e['branch'] !== 'Sin sucursal' ? $e['branch'] : '—' }}</td>
+        <td class="r">{{ $e['pagos'] > 0 ? $fmt($e['pagos']) : '—' }}</td>
+        <td class="r">{{ $e['neto'] > 0 ? $fmt($e['neto']) : '—' }}</td>
+        <td class="r">{{ $e['colocacion'] > 0 ? $fmt($e['colocacion']) : '—' }}</td>
+        <td class="r">{{ $e['operaciones'] > 0 ? $fmtn($e['operaciones']) : '—' }}</td>
+        <td class="r">{{ $e['cartera'] > 0 ? $fmt($e['cartera']) : '—' }}</td>
+        <td class="r @if($e['mora'] > 25) card-red @endif">{{ $e['cartera'] > 0 ? $fmtp($e['mora']) : '—' }}</td>
     </tr>
     @endforeach
-    @if(count($snap['sections']['promoters']) > 20)
-    <tr><td colspan="4" style="text-align:center;color:#64748b;font-style:italic;font-size:8pt;">... y {{ count($snap['sections']['promoters']) - 20 }} gestores más. Ver Excel para detalle completo.</td></tr>
+    @if(count($empGest) > 25)
+    <tr><td colspan="8" style="text-align:center;color:#64748b;font-style:italic;font-size:8pt;">... y {{ count($empGest) - 25 }} más. Ver Excel para detalle completo.</td></tr>
     @endif
 </table>
 @endif
 
-<!-- ═══ EMPLEADOS (nómina top 20) ═══════════════════════════════════ -->
-@if(!empty($snap['sections']['employees']))
-<div class="pb"></div>
-<div class="section-title">DETALLE NÓMINA — TOP {{ min(20, count($snap['sections']['employees'])) }} EMPLEADOS</div>
+<!-- ═══ GASTOS POR CATEGORÍA ══════════════════════════════════════════ -->
+@php $expDetail = $snap['sections']['expenses_detail'] ?? []; @endphp
+@if(!empty($expDetail['byCategory']))
+<div class="section-title">GASTOS POR CATEGORÍA — Total: {{ $fmt($expDetail['total'] ?? 0) }}</div>
 <table class="data">
     <tr>
-        <th>Empleado</th>
-        <th>Sucursal</th>
-        <th class="r">Pagos</th>
-        <th class="r">Gastos</th>
-        <th class="r">Neto</th>
-        <th class="c">Estado</th>
+        <th>Categoría</th>
+        <th class="r">Registros</th>
+        <th class="r">Total</th>
     </tr>
-    @foreach(array_slice($snap['sections']['employees'], 0, 20) as $e)
+    @foreach($expDetail['byCategory'] as $c)
     <tr>
-        <td class="b">{{ $e['name'] }}</td>
-        <td>{{ $e['branch'] }}</td>
-        <td class="r">{{ $fmt($e['pagos']) }}</td>
-        <td class="r">{{ $fmt($e['gastos']) }}</td>
-        <td class="r b">{{ $fmt($e['neto']) }}</td>
-        <td class="c"><span class="badge {{ $e['included'] ? 'b-info' : 'b-warning' }}">{{ $e['included'] ? 'Incluido' : 'Excluido' }}</span></td>
+        <td class="b">{{ $c['categoria'] }}</td>
+        <td class="r">{{ $fmtn($c['count']) }}</td>
+        <td class="r">{{ $fmt($c['total']) }}</td>
+    </tr>
+    @endforeach
+</table>
+@endif
+
+<!-- ═══ GASTOS POR SUCURSAL ════════════════════════════════════════════ -->
+@if(!empty($expDetail['byBranch']))
+<div class="section-sub">Por sucursal</div>
+<table class="data">
+    <tr>
+        <th>Sucursal</th>
+        <th class="r">Registros</th>
+        <th class="r">Total</th>
+    </tr>
+    @foreach($expDetail['byBranch'] as $b)
+    <tr>
+        <td class="b">{{ $b['sucursal'] }}</td>
+        <td class="r">{{ $fmtn($b['count']) }}</td>
+        <td class="r">{{ $fmt($b['total']) }}</td>
     </tr>
     @endforeach
 </table>

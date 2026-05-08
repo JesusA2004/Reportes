@@ -11,16 +11,18 @@ return new class extends Migration {
             $table->id();
             $table->string('name', 180);
             $table->string('code', 80)->unique();
-            // weekly, bimonthly, quarterly, semiannual, annual
+            // weekly | monthly | bimonthly | quarterly | semiannual | annual
+            // weekly = periodo base, recibe archivos
+            // monthly = periodo operativo, compuesto de semanas elegidas por el usuario
+            // bimonthly/quarterly/semiannual/annual = automáticos, compuestos de meses
             $table->string('type', 30)->index();
             $table->unsignedSmallInteger('year')->index();
-            // Para weekly sirve como "mes contenedor"
-            // Para otros tipos puede ir null
             $table->unsignedTinyInteger('month')->nullable()->index();
-            // Semana 1, Semana 2, Trimestre 1, etc.
             $table->unsignedSmallInteger('sequence')->default(1);
             $table->date('start_date')->index();
             $table->date('end_date')->index();
+            // IDs de periodos que componen este periodo (semanas para mensuales, meses para bimestres/etc.)
+            $table->json('component_period_ids')->nullable();
             $table->boolean('is_closed')->default(false);
             $table->timestamps();
             $table->index(['type', 'year']);

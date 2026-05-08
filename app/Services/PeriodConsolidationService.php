@@ -14,7 +14,14 @@ class PeriodConsolidationService
 {
     public function consolidate(Period $period): array
     {
-        return DB::transaction(function () use ($period) {
+        // For compound periods (monthly, etc.) fact data lives on base weekly period IDs.
+        $allPeriods = Period::all();
+        $dataIds = $period->resolveBaseWeeklyIds($allPeriods);
+        if (empty($dataIds)) {
+            $dataIds = [$period->id];
+        }
+
+        return DB::transaction(function () use ($period, $dataIds) {
             MonthlyEmployeeSummary::query()
                 ->where('period_id', $period->id)
                 ->delete();
@@ -22,13 +29,13 @@ class PeriodConsolidationService
             $employeeIds = collect()
                 ->merge(
                     NoiMovement::query()
-                        ->where('period_id', $period->id)
+                        ->whereIn('period_id', $dataIds)
                         ->whereNotNull('employee_id')
                         ->pluck('employee_id')
                 )
                 ->merge(
                     Expense::query()
-                        ->where('period_id', $period->id)
+                        ->whereIn('period_id', $dataIds)
                         ->whereNotNull('employee_id')
                         ->pluck('employee_id')
                 )
@@ -47,7 +54,7 @@ class PeriodConsolidationService
                     continue;
                 }
 
-                $summary = $this->buildEmployeeSummary($period, $employee);
+                $summary = $this->buildEmployeeSummary($period, $dataIds, $employee);
 
                 MonthlyEmployeeSummary::query()->create($summary);
 
@@ -68,21 +75,24 @@ class PeriodConsolidationService
         });
     }
 
-    private function buildEmployeeSummary(Period $period, Employee $employee): array
+    private function buildEmployeeSummary(Period $period, array $dataIds, Employee $employee): array
     {
         $noiMovements = NoiMovement::query()
-            ->where('period_id', $period->id)
+            ->whereIn('period_id', $dataIds)
             ->where('employee_id', $employee->id)
             ->get();
 
         $expenses = Expense::query()
-            ->where('period_id', $period->id)
+            ->whereIn('period_id', $dataIds)
             ->where('employee_id', $employee->id)
             ->get();
 
+        // Look for assignment on the reporting period first; fall back to any base weekly period
         $assignment = EmployeeBranchAssignment::query()
-            ->where('period_id', $period->id)
             ->where('employee_id', $employee->id)
+            ->whereIn('period_id', array_merge([$period->id], $dataIds))
+            ->whereNotNull('branch_id')
+            ->orderByRaw('CASE WHEN period_id = ? THEN 0 ELSE 1 END', [$period->id])
             ->first();
 
         $totalPayments = (float) $noiMovements

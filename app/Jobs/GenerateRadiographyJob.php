@@ -9,6 +9,7 @@ use App\Models\PeriodRadiographyExport;
 use App\Models\PeriodRadiographyRun;
 use App\Models\PeriodSummary;
 use App\Models\User;
+use App\Services\EmployeeBranchAutoMatchService;
 use App\Services\PeriodConsolidationService;
 use App\Services\PeriodDerivedDataCleaner;
 use App\Services\PeriodRadiographyService;
@@ -45,6 +46,7 @@ class GenerateRadiographyJob implements ShouldQueue
         RadiografiaExportService $exportService,
         PeriodConsolidationService $consolidationService,
         PeriodDerivedDataCleaner $cleaner,
+        EmployeeBranchAutoMatchService $branchAutoMatch,
     ): void {
         @ini_set('memory_limit', '1024M');
         @ini_set('max_execution_time', '1800');
@@ -86,7 +88,11 @@ class GenerateRadiographyJob implements ShouldQueue
                 'log'               => 'Consolidando empleados y nómina.',
             ]);
 
-            // ── 2. Consolidate employee summaries (populates fact_monthly_employee_summary) ──
+            // ── 2a. Auto-assign branches to employees (uses placements, portfolios, cobranza) ──
+            $run->update(['log' => 'Asignando sucursales a empleados.']);
+            $branchAutoMatch->handle($period->id);
+
+            // ── 2b. Consolidate employee summaries (populates fact_period_employee_summary) ──
             $consolidationService->consolidate($period);
 
             $run->update([

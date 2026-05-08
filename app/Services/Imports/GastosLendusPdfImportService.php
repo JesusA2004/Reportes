@@ -12,14 +12,24 @@ use Smalot\PdfParser\Parser;
 
 class GastosLendusPdfImportService
 {
-    // Known branch names as they appear in the PDF section headers
+    /**
+     * Branch names as they appear in the PDF section headers.
+     * Used as direct matches; the regex fallback catches anything else
+     * that is all-uppercase letters/spaces.
+     */
     private const KNOWN_BRANCHES = [
         'ATLIXCO', 'CUERNAVACA', 'CORDOBA', 'HUAMANTLA',
-        'SAN JUAN DEL RIO', 'MIACATLAN', 'CHIHUAHUA', 'DURANGO',
-        'ORIZABA', 'ATLACOMULCO', 'IXTLAHUACA', 'TLAXCALA',
-        'TENANGO', 'TULA', 'SAN LUIS POTOSI', 'YAUTEPEC',
-        'SAN LUIS SUBGERENCIA',
+        'SAN JUAN DEL RIO', 'SAN JUAN DEL RÍO', 'MIACATLAN', 'CHIHUAHUA',
+        'DURANGO', 'ORIZABA', 'ATLACOMULCO', 'IXTLAHUACA', 'TLAXCALA',
+        'TENANGO', 'TENANGO DEL VALLE', 'TULA', 'SAN LUIS POTOSI',
+        'YAUTEPEC', 'SAN LUIS SUBGERENCIA', 'CORPORATIVO',
     ];
+
+    /**
+     * Known expense categories — used as anchors in the row regex.
+     * If the PDF adds new categories they MUST be added here.
+     */
+    private const CATEGORIES_PATTERN = 'PAGOS Y SERVICIOS|PROTOCOLARES|EMERGENTES|DEDUCCIONES';
 
     public function __construct(private readonly BranchResolverService $branchResolver) {}
 
@@ -44,13 +54,13 @@ class GastosLendusPdfImportService
 
         Expense::query()->where('report_upload_id', $upload->id)->delete();
 
-        $currentBranch    = null;
-        $rowsRead         = 0;
-        $rowsInserted     = 0;
-        $rowsSkipped      = 0;
-        $rowsErrors       = 0;
-        $branchCache      = [];
-        $employeeCache    = [];
+        $currentBranch = null;
+        $rowsRead      = 0;
+        $rowsInserted  = 0;
+        $rowsSkipped   = 0;
+        $rowsErrors    = 0;
+        $branchCache   = [];
+        $employeeCache = [];
 
         foreach ($pdf->getPages() as $page) {
             $text  = $page->getText();
@@ -62,23 +72,18 @@ class GastosLendusPdfImportService
                     continue;
                 }
 
-                // Page headers — skip
-                if (
-                    str_starts_with($line, 'PRODUCTOS Y SERVICIOS') ||
-                    str_starts_with($line, 'REPORTE DE GASTOS') ||
-                    str_contains($line, 'Monto Gasto') ||
-                    str_contains($line, 'M pagado empleado')
-                ) {
+                // Skip page/column headers and footer lines
+                if ($this->isSkipLine($line)) {
                     continue;
                 }
 
-                // Total summary rows — skip
+                // TOTAL: lines are reference-only — skip
                 if (str_starts_with($line, 'TOTAL:')) {
                     continue;
                 }
 
-                // Branch section header: no $, no tab, all-caps text matching known names
-                if (!str_contains($line, '$') && !str_contains($line, "\t")) {
+                // Lines without $ → look for branch section header
+                if (!str_contains($line, '$')) {
                     $candidate = mb_strtoupper(trim($line));
                     if ($this->isBranchHeader($candidate)) {
                         $currentBranch = $candidate;
@@ -86,11 +91,7 @@ class GastosLendusPdfImportService
                     continue;
                 }
 
-                // Data line: must contain tabs and at least one $ amount
-                if (!str_contains($line, "\t") || !str_contains($line, '$')) {
-                    continue;
-                }
-
+                // Lines with $ → attempt to parse as expense data row
                 $parsed = $this->parseDataLine($line);
                 if (!$parsed) {
                     $rowsSkipped++;
@@ -106,20 +107,22 @@ class GastosLendusPdfImportService
                 }
 
                 // Skip zero-amount rows
-                if ($parsed['amount'] === null || $parsed['amount'] <= 0.0) {
+                if (!$parsed['amount'] || $parsed['amount'] <= 0.0) {
                     $rowsSkipped++;
                     continue;
                 }
 
                 try {
                     $branchName = $currentBranch ?? '';
-                    $branch     = $branchCache[$branchName] ?? ($branchCache[$branchName] = $this->resolveBranch($branchName));
-                    $employee   = $employeeCache[$parsed['employee']] ?? ($employeeCache[$parsed['employee']] = $this->resolveEmployee($parsed['employee']));
+                    $branch     = array_key_exists($branchName, $branchCache)
+                        ? $branchCache[$branchName]
+                        : ($branchCache[$branchName] = $this->resolveBranch($branchName));
 
-                    // FONDEO A → mark as inter-branch loan category
-                    $category = str_starts_with(mb_strtoupper(trim($parsed['concepto'])), 'FONDEO A')
-                        ? 'FONDEO / PRESTAMO INTERSUCURSAL'
-                        : ($parsed['category'] ?: 'GASTOS LENDUS');
+                    $employee = array_key_exists($parsed['employee'], $employeeCache)
+                        ? $employeeCache[$parsed['employee']]
+                        : ($employeeCache[$parsed['employee']] = $this->resolveEmployee($parsed['employee']));
+
+                    $category = $this->resolveCategory($parsed['category'], $parsed['concept']);
 
                     Expense::query()->create([
                         'period_id'        => $upload->period_id,
@@ -127,7 +130,10 @@ class GastosLendusPdfImportService
                         'employee_id'      => $employee?->id,
                         'branch_id'        => $branch?->id,
                         'category'         => $category,
-                        'concept'          => $parsed['concepto'] ?: 'Sin concepto',
+                        'concept'          => $parsed['concept'] ?: 'Sin concepto',
+                        // amount = Monto Gasto (requested)
+                        // paid_amount = M pagado empresa = Monto Gasto for Autorizado rows
+                        // (M pagado empleado is always $0.00 in this PDF)
                         'amount'           => $parsed['amount'],
                         'paid_amount'      => $parsed['amount'],
                         'expense_date'     => $parsed['date'],
@@ -165,70 +171,61 @@ class GastosLendusPdfImportService
     }
 
     /**
-     * Parse a data row from the PDF.
+     * Parse a data row from the PDF text.
      *
-     * PDF tab-separated segment structure:
-     *   [0] {DD/MM/YYYY}{Employee name}
-     *   [1] $ {MontoGasto}{Concepto} {Estatus}
-     *   [2] $ {MPagadoEmpleado}{F.autorización}   (empty for Cancelado)
-     *   [3] $ {MPagadoEmpresa}$ {MPagadoEmpleadoCaja}{Categoría}
+     * smalot/pdfparser extracts each visual table row with TAB separators.
+     * The actual structure is:
      *
-     * Amount[2] (3rd $ overall) = M pagado empresa = the value to use.
+     *   {DD/MM/YYYY}{EMPLOYEE}\t${MONTO_GASTO}{CONCEPT} {STATUS}\t${M_PAG_EMP}{DATETIME}\t${MONTO_CAJA}${M_PAG_EMP2}{CATEGORY}
+     *
+     * Date comes first (no separator from employee name), then TAB.
+     * We use STATUS (Autorizado/Cancelado) and CATEGORY (at end) as anchors.
+     * For Autorizado rows, Monto Gasto = M pagado empresa (company-paid amount).
      */
     private function parseDataLine(string $line): ?array
     {
-        $segments = explode("\t", $line);
-        if (count($segments) < 3) {
+        $cats    = self::CATEGORIES_PATTERN;
+        // {DD/MM/YYYY}{EMPLOYEE}\t${AMOUNT}{CONCEPT} {STATUS}\t...{CATEGORY}
+        $pattern = '/^(\d{2}\/\d{2}\/\d{4})(.+?)\t\$\s*([\d,]+\.?\d*)\s*(.+?)\s+(Autorizado|Cancelado)\t.*?(' . $cats . ')\s*$/u';
+
+        if (!preg_match($pattern, $line, $m)) {
             return null;
         }
 
-        // ── Segment 0: date + employee ────────────────────────────────────
-        $seg0 = trim($segments[0]);
-        if (!preg_match('/^(\d{2}\/\d{2}\/\d{4})(.+)$/s', $seg0, $m0)) {
-            return null;
-        }
-        $rawDate  = $m0[1]; // DD/MM/YYYY
-        $employee = trim($m0[2]);
+        $rawDate  = $m[1];
+        $employee = trim($m[2]);
+        $amount   = $this->toDecimal($m[3]);
+        $concept  = trim($m[4]);
+        $status   = $m[5];
+        $category = trim($m[6]);
 
-        // ── Segment 1: monto_gasto + concepto + estatus ───────────────────
-        $seg1 = trim($segments[1] ?? '');
-        preg_match('/^\$\s*[\d,\.]+(.+)$/', $seg1, $m1);
-        $conceptStatus = trim($m1[1] ?? '');
-
-        // Status is the last word (Autorizado | Cancelado)
-        $status  = '';
-        $concepto = $conceptStatus;
-        if (preg_match('/(Autorizado|Cancelado)\s*$/i', $conceptStatus, $ms)) {
-            $status   = ucfirst(strtolower($ms[1]));
-            $concepto = trim(mb_substr($conceptStatus, 0, mb_strlen($conceptStatus) - mb_strlen($ms[0])));
-        }
-
-        // ── Extract all $ amounts from the whole line ─────────────────────
-        preg_match_all('/\$\s*([\d,]+\.?\d*)/', $line, $amtMatches);
-        $amounts = array_map(fn($v) => $this->toDecimal($v), $amtMatches[1]);
-
-        // amounts[2] = M pagado empresa (the financial column we want)
-        $amount = $amounts[2] ?? null;
-
-        // ── Category from segment 3 (last segment) ────────────────────────
-        $lastSeg  = trim(end($segments));
-        $category = preg_replace('/^\$[\d,\.\s]+\$[\d,\.\s]+/', '', $lastSeg);
-        $category = trim($category);
-
-        // ── Convert date DD/MM/YYYY → Y-m-d ──────────────────────────────
         $date = null;
-        if ($rawDate && preg_match('/^(\d{2})\/(\d{2})\/(\d{4})$/', $rawDate, $dm)) {
+        if (preg_match('/^(\d{2})\/(\d{2})\/(\d{4})$/', $rawDate, $dm)) {
             $date = $dm[3] . '-' . $dm[2] . '-' . $dm[1];
         }
 
-        return [
-            'date'     => $date,
-            'employee' => $employee,
-            'concepto' => $concepto,
-            'status'   => $status,
-            'amount'   => $amount,
-            'category' => $category ?: null,
-        ];
+        return compact('employee', 'category', 'concept', 'status', 'date', 'amount');
+    }
+
+    private function isSkipLine(string $line): bool
+    {
+        if (str_starts_with($line, 'PRODUCTOS Y SERVICIOS')) {
+            return true;
+        }
+        if (str_starts_with($line, 'REPORTE DE GASTOS')) {
+            return true;
+        }
+        if (str_contains($line, 'Monto Gasto') || str_contains($line, 'M pagado')) {
+            return true;
+        }
+        if (str_contains($line, 'Empleado') && str_contains($line, 'Categoría')) {
+            return true;
+        }
+        // Footer: "jueves 07 mayo 2026Lendus 27Pagina 1 de" or "Lendus jueves... Página X de Y"
+        if (str_contains($line, 'Lendus') && (str_contains($line, 'Pagina') || str_contains($line, 'Página'))) {
+            return true;
+        }
+        return false;
     }
 
     private function isBranchHeader(string $line): bool
@@ -237,13 +234,22 @@ class GastosLendusPdfImportService
             return false;
         }
 
-        // Direct match against known branches
         if (in_array($line, self::KNOWN_BRANCHES, true)) {
             return true;
         }
 
-        // Or: all uppercase letters/spaces, no digits, no special chars
+        // All uppercase letters, spaces and accented chars — no digits, no punctuation
         return (bool) preg_match('/^[A-ZÁÉÍÓÚÜÑ\s]+$/u', $line);
+    }
+
+    private function resolveCategory(string $category, string $concept): string
+    {
+        $cu = mb_strtoupper(trim($concept));
+        if (str_starts_with($cu, 'FONDEO A') || str_contains($cu, 'FONDEO') || str_contains($cu, 'PRESTAMO INTERSUCURSAL')) {
+            return 'FONDEO / PRESTAMO INTERSUCURSAL';
+        }
+
+        return $category ?: 'Sin categoría';
     }
 
     private function resolveBranch(string $name): ?Branch
@@ -252,13 +258,19 @@ class GastosLendusPdfImportService
             return null;
         }
 
-        $norm = mb_strtolower($name);
+        // Normalize accent variants: "SAN JUAN DEL RÍO" → "SAN JUAN DEL RIO"
+        $nameNorm = $this->normalize($name);
+
         $branch = Branch::query()
-            ->whereRaw('LOWER(name) = ?', [$norm])
-            ->orWhereRaw('LOWER(normalized_name) = ?', [$this->normalize($name)])
+            ->whereRaw('LOWER(normalized_name) = ?', [$nameNorm])
             ->first();
 
-        return $branch ?? $this->branchResolver->findOrCreateBranchByCode($name);
+        if ($branch) {
+            return $branch;
+        }
+
+        // Create branch by exact display name (handles CORPORATIVO and all others)
+        return $this->branchResolver->findOrCreateBranchByName($name);
     }
 
     private function resolveEmployee(string $name): ?Employee
@@ -275,7 +287,7 @@ class GastosLendusPdfImportService
     private function normalize(string $value): string
     {
         $value = mb_strtolower(trim($value));
-        $value = strtr($value, ['á'=>'a','é'=>'e','í'=>'i','ó'=>'o','ú'=>'u','ü'=>'u','ñ'=>'n']);
+        $value = strtr($value, ['á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ú' => 'u', 'ü' => 'u', 'ñ' => 'n']);
         return preg_replace('/\s+/', ' ', $value) ?? $value;
     }
 

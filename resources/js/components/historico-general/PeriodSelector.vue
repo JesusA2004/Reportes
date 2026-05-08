@@ -8,13 +8,15 @@ const emit = defineEmits<{ (event: 'update:modelValue', value: number): void }>(
 const query = ref('')
 
 const selected = computed(() => props.periods.find((period) => period.id === props.modelValue) ?? null)
+const nonWeeklyPeriods = computed(() => props.periods.filter((p) => p.type !== 'weekly'))
+
 const filteredPeriods = computed(() => {
     const term = query.value.trim().toLowerCase()
-    if (!term) return props.periods.slice(0, 18)
-    return props.periods.filter((period) => [period.label, period.code, period.type].join(' ').toLowerCase().includes(term)).slice(0, 24)
+    if (!term) return nonWeeklyPeriods.value.slice(0, 18)
+    return nonWeeklyPeriods.value.filter((period) => [period.label, period.code, period.type].join(' ').toLowerCase().includes(term)).slice(0, 24)
 })
 
-const typeLabel = (type?: string) => ({ weekly: 'Semana base', monthly: 'Mes automático', bimonthly: 'Bimestre automático', quarterly: 'Trimestre automático', annual: 'Anual automático' } as Record<string, string>)[type ?? ''] ?? 'Periodo'
+const typeLabel = (type?: string) => ({ weekly: 'Semana base', monthly: 'Mes operativo', bimonthly: 'Bimestre automático', quarterly: 'Trimestre automático', annual: 'Anual automático' } as Record<string, string>)[type ?? ''] ?? 'Periodo'
 const status = (period: any) => period.is_derived ? 'automatic' : period.failed_count > 0 ? 'error' : period.missing_sources_count > 0 ? 'blocked' : 'completed'
 const statusLabel = (period: any) => period.is_derived ? 'Automático' : period.failed_count > 0 ? 'Con error' : period.missing_sources_count > 0 ? 'Incompleto' : 'Completo'
 </script>
@@ -33,7 +35,7 @@ const statusLabel = (period: any) => period.is_derived ? 'Automático' : period.
                     </div>
                 </div>
                 <p class="mt-4 text-sm leading-6 text-slate-600">
-                    Busca semanas base para carga directa o periodos automáticos para generar reportes integrados desde sus fuentes reales.
+                    Selecciona un <strong>mes operativo</strong> para cargar archivos y generar reportes. Los periodos automáticos (bimestre, trimestre, etc.) solo permiten generar reportes.
                 </p>
                 <div v-if="selected" class="mt-5 rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4">
                     <div class="flex items-start justify-between gap-4">

@@ -12,7 +12,7 @@ const emit = defineEmits(['upload', 'delete', 'reprocess'])
         <SectionHeader
             eyebrow="Etapa 1"
             title="Periodo y archivos fuente"
-            description="Carga únicamente sobre periodos base reales. NOI Nómina y Lendus Ingresos Cobranza habilitan la actualización de BD; todas las fuentes activas habilitan la Radiografía final."
+            description="Carga los archivos sobre el mes operativo seleccionado. Las fuentes se muestran dinámicamente según la configuración de data_sources. Las marcadas &quot;Req. BD&quot; habilitan la actualización de BD; las marcadas &quot;Req. Radiografía&quot; son necesarias para generar el reporte final."
         />
         <AutomaticPeriodInfo v-if="period?.is_derived" :period="period" />
         <div v-else class="grid gap-5 md:grid-cols-2 xl:grid-cols-3">

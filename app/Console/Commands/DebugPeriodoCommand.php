@@ -56,7 +56,7 @@ class DebugPeriodoCommand extends Command
                 ['fact_portfolios con producto',         Portfolio::query()->where('period_id', $id)->whereNotNull('product_name')->count()],
                 ['fact_portfolios con promotor',         Portfolio::query()->where('period_id', $id)->whereNotNull('promoter_name')->count()],
                 ['fact_portfolios con ruta',             Portfolio::query()->where('period_id', $id)->whereNotNull('route_name')->count()],
-                ['fact_monthly_employee_summary',        MonthlyEmployeeSummary::query()->where('period_id', $id)->count()],
+                ['fact_period_employee_summary',        MonthlyEmployeeSummary::query()->where('period_id', $id)->count()],
                 ['branches activas (total)',             Branch::query()->where('is_active', true)->count()],
             ]
         );

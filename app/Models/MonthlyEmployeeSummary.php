@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class MonthlyEmployeeSummary extends Model {
 
-    protected $table = 'fact_monthly_employee_summary';
+    protected $table = 'fact_period_employee_summary';
 
     protected $fillable = [
         'period_id',
@@ -24,13 +24,13 @@ class MonthlyEmployeeSummary extends Model {
     ];
 
     protected $casts = [
-        'total_payments' => 'decimal:2',
-        'total_bonuses' => 'decimal:2',
+        'total_payments'  => 'decimal:2',
+        'total_bonuses'   => 'decimal:2',
         'total_discounts' => 'decimal:2',
-        'total_expenses' => 'decimal:2',
-        'net_amount' => 'decimal:2',
+        'total_expenses'  => 'decimal:2',
+        'net_amount'      => 'decimal:2',
         'has_useful_movement' => 'boolean',
-        'included_in_report' => 'boolean',
+        'included_in_report'  => 'boolean',
     ];
 
     public function period(): BelongsTo {

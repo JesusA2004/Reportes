@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\Schema;
 return new class extends Migration {
 
     public function up(): void {
-        Schema::create('fact_monthly_employee_summary', function (Blueprint $table) {
+        Schema::create('fact_period_employee_summary', function (Blueprint $table) {
             $table->id();
             $table->foreignId('period_id')
                 ->constrained('periods')
@@ -32,12 +32,12 @@ return new class extends Migration {
             $table->boolean('included_in_report')->default(false);
             $table->string('exclusion_reason', 180)->nullable();
             $table->timestamps();
-            $table->unique(['period_id', 'employee_id'], 'fmes_period_employee_unique');
+            $table->unique(['period_id', 'employee_id'], 'fpes_period_employee_unique');
         });
     }
 
     public function down(): void {
-        Schema::dropIfExists('fact_monthly_employee_summary');
+        Schema::dropIfExists('fact_period_employee_summary');
     }
 
 };

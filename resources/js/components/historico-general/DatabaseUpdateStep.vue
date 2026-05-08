@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch, onUnmounted } from 'vue'
 import { AlertTriangle, Ban, CheckCircle, Clock, DatabaseZap, LoaderCircle, RefreshCw, ShieldCheck, TriangleAlert, XCircle } from 'lucide-vue-next'
 import SectionHeader from './SectionHeader.vue'
 import StatusBadge from './StatusBadge.vue'
@@ -16,8 +16,38 @@ const dbRunLog      = computed(() => props.period?.database_update_run_log ?? nu
 const dbRunError    = computed(() => props.period?.database_update_run_error ?? null)
 const dbRunStarted  = computed(() => props.period?.database_update_run_started_at ?? null)
 const dbRunFinished = computed(() => props.period?.database_update_run_finished_at ?? null)
-const dbElapsed     = computed(() => props.period?.database_update_elapsed_minutes ?? null)
 const stuckWarning  = computed(() => !!props.period?.database_update_stuck_warning)
+
+// Live elapsed counter
+const liveSeconds = ref<number | null>(null)
+let ticker: ReturnType<typeof setInterval> | null = null
+
+const clearTicker = () => { if (ticker) { clearInterval(ticker); ticker = null } }
+
+watch(
+    () => [props.period?.database_update_elapsed_seconds, props.period?.database_update_run_status] as const,
+    ([secs, status]) => {
+        clearTicker()
+        liveSeconds.value = typeof secs === 'number' ? secs : null
+        if (status === 'queued' || status === 'running') {
+            ticker = setInterval(() => {
+                if (liveSeconds.value !== null) liveSeconds.value++
+            }, 1000)
+        }
+    },
+    { immediate: true }
+)
+
+onUnmounted(clearTicker)
+
+const elapsedFormatted = computed(() => {
+    if (liveSeconds.value === null) return null
+    const s = liveSeconds.value
+    const mins = Math.floor(s / 60)
+    const secs = s % 60
+    if (mins === 0) return `${secs} seg`
+    return `${mins} min ${String(secs).padStart(2, '0')} seg`
+})
 const isQueued      = computed(() => dbRunStatus.value === 'queued')
 const isRunning     = computed(() => ['queued', 'running'].includes(dbRunStatus.value))
 const isFailed      = computed(() => dbRunStatus.value === 'failed')
@@ -116,11 +146,11 @@ const statusConfig = computed(() => {
                         </div>
                     </div>
 
-                    <div v-if="dbRunStarted || dbRunFinished || (isRunning && dbElapsed !== null)" class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                    <div v-if="dbRunStarted || dbRunFinished || elapsedFormatted" class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
                         <span v-if="dbRunStarted">Inicio: <strong>{{ dbRunStarted }}</strong></span>
                         <span v-if="dbRunFinished">Fin: <strong>{{ dbRunFinished }}</strong></span>
-                        <span v-if="isRunning && dbElapsed !== null" class="flex items-center gap-1">
-                            <Clock class="size-3 shrink-0" />Transcurrido: <strong>{{ dbElapsed }} min</strong>
+                        <span v-if="elapsedFormatted" class="flex items-center gap-1">
+                            <Clock class="size-3 shrink-0" />Transcurrido: <strong>{{ elapsedFormatted }}</strong>
                         </span>
                     </div>
                     <div v-if="isFailed && dbRunError" class="mt-3 break-all rounded-xl bg-rose-100 p-3 font-mono text-xs leading-5 text-rose-800">{{ dbRunError }}</div>
