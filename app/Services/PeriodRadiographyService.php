@@ -46,6 +46,8 @@ class PeriodRadiographyService
         if (empty($dataIds)) {
             $dataIds = [$period->id];
         }
+        // Include the period itself so uploads stored directly on monthly periods are found
+        $dataIds = array_values(array_unique(array_merge($dataIds, [$period->id])));
 
         $uploads = $this->importSourcesForFinalRadiography($period, $dataIds, $allPeriods);
 

@@ -213,9 +213,6 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                     <td class="py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
                                 </tr>
                             </table>
-                            <p v-if="pay.source === 'noi_direct'" class="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700">
-                                Nómina calculada directo de movimientos NOI. Verifica el campo "concept_type".
-                            </p>
                         </div>
                     </div>
 

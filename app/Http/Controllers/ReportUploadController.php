@@ -203,7 +203,7 @@ class ReportUploadController extends Controller {
                 'branch_name' => $e->employeeBranchAssignments->first()?->branch?->name,
             ]);
 
-        return Inertia::render('Historico-General/index', [
+        return Inertia::render('historico-general/index', [
             'periods'         => $periods,
             'sources'         => $sources,
             'groupedUploads'  => $groupedUploads,
@@ -600,8 +600,46 @@ class ReportUploadController extends Controller {
 
         $previewSummary = null;
         if ($radiographyReady && $summary) {
+            $gm = $summary->global_metrics ?? [];
+
+            // If stored global_metrics are all zero, recompute inline from fact tables
+            // This happens when the radiography was generated before the period-ID merge fix
+            if (($gm['colocacion_total'] ?? 0) == 0 && ($gm['valor_cartera_total'] ?? 0) == 0) {
+                $period = \App\Models\Period::find($summary->period_id);
+                if ($period) {
+                    $allPeriodsLocal = \App\Models\Period::all();
+                    $weeklyIdsLocal  = $period->resolveBaseWeeklyIds($allPeriodsLocal);
+                    if (empty($weeklyIdsLocal)) {
+                        $weeklyIdsLocal = [$period->id];
+                    }
+                    $dataIdsLocal = array_values(array_unique(array_merge($weeklyIdsLocal, [$period->id])));
+
+                    $ct = (float) \Illuminate\Support\Facades\DB::table('fact_portfolios')->whereIn('period_id', $dataIdsLocal)->sum('balance');
+                    $cv = (float) \Illuminate\Support\Facades\DB::table('fact_portfolios')->whereIn('period_id', $dataIdsLocal)->where('days_past_due', '>', 0)->sum('balance');
+                    $gm['valor_cartera_total']   = $ct;
+                    $gm['cartera_vencida_total'] = $cv;
+                    $gm['mora_porcentaje']       = $ct > 0 ? round($cv / $ct * 100, 2) : 0;
+                    $gm['colocacion_total']      = (float) \Illuminate\Support\Facades\DB::table('fact_placements')->whereIn('period_id', $dataIdsLocal)->sum('amount');
+                    $gm['recuperacion_total']    = (float) \Illuminate\Support\Facades\DB::table('fact_recoveries')->whereIn('period_id', $dataIdsLocal)->sum('total_amount');
+                    $gm['gasto_total']           = (float) \Illuminate\Support\Facades\DB::table('fact_expenses')->whereIn('period_id', $dataIdsLocal)->sum('amount');
+                    // Payroll from consolidated table (uses period->id directly)
+                    $mes = \Illuminate\Support\Facades\DB::table('fact_period_employee_summary')
+                        ->where('period_id', $period->id)
+                        ->selectRaw('COUNT(*) as cnt, SUM(total_payments) as pagos, SUM(net_amount) as neto')
+                        ->first();
+                    if ((int)($mes?->cnt ?? 0) > 0) {
+                        $gm['total_empleados'] = (int)$mes->cnt;
+                        $gm['pagos_total']     = (float)$mes->pagos;
+                        $gm['neto_total']      = (float)$mes->neto;
+                    } else {
+                        $gm['total_empleados'] = (int) \Illuminate\Support\Facades\DB::table('fact_noi_movements')
+                            ->whereIn('period_id', $dataIdsLocal)->whereNotNull('employee_id')->distinct('employee_id')->count('employee_id');
+                    }
+                }
+            }
+
             $previewSummary = [
-                'global_metrics' => $summary->global_metrics ?? [],
+                'global_metrics' => $gm,
                 'generated_at'   => optional($summary->generated_at)->format('d/m/Y H:i'),
                 'version'        => $summary->version,
             ];

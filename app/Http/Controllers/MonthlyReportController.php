@@ -180,14 +180,19 @@ class MonthlyReportController extends Controller {
         if (!$summary || $summary->status !== 'generated' || $summary->invalidated_at) {
             return back()->with('error', 'No existe un consolidado vigente para exportar la radiografía.');
         }
-        $sources = $this->sourceStatus($period);
-        if (!empty($sources['missing']) || !empty($sources['errors'])) {
-            return back()->with('error', 'No se puede exportar. Faltan fuentes procesadas: ' . implode(', ', array_merge($sources['missing'], $sources['errors'])) . '.');
-        }
+
+        // Check for existing export BEFORE source validation — if the file is already built, download it immediately
         $existingExport = PeriodRadiographyExport::query()->where('period_summary_id', $summary->id)->where('file_type', 'excel')->latest('id')->first();
         if ($existingExport && is_string($existingExport->export_path) && File::exists($existingExport->export_path)) {
             return response()->download($existingExport->export_path, basename($existingExport->export_path));
         }
+
+        // Only validate sources when we need to generate the export on-demand
+        $sources = $this->sourceStatus($period);
+        if (!empty($sources['missing']) || !empty($sources['errors'])) {
+            return back()->with('error', 'No se puede exportar. Faltan fuentes procesadas: ' . implode(', ', array_merge($sources['missing'], $sources['errors'])) . '.');
+        }
+
         $path = $service->export($period);
         PeriodRadiographyExport::query()->create([
             'period_summary_id' => $summary->id,
