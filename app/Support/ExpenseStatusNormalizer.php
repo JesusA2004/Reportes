@@ -9,6 +9,7 @@ class ExpenseStatusNormalizer
         'POR COMPROBAR',
         'POR_COMPROBAR',
         'COMPROBADA',
+        'COMPROBACION ACEPTADA',
     ];
 
     public static function normalize(string $value): string

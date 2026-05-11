@@ -14,6 +14,7 @@ use App\Models\Placement;
 use App\Models\Portfolio;
 use App\Models\Recovery;
 use App\Services\BranchResolverService;
+use App\Services\EmployeeNameCanonicalizer;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -24,6 +25,8 @@ class RadiographySnapshotBuilder
 {
     private array $branchCache = [];
     private array $dataIds     = [];
+
+    public function __construct(private readonly EmployeeNameCanonicalizer $canonicalizer) {}
 
     public function build(Period $period, PeriodSummary $summary): array
     {
@@ -67,8 +70,10 @@ class RadiographySnapshotBuilder
             $gm['gasto_total'] = (float) DB::table('fact_expenses')->whereIn('period_id', $this->dataIds)->sum('amount');
         }
 
-        $payroll         = $this->buildPayroll($period);
-        $empGestores     = $this->buildEmployeesGestores($period);
+        $payroll           = $this->buildPayroll($period);
+        $empGestoresResult = $this->buildEmployeesGestores($period);
+        $empGestores       = $empGestoresResult['rows'];
+        $mergedIncidents   = $empGestoresResult['merged_incidents'];
 
         // Reconcile payroll total: if buildPayroll returned 0 but employees_gestores has pagos, derive from it
         if (($payroll['pagos'] + $payroll['bonos']) == 0.0) {
@@ -107,15 +112,23 @@ class RadiographySnapshotBuilder
                 'net_payroll'           => $payroll['neto'],
             ],
             'sections' => [
-                'payroll'            => $payroll,
-                'products'           => $this->buildProducts($period),
-                'branches'           => $this->buildBranches($period, $summary),
-                'employees'          => $this->buildEmployees($period),
-                'promoters'          => $this->buildPromoters($period),
-                'employees_gestores' => $empGestores,
-                'portfolio_buckets'  => $this->buildPortfolioBuckets($period),
-                'expenses_detail'    => $this->buildExpensesDetail($period),
-                'incidents'          => $this->buildIncidents($summary, $period),
+                'payroll'                    => $payroll,
+                'products'                   => $this->buildProducts($period),
+                'branches'                   => $this->buildBranches($period, $summary),
+                'employees'                  => $this->buildEmployees($period),
+                'promoters'                  => $this->buildPromoters($period),
+                'employees_gestores'         => $empGestores,
+                'portfolio_buckets'          => $this->buildPortfolioBuckets($period),
+                'expenses_detail'            => $this->buildExpensesDetail($period),
+                'incidents'                  => $this->buildIncidents($summary, $period, $mergedIncidents),
+                'payroll_by_branch_concept'  => $this->buildPayrollByBranchConcept($period),
+                'expenses_matrix'            => $this->buildExpensesMatrix($period),
+                'interbranch_loans'          => $this->buildInterbranchLoans($period),
+                'recovery_detail'            => $this->buildRecoveryDetail($period),
+                'portfolio_by_branch_product' => $this->buildPortfolioByBranchProduct($period),
+                'mora_by_branch'             => $this->buildMoraByBranch($period),
+                'corporate_funding'          => $this->buildCorporateFunding($period),
+                'placement_by_branch_product'=> $this->buildPlacementByBranchProduct($period),
             ],
             'charts' => [
                 'recovery_by_branch'      => $this->chartByBranch($period, 'recuperacion'),
@@ -289,7 +302,7 @@ class RadiographySnapshotBuilder
                 ->whereNotNull('r.promoter_name')
                 ->distinct()
                 ->get()
-                ->groupBy(fn ($r) => $this->normalizeHumanName($r->promoter_name))
+                ->groupBy(fn ($r) => $this->canonicalizer->normalize($r->promoter_name))
                 ->map(fn ($g) => $g->first()->branch);
 
             $activityBranches = array_merge($placements->all(), $recoveries->all());
@@ -700,21 +713,22 @@ class RadiographySnapshotBuilder
 
     private function buildEmployeesGestores(Period $period): array
     {
+        $rawNameByNorm = []; // UPPERCASE display name per normalized lowercase key
+
         $payroll = [];
         $mesRows = MonthlyEmployeeSummary::query()
             ->with(['employee:id,full_name,normalized_name', 'branch:id,name'])
             ->where('period_id', $period->id)
             ->get();
 
-        // Use MES data only when it actually has payroll amounts; otherwise fall to NOI direct.
         $mesHasPayments = $mesRows->isNotEmpty()
             && ($mesRows->sum('total_payments') + $mesRows->sum('total_bonuses')) > 0;
 
         if ($mesHasPayments) {
             foreach ($mesRows as $mes) {
-                $norm = $mes->employee?->normalized_name
-                    ?? $this->normalizeHumanName($mes->employee?->full_name ?? '');
+                $norm = $this->canonicalizer->normalize($mes->employee?->full_name ?? '');
                 if (!$norm) continue;
+                $rawNameByNorm[$norm] = $mes->employee?->full_name ?? '';
                 $payroll[$norm] = [
                     'name'       => $mes->employee?->full_name ?? 'Sin empleado',
                     'code'       => null,
@@ -727,7 +741,6 @@ class RadiographySnapshotBuilder
                 ];
             }
         } else {
-            // Fallback: compute per-employee NOI aggregates directly (SQL comparison is accent-insensitive)
             $noiRows = DB::table('fact_noi_movements as n')
                 ->join('employees as e', 'n.employee_id', '=', 'e.id')
                 ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period) {
@@ -749,37 +762,62 @@ class RadiographySnapshotBuilder
                 ->get();
 
             foreach ($noiRows as $row) {
-                $norm = $row->norm_key ?? $this->normalizeHumanName($row->name ?? '');
+                $norm = $this->canonicalizer->normalize($row->name ?? '');
                 if (!$norm) continue;
+                $rawNameByNorm[$norm] ??= $row->name ?? '';
                 $neto = (float)$row->pagos + (float)$row->bonos - (float)$row->descuentos;
-                $payroll[$norm] = [
-                    'name'       => $row->name,
-                    'code'       => null,
-                    'branch_src' => $row->branch ?? null,
-                    'pagos'      => (float)$row->pagos,
-                    'bonos'      => (float)$row->bonos,
-                    'descuentos' => (float)$row->descuentos,
-                    'gastos'     => 0.0,
-                    'neto'       => $neto,
-                ];
+                if (isset($payroll[$norm])) {
+                    $payroll[$norm]['pagos']      += (float)$row->pagos;
+                    $payroll[$norm]['bonos']      += (float)$row->bonos;
+                    $payroll[$norm]['descuentos'] += (float)$row->descuentos;
+                    $payroll[$norm]['neto']       += $neto;
+                } else {
+                    $payroll[$norm] = [
+                        'name'       => $row->name,
+                        'code'       => null,
+                        'branch_src' => $row->branch ?? null,
+                        'pagos'      => (float)$row->pagos,
+                        'bonos'      => (float)$row->bonos,
+                        'descuentos' => (float)$row->descuentos,
+                        'gastos'     => 0.0,
+                        'neto'       => $neto,
+                    ];
+                }
             }
         }
 
-        $gestorPlacements = DB::table('fact_placements as p')
+        $gestorPlacements = [];
+        DB::table('fact_placements as p')
             ->leftJoin('branches as b', 'p.branch_id', '=', 'b.id')
             ->whereIn('p.period_id', $this->dataIds)
             ->where(fn ($q) => $q->whereNotNull('p.promoter_name')->orWhereNotNull('p.promoter_code'))
             ->selectRaw("
-                p.normalized_promoter_name as norm_key,
                 COALESCE(p.promoter_name, p.promoter_code,'Sin nombre') as gestor,
                 COALESCE(p.promoter_code,'') as codigo,
                 b.name as sucursal,
                 COUNT(*) as operaciones,
                 SUM(p.amount) as colocacion
             ")
-            ->groupBy('p.normalized_promoter_name', 'p.promoter_name', 'p.promoter_code', 'b.name')
+            ->groupBy('p.promoter_name', 'p.promoter_code', 'b.name')
             ->get()
-            ->keyBy('norm_key');
+            ->each(function ($row) use (&$gestorPlacements, &$rawNameByNorm) {
+                $norm = $this->canonicalizer->normalize($row->gestor ?? '');
+                if (!$norm) return;
+                $rawNameByNorm[$norm] ??= mb_strtoupper(trim($row->gestor ?? ''));
+                if (!isset($gestorPlacements[$norm])) {
+                    $gestorPlacements[$norm] = [
+                        'gestor'      => $row->gestor,
+                        'codigo'      => $row->codigo,
+                        'sucursal'    => $row->sucursal,
+                        'operaciones' => (int)$row->operaciones,
+                        'colocacion'  => (float)$row->colocacion,
+                    ];
+                } else {
+                    $gestorPlacements[$norm]['operaciones'] += (int)$row->operaciones;
+                    $gestorPlacements[$norm]['colocacion']  += (float)$row->colocacion;
+                    $gestorPlacements[$norm]['sucursal'] ??= $row->sucursal;
+                }
+            });
 
         $portfolioByNorm = [];
         $poRows = DB::table('fact_portfolios as po')
@@ -796,8 +834,9 @@ class RadiographySnapshotBuilder
             ->get();
 
         foreach ($poRows as $po) {
-            $norm = $this->normalizeHumanName($po->raw_name ?? '');
+            $norm = $this->canonicalizer->normalize($po->raw_name ?? '');
             if (!$norm) continue;
+            $rawNameByNorm[$norm] ??= mb_strtoupper(trim($po->raw_name ?? ''));
             if (!isset($portfolioByNorm[$norm])) {
                 $portfolioByNorm[$norm] = ['cartera' => 0.0, 'vencida' => 0.0, 'sucursal' => null, 'ruta' => null];
             }
@@ -814,9 +853,10 @@ class RadiographySnapshotBuilder
             ->selectRaw('promoter_name, SUM(total_amount) as recuperacion')
             ->groupBy('promoter_name')
             ->get()
-            ->each(function ($r) use (&$recoveryByNorm) {
-                $norm = $this->normalizeHumanName($r->promoter_name);
+            ->each(function ($r) use (&$recoveryByNorm, &$rawNameByNorm) {
+                $norm = $this->canonicalizer->normalize($r->promoter_name);
                 if ($norm) {
+                    $rawNameByNorm[$norm] ??= mb_strtoupper(trim($r->promoter_name));
                     $recoveryByNorm[$norm] = ($recoveryByNorm[$norm] ?? 0.0) + (float)$r->recuperacion;
                 }
             });
@@ -826,32 +866,96 @@ class RadiographySnapshotBuilder
             ->join('employees as emp', 'e.employee_id', '=', 'emp.id')
             ->whereIn('e.period_id', $this->dataIds)
             ->whereNotNull('e.employee_id')
-            ->selectRaw('emp.normalized_name as norm_key, SUM(COALESCE(NULLIF(e.paid_amount,0),e.amount)) as gastos')
-            ->groupBy('emp.normalized_name')
+            ->selectRaw('emp.full_name as full_name, SUM(COALESCE(NULLIF(e.paid_amount,0),e.amount)) as gastos')
+            ->groupBy('emp.id', 'emp.full_name')
             ->get()
-            ->each(function ($ex) use (&$expensesByNorm) {
-                if ($ex->norm_key) {
-                    $expensesByNorm[$ex->norm_key] = (float)$ex->gastos;
+            ->each(function ($ex) use (&$expensesByNorm, &$rawNameByNorm) {
+                $norm = $this->canonicalizer->normalize($ex->full_name ?? '');
+                if ($norm) {
+                    $rawNameByNorm[$norm] ??= mb_strtoupper(trim($ex->full_name ?? ''));
+                    $expensesByNorm[$norm] = ($expensesByNorm[$norm] ?? 0.0) + (float)$ex->gastos;
                 }
             });
 
+        // ── FUZZY MERGE: unify near-duplicate names across sources ───────────
+        $allUniqueKeys = array_values(array_unique(array_merge(
+            array_keys($payroll),
+            array_keys($gestorPlacements),
+            array_keys($portfolioByNorm),
+            array_keys($recoveryByNorm),
+            array_keys($expensesByNorm),
+        )));
+
+        $mergeMap        = $this->canonicalizer->buildCanonicalMap($allUniqueKeys, array_keys($payroll));
+        $mergedIncidents = [];
+
+        foreach ($mergeMap as $key => $canonical) {
+            if ($key === $canonical) continue;
+
+            $mergedIncidents[] = [
+                'type'     => 'nombre_fusionado',
+                'severity' => 'info',
+                'message'  => 'Colaborador fusionado por variante de escritura: "' . mb_strtoupper($key) . '" → "' . mb_strtoupper($canonical) . '".',
+            ];
+
+            if (isset($payroll[$key]) && !isset($payroll[$canonical])) {
+                $payroll[$canonical] = $payroll[$key];
+            }
+            unset($payroll[$key]);
+
+            if (isset($gestorPlacements[$key])) {
+                if (isset($gestorPlacements[$canonical])) {
+                    $gestorPlacements[$canonical]['operaciones'] += $gestorPlacements[$key]['operaciones'];
+                    $gestorPlacements[$canonical]['colocacion']  += $gestorPlacements[$key]['colocacion'];
+                    $gestorPlacements[$canonical]['sucursal']    ??= $gestorPlacements[$key]['sucursal'];
+                } else {
+                    $gestorPlacements[$canonical] = $gestorPlacements[$key];
+                }
+                unset($gestorPlacements[$key]);
+            }
+
+            if (isset($portfolioByNorm[$key])) {
+                if (isset($portfolioByNorm[$canonical])) {
+                    $portfolioByNorm[$canonical]['cartera'] += $portfolioByNorm[$key]['cartera'];
+                    $portfolioByNorm[$canonical]['vencida']  += $portfolioByNorm[$key]['vencida'];
+                    $portfolioByNorm[$canonical]['sucursal'] ??= $portfolioByNorm[$key]['sucursal'];
+                } else {
+                    $portfolioByNorm[$canonical] = $portfolioByNorm[$key];
+                }
+                unset($portfolioByNorm[$key]);
+            }
+
+            if (isset($recoveryByNorm[$key])) {
+                $recoveryByNorm[$canonical] = ($recoveryByNorm[$canonical] ?? 0.0) + $recoveryByNorm[$key];
+                unset($recoveryByNorm[$key]);
+            }
+
+            if (isset($expensesByNorm[$key])) {
+                $expensesByNorm[$canonical] = ($expensesByNorm[$canonical] ?? 0.0) + $expensesByNorm[$key];
+                unset($expensesByNorm[$key]);
+            }
+
+            $rawNameByNorm[$canonical] ??= $rawNameByNorm[$key] ?? mb_strtoupper($key);
+            unset($rawNameByNorm[$key]);
+        }
+
         $allKeys = collect(array_keys($payroll))
-            ->merge($gestorPlacements->keys())
+            ->merge(array_keys($gestorPlacements))
             ->merge(array_keys($portfolioByNorm))
             ->unique()
             ->filter(fn ($k) => $k !== '')
             ->values();
 
-        return $allKeys->map(function (string $key) use ($payroll, $gestorPlacements, $portfolioByNorm, $recoveryByNorm, $expensesByNorm) {
+        $rows = $allKeys->map(function (string $key) use ($payroll, $gestorPlacements, $portfolioByNorm, $recoveryByNorm, $expensesByNorm, $rawNameByNorm) {
             $emp    = $payroll[$key] ?? null;
-            $ges    = $gestorPlacements->get($key);
+            $ges    = $gestorPlacements[$key] ?? null;
             $po     = $portfolioByNorm[$key] ?? null;
             $rec    = $recoveryByNorm[$key] ?? 0.0;
             $gasEmp = $expensesByNorm[$key] ?? ($emp['gastos'] ?? 0.0);
 
-            $name   = $emp['name'] ?? $ges?->gestor ?? $key;
-            $code   = ($emp['code'] ?? null) ?: ($ges?->codigo ?: null);
-            $branch = ($emp['branch_src'] ?? null) ?? ($ges?->sucursal ?? null) ?? ($po['sucursal'] ?? null);
+            $name   = $emp['name'] ?? $ges['gestor'] ?? $rawNameByNorm[$key] ?? mb_strtoupper($key);
+            $code   = ($emp['code'] ?? null) ?: ($ges['codigo'] ?? null) ?: null;
+            $branch = ($emp['branch_src'] ?? null) ?? ($ges['sucursal'] ?? null) ?? ($po['sucursal'] ?? null);
             $route  = $po['ruta'] ?? null;
 
             $cartera = (float)($po['cartera'] ?? 0);
@@ -867,19 +971,21 @@ class RadiographySnapshotBuilder
                 'descuentos'   => $emp['descuentos'] ?? 0.0,
                 'neto'         => $emp['neto'] ?? 0.0,
                 'gastos'       => round($gasEmp, 2),
-                'colocacion'   => (float)($ges?->colocacion ?? 0),
-                'operaciones'  => (int)($ges?->operaciones ?? 0),
+                'colocacion'   => (float)($ges['colocacion'] ?? 0),
+                'operaciones'  => (int)($ges['operaciones'] ?? 0),
                 'recuperacion' => round($rec, 2),
                 'cartera'      => $cartera,
                 'vencida'      => $vencida,
                 'mora'         => $cartera > 0 ? round($vencida / $cartera * 100, 2) : 0.0,
             ];
         })->sortByDesc(fn ($r) => $r['colocacion'] + $r['pagos'])->values()->all();
+
+        return ['rows' => $rows, 'merged_incidents' => $mergedIncidents];
     }
 
     // ── INCIDENTS ────────────────────────────────────────────────────────────
 
-    private function buildIncidents(PeriodSummary $summary, Period $period): array
+    private function buildIncidents(PeriodSummary $summary, Period $period, array $extraIncidents = []): array
     {
         if (!$summary->relationLoaded('incidents')) {
             $summary->load('incidents');
@@ -893,12 +999,17 @@ class RadiographySnapshotBuilder
 
         $live = $this->detectLiveIncidents($period);
 
-        // Merge: stored incidents first, then live ones not already present
+        // Merge: stored incidents first, then live ones not already present by type
         $storedTypes = array_column($stored, 'type');
         foreach ($live as $inc) {
             if (!in_array($inc['type'], $storedTypes, true)) {
                 $stored[] = $inc;
             }
+        }
+
+        // Append merge-by-similarity incidents (each has unique message)
+        foreach ($extraIncidents as $inc) {
+            $stored[] = $inc;
         }
 
         return $stored;
@@ -988,10 +1099,17 @@ class RadiographySnapshotBuilder
 
     private function chartByBranch(Period $period, string $metric): array
     {
+        // Only show real branches (not routes/offices); CORPORATIVO excluded from cartera/recuperacion
+        $realNames = array_values(array_filter(
+            $this->resolveRealBranchNormalizedNames(),
+            fn ($n) => $n !== 'corporativo'
+        ));
+
         if ($metric === 'recuperacion') {
             $rows = DB::table('fact_recoveries as r')
                 ->join('branches as b', 'r.branch_id', '=', 'b.id')
                 ->whereIn('r.period_id', $this->dataIds)
+                ->when(!empty($realNames), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realNames))
                 ->selectRaw('b.name as label, SUM(r.total_amount) as value')
                 ->groupBy('b.id', 'b.name')
                 ->orderByDesc('value')
@@ -1001,6 +1119,7 @@ class RadiographySnapshotBuilder
             $rows = DB::table('fact_portfolios as p')
                 ->join('branches as b', 'p.branch_id', '=', 'b.id')
                 ->whereIn('p.period_id', $this->dataIds)
+                ->when(!empty($realNames), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realNames))
                 ->selectRaw('b.name as label, SUM(p.balance) as value')
                 ->groupBy('b.id', 'b.name')
                 ->orderByDesc('value')
@@ -1065,6 +1184,414 @@ class RadiographySnapshotBuilder
         ])->values()->all();
     }
 
+    // ── NEW SECTIONS FOR EXCEL TABS ─────────────────────────────────────────
+
+    /**
+     * NOI movements grouped as: branch → concept → total amount.
+     * Used for the NOMINAS Excel tab.
+     */
+    private function buildPayrollByBranchConcept(Period $period): array
+    {
+        $rows = DB::table('fact_noi_movements as n')
+            ->join('employees as e', 'n.employee_id', '=', 'e.id')
+            ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period) {
+                $j->on('eba.employee_id', '=', 'n.employee_id')
+                  ->where('eba.period_id', '=', $period->id);
+            })
+            ->leftJoin('branches as b', 'eba.branch_id', '=', 'b.id')
+            ->whereIn('n.period_id', $this->dataIds)
+            ->whereNotNull('n.employee_id')
+            ->selectRaw("
+                COALESCE(b.name, 'Sin asignar') as branch,
+                COALESCE(n.concept, n.concept_type, 'Sin concepto') as concept,
+                SUM(n.amount) as total
+            ")
+            ->groupBy('b.name', 'n.concept', 'n.concept_type')
+            ->orderBy('b.name')
+            ->orderByDesc('total')
+            ->get();
+
+        $result = [];
+        foreach ($rows as $row) {
+            $result[$row->branch][$row->concept] = (float) $row->total;
+        }
+        ksort($result);
+        return $result;
+    }
+
+    /**
+     * Expense categories × real branches matrix.
+     * Used for the GASTOS Excel tab.
+     */
+    private function buildExpensesMatrix(Period $period): array
+    {
+        $realBranchNames = $this->resolveRealBranchNormalizedNames();
+
+        $rows = DB::table('fact_expenses as e')
+            ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
+            ->whereIn('e.period_id', $this->dataIds)
+            ->selectRaw("
+                COALESCE(e.category, 'Sin categoría') as category,
+                COALESCE(b.name, 'Sin sucursal') as branch,
+                SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total
+            ")
+            ->groupBy('e.category', 'e.branch_id', 'b.name')
+            ->get();
+
+        $categories = [];
+        $branches   = [];
+        $matrix     = [];
+
+        foreach ($rows as $row) {
+            $branch = $row->branch;
+            // Normalize to real branches only; lump unrecognized into 'Otras'
+            $normalizedBranch = $this->normalizeText($branch);
+            if (!empty($realBranchNames) && !in_array($normalizedBranch, $realBranchNames, true)) {
+                $branch = 'Otras';
+            }
+
+            $categories[$row->category] = true;
+            $branches[$branch]          = true;
+            $matrix[$row->category][$branch] = ($matrix[$row->category][$branch] ?? 0.0) + (float) $row->total;
+        }
+
+        $categoryList = array_keys($categories);
+        $branchList   = array_keys($branches);
+        sort($categoryList);
+        sort($branchList);
+
+        $totalsByCategory = [];
+        $totalsByBranch   = [];
+
+        foreach ($categoryList as $cat) {
+            $totalsByCategory[$cat] = 0.0;
+            foreach ($branchList as $br) {
+                $v = $matrix[$cat][$br] ?? 0.0;
+                $totalsByCategory[$cat] += $v;
+                $totalsByBranch[$br]     = ($totalsByBranch[$br] ?? 0.0) + $v;
+            }
+        }
+
+        return [
+            'categories'         => $categoryList,
+            'branches'           => $branchList,
+            'matrix'             => $matrix,
+            'totals_by_category' => $totalsByCategory,
+            'totals_by_branch'   => $totalsByBranch,
+            'grand_total'        => array_sum($totalsByCategory),
+        ];
+    }
+
+    /**
+     * Interbranch loan expenses (FONDEO / PRESTAMO INTERSUCURSAL category).
+     * Used for the P. INTERSUC. Excel tab.
+     */
+    private function buildInterbranchLoans(Period $period): array
+    {
+        $rows = DB::table('fact_expenses as e')
+            ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
+            ->whereIn('e.period_id', $this->dataIds)
+            ->where(function ($q) {
+                $q->whereRaw("UPPER(COALESCE(e.category,'')) LIKE '%FONDEO%'")
+                  ->orWhereRaw("UPPER(COALESCE(e.category,'')) LIKE '%INTERSUCURSAL%'")
+                  ->orWhereRaw("UPPER(COALESCE(e.concept,'')) LIKE '%PRESTAMO INTERSUC%'")
+                  ->orWhereRaw("UPPER(COALESCE(e.concept,'')) LIKE '%FONDEO%'");
+            })
+            ->selectRaw("
+                COALESCE(b.name,'Sin sucursal') as branch,
+                COALESCE(e.concept, e.category, 'Préstamo intersucursal') as concept,
+                e.observations,
+                e.expense_date,
+                SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total,
+                COUNT(*) as cnt
+            ")
+            ->groupBy('e.branch_id', 'b.name', 'e.concept', 'e.category', 'e.observations', 'e.expense_date')
+            ->orderByDesc('total')
+            ->get();
+
+        $total = $rows->sum('total');
+
+        // Build catalog of real branch names to detect receiver branch in text
+        $branchCatalog = [];
+        try {
+            $branchCatalog = array_values(app(BranchResolverService::class)->getCatalog());
+        } catch (\Throwable) {}
+
+        $fondeaMap = [];
+        $recibeMap = [];
+        $detail    = [];
+
+        foreach ($rows as $row) {
+            $fondeaMap[$row->branch] = ($fondeaMap[$row->branch] ?? 0.0) + (float) $row->total;
+
+            // Detect receiver branch from observations/concept text
+            $searchText = strtoupper(($row->observations ?? '') . ' ' . $row->concept);
+            $toBranch   = 'No identificada';
+            foreach ($branchCatalog as $brName) {
+                if (str_contains($searchText, strtoupper($brName))) {
+                    $toBranch = $brName;
+                    break;
+                }
+            }
+
+            $recibeMap[$toBranch] = ($recibeMap[$toBranch] ?? 0.0) + (float) $row->total;
+
+            $detail[] = [
+                'date'        => $row->expense_date
+                    ? \Carbon\Carbon::parse($row->expense_date)->format('d/m/Y') : '—',
+                'from_branch' => $row->branch,
+                'to_branch'   => $toBranch,
+                'amount'      => (float) $row->total,
+                'concept'     => $row->concept,
+                'description' => $row->observations ?? '',
+            ];
+        }
+
+        $fondeaRows = collect($fondeaMap)
+            ->map(fn ($v, $k) => ['branch' => $k, 'total' => $v])
+            ->sortByDesc('total')->values()->all();
+
+        $recibeRows = collect($recibeMap)
+            ->map(fn ($v, $k) => ['branch' => $k, 'total' => $v])
+            ->sortByDesc('total')->values()->all();
+
+        return [
+            'total'     => (float) $total,
+            'fondea'    => $fondeaRows,
+            'recibe'    => $recibeRows,
+            'by_branch' => $fondeaRows,
+            'detail'    => $detail,
+        ];
+    }
+
+    /**
+     * Recovery totals by real branch and by gestor.
+     * Used for the RECUP. Excel tab.
+     */
+    private function buildRecoveryDetail(Period $period): array
+    {
+        $byBranch = DB::table('fact_recoveries as r')
+            ->join('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $this->dataIds)
+            ->selectRaw('
+                b.name as branch,
+                SUM(r.capital) as capital,
+                SUM(r.interest) as interest,
+                SUM(r.tax) as tax,
+                SUM(r.charges) as charges,
+                SUM(r.total_amount) as total,
+                COUNT(*) as operaciones
+            ')
+            ->groupBy('r.branch_id', 'b.name')
+            ->orderByDesc('total')
+            ->get()
+            ->map(fn ($r) => [
+                'branch'      => $r->branch,
+                'capital'     => (float)($r->capital ?? 0),
+                'interest'    => (float)($r->interest ?? 0),
+                'tax'         => (float)($r->tax ?? 0),
+                'charges'     => (float)($r->charges ?? 0),
+                'moratorios'  => 0.0,
+                'total'       => (float)($r->total ?? 0),
+                'operaciones' => (int)($r->operaciones ?? 0),
+            ])
+            ->values()->all();
+
+        $byGestor = DB::table('fact_recoveries as r')
+            ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $this->dataIds)
+            ->whereNotNull('r.promoter_name')
+            ->selectRaw('
+                r.promoter_name as gestor,
+                COALESCE(b.name,\'Sin sucursal\') as branch,
+                SUM(r.total_amount) as total,
+                COUNT(*) as operaciones
+            ')
+            ->groupBy('r.promoter_name', 'r.branch_id', 'b.name')
+            ->orderByDesc('total')
+            ->limit(100)
+            ->get()
+            ->map(fn ($r) => [
+                'gestor'      => $r->gestor,
+                'branch'      => $r->branch,
+                'total'       => (float) $r->total,
+                'operaciones' => (int) $r->operaciones,
+            ])
+            ->values()->all();
+
+        return ['by_branch' => $byBranch, 'by_gestor' => $byGestor];
+    }
+
+    /**
+     * Portfolio cartera and vencida broken down by real branch and product.
+     * Used for the VAL. CART Excel tab.
+     */
+    private function buildPortfolioByBranchProduct(Period $period): array
+    {
+        $realBranchNames = $this->resolveRealBranchNormalizedNames();
+
+        $rows = DB::table('fact_portfolios as po')
+            ->join('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $this->dataIds)
+            ->when(!empty($realBranchNames), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNames))
+            ->selectRaw("
+                b.name as branch,
+                COALESCE(NULLIF(po.product_name,''), 'Sin producto') as product,
+                COUNT(*) as contratos,
+                SUM(po.balance) as cartera,
+                SUM(CASE WHEN po.days_past_due > 0 THEN COALESCE(po.capital_due, po.past_due_balance, po.balance) ELSE 0 END) as vencida
+            ")
+            ->groupBy('po.branch_id', 'b.name', 'po.product_name')
+            ->orderBy('b.name')
+            ->orderByDesc('cartera')
+            ->get();
+
+        return $rows->map(fn ($r) => [
+            'branch'    => $r->branch,
+            'product'   => $r->product,
+            'contratos' => (int) $r->contratos,
+            'cartera'   => (float) $r->cartera,
+            'vencida'   => (float) $r->vencida,
+            'mora'      => (float) $r->cartera > 0 ? round((float) $r->vencida / (float) $r->cartera * 100, 2) : 0.0,
+        ])->values()->all();
+    }
+
+    /**
+     * Portfolio mora buckets broken down per real branch.
+     * Used for the MORA Excel tab.
+     */
+    private function buildMoraByBranch(Period $period): array
+    {
+        $realBranchNames = $this->resolveRealBranchNormalizedNames();
+
+        $defs = [
+            ['label' => 'al_corriente', 'min' => 0,   'max' => 0     ],
+            ['label' => 'mora_1_30',    'min' => 1,   'max' => 30    ],
+            ['label' => 'mora_31_60',   'min' => 31,  'max' => 60    ],
+            ['label' => 'mora_61_90',   'min' => 61,  'max' => 90    ],
+            ['label' => 'mora_91_120',  'min' => 91,  'max' => 120   ],
+            ['label' => 'mora_121_180', 'min' => 121, 'max' => 180   ],
+            ['label' => 'mora_180_mas', 'min' => 181, 'max' => 99999 ],
+        ];
+
+        $rows = DB::table('fact_portfolios as po')
+            ->join('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $this->dataIds)
+            ->when(!empty($realBranchNames), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNames))
+            ->selectRaw('b.name as branch, po.days_past_due, SUM(po.balance) as balance')
+            ->groupBy('po.branch_id', 'b.name', 'po.days_past_due')
+            ->get();
+
+        $byBranch = [];
+        foreach ($rows as $row) {
+            $branch = $row->branch;
+            $dpd    = (int) $row->days_past_due;
+            $bal    = (float) $row->balance;
+
+            foreach ($defs as $def) {
+                if ($dpd >= $def['min'] && $dpd <= $def['max']) {
+                    $byBranch[$branch][$def['label']] = ($byBranch[$branch][$def['label']] ?? 0.0) + $bal;
+                    break;
+                }
+            }
+        }
+
+        $result = [];
+        foreach ($byBranch as $branch => $buckets) {
+            $cartera = array_sum($buckets);
+            $vencida = array_sum(array_filter($buckets, fn ($v, $k) => $k !== 'al_corriente', ARRAY_FILTER_USE_BOTH));
+            $row = ['branch' => $branch, 'cartera_total' => $cartera, 'vencida_total' => $vencida];
+            foreach ($defs as $def) {
+                $row[$def['label']] = $buckets[$def['label']] ?? 0.0;
+            }
+            $result[] = $row;
+        }
+
+        usort($result, fn ($a, $b) => $b['cartera_total'] <=> $a['cartera_total']);
+        return $result;
+    }
+
+    private function buildCorporateFunding(Period $period): array
+    {
+        $realBranchNames = $this->resolveRealBranchNormalizedNames();
+
+        $rows = DB::table('fact_expenses as e')
+            ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
+            ->whereIn('e.period_id', $this->dataIds)
+            ->whereRaw("LOWER(COALESCE(e.concept,'')) LIKE '%excedente%'")
+            ->whereNotNull('e.expense_date')
+            ->when(!empty($realBranchNames), fn ($q) => $q->whereIn(DB::raw("LOWER(COALESCE(b.name,''))"), $realBranchNames))
+            ->selectRaw("b.name as branch, e.expense_date, SUM(e.amount) as total")
+            ->groupBy('b.name', 'e.expense_date')
+            ->get();
+
+        $month       = (int)($period->month ?? (int)date('n'));
+        $year        = (int)($period->year  ?? (int)date('Y'));
+        $daysInMonth = (int)date('t', mktime(0, 0, 0, $month, 1, $year));
+        $dayNames    = ['DOMINGO', 'LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO'];
+
+        $amountByDay = [];
+        $byBranch    = [];
+        foreach ($rows as $row) {
+            $day = (int)date('j', strtotime($row->expense_date));
+            $amountByDay[$day] = ($amountByDay[$day] ?? 0.0) + (float)$row->total;
+            if ($row->branch) {
+                $byBranch[$row->branch] = ($byBranch[$row->branch] ?? 0.0) + (float)$row->total;
+            }
+        }
+
+        $byDay = [];
+        for ($d = 1; $d <= $daysInMonth; $d++) {
+            $ts      = mktime(0, 0, 0, $month, $d, $year);
+            $byDay[] = [
+                'day'     => $d,
+                'weekday' => $dayNames[(int)date('w', $ts)],
+                'total'   => $amountByDay[$d] ?? 0.0,
+            ];
+        }
+
+        $byBranchResult = [];
+        foreach ($byBranch as $branch => $total) {
+            $byBranchResult[] = ['branch' => $branch, 'total' => $total];
+        }
+        usort($byBranchResult, fn ($a, $b) => $b['total'] <=> $a['total']);
+
+        return [
+            'total'     => array_sum($amountByDay),
+            'by_day'    => $byDay,
+            'by_branch' => $byBranchResult,
+        ];
+    }
+
+    private function buildPlacementByBranchProduct(Period $period): array
+    {
+        $realBranchNames = $this->resolveRealBranchNormalizedNames();
+
+        $rows = DB::table('fact_placements as p')
+            ->join('branches as b', 'p.branch_id', '=', 'b.id')
+            ->whereIn('p.period_id', $this->dataIds)
+            ->when(!empty($realBranchNames), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNames))
+            ->selectRaw("
+                b.name as branch,
+                COALESCE(NULLIF(TRIM(p.product_name), ''), 'Sin producto') as product,
+                COUNT(*) as creditos,
+                SUM(p.amount) as monto
+            ")
+            ->groupBy('p.branch_id', 'b.name', 'p.product_name')
+            ->having('monto', '>', 0)
+            ->orderBy('b.name')
+            ->orderByDesc('monto')
+            ->get();
+
+        return $rows->map(fn ($r) => [
+            'branch'   => $r->branch,
+            'product'  => $r->product,
+            'creditos' => (int)$r->creditos,
+            'monto'    => (float)$r->monto,
+            'apertura' => 0.0,
+        ])->values()->all();
+    }
+
     // ── HELPERS ──────────────────────────────────────────────────────────────
 
     private function resolveRealBranchNormalizedNames(): array
@@ -1095,18 +1622,6 @@ class RadiographySnapshotBuilder
             ['a', 'e', 'i', 'o', 'u', 'u', 'n'],
             $value,
         );
-    }
-
-    private function normalizeHumanName(?string $value): string
-    {
-        $value = trim(mb_strtolower((string) $value));
-        $value = str_replace(
-            ['á', 'é', 'í', 'ó', 'ú', 'ü', 'ñ'],
-            ['a', 'e', 'i', 'o', 'u', 'u', 'n'],
-            $value,
-        );
-        $value = preg_replace('/[^a-z0-9\s]/', ' ', $value) ?? $value;
-        return preg_replace('/\s+/', ' ', trim($value)) ?? trim($value);
     }
 
     private function resolveBranch(?int $id): ?Branch

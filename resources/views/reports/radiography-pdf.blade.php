@@ -62,9 +62,16 @@ table.metric td:last-child  { text-align: right; }
 
 /* ─ Badge ─ */
 .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 7.5pt; font-weight: bold; }
+.b-error   { background: #fee2e2; color: #991b1b; }
 .b-high    { background: #fee2e2; color: #991b1b; }
 .b-warning { background: #fef3c7; color: #92400e; }
 .b-info    { background: #dbeafe; color: #1e3a8a; }
+/* ─ Green sections (RECUP / MORA / FOND CORP) ─ */
+.section-green { background: #065f46; color: #fff; padding: 5px 10px; font-size: 9pt; font-weight: bold; margin-top: 14px; }
+table.data th.green { background: #065f46; color: #fff; }
+.cat-senior    { background: #d1fae5; color: #065f46; font-weight: bold; }
+.cat-junior    { background: #fef9c3; color: #78350f; font-weight: bold; }
+.cat-mantenido { background: #fee2e2; color: #991b1b; font-weight: bold; }
 
 /* ─ Page break ─ */
 .pb { page-break-before: always; }
@@ -83,6 +90,32 @@ $pay    = $snap['sections']['payroll'];
 $fmt    = fn($v) => '$' . number_format((float)$v, 2);
 $fmtp   = fn($v) => number_format((float)$v, 2) . '%';
 $fmtn   = fn($v) => number_format((float)$v, 0);
+
+$friendlyIncidentType = [
+    'empleados_sin_sucursal'      => 'Empleados sin sucursal',
+    'gestores_sin_match_noi'      => 'Gestores sin coincidencia en nómina',
+    'cartera_sin_producto'        => 'Contratos sin producto',
+    'cartera_vencida_recalculada' => 'Cartera vencida recalculada',
+    'nombre_fusionado'            => 'Nombre fusionado (variante)',
+];
+
+// Categorías por sucursal (utilidad = recuperación - gastos - nómina neta)
+$payrollByBranch = [];
+foreach ($snap['sections']['employees_gestores'] ?? [] as $emp) {
+    $br = strtoupper(trim($emp['branch'] ?? ''));
+    if ($br === '' || $br === 'SIN SUCURSAL') continue;
+    $payrollByBranch[$br] = ($payrollByBranch[$br] ?? 0.0) + (float)($emp['neto'] ?? 0);
+}
+$categorias = [];
+foreach ($snap['sections']['branches'] ?? [] as $b) {
+    $brName   = $b['nombre'] ?? ($b['name'] ?? '');
+    $rec      = (float)($b['recuperacion'] ?? 0);
+    $gastos   = (float)($b['gastos'] ?? 0);
+    $nomina   = $payrollByBranch[strtoupper(trim($brName))] ?? 0.0;
+    $utilidad = $rec - $gastos - $nomina;
+    $cat      = $utilidad >= 300000 ? 'SENIOR' : ($utilidad >= 100000 ? 'JUNIOR' : 'MANTENIDO');
+    $categorias[] = ['nombre' => $brName, 'utilidad' => $utilidad, 'categoria' => $cat];
+}
 @endphp
 
 <!-- ═══ PORTADA / HEADER ════════════════════════════════════════════ -->
@@ -160,7 +193,7 @@ $fmtn   = fn($v) => number_format((float)$v, 0);
         <td style="background:#334155;color:#fff;font-weight:bold;text-align:right;">{{ $fmt($pay['neto']) }}</td></tr>
 </table>
 @if(($pay['source'] ?? '') === 'noi_direct')
-<div class="warn-box">⚠ Nómina calculada directamente de movimientos NOI. Si los montos parecen incorrectos, verifica que el tipo de concepto (concept_type) se haya importado correctamente.</div>
+<div class="warn-box">⚠ Información calculada con base en los archivos cargados. Si los montos parecen incorrectos, verifica que el archivo de nómina esté completo y procesado.</div>
 @endif
 
 <!-- ═══ GRÁFICA: COLOCACIÓN POR PRODUCTO ════════════════════════════ -->
@@ -367,16 +400,209 @@ $fmtn   = fn($v) => number_format((float)$v, 0);
 </table>
 @endif
 
+<!-- ═══ RECUPERACIÓN ════════════════════════════════════════════════ -->
+@php $recDetail = $snap['sections']['recovery_detail'] ?? []; @endphp
+@if(!empty($recDetail['by_branch']))
+<div class="pb"></div>
+<div class="section-green">RECUPERACIÓN — {{ strtoupper($period->label) }}</div>
+<table class="data">
+    <tr>
+        <th class="green">Sucursal / Ruta</th>
+        <th class="r green">Capital</th>
+        <th class="r green">Interés</th>
+        <th class="r green">Impuesto</th>
+        <th class="r green">Cargos</th>
+        <th class="r green">Gran Total</th>
+    </tr>
+    @php $recTot = ['capital'=>0,'interest'=>0,'tax'=>0,'charges'=>0,'total'=>0]; @endphp
+    @foreach(array_slice($recDetail['by_branch'], 0, 25) as $rb)
+    @php foreach(['capital','interest','tax','charges','total'] as $k) $recTot[$k] += $rb[$k]; @endphp
+    <tr>
+        <td class="b">{{ $rb['branch'] }}</td>
+        <td class="r">{{ $fmt($rb['capital']) }}</td>
+        <td class="r">{{ $fmt($rb['interest']) }}</td>
+        <td class="r">{{ $fmt($rb['tax']) }}</td>
+        <td class="r">{{ $fmt($rb['charges']) }}</td>
+        <td class="r b">{{ $fmt($rb['total']) }}</td>
+    </tr>
+    @endforeach
+    @if(count($recDetail['by_branch']) > 25)
+    <tr><td colspan="6" style="text-align:center;color:#64748b;font-style:italic;font-size:8pt;">Detalle completo disponible en Excel (RECUP.)</td></tr>
+    @endif
+    <tr class="totals-row">
+        <td>TOTAL GENERAL</td>
+        <td class="r">{{ $fmt($recTot['capital']) }}</td>
+        <td class="r">{{ $fmt($recTot['interest']) }}</td>
+        <td class="r">{{ $fmt($recTot['tax']) }}</td>
+        <td class="r">{{ $fmt($recTot['charges']) }}</td>
+        <td class="r">{{ $fmt($recTot['total']) }}</td>
+    </tr>
+</table>
+@if(!empty($recDetail['by_gestor']))
+<div class="section-sub">Top gestores por recuperación</div>
+<table class="data">
+    <tr><th>Gestor</th><th>Sucursal</th><th class="r">Operaciones</th><th class="r">Total recuperado</th></tr>
+    @foreach(array_slice($recDetail['by_gestor'], 0, 15) as $rg)
+    <tr>
+        <td class="b">{{ $rg['gestor'] }}</td>
+        <td>{{ $rg['branch'] }}</td>
+        <td class="r">{{ $fmtn($rg['operaciones']) }}</td>
+        <td class="r">{{ $fmt($rg['total']) }}</td>
+    </tr>
+    @endforeach
+</table>
+@endif
+@endif
+
+<!-- ═══ MORA POR SUCURSAL ════════════════════════════════════════════ -->
+@if(!empty($snap['sections']['mora_by_branch']))
+<div class="section-green">MORAS — {{ strtoupper($period->label) }}</div>
+<table class="data">
+    <tr>
+        <th class="green">Sucursal</th>
+        <th class="r green">Cartera</th>
+        <th class="r green">Vencida</th>
+        <th class="r green">0-30</th>
+        <th class="r green">31-60</th>
+        <th class="r green">61-90</th>
+        <th class="r green">91-120</th>
+        <th class="r green">120+</th>
+        <th class="r green">Mora %</th>
+    </tr>
+    @foreach($snap['sections']['mora_by_branch'] as $mb)
+    @php $mora = (float)($mb['cartera_total']) > 0 ? round((float)($mb['vencida_total'])/(float)($mb['cartera_total'])*100,2) : 0; @endphp
+    <tr>
+        <td class="b">{{ $mb['branch'] }}</td>
+        <td class="r">{{ $fmt($mb['cartera_total']) }}</td>
+        <td class="r" @if((float)$mb['vencida_total']>0) style="color:#b91c1c;" @endif>{{ $fmt($mb['vencida_total']) }}</td>
+        <td class="r">{{ $fmt($mb['mora_1_30'] ?? 0) }}</td>
+        <td class="r">{{ $fmt($mb['mora_31_60'] ?? 0) }}</td>
+        <td class="r">{{ $fmt($mb['mora_61_90'] ?? 0) }}</td>
+        <td class="r">{{ $fmt($mb['mora_91_120'] ?? 0) }}</td>
+        <td class="r">{{ $fmt(($mb['mora_121_180'] ?? 0) + ($mb['mora_180_mas'] ?? 0)) }}</td>
+        <td class="r @if($mora > 25) card-red @endif">{{ $fmtp($mora) }}</td>
+    </tr>
+    @endforeach
+</table>
+@endif
+
+<!-- ═══ COLOCACIÓN ════════════════════════════════════════════════════ -->
+@php $colRows = $snap['sections']['placement_by_branch_product'] ?? []; @endphp
+@if(!empty($colRows))
+<div class="pb"></div>
+<div class="section-green">COLOCACIÓN — {{ strtoupper($period->label) }}</div>
+<table class="data">
+    <tr>
+        <th class="green">Sucursal / Producto</th>
+        <th class="r green">Monto Colocado</th>
+        <th class="r green"># Créditos</th>
+    </tr>
+    @php
+    $colGrouped = [];
+    foreach ($colRows as $cr) { $colGrouped[$cr['branch']][] = $cr; }
+    $colGrandMonto = 0; $colGrandCred = 0;
+    @endphp
+    @foreach($colGrouped as $colBranch => $colProducts)
+    @php $bMonto = array_sum(array_column($colProducts,'monto')); $bCred = array_sum(array_column($colProducts,'creditos')); $colGrandMonto += $bMonto; $colGrandCred += $bCred; @endphp
+    <tr style="background:#065f46;color:#fff;">
+        <td class="b">{{ strtoupper($colBranch) }}</td>
+        <td class="r b">{{ $fmt($bMonto) }}</td>
+        <td class="r b">{{ $fmtn($bCred) }}</td>
+    </tr>
+    @foreach($colProducts as $cp)
+    <tr>
+        <td style="padding-left:20px;">{{ $cp['product'] }}</td>
+        <td class="r">{{ $fmt($cp['monto']) }}</td>
+        <td class="r">{{ $fmtn($cp['creditos']) }}</td>
+    </tr>
+    @endforeach
+    @endforeach
+    <tr class="totals-row">
+        <td>TOTAL GENERAL</td>
+        <td class="r">{{ $fmt($colGrandMonto) }}</td>
+        <td class="r">{{ $fmtn($colGrandCred) }}</td>
+    </tr>
+</table>
+@endif
+
+<!-- ═══ PRÉSTAMOS INTERSUCURSALES ════════════════════════════════════ -->
+@php $loans = $snap['sections']['interbranch_loans'] ?? []; @endphp
+@if(!empty($loans) && ($loans['total'] ?? 0) > 0)
+<div class="section-title">PRÉSTAMOS INTERSUCURSALES</div>
+<table class="metric">
+    <tr><td>Total fondeado / recibido</td><td>{{ $fmt($loans['total']) }}</td></tr>
+</table>
+@if(!empty($loans['fondea']))
+<div class="section-sub">Sucursales que fondean</div>
+<table class="data">
+    <tr><th>Sucursal</th><th class="r">Total</th></tr>
+    @foreach($loans['fondea'] as $lf)
+    <tr><td class="b">{{ $lf['branch'] }}</td><td class="r">{{ $fmt($lf['total']) }}</td></tr>
+    @endforeach
+</table>
+@endif
+@if(!empty($loans['recibe']))
+<div class="section-sub">Sucursales que reciben</div>
+<table class="data">
+    <tr><th>Sucursal</th><th class="r">Total</th></tr>
+    @foreach($loans['recibe'] as $lr)
+    <tr><td class="b">{{ $lr['branch'] }}</td><td class="r">{{ $fmt($lr['total']) }}</td></tr>
+    @endforeach
+</table>
+@endif
+@endif
+
+<!-- ═══ CORPORATIVO — ENVÍO DE UTILIDAD ══════════════════════════════ -->
+@php $funding = $snap['sections']['corporate_funding'] ?? []; @endphp
+@if(!empty($funding) && ($funding['total'] ?? 0) > 0)
+<div class="section-title">ENVÍO DE UTILIDAD A CORPORATIVO</div>
+<table class="metric">
+    <tr><td>Total enviado</td><td>{{ $fmt($funding['total']) }}</td></tr>
+</table>
+@if(!empty($funding['by_branch']))
+<table class="data">
+    <tr><th>Sucursal</th><th class="r">Total</th></tr>
+    @foreach($funding['by_branch'] as $fb)
+    <tr><td class="b">{{ $fb['branch'] }}</td><td class="r">{{ $fmt($fb['total']) }}</td></tr>
+    @endforeach
+</table>
+@endif
+@endif
+
+<!-- ═══ CATEGORÍAS DE SUCURSAL ═══════════════════════════════════════ -->
+@if(!empty($categorias))
+<div class="pb"></div>
+<div class="section-title">CATEGORÍA GESTORES</div>
+<table class="data">
+    <tr><th>Sucursal</th><th class="r">Utilidad Estimada</th><th class="c">Categoría</th></tr>
+    @foreach($categorias as $cat)
+    <tr>
+        <td class="b">{{ $cat['nombre'] }}</td>
+        <td class="r" @if((float)$cat['utilidad'] < 0) style="color:#b91c1c;" @else style="color:#065f46;" @endif>{{ $fmt($cat['utilidad']) }}</td>
+        <td class="c"><span class="badge cat-{{ strtolower($cat['categoria']) }}">{{ $cat['categoria'] }}</span></td>
+    </tr>
+    @endforeach
+</table>
+<div style="font-size:7.5pt;color:#64748b;margin-top:4px;">* Utilidad = Recuperación − Gastos − Nómina neta estimada por sucursal.</div>
+@endif
+
 <!-- ═══ INCIDENCIAS ══════════════════════════════════════════════════ -->
 @if(!empty($snap['sections']['incidents']))
 <div class="section-title">INCIDENCIAS DEL PERIODO</div>
 <table class="data">
-    <tr><th>Severidad</th><th>Tipo</th><th>Mensaje</th></tr>
+    <tr><th>Severidad</th><th>Tipo</th><th>Descripción</th><th>Sugerencia</th></tr>
     @foreach($snap['sections']['incidents'] as $i)
+    @php
+    $sevLabel = match($i['severity']) { 'error' => 'ERROR', 'warning' => 'ADVERTENCIA', default => 'INFO' };
+    $sevClass = match($i['severity']) { 'error' => 'b-error', 'warning' => 'b-warning', default => 'b-info' };
+    $typeLabel = $friendlyIncidentType[$i['type']] ?? ucwords(str_replace('_', ' ', $i['type'] ?? ''));
+    $suggestion = match($i['severity'] ?? '') { 'error' => 'Revisar y corregir antes de cerrar el periodo.', 'warning' => 'Verificar si es posible.', default => 'Sin acción requerida.' };
+    @endphp
     <tr>
-        <td class="c"><span class="badge b-{{ $i['severity'] }}">{{ strtoupper($i['severity']) }}</span></td>
-        <td>{{ $i['type'] }}</td>
+        <td class="c"><span class="badge {{ $sevClass }}">{{ $sevLabel }}</span></td>
+        <td>{{ $typeLabel }}</td>
         <td>{{ $i['message'] }}</td>
+        <td style="color:#64748b;font-style:italic;">{{ $suggestion }}</td>
     </tr>
     @endforeach
 </table>

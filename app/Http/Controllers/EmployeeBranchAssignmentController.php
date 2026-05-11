@@ -7,10 +7,13 @@ use App\Enums\SourceType;
 use App\Models\Branch;
 use App\Models\EmployeeBranchAssignment;
 use App\Models\Period;
+use App\Services\BranchResolverService;
 use App\Services\EmployeeBranchAutoMatchService;
+use App\Services\EmployeeNameCanonicalizer;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -18,7 +21,9 @@ class EmployeeBranchAssignmentController extends Controller
 {
     public function index(Request $request): Response
     {
+        // Only monthly periods are valid for employee–branch assignments
         $periods = Period::query()
+            ->where('type', 'monthly')
             ->orderByDesc('year')
             ->orderByDesc('month')
             ->orderByDesc('sequence')
@@ -28,7 +33,12 @@ class EmployeeBranchAssignmentController extends Controller
             ?? $periods->first();
 
         $assignments = collect();
+
+        // Only real assignable branches (operational + CORPORATIVO, no routes)
+        $resolver       = app(BranchResolverService::class);
+        $realBranchNames = $resolver->realAssignableBranches();
         $branches = Branch::query()
+            ->whereIn(DB::raw('UPPER(name)'), $realBranchNames)
             ->orderBy('name')
             ->get(['id', 'name']);
 
@@ -51,7 +61,7 @@ class EmployeeBranchAssignmentController extends Controller
         $incidences = collect();
 
         if ($selectedPeriod) {
-            $assignments = EmployeeBranchAssignment::query()
+            $rawAssignments = EmployeeBranchAssignment::query()
                 ->with([
                     'employee:id,full_name,normalized_name',
                     'branch:id,name',
@@ -59,9 +69,61 @@ class EmployeeBranchAssignmentController extends Controller
                 ])
                 ->where('period_id', $selectedPeriod->id)
                 ->orderByDesc('updated_at')
-                ->get()
-                ->map(fn (EmployeeBranchAssignment $assignment) => $this->transformAssignment($assignment))
-                ->values();
+                ->get();
+
+            // Build canonical map over employee names to detect typo variants
+            $canonicalizer = app(EmployeeNameCanonicalizer::class);
+            $allNames = $rawAssignments
+                ->map(fn ($a) => $a->employee?->full_name)
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
+            $canonicalMap = $canonicalizer->buildCanonicalMap($allNames);
+
+            // Index assignments by normalized employee name
+            $byNorm = $rawAssignments->keyBy(fn ($a) => $canonicalizer->normalize($a->employee?->full_name ?? ''));
+
+            // Build deduplicated list: one row per canonical, aliases nested inside
+            $seen        = [];
+            $assignments = collect();
+
+            foreach ($rawAssignments as $assignment) {
+                $empName = $assignment->employee?->full_name ?? '';
+                $norm    = $canonicalizer->normalize($empName);
+                $canonical = $canonicalMap[$norm] ?? $norm;
+
+                // Skip if we already emitted this canonical
+                if (isset($seen[$canonical])) continue;
+                $seen[$canonical] = true;
+
+                // Find all aliases for this canonical (normalized keys that map to it)
+                $aliasNorms = array_values(array_filter(
+                    array_keys($canonicalMap),
+                    fn ($k) => $canonicalMap[$k] === $canonical && $k !== $canonical
+                ));
+
+                // Pick the canonical assignment (prefer canonical key, else this one)
+                $canonicalAssignment = $byNorm[$canonical] ?? $assignment;
+
+                $row = $this->transformAssignment($canonicalAssignment);
+                $row['aliases'] = collect($aliasNorms)
+                    ->map(fn ($aliasNorm) => $byNorm[$aliasNorm] ?? null)
+                    ->filter()
+                    ->map(fn ($a) => [
+                        'employee_id'   => $a->employee_id,
+                        'employee_name' => $a->employee?->full_name ?? '',
+                        'branch_name'   => $a->branch?->name,
+                        'branch_id'     => $a->branch_id,
+                        'match_type'    => $a->match_type?->value,
+                    ])
+                    ->values()
+                    ->all();
+
+                $assignments->push($row);
+            }
+
+            $assignments = $assignments->values();
 
             $previousPeriod = Period::query()
                 ->where('id', '!=', $selectedPeriod->id)
@@ -167,7 +229,7 @@ class EmployeeBranchAssignmentController extends Controller
             'branch_id.exists' => 'La sucursal seleccionada no existe.',
         ]);
 
-        $assignment->update([
+        $payload = [
             'branch_id' => (int) $validated['branch_id'],
             'source_type' => SourceType::Manual,
             'source_reference' => null,
@@ -175,7 +237,39 @@ class EmployeeBranchAssignmentController extends Controller
             'confidence' => 1,
             'was_manual_reviewed' => true,
             'notes' => $validated['notes'] ?? $assignment->notes,
-        ]);
+        ];
+
+        $assignment->update($payload);
+
+        // Propagate to alias employees (same period, same canonical name group)
+        $empName = $assignment->employee?->full_name ?? '';
+        if ($empName && $assignment->period_id) {
+            $canonicalizer = app(EmployeeNameCanonicalizer::class);
+            $canonicalNorm = $canonicalizer->normalize($empName);
+
+            // Load all assignments for the same period to find aliases
+            $periodAssignments = EmployeeBranchAssignment::query()
+                ->with('employee:id,full_name')
+                ->where('period_id', $assignment->period_id)
+                ->where('id', '!=', $assignment->id)
+                ->get();
+
+            $allNames = $periodAssignments
+                ->map(fn ($a) => $a->employee?->full_name)
+                ->filter()->push($empName)->unique()->values()->all();
+            $canonicalMap = $canonicalizer->buildCanonicalMap($allNames);
+
+            $aliasPayload = array_merge($payload, ['was_manual_reviewed' => false]);
+            foreach ($periodAssignments as $other) {
+                $otherNorm = $canonicalizer->normalize($other->employee?->full_name ?? '');
+                if (($canonicalMap[$otherNorm] ?? $otherNorm) === $canonicalNorm && $otherNorm !== $canonicalNorm) {
+                    // Only update if not already manually reviewed
+                    if (!$other->was_manual_reviewed) {
+                        $other->update($aliasPayload);
+                    }
+                }
+            }
+        }
 
         return back()->with('success', 'Asignación manual guardada correctamente.');
     }
@@ -253,6 +347,7 @@ class EmployeeBranchAssignmentController extends Controller
             'needs_manual_attention' => in_array($uiStatus, ['pending', 'unmatched'], true)
                 || (($assignment->confidence ?? 0) < 0.85),
             'context' => $context,
+            'aliases' => [],
         ];
     }
 

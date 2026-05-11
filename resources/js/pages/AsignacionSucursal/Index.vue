@@ -22,6 +22,14 @@ import Swal from 'sweetalert2'
 
 import AppLayout from '@/layouts/AppLayout.vue'
 
+type AssignmentAlias = {
+    employee_id: number
+    employee_name: string
+    branch_name?: string | null
+    branch_id?: number | null
+    match_type?: string | null
+}
+
 type Assignment = {
     id: number
     employee_id?: number | null
@@ -42,6 +50,7 @@ type Assignment = {
     notes?: string | null
     needs_manual_attention?: boolean
     context?: string
+    aliases?: AssignmentAlias[]
 }
 
 type Branch = {
@@ -253,12 +262,14 @@ const filteredAssignments = computed(() => {
     const query = filters.query.trim().toLowerCase()
 
     return props.assignments.filter((item) => {
+        const aliasNames = (item.aliases ?? []).map((a) => a.employee_name.toLowerCase()).join(' ')
         const matchesQuery =
             !query ||
             item.employee_name.toLowerCase().includes(query) ||
             (item.normalized_name ?? '').toLowerCase().includes(query) ||
             (item.branch_name ?? '').toLowerCase().includes(query) ||
-            (item.notes ?? '').toLowerCase().includes(query)
+            (item.notes ?? '').toLowerCase().includes(query) ||
+            aliasNames.includes(query)
 
         const matchesStatus = filters.status === 'all' || item.ui_status === filters.status
 
@@ -417,6 +428,13 @@ const hasNoAssignments = computed(() => props.assignments.length === 0)
                                     <h3 class="truncate text-base font-bold tracking-tight">
                                         {{ item.employee_name }}
                                     </h3>
+                                    <p
+                                        v-if="item.aliases && item.aliases.length > 0"
+                                        class="mt-0.5 text-xs text-amber-600 dark:text-amber-400"
+                                        :title="`Variantes fusionadas: ${item.aliases.map((a) => a.employee_name).join(', ')}`"
+                                    >
+                                        También: {{ item.aliases.map((a) => a.employee_name).join(' · ') }}
+                                    </p>
                                     <p class="mt-1 text-xs text-muted-foreground">
                                         {{ item.normalized_name || 'Sin nombre normalizado' }}
                                     </p>

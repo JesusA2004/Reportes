@@ -181,13 +181,7 @@ class MonthlyReportController extends Controller {
             return back()->with('error', 'No existe un consolidado vigente para exportar la radiografía.');
         }
 
-        // Check for existing export BEFORE source validation — if the file is already built, download it immediately
-        $existingExport = PeriodRadiographyExport::query()->where('period_summary_id', $summary->id)->where('file_type', 'excel')->latest('id')->first();
-        if ($existingExport && is_string($existingExport->export_path) && File::exists($existingExport->export_path)) {
-            return response()->download($existingExport->export_path, basename($existingExport->export_path));
-        }
-
-        // Only validate sources when we need to generate the export on-demand
+        // Always regenerate — never serve a stale cached file
         $sources = $this->sourceStatus($period);
         if (!empty($sources['missing']) || !empty($sources['errors'])) {
             return back()->with('error', 'No se puede exportar. Faltan fuentes procesadas: ' . implode(', ', array_merge($sources['missing'], $sources['errors'])) . '.');
@@ -213,16 +207,7 @@ class MonthlyReportController extends Controller {
             return back()->with('error', 'No existe un PDF vigente para esta radiografía.');
         }
 
-        $existingExport = PeriodRadiographyExport::query()
-            ->where('period_summary_id', $summary->id)
-            ->where('file_type', 'pdf')
-            ->latest('id')
-            ->first();
-
-        if ($existingExport && is_string($existingExport->export_path) && File::exists($existingExport->export_path)) {
-            return response()->download($existingExport->export_path, basename($existingExport->export_path));
-        }
-
+        // Always regenerate — never serve a stale cached file
         $path = $service->exportPdf($period);
         PeriodRadiographyExport::query()->create([
             'period_summary_id' => $summary->id,

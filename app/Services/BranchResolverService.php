@@ -287,6 +287,24 @@ class BranchResolverService
         return $catalog;
     }
 
+    /**
+     * UPPERCASE list of real operational branches (excludes routes and CORPORATIVO).
+     */
+    public function realOperationalBranches(): array
+    {
+        return array_values(array_unique(array_values(array_merge(self::PREFIX_3, self::PREFIX_2))));
+    }
+
+    /**
+     * UPPERCASE list of branches assignable to employees (operational + CORPORATIVO).
+     */
+    public function realAssignableBranches(): array
+    {
+        $branches   = $this->realOperationalBranches();
+        $branches[] = 'CORPORATIVO';
+        return $branches;
+    }
+
     private function normalizeText(string $value): string
     {
         $value = trim(mb_strtolower($value));
