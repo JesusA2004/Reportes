@@ -67,7 +67,23 @@ class RadiographySnapshotBuilder
             $gm['gasto_total'] = (float) DB::table('fact_expenses')->whereIn('period_id', $this->dataIds)->sum('amount');
         }
 
-        $payroll = $this->buildPayroll($period);
+        $payroll         = $this->buildPayroll($period);
+        $empGestores     = $this->buildEmployeesGestores($period);
+
+        // Reconcile payroll total: if buildPayroll returned 0 but employees_gestores has pagos, derive from it
+        if (($payroll['pagos'] + $payroll['bonos']) == 0.0) {
+            $egPagos = collect($empGestores)->sum('pagos');
+            $egBonos = collect($empGestores)->sum('bonos');
+            if (($egPagos + $egBonos) > 0) {
+                $payroll['pagos']      = round($egPagos, 2);
+                $payroll['bonos']      = round($egBonos, 2);
+                $payroll['descuentos'] = round(collect($empGestores)->sum('descuentos'), 2);
+                $payroll['neto']       = round(collect($empGestores)->sum('neto'), 2);
+                if ($payroll['total_empleados'] === 0) {
+                    $payroll['total_empleados'] = collect($empGestores)->filter(fn ($r) => ($r['pagos'] + $r['bonos']) > 0)->count();
+                }
+            }
+        }
 
         return [
             'period' => [
@@ -96,10 +112,10 @@ class RadiographySnapshotBuilder
                 'branches'           => $this->buildBranches($period, $summary),
                 'employees'          => $this->buildEmployees($period),
                 'promoters'          => $this->buildPromoters($period),
-                'employees_gestores' => $this->buildEmployeesGestores($period),
+                'employees_gestores' => $empGestores,
                 'portfolio_buckets'  => $this->buildPortfolioBuckets($period),
                 'expenses_detail'    => $this->buildExpensesDetail($period),
-                'incidents'          => $this->buildIncidents($summary),
+                'incidents'          => $this->buildIncidents($summary, $period),
             ],
             'charts' => [
                 'recovery_by_branch'      => $this->chartByBranch($period, 'recuperacion'),
@@ -656,15 +672,14 @@ class RadiographySnapshotBuilder
 
         $byEmployee = DB::table('fact_expenses as e')
             ->join('employees as emp', 'e.employee_id', '=', 'emp.id')
-            ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
             ->whereIn('e.period_id', $this->dataIds)
             ->whereNotNull('e.employee_id')
-            ->selectRaw("emp.full_name as empleado, COALESCE(b.name,'Sin sucursal') as sucursal, SUM($amtExpr) as total")
-            ->groupBy('e.employee_id', 'emp.full_name', 'b.name')
+            ->selectRaw("emp.full_name as empleado, SUM($amtExpr) as total")
+            ->groupBy('e.employee_id', 'emp.full_name')
             ->orderByDesc('total')
             ->limit(50)
             ->get()
-            ->map(fn ($r) => ['empleado' => $r->empleado, 'sucursal' => $r->sucursal, 'total' => (float)$r->total])
+            ->map(fn ($r) => ['empleado' => $r->empleado, 'total' => (float)$r->total])
             ->values()->all();
 
         $bySource = DB::table('fact_expenses as e')
@@ -691,7 +706,11 @@ class RadiographySnapshotBuilder
             ->where('period_id', $period->id)
             ->get();
 
-        if ($mesRows->isNotEmpty()) {
+        // Use MES data only when it actually has payroll amounts; otherwise fall to NOI direct.
+        $mesHasPayments = $mesRows->isNotEmpty()
+            && ($mesRows->sum('total_payments') + $mesRows->sum('total_bonuses')) > 0;
+
+        if ($mesHasPayments) {
             foreach ($mesRows as $mes) {
                 $norm = $mes->employee?->normalized_name
                     ?? $this->normalizeHumanName($mes->employee?->full_name ?? '');
@@ -708,6 +727,7 @@ class RadiographySnapshotBuilder
                 ];
             }
         } else {
+            // Fallback: compute per-employee NOI aggregates directly (SQL comparison is accent-insensitive)
             $noiRows = DB::table('fact_noi_movements as n')
                 ->join('employees as e', 'n.employee_id', '=', 'e.id')
                 ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period) {
@@ -719,7 +739,9 @@ class RadiographySnapshotBuilder
                 ->whereNotNull('n.employee_id')
                 ->selectRaw("
                     e.normalized_name as norm_key, e.full_name as name, b.name as branch,
-                    SUM(CASE WHEN LOWER(COALESCE(n.concept_type,''))='percepcion' AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%bono%' THEN n.amount ELSE 0 END) as pagos,
+                    SUM(CASE WHEN LOWER(COALESCE(n.concept_type,''))='percepcion' AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%bono%' THEN n.amount
+                             WHEN LOWER(COALESCE(n.concept,'')) LIKE '%comisi%' THEN n.amount
+                             ELSE 0 END) as pagos,
                     SUM(CASE WHEN LOWER(COALESCE(n.concept_type,''))='percepcion' AND LOWER(COALESCE(n.concept,'')) LIKE '%bono%' THEN n.amount ELSE 0 END) as bonos,
                     SUM(CASE WHEN LOWER(COALESCE(n.concept_type,'')) IN ('deduccion','descuento') THEN n.amount ELSE 0 END) as descuentos
                 ")
@@ -857,16 +879,109 @@ class RadiographySnapshotBuilder
 
     // ── INCIDENTS ────────────────────────────────────────────────────────────
 
-    private function buildIncidents(PeriodSummary $summary): array
+    private function buildIncidents(PeriodSummary $summary, Period $period): array
     {
         if (!$summary->relationLoaded('incidents')) {
             $summary->load('incidents');
         }
-        return $summary->incidents->map(fn ($i) => [
+
+        $stored = $summary->incidents->map(fn ($i) => [
             'type'     => $i->type,
             'severity' => $i->severity,
             'message'  => $i->message,
         ])->values()->all();
+
+        $live = $this->detectLiveIncidents($period);
+
+        // Merge: stored incidents first, then live ones not already present
+        $storedTypes = array_column($stored, 'type');
+        foreach ($live as $inc) {
+            if (!in_array($inc['type'], $storedTypes, true)) {
+                $stored[] = $inc;
+            }
+        }
+
+        return $stored;
+    }
+
+    private function detectLiveIncidents(Period $period): array
+    {
+        $items = [];
+
+        // Employees in NOI without branch assignment
+        $sinSucursal = DB::table('fact_noi_movements as n')
+            ->join('employees as e', 'n.employee_id', '=', 'e.id')
+            ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period) {
+                $j->on('eba.employee_id', '=', 'n.employee_id')
+                  ->whereIn('eba.period_id', array_merge([$period->id], $this->dataIds));
+            })
+            ->whereIn('n.period_id', $this->dataIds)
+            ->whereNotNull('n.employee_id')
+            ->whereNull('eba.branch_id')
+            ->distinct('n.employee_id')
+            ->count('n.employee_id');
+
+        if ($sinSucursal > 0) {
+            $items[] = [
+                'type'     => 'empleados_sin_sucursal',
+                'severity' => 'warning',
+                'message'  => "{$sinSucursal} empleado(s) del archivo NOI no tienen sucursal asignada. Asígnalos en el módulo Empleados para que aparezcan correctamente en el reporte.",
+            ];
+        }
+
+        // Promoter names in placements that do not match any employee in employees table
+        $gestoresSinMatch = DB::table('fact_placements as p')
+            ->whereIn('p.period_id', $this->dataIds)
+            ->whereNotNull('p.normalized_promoter_name')
+            ->where('p.normalized_promoter_name', '<>', '')
+            ->whereNotExists(function ($q) {
+                $q->from('employees as e')
+                  ->whereColumn('e.normalized_name', 'p.normalized_promoter_name');
+            })
+            ->distinct('p.normalized_promoter_name')
+            ->count('p.normalized_promoter_name');
+
+        if ($gestoresSinMatch > 0) {
+            $items[] = [
+                'type'     => 'gestores_sin_match_noi',
+                'severity' => 'warning',
+                'message'  => "{$gestoresSinMatch} gestor(es) de ministraciones no coinciden con ningún empleado del archivo NOI. Revisa la normalización de nombres.",
+            ];
+        }
+
+        // Portfolios with no product name
+        $sinProducto = DB::table('fact_portfolios')
+            ->whereIn('period_id', $this->dataIds)
+            ->where(fn ($q) => $q->whereNull('product_name')->orWhere('product_name', ''))
+            ->count();
+
+        if ($sinProducto > 0) {
+            $items[] = [
+                'type'     => 'cartera_sin_producto',
+                'severity' => 'warning',
+                'message'  => "{$sinProducto} contrato(s) de cartera no tienen producto identificado.",
+            ];
+        }
+
+        // Summary cartera vs bucket sum mismatch (indicates stale global_metrics)
+        $bucketSum = (float) DB::table('fact_portfolios')
+            ->whereIn('period_id', $this->dataIds)
+            ->where('days_past_due', '>', 0)
+            ->sum('balance');
+
+        $globalVencida = (float) DB::table('fact_portfolios')
+            ->whereIn('period_id', $this->dataIds)
+            ->sum('past_due_balance');
+
+        if ($bucketSum > 0 && $globalVencida === 0.0) {
+            $items[] = [
+                'type'     => 'cartera_vencida_recalculada',
+                'severity' => 'info',
+                'message'  => 'La cartera vencida fue calculada usando días vencidos porque la columna de saldo vencido estaba vacía.',
+            ];
+        }
+
+        return $items;
     }
 
     // ── CHART DATA ───────────────────────────────────────────────────────────

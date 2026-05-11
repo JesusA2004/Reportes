@@ -401,6 +401,14 @@ class PeriodRadiographyService
             ->whereIn('period_id', $dataIds)
             ->sum('past_due_balance');
 
+        // Fallback: use days_past_due when past_due_balance is all zero
+        if ($carteraVencida === 0.0 && $valorCartera > 0) {
+            $carteraVencida = (float) Portfolio::query()
+                ->whereIn('period_id', $dataIds)
+                ->where('days_past_due', '>', 0)
+                ->sum('balance');
+        }
+
         if ($valorCartera > 0 && $carteraVencida > ($valorCartera * 0.25)) {
             $items[] = [
                 'type'     => 'mora_alta',
@@ -410,6 +418,48 @@ class PeriodRadiographyService
                     'valor_cartera'   => $valorCartera,
                     'cartera_vencida' => $carteraVencida,
                 ],
+            ];
+        }
+
+        // Employees in NOI without branch assignment
+        $sinSucursal = DB::table('fact_noi_movements as n')
+            ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period, $dataIds) {
+                $j->on('eba.employee_id', '=', 'n.employee_id')
+                  ->whereIn('eba.period_id', array_merge([$period->id], $dataIds));
+            })
+            ->whereIn('n.period_id', $dataIds)
+            ->whereNotNull('n.employee_id')
+            ->whereNull('eba.branch_id')
+            ->distinct('n.employee_id')
+            ->count('n.employee_id');
+
+        if ($sinSucursal > 0) {
+            $items[] = [
+                'type'     => 'empleados_sin_sucursal',
+                'severity' => 'warning',
+                'message'  => "{$sinSucursal} empleado(s) del NOI no tienen sucursal asignada. Sus datos no aparecen en reportes por sucursal.",
+                'context'  => ['count' => $sinSucursal],
+            ];
+        }
+
+        // Promoter names in placements with no matching employee in employees table
+        $gestoresSinMatch = DB::table('fact_placements as p')
+            ->whereIn('p.period_id', $dataIds)
+            ->whereNotNull('p.normalized_promoter_name')
+            ->where('p.normalized_promoter_name', '<>', '')
+            ->whereNotExists(function ($q) {
+                $q->from('employees as e')
+                  ->whereColumn('e.normalized_name', 'p.normalized_promoter_name');
+            })
+            ->distinct('p.normalized_promoter_name')
+            ->count('p.normalized_promoter_name');
+
+        if ($gestoresSinMatch > 0) {
+            $items[] = [
+                'type'     => 'gestores_sin_match_noi',
+                'severity' => 'warning',
+                'message'  => "{$gestoresSinMatch} gestor(es) de ministraciones no coinciden con ningún empleado NOI. Revisa los nombres en ambos archivos.",
+                'context'  => ['count' => $gestoresSinMatch],
             ];
         }
 

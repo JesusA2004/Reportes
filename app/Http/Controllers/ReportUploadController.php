@@ -203,7 +203,7 @@ class ReportUploadController extends Controller {
                 'branch_name' => $e->employeeBranchAssignments->first()?->branch?->name,
             ]);
 
-        return Inertia::render('historico-general/index', [
+        return Inertia::render('Historico-General/index', [
             'periods'         => $periods,
             'sources'         => $sources,
             'groupedUploads'  => $groupedUploads,
@@ -602,9 +602,10 @@ class ReportUploadController extends Controller {
         if ($radiographyReady && $summary) {
             $gm = $summary->global_metrics ?? [];
 
-            // If stored global_metrics are all zero, recompute inline from fact tables
-            // This happens when the radiography was generated before the period-ID merge fix
-            if (($gm['colocacion_total'] ?? 0) == 0 && ($gm['valor_cartera_total'] ?? 0) == 0) {
+            $needsRecompute = (($gm['colocacion_total'] ?? 0) == 0 && ($gm['valor_cartera_total'] ?? 0) == 0)
+                || ($gm['recuperacion_total'] ?? 0) == 0;
+
+            if ($needsRecompute) {
                 $period = \App\Models\Period::find($summary->period_id);
                 if ($period) {
                     $allPeriodsLocal = \App\Models\Period::all();
@@ -614,26 +615,69 @@ class ReportUploadController extends Controller {
                     }
                     $dataIdsLocal = array_values(array_unique(array_merge($weeklyIdsLocal, [$period->id])));
 
-                    $ct = (float) \Illuminate\Support\Facades\DB::table('fact_portfolios')->whereIn('period_id', $dataIdsLocal)->sum('balance');
-                    $cv = (float) \Illuminate\Support\Facades\DB::table('fact_portfolios')->whereIn('period_id', $dataIdsLocal)->where('days_past_due', '>', 0)->sum('balance');
-                    $gm['valor_cartera_total']   = $ct;
-                    $gm['cartera_vencida_total'] = $cv;
-                    $gm['mora_porcentaje']       = $ct > 0 ? round($cv / $ct * 100, 2) : 0;
-                    $gm['colocacion_total']      = (float) \Illuminate\Support\Facades\DB::table('fact_placements')->whereIn('period_id', $dataIdsLocal)->sum('amount');
-                    $gm['recuperacion_total']    = (float) \Illuminate\Support\Facades\DB::table('fact_recoveries')->whereIn('period_id', $dataIdsLocal)->sum('total_amount');
-                    $gm['gasto_total']           = (float) \Illuminate\Support\Facades\DB::table('fact_expenses')->whereIn('period_id', $dataIdsLocal)->sum('amount');
-                    // Payroll from consolidated table (uses period->id directly)
+                    if (($gm['colocacion_total'] ?? 0) == 0) {
+                        $gm['colocacion_total'] = (float) \Illuminate\Support\Facades\DB::table('fact_placements')->whereIn('period_id', $dataIdsLocal)->sum('amount');
+                    }
+                    if (($gm['recuperacion_total'] ?? 0) == 0) {
+                        $gm['recuperacion_total'] = (float) \Illuminate\Support\Facades\DB::table('fact_recoveries')->whereIn('period_id', $dataIdsLocal)->sum('total_amount');
+                    }
+                    if (($gm['valor_cartera_total'] ?? 0) == 0) {
+                        $ct = (float) \Illuminate\Support\Facades\DB::table('fact_portfolios')->whereIn('period_id', $dataIdsLocal)->sum('balance');
+                        $cv = (float) \Illuminate\Support\Facades\DB::table('fact_portfolios')->whereIn('period_id', $dataIdsLocal)->where('days_past_due', '>', 0)->sum('balance');
+                        $gm['valor_cartera_total']   = $ct;
+                        $gm['cartera_vencida_total'] = $cv;
+                        $gm['mora_porcentaje']       = $ct > 0 ? round($cv / $ct * 100, 2) : 0;
+                    }
+                    if (($gm['gasto_total'] ?? 0) == 0) {
+                        $gm['gasto_total'] = (float) \Illuminate\Support\Facades\DB::table('fact_expenses')->whereIn('period_id', $dataIdsLocal)->sum('amount');
+                    }
+                }
+            }
+
+            // Always recompute payroll inline if pagos_total is 0
+            if (($gm['pagos_total'] ?? 0) == 0) {
+                $periodForPayroll = isset($period) ? $period : \App\Models\Period::find($summary->period_id);
+                if ($periodForPayroll) {
                     $mes = \Illuminate\Support\Facades\DB::table('fact_period_employee_summary')
-                        ->where('period_id', $period->id)
-                        ->selectRaw('COUNT(*) as cnt, SUM(total_payments) as pagos, SUM(net_amount) as neto')
+                        ->where('period_id', $periodForPayroll->id)
+                        ->selectRaw('COUNT(*) as cnt, SUM(total_payments) as pagos, SUM(total_bonuses) as bonos, SUM(net_amount) as neto')
                         ->first();
-                    if ((int)($mes?->cnt ?? 0) > 0) {
+                    $mesPagos = (float)($mes?->pagos ?? 0) + (float)($mes?->bonos ?? 0);
+                    if ((int)($mes?->cnt ?? 0) > 0 && $mesPagos > 0) {
                         $gm['total_empleados'] = (int)$mes->cnt;
                         $gm['pagos_total']     = (float)$mes->pagos;
                         $gm['neto_total']      = (float)$mes->neto;
                     } else {
-                        $gm['total_empleados'] = (int) \Illuminate\Support\Facades\DB::table('fact_noi_movements')
-                            ->whereIn('period_id', $dataIdsLocal)->whereNotNull('employee_id')->distinct('employee_id')->count('employee_id');
+                        // Fallback via NOI
+                        if (!isset($dataIdsLocal)) {
+                            $allPeriodsLocal2 = \App\Models\Period::all();
+                            $wIds = $periodForPayroll->resolveBaseWeeklyIds($allPeriodsLocal2);
+                            $dataIdsLocal = empty($wIds) ? [$periodForPayroll->id] : array_values(array_unique(array_merge($wIds, [$periodForPayroll->id])));
+                        }
+                        $noiPagos = (float) \Illuminate\Support\Facades\DB::table('fact_noi_movements')
+                            ->whereIn('period_id', $dataIdsLocal)
+                            ->whereNotNull('employee_id')
+                            ->whereRaw("LOWER(COALESCE(concept_type,'')) = 'percepcion'")
+                            ->whereRaw("LOWER(COALESCE(concept,'')) NOT LIKE '%bono%'")
+                            ->sum('amount');
+                        $noiComisiones = (float) \Illuminate\Support\Facades\DB::table('fact_noi_movements')
+                            ->whereIn('period_id', $dataIdsLocal)
+                            ->whereNotNull('employee_id')
+                            ->whereRaw("LOWER(COALESCE(concept,'')) LIKE '%comisi%'")
+                            ->sum('amount');
+                        if ($noiPagos + $noiComisiones > 0) {
+                            $gm['pagos_total'] = $noiPagos + $noiComisiones;
+                            $noiDesc = (float) \Illuminate\Support\Facades\DB::table('fact_noi_movements')
+                                ->whereIn('period_id', $dataIdsLocal)
+                                ->whereNotNull('employee_id')
+                                ->whereRaw("LOWER(COALESCE(concept_type,'')) IN ('deduccion','descuento')")
+                                ->sum('amount');
+                            $gm['neto_total'] = $gm['pagos_total'] - $noiDesc;
+                        }
+                        if (($gm['total_empleados'] ?? 0) == 0) {
+                            $gm['total_empleados'] = (int) \Illuminate\Support\Facades\DB::table('fact_noi_movements')
+                                ->whereIn('period_id', $dataIdsLocal)->whereNotNull('employee_id')->distinct('employee_id')->count('employee_id');
+                        }
                     }
                 }
             }

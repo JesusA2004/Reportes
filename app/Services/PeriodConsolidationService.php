@@ -140,11 +140,16 @@ class PeriodConsolidationService
 
     private function isPayment(NoiMovement $movement): bool
     {
-        $type = mb_strtolower((string) ($movement->concept_type ?? ''));
+        $type    = $this->normalizeConceptType((string) ($movement->concept_type ?? ''));
         $concept = mb_strtolower((string) ($movement->concept ?? ''));
 
         if ($type === 'percepcion') {
             return !str_contains($concept, 'bono');
+        }
+
+        // Comisiones cuentan como pago del gestor aunque concept_type sea null/desconocido
+        if (str_contains($concept, 'comisi')) {
+            return true;
         }
 
         return false;
@@ -152,7 +157,7 @@ class PeriodConsolidationService
 
     private function isBonus(NoiMovement $movement): bool
     {
-        $type = mb_strtolower((string) ($movement->concept_type ?? ''));
+        $type    = $this->normalizeConceptType((string) ($movement->concept_type ?? ''));
         $concept = mb_strtolower((string) ($movement->concept ?? ''));
 
         return $type === 'percepcion' && str_contains($concept, 'bono');
@@ -160,8 +165,18 @@ class PeriodConsolidationService
 
     private function isDiscount(NoiMovement $movement): bool
     {
-        $type = mb_strtolower((string) ($movement->concept_type ?? ''));
+        $type = $this->normalizeConceptType((string) ($movement->concept_type ?? ''));
 
         return in_array($type, ['deduccion', 'descuento'], true);
+    }
+
+    private function normalizeConceptType(string $type): string
+    {
+        $type = mb_strtolower(trim($type));
+        return str_replace(
+            ['á', 'é', 'í', 'ó', 'ú', 'ü', 'ñ'],
+            ['a', 'e', 'i', 'o', 'u', 'u', 'n'],
+            $type,
+        );
     }
 }

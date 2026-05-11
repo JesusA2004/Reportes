@@ -51,7 +51,6 @@ const filteredEmp = computed(() => {
         const q = searchEmp.value.trim().toLowerCase()
         rows = rows.filter((r: any) =>
             (r.name ?? '').toLowerCase().includes(q) ||
-            (r.code ?? '').toLowerCase().includes(q) ||
             (r.branch ?? '').toLowerCase().includes(q)
         )
     }
@@ -407,9 +406,7 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                 <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
                                     <tr>
                                         <th class="px-3 py-3 text-left sticky left-0 bg-slate-50">Empleado / Gestor</th>
-                                        <th class="px-3 py-3 text-left">Código</th>
                                         <th class="px-3 py-3 text-left">Sucursal</th>
-                                        <th class="px-3 py-3 text-left">Ruta</th>
                                         <th class="px-3 py-3 text-right">Pagos</th>
                                         <th class="px-3 py-3 text-right">Bonos</th>
                                         <th class="px-3 py-3 text-right">Descuentos</th>
@@ -426,11 +423,9 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                 <tbody>
                                     <tr v-for="e in empVisible" :key="e.name + e.branch" class="border-t hover:bg-slate-50">
                                         <td class="px-3 py-2 font-bold sticky left-0 bg-white whitespace-nowrap">{{ e.name }}</td>
-                                        <td class="px-3 py-2 text-slate-500">{{ e.code || '—' }}</td>
                                         <td class="px-3 py-2 text-slate-600 whitespace-nowrap">
                                             <span :class="e.branch === 'Sin sucursal' ? 'text-amber-600 font-semibold' : ''">{{ e.branch }}</span>
                                         </td>
-                                        <td class="px-3 py-2 text-slate-500">{{ e.route || '—' }}</td>
                                         <td class="px-3 py-2 text-right">{{ e.pagos > 0 ? moneyFull(e.pagos) : '—' }}</td>
                                         <td class="px-3 py-2 text-right">{{ e.bonos > 0 ? moneyFull(e.bonos) : '—' }}</td>
                                         <td class="px-3 py-2 text-right">{{ e.descuentos > 0 ? moneyFull(e.descuentos) : '—' }}</td>
@@ -600,9 +595,8 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                             <div class="bg-slate-50 border-b px-4 py-2 text-xs font-bold uppercase tracking-wider text-slate-500">Por empleado / gestor</div>
                             <table class="w-full text-xs">
                                 <tbody>
-                                    <tr v-for="e in gastosByEmployee" :key="e.empleado + e.sucursal" class="border-b last:border-0 hover:bg-slate-50">
+                                    <tr v-for="e in gastosByEmployee" :key="e.empleado" class="border-b last:border-0 hover:bg-slate-50">
                                         <td class="px-4 py-2 font-semibold text-slate-700">{{ e.empleado }}</td>
-                                        <td class="px-4 py-2 text-slate-500">{{ e.sucursal }}</td>
                                         <td class="px-4 py-2 text-right font-black">{{ moneyFull(e.total) }}</td>
                                     </tr>
                                 </tbody>
