@@ -75,6 +75,12 @@ class RadiographySnapshotBuilder
         $empGestores       = $empGestoresResult['rows'];
         $mergedIncidents   = $empGestoresResult['merged_incidents'];
 
+        $interbranchLoans     = $this->buildInterbranchLoans($period);
+        $mergedIncidents      = array_merge($mergedIncidents, $interbranchLoans['incidents'] ?? []);
+
+        $payrollByBranchResult = $this->buildPayrollByBranchConceptResolved($period);
+        $mergedIncidents       = array_merge($mergedIncidents, $payrollByBranchResult['incidents'] ?? []);
+
         // Reconcile payroll total: if buildPayroll returned 0 but employees_gestores has pagos, derive from it
         if (($payroll['pagos'] + $payroll['bonos']) == 0.0) {
             $egPagos = collect($empGestores)->sum('pagos');
@@ -121,9 +127,9 @@ class RadiographySnapshotBuilder
                 'portfolio_buckets'          => $this->buildPortfolioBuckets($period),
                 'expenses_detail'            => $this->buildExpensesDetail($period),
                 'incidents'                  => $this->buildIncidents($summary, $period, $mergedIncidents),
-                'payroll_by_branch_concept'  => $this->buildPayrollByBranchConcept($period),
+                'payroll_by_branch_concept'  => $payrollByBranchResult['data'],
                 'expenses_matrix'            => $this->buildExpensesMatrix($period),
-                'interbranch_loans'          => $this->buildInterbranchLoans($period),
+                'interbranch_loans'          => $interbranchLoans,
                 'recovery_detail'            => $this->buildRecoveryDetail($period),
                 'portfolio_by_branch_product' => $this->buildPortfolioByBranchProduct($period),
                 'mora_by_branch'             => $this->buildMoraByBranch($period),
@@ -443,9 +449,10 @@ class RadiographySnapshotBuilder
 
     private function buildBranches(Period $period, PeriodSummary $summary): array
     {
-        $realBranchNames = $this->resolveRealBranchNormalizedNames();
+        $realBranchNames  = $this->resolveRealBranchNormalizedNames();
+        $recoveryByBranch = $this->getRecoveryByRealBranch();
 
-        $fromSummary = $summary->branchSummaries->map(function (PeriodBranchSummary $bs) use ($period, $realBranchNames) {
+        $fromSummary = $summary->branchSummaries->map(function (PeriodBranchSummary $bs) use ($period, $realBranchNames, $recoveryByBranch) {
             $branch  = $this->resolveBranch($bs->branch_id);
             $m       = $bs->metrics ?? [];
             $cartera = (float)($m['valor_cartera'] ?? 0);
@@ -463,11 +470,16 @@ class RadiographySnapshotBuilder
                     ->where('days_past_due', '>', 0)
                     ->sum('balance');
             }
-            $mora = $cartera > 0 ? round($vencida / $cartera * 100, 2) : (float)($m['mora_porcentaje'] ?? 0);
+            $mora   = $cartera > 0 ? round($vencida / $cartera * 100, 2) : (float)($m['mora_porcentaje'] ?? 0);
+            $nombre = $branch?->name ?? "Sucursal #{$bs->branch_id}";
+            // Real recovery: map all route-level recoveries to this real branch
+            $recuperacion = $recoveryByBranch[$this->normalizeText($nombre)]
+                ?? (float)($m['recuperacion_total'] ?? 0);
+
             return [
                 'branch_id'    => $bs->branch_id,
-                'nombre'       => $branch?->name ?? "Sucursal #{$bs->branch_id}",
-                'recuperacion' => (float)($m['recuperacion_total'] ?? 0),
+                'nombre'       => $nombre,
+                'recuperacion' => $recuperacion,
                 'colocacion'   => (float)($m['colocacion_total'] ?? 0),
                 'cartera'      => $cartera,
                 'vencida'      => $vencida,
@@ -482,13 +494,12 @@ class RadiographySnapshotBuilder
 
         // Fallback: build from raw tables, filtered to real branches only
         $branchIds = collect()
-            ->merge(Recovery::query()->whereIn('period_id', $this->dataIds)->pluck('branch_id'))
             ->merge(Placement::query()->whereIn('period_id', $this->dataIds)->pluck('branch_id'))
             ->merge(Portfolio::query()->whereIn('period_id', $this->dataIds)->pluck('branch_id'))
             ->merge(Expense::query()->whereIn('period_id', $this->dataIds)->pluck('branch_id'))
             ->filter()->unique()->values();
 
-        return $branchIds->map(function ($bId) use ($realBranchNames) {
+        return $branchIds->map(function ($bId) use ($realBranchNames, $recoveryByBranch) {
             $branch  = $this->resolveBranch($bId);
 
             // Skip routes/offices
@@ -496,12 +507,17 @@ class RadiographySnapshotBuilder
                 return null;
             }
 
+            $nombre  = $branch?->name ?? "Sucursal #{$bId}";
             $cartera = (float) Portfolio::query()->whereIn('period_id', $this->dataIds)->where('branch_id', $bId)->sum('balance');
             $vencida = (float) Portfolio::query()->whereIn('period_id', $this->dataIds)->where('branch_id', $bId)->where('days_past_due', '>', 0)->sum('balance');
+            // Use mapped recovery; fall back to direct branch query only if not found in map
+            $recuperacion = $recoveryByBranch[$this->normalizeText($nombre)]
+                ?? (float) Recovery::query()->whereIn('period_id', $this->dataIds)->where('branch_id', $bId)->sum('total_amount');
+
             return [
                 'branch_id'    => $bId,
-                'nombre'       => $branch?->name ?? "Sucursal #{$bId}",
-                'recuperacion' => (float) Recovery::query()->whereIn('period_id', $this->dataIds)->where('branch_id', $bId)->sum('total_amount'),
+                'nombre'       => $nombre,
+                'recuperacion' => $recuperacion,
                 'colocacion'   => (float) Placement::query()->whereIn('period_id', $this->dataIds)->where('branch_id', $bId)->sum('amount'),
                 'cartera'      => $cartera,
                 'vencida'      => $vencida,
@@ -509,6 +525,36 @@ class RadiographySnapshotBuilder
                 'gastos'       => (float) Expense::query()->whereIn('period_id', $this->dataIds)->where('branch_id', $bId)->sum('amount'),
             ];
         })->filter()->sortByDesc('cartera')->values()->all();
+    }
+
+    /**
+     * Aggregates fact_recoveries by real branch, mapping route/office branch names
+     * to their parent real sucursal via BranchResolverService::resolveRealBranchFromRoute().
+     * Returns [normalizedRealBranchName => totalRecovery].
+     */
+    private function getRecoveryByRealBranch(): array
+    {
+        $resolver = app(BranchResolverService::class);
+
+        $rows = DB::table('fact_recoveries as r')
+            ->join('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $this->dataIds)
+            ->selectRaw('b.name as branch_name, SUM(r.total_amount) as total')
+            ->groupBy('r.branch_id', 'b.name')
+            ->get();
+
+        $byRealBranch = [];
+        foreach ($rows as $r) {
+            // Skip routes that can't be mapped to a real branch — never expose route names
+            $real = $resolver->resolveRealBranchFromRoute($r->branch_name);
+            if (!$real) {
+                continue;
+            }
+            $key = $this->normalizeText($real);
+            $byRealBranch[$key] = ($byRealBranch[$key] ?? 0.0) + (float) $r->total;
+        }
+
+        return $byRealBranch;
     }
 
     // ── PROMOTERS ──────────────────────────────────────────────────────────
@@ -1190,33 +1236,163 @@ class RadiographySnapshotBuilder
      * NOI movements grouped as: branch → concept → total amount.
      * Used for the NOMINAS Excel tab.
      */
-    private function buildPayrollByBranchConcept(Period $period): array
+    private function buildPayrollByBranchConceptResolved(Period $period): array
     {
-        $rows = DB::table('fact_noi_movements as n')
-            ->join('employees as e', 'n.employee_id', '=', 'e.id')
-            ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period) {
-                $j->on('eba.employee_id', '=', 'n.employee_id')
-                  ->where('eba.period_id', '=', $period->id);
-            })
+        $resolver = app(BranchResolverService::class);
+
+        // ── 1. EBA map: employee_id → real branch (using all dataIds, not just monthly) ──
+        //    LEFT JOIN so employees with orphaned/empty branch_id are still found.
+        //    For each employee, prefer an EBA that resolves to a real branch.
+        $ebaMap = [];
+        DB::table('employee_branch_assignments as eba')
             ->leftJoin('branches as b', 'eba.branch_id', '=', 'b.id')
+            ->whereIn('eba.period_id', $this->dataIds)
+            ->select('eba.employee_id', 'b.name as branch')
+            ->get()
+            ->each(function ($r) use (&$ebaMap, $resolver) {
+                $empId = $r->employee_id;
+                if (!$r->branch) return; // orphaned/empty branch_id → skip, fall to activity lookup
+                $real     = $resolver->resolveRealBranchFromRoute($r->branch);
+                $resolved = $real ?? $r->branch;
+                // Keep if not set yet, or upgrade from non-real to real branch
+                if (!isset($ebaMap[$empId]) || (!$resolver->isRealReportBranch($ebaMap[$empId]) && $real)) {
+                    $ebaMap[$empId] = $resolved;
+                }
+            });
+
+        // ── 2. Activity lookup: normalized name → real branch from placements/portfolios/recoveries ──
+        $activityMap = $this->buildPayrollActivityLookup($resolver);
+
+        // ── 3. NOI rows pre-aggregated by (employee, concept) ────────────────
+        $noiRows = DB::table('fact_noi_movements as n')
+            ->join('employees as e', 'n.employee_id', '=', 'e.id')
             ->whereIn('n.period_id', $this->dataIds)
             ->whereNotNull('n.employee_id')
             ->selectRaw("
-                COALESCE(b.name, 'Sin asignar') as branch,
+                n.employee_id,
+                e.full_name,
                 COALESCE(n.concept, n.concept_type, 'Sin concepto') as concept,
                 SUM(n.amount) as total
             ")
-            ->groupBy('b.name', 'n.concept', 'n.concept_type')
-            ->orderBy('b.name')
-            ->orderByDesc('total')
+            ->groupBy('n.employee_id', 'e.full_name', 'n.concept', 'n.concept_type')
             ->get();
 
-        $result = [];
-        foreach ($rows as $row) {
-            $result[$row->branch][$row->concept] = (float) $row->total;
+        // ── 4. Canonical map for alias resolution ────────────────────────────
+        $employeeNorms = $noiRows->pluck('full_name')->unique()
+            ->map(fn ($n) => $this->canonicalizer->normalize($n))->values()->all();
+        $allNorms     = array_values(array_unique(array_merge($employeeNorms, array_keys($activityMap))));
+        $canonicalMap = $this->canonicalizer->buildCanonicalMap($allNorms, $employeeNorms);
+
+        // ── 5. Resolve branch per row ─────────────────────────────────────────
+        $data     = [];
+        $sinTotal = 0.0;
+        $sinCount = [];
+
+        foreach ($noiRows as $row) {
+            // Priority A: EBA (manual assignment)
+            $branch = $ebaMap[$row->employee_id] ?? null;
+
+            // Priority B/C/D: activity lookup by norm, canonical, or any alias
+            if (!$branch) {
+                $norm      = $this->canonicalizer->normalize($row->full_name ?? '');
+                $canonical = $canonicalMap[$norm] ?? $norm;
+                $branch    = $activityMap[$norm] ?? $activityMap[$canonical] ?? null;
+
+                if (!$branch) {
+                    foreach ($canonicalMap as $alias => $can) {
+                        if ($can === $canonical && isset($activityMap[$alias])) {
+                            $branch = $activityMap[$alias];
+                            break;
+                        }
+                    }
+                }
+
+                // Resolve route → real branch; discard if not resolvable
+                if ($branch) {
+                    $branch = $resolver->resolveRealBranchFromRoute($branch);
+                }
+            }
+
+            $branchKey  = $branch ?? 'Sin asignar';
+            $conceptKey = $row->concept ?? 'Sin concepto';
+            $amount     = (float) $row->total;
+
+            $data[$branchKey][$conceptKey] = ($data[$branchKey][$conceptKey] ?? 0.0) + $amount;
+
+            if ($branchKey === 'Sin asignar') {
+                $sinTotal                         += $amount;
+                $sinCount[$row->employee_id]       = true;
+            }
         }
-        ksort($result);
-        return $result;
+
+        ksort($data);
+
+        // ── 6. Incident for truly unresolvable employees (UI only) ───────────
+        $incidents  = [];
+        $unresolved = count($sinCount);
+        if ($unresolved > 0) {
+            $incidents[] = [
+                'type'     => 'nomina_sin_sucursal',
+                'severity' => 'warning',
+                'message'  => "Hay {$unresolved} colaborador(es) de NOI pendientes de asignar a sucursal. "
+                            . 'Monto sin asignar: $' . number_format($sinTotal, 2) . '. '
+                            . 'Revísalos en el módulo Empleados / Gestores.',
+            ];
+        }
+
+        return ['data' => $data, 'incidents' => $incidents];
+    }
+
+    private function buildPayrollActivityLookup(BranchResolverService $resolver): array
+    {
+        $lookup = [];
+
+        DB::table('fact_placements as p')
+            ->join('branches as b', 'p.branch_id', '=', 'b.id')
+            ->whereIn('p.period_id', $this->dataIds)
+            ->whereNotNull('p.promoter_name')
+            ->select('p.promoter_name', 'b.name as branch')
+            ->distinct()
+            ->get()
+            ->each(function ($row) use (&$lookup, $resolver) {
+                $norm = $this->canonicalizer->normalize($row->promoter_name);
+                $real = $resolver->resolveRealBranchFromRoute($row->branch);
+                if ($real && !isset($lookup[$norm])) {
+                    $lookup[$norm] = $real;
+                }
+            });
+
+        DB::table('fact_portfolios as po')
+            ->join('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $this->dataIds)
+            ->whereNotNull('po.promoter_name')
+            ->select('po.promoter_name', 'b.name as branch')
+            ->distinct()
+            ->get()
+            ->each(function ($row) use (&$lookup, $resolver) {
+                $norm = $this->canonicalizer->normalize($row->promoter_name);
+                $real = $resolver->resolveRealBranchFromRoute($row->branch);
+                if ($real && !isset($lookup[$norm])) {
+                    $lookup[$norm] = $real;
+                }
+            });
+
+        DB::table('fact_recoveries as r')
+            ->join('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $this->dataIds)
+            ->whereNotNull('r.promoter_name')
+            ->select('r.promoter_name', 'b.name as branch')
+            ->distinct()
+            ->get()
+            ->each(function ($row) use (&$lookup, $resolver) {
+                $norm = $this->canonicalizer->normalize($row->promoter_name);
+                $real = $resolver->resolveRealBranchFromRoute($row->branch);
+                if ($real && !isset($lookup[$norm])) {
+                    $lookup[$norm] = $real;
+                }
+            });
+
+        return $lookup;
     }
 
     /**
@@ -1283,13 +1459,19 @@ class RadiographySnapshotBuilder
     }
 
     /**
-     * Interbranch loan expenses (FONDEO / PRESTAMO INTERSUCURSAL category).
+     * Interbranch loan expenses — cross-references PDF Lendus with Excel complementario.
+     * PDF is the primary source; Excel supplies the destination branch via raw_payload.branch_to_detected.
      * Used for the P. INTERSUC. Excel tab.
      */
     private function buildInterbranchLoans(Period $period): array
     {
-        $rows = DB::table('fact_expenses as e')
+        $resolver = app(BranchResolverService::class);
+
+        // ── A: PDF Lendus intersucursal records (individual rows) ────────────
+        $pdfRows = DB::table('fact_expenses as e')
             ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
+            ->leftJoin('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+            ->leftJoin('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
             ->whereIn('e.period_id', $this->dataIds)
             ->where(function ($q) {
                 $q->whereRaw("UPPER(COALESCE(e.category,'')) LIKE '%FONDEO%'")
@@ -1297,55 +1479,164 @@ class RadiographySnapshotBuilder
                   ->orWhereRaw("UPPER(COALESCE(e.concept,'')) LIKE '%PRESTAMO INTERSUC%'")
                   ->orWhereRaw("UPPER(COALESCE(e.concept,'')) LIKE '%FONDEO%'");
             })
+            ->where(function ($q) {
+                $q->whereNull('ds.code')
+                  ->orWhereIn('ds.code', ['gastos_lendus', 'gastos']);
+            })
             ->selectRaw("
-                COALESCE(b.name,'Sin sucursal') as branch,
+                e.id,
+                COALESCE(b.name, 'Sin sucursal') as branch,
                 COALESCE(e.concept, e.category, 'Préstamo intersucursal') as concept,
                 e.observations,
                 e.expense_date,
-                SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total,
-                COUNT(*) as cnt
+                COALESCE(NULLIF(e.paid_amount, 0), e.amount) as amount
             ")
-            ->groupBy('e.branch_id', 'b.name', 'e.concept', 'e.category', 'e.observations', 'e.expense_date')
-            ->orderByDesc('total')
+            ->orderBy('e.expense_date')
+            ->orderByDesc('amount')
             ->get();
 
-        $total = $rows->sum('total');
+        // ── B: Excel complementario records ──────────────────────────────────
+        $excelRows = DB::table('fact_expenses as e')
+            ->leftJoin('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+            ->leftJoin('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+            ->whereIn('e.period_id', $this->dataIds)
+            ->where('ds.code', 'gastos_lendus_excel')
+            ->selectRaw("
+                e.id,
+                COALESCE(e.concept, e.category, 'Sin concepto') as concept,
+                e.observations,
+                e.expense_date,
+                COALESCE(NULLIF(e.paid_amount, 0), e.amount) as amount,
+                e.raw_payload
+            ")
+            ->get()
+            ->map(function ($row) {
+                $row->decoded_payload = is_string($row->raw_payload)
+                    ? (json_decode($row->raw_payload, true) ?? [])
+                    : (array)($row->raw_payload ?? []);
+                return $row;
+            })
+            ->all();
 
-        // Build catalog of real branch names to detect receiver branch in text
-        $branchCatalog = [];
-        try {
-            $branchCatalog = array_values(app(BranchResolverService::class)->getCatalog());
-        } catch (\Throwable) {}
+        // Index Excel records by rounded amount for O(1) lookup
+        $excelIndex  = [];
+        $usedExcelIds = [];
+        foreach ($excelRows as $ex) {
+            $key = (int) round((float) $ex->amount);
+            $excelIndex[$key][] = $ex;
+        }
 
+        $detail    = [];
+        $unmatched = [];
+        $incidents = [];
         $fondeaMap = [];
         $recibeMap = [];
-        $detail    = [];
 
-        foreach ($rows as $row) {
-            $fondeaMap[$row->branch] = ($fondeaMap[$row->branch] ?? 0.0) + (float) $row->total;
+        foreach ($pdfRows as $pdfRow) {
+            $pdfAmount = (float) $pdfRow->amount;
+            $pdfDate   = $pdfRow->expense_date
+                ? \Carbon\Carbon::parse($pdfRow->expense_date)
+                : null;
 
-            // Detect receiver branch from observations/concept text
-            $searchText = strtoupper(($row->observations ?? '') . ' ' . $row->concept);
-            $toBranch   = 'No identificada';
-            foreach ($branchCatalog as $brName) {
-                if (str_contains($searchText, strtoupper($brName))) {
-                    $toBranch = $brName;
-                    break;
+            // Resolve from_branch — never expose routes
+            $fromBranch = $resolver->resolveRealBranchFromRoute($pdfRow->branch) ?? 'No identificada';
+
+            // ── Match PDF row against Excel records ───────────────────────
+            $matchedExcel = null;
+            $amtKey       = (int) round($pdfAmount);
+            foreach ([$amtKey, $amtKey - 1, $amtKey + 1] as $key) {
+                if (!isset($excelIndex[$key])) continue;
+                foreach ($excelIndex[$key] as $ex) {
+                    if (in_array($ex->id, $usedExcelIds, true)) continue;
+                    if (!$pdfDate) {
+                        $matchedExcel = $ex;
+                        break 2;
+                    }
+                    $exDate = $ex->expense_date
+                        ? \Carbon\Carbon::parse($ex->expense_date)
+                        : null;
+                    if (!$exDate) {
+                        $matchedExcel = $ex;
+                        break 2;
+                    }
+                    if ($pdfDate->year  === $exDate->year
+                        && $pdfDate->month === $exDate->month
+                        && abs($pdfDate->diffInDays($exDate)) <= 3
+                    ) {
+                        $matchedExcel = $ex;
+                        break 2;
+                    }
                 }
             }
 
-            $recibeMap[$toBranch] = ($recibeMap[$toBranch] ?? 0.0) + (float) $row->total;
+            $toBranch      = 'No identificada';
+            $observation   = $pdfRow->observations ?? '';
+            $justification = '';
+            $source        = 'pdf';
+
+            if ($matchedExcel) {
+                $usedExcelIds[] = $matchedExcel->id;
+                $payload        = $matchedExcel->decoded_payload;
+
+                // 1. Use branch_to_detected set by the Excel importer
+                $toBranchRaw = $payload['branch_to_detected'] ?? null;
+                if ($toBranchRaw) {
+                    $toBranch = $resolver->resolveRealBranchFromRoute($toBranchRaw) ?? $toBranchRaw;
+                }
+
+                // 2. Fallback: pattern-detect from Excel text
+                if ($toBranch === 'No identificada') {
+                    $exText  = implode(' ', array_filter([$matchedExcel->concept, $matchedExcel->observations]));
+                    $detected = $this->detectBranchFromText($exText, $resolver);
+                    if ($detected) $toBranch = $detected;
+                }
+
+                $observation   = $matchedExcel->observations ?? $observation;
+                $justification = $payload['justification'] ?? '';
+                $source        = 'pdf+excel';
+            } else {
+                // No Excel match — try PDF concept/observation text
+                $pdfText  = implode(' ', array_filter([$pdfRow->concept, $pdfRow->observations]));
+                $detected = $this->detectBranchFromText($pdfText, $resolver);
+                if ($detected) $toBranch = $detected;
+            }
+
+            if ($toBranch === 'No identificada') {
+                $unmatched[] = [
+                    'date'        => $pdfDate ? $pdfDate->format('d/m/Y') : '—',
+                    'from_branch' => $fromBranch,
+                    'amount'      => $pdfAmount,
+                    'concept'     => $pdfRow->concept,
+                    'source'      => $source,
+                ];
+                $incidents[] = [
+                    'type'     => 'prestamo_intersucursal_sin_destino',
+                    'severity' => 'warning',
+                    'message'  => sprintf(
+                        'Préstamo intersucursal sin sucursal destino identificada: %s — $%s el %s.',
+                        $fromBranch,
+                        number_format($pdfAmount, 2),
+                        $pdfDate ? $pdfDate->format('d/m/Y') : 'fecha desconocida'
+                    ),
+                ];
+            }
+
+            $fondeaMap[$fromBranch] = ($fondeaMap[$fromBranch] ?? 0.0) + $pdfAmount;
+            $recibeMap[$toBranch]   = ($recibeMap[$toBranch] ?? 0.0) + $pdfAmount;
 
             $detail[] = [
-                'date'        => $row->expense_date
-                    ? \Carbon\Carbon::parse($row->expense_date)->format('d/m/Y') : '—',
-                'from_branch' => $row->branch,
-                'to_branch'   => $toBranch,
-                'amount'      => (float) $row->total,
-                'concept'     => $row->concept,
-                'description' => $row->observations ?? '',
+                'date'          => $pdfDate ? $pdfDate->format('d/m/Y') : '—',
+                'from_branch'   => $fromBranch,
+                'to_branch'     => $toBranch,
+                'amount'        => $pdfAmount,
+                'concept'       => $pdfRow->concept,
+                'observation'   => $observation,
+                'justification' => $justification,
+                'source'        => $source,
             ];
         }
+
+        $total = array_sum(array_column($detail, 'amount'));
 
         $fondeaRows = collect($fondeaMap)
             ->map(fn ($v, $k) => ['branch' => $k, 'total' => $v])
@@ -1356,21 +1647,55 @@ class RadiographySnapshotBuilder
             ->sortByDesc('total')->values()->all();
 
         return [
-            'total'     => (float) $total,
+            'total'     => $total,
             'fondea'    => $fondeaRows,
             'recibe'    => $recibeRows,
             'by_branch' => $fondeaRows,
             'detail'    => $detail,
+            'unmatched' => $unmatched,
+            'incidents' => $incidents,
         ];
     }
 
     /**
+     * Extract a real branch name from free text using pattern matching.
+     * Looks for patterns like "FONDEO A ORIZABA", "PRÉSTAMO PARA TULA", etc.
+     */
+    private function detectBranchFromText(string $text, BranchResolverService $resolver): ?string
+    {
+        if (empty(trim($text))) return null;
+
+        $upper    = mb_strtoupper($text);
+        $patterns = [
+            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/FOND(?:EA|EO)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/INTERSUCURSAL\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $upper, $m)) {
+                $candidate = trim($m[1]);
+                if (strlen($candidate) >= 3) {
+                    $resolved = $resolver->resolveRealBranchFromRoute($candidate);
+                    if ($resolved) return $resolved;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Recovery totals by real branch and by gestor.
+     * Routes/offices are folded into their parent real sucursal.
      * Used for the RECUP. Excel tab.
      */
     private function buildRecoveryDetail(Period $period): array
     {
-        $byBranch = DB::table('fact_recoveries as r')
+        $resolver = app(BranchResolverService::class);
+
+        $rawRows = DB::table('fact_recoveries as r')
             ->join('branches as b', 'r.branch_id', '=', 'b.id')
             ->whereIn('r.period_id', $this->dataIds)
             ->selectRaw('
@@ -1384,18 +1709,37 @@ class RadiographySnapshotBuilder
             ')
             ->groupBy('r.branch_id', 'b.name')
             ->orderByDesc('total')
-            ->get()
-            ->map(fn ($r) => [
-                'branch'      => $r->branch,
-                'capital'     => (float)($r->capital ?? 0),
-                'interest'    => (float)($r->interest ?? 0),
-                'tax'         => (float)($r->tax ?? 0),
-                'charges'     => (float)($r->charges ?? 0),
-                'moratorios'  => 0.0,
-                'total'       => (float)($r->total ?? 0),
-                'operaciones' => (int)($r->operaciones ?? 0),
-            ])
-            ->values()->all();
+            ->get();
+
+        $grouped = [];
+        foreach ($rawRows as $r) {
+            // Never fall back to the raw route name — skip unmapped routes silently
+            $real = $resolver->resolveRealBranchFromRoute($r->branch);
+            if (!$real) {
+                continue;
+            }
+            if (!isset($grouped[$real])) {
+                $grouped[$real] = [
+                    'branch'      => $real,
+                    'capital'     => 0.0,
+                    'interest'    => 0.0,
+                    'tax'         => 0.0,
+                    'charges'     => 0.0,
+                    'moratorios'  => 0.0,
+                    'total'       => 0.0,
+                    'operaciones' => 0,
+                ];
+            }
+            $grouped[$real]['capital']     += (float)($r->capital    ?? 0);
+            $grouped[$real]['interest']    += (float)($r->interest   ?? 0);
+            $grouped[$real]['tax']         += (float)($r->tax        ?? 0);
+            $grouped[$real]['charges']     += (float)($r->charges    ?? 0);
+            $grouped[$real]['total']       += (float)($r->total      ?? 0);
+            $grouped[$real]['operaciones'] += (int)($r->operaciones  ?? 0);
+        }
+
+        usort($grouped, fn ($a, $b) => $b['total'] <=> $a['total']);
+        $byBranch = array_values($grouped);
 
         $byGestor = DB::table('fact_recoveries as r')
             ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')

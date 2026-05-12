@@ -42,14 +42,6 @@ class DataSourceSeeder extends Seeder {
                 'is_required_for_report' => true,
             ],
             [
-                'code'                => 'gastos',
-                'name'                => 'Gastos (legado)',
-                'description'         => 'Fuente genérica de gastos — reemplazada por Gastos Lendus y Gastos ERP',
-                'is_active'           => false,
-                'is_required_for_bd'  => false,
-                'is_required_for_report' => false,
-            ],
-            [
                 'code'                => 'gastos_lendus',
                 'name'                => 'Gastos Lendus (PDF)',
                 'description'         => 'Reporte de gastos operativos exportado desde Lendus en formato PDF',
@@ -64,6 +56,14 @@ class DataSourceSeeder extends Seeder {
                 'is_active'           => true,
                 'is_required_for_bd'  => false,
                 'is_required_for_report' => true,
+            ],
+            [
+                'code'                => 'gastos_lendus_excel',
+                'name'                => 'Gastos Lendus Excel (complementario)',
+                'description'         => 'Excel de gastos Lendus. Complementa al PDF: aporta la sucursal destino en préstamos intersucursales a través de columnas Observación/Justificación.',
+                'is_active'           => true,
+                'is_required_for_bd'  => false,
+                'is_required_for_report' => false,
             ],
         ];
 

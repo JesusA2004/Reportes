@@ -9,12 +9,14 @@ use App\Models\PeriodRadiographyExport;
 use App\Models\PeriodBranchSummary;
 use App\Models\PeriodRadiographyRun;
 use App\Models\PeriodSummary;
+use App\Models\ReportUpload;
 use App\Services\PeriodRadiographyService;
 use App\Services\RadiografiaExportService;
 use App\Services\Radiography\RadiographySnapshotBuilder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Log;
 use Inertia\Inertia;
 use Inertia\Response;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -172,54 +174,132 @@ class MonthlyReportController extends Controller {
 
     public function exportRadiography(Period $period, RadiografiaExportService $service)
     {
+        // Check summary FIRST — a pending old job must NOT block an already-generated report
+        $summary = PeriodSummary::query()
+            ->where('period_id', $period->id)
+            ->where('status', 'generated')
+            ->whereNull('invalidated_at')
+            ->latest('id')
+            ->first();
+
+        if (!$summary) {
+            return response('No existe un consolidado vigente para exportar la radiografía.', 409);
+        }
+
+        // Log if there is a stale queued/running job (informational only)
         $latestRun = PeriodRadiographyRun::query()->where('period_id', $period->id)->latest('id')->first();
         if ($latestRun && in_array($latestRun->status, ['queued', 'running'], true)) {
-            return back()->with('error', 'La Radiografía todavía se está generando. Intenta nuevamente cuando finalice.');
-        }
-        $summary = PeriodSummary::query()->where('period_id', $period->id)->first();
-        if (!$summary || $summary->status !== 'generated' || $summary->invalidated_at) {
-            return back()->with('error', 'No existe un consolidado vigente para exportar la radiografía.');
+            \Illuminate\Support\Facades\Log::warning('exportRadiography: stale job detected but summary exists, proceeding.', [
+                'period_id' => $period->id,
+                'run_id'    => $latestRun->id,
+                'run_status'=> $latestRun->status,
+            ]);
         }
 
-        // Always regenerate — never serve a stale cached file
+        // Build snapshot to check if expense data actually exists before trusting sourceStatus
+        $snapshot = app(RadiographySnapshotBuilder::class)->build($period, $summary);
+
+        $hasExpensesInSnapshot =
+            (float) data_get($snapshot, 'summary.expenses_total', 0) > 0
+            || (float) data_get($snapshot, 'sections.expenses_detail.total', 0) > 0
+            || (float) data_get($snapshot, 'sections.expenses_matrix.grand_total', 0) > 0;
+
         $sources = $this->sourceStatus($period);
-        if (!empty($sources['missing']) || !empty($sources['errors'])) {
-            return back()->with('error', 'No se puede exportar. Faltan fuentes procesadas: ' . implode(', ', array_merge($sources['missing'], $sources['errors'])) . '.');
+
+        Log::info('Excel export source validation', [
+            'period_id'             => $period->id,
+            'period_label'          => $period->label,
+            'missing'               => $sources['missing'] ?? [],
+            'errors'                => $sources['errors'] ?? [],
+            'has_expenses_snapshot' => $hasExpensesInSnapshot,
+            'expenses_total'        => data_get($snapshot, 'summary.expenses_total'),
+            'expenses_detail_total' => data_get($snapshot, 'sections.expenses_detail.total'),
+            'expenses_matrix_total' => data_get($snapshot, 'sections.expenses_matrix.grand_total'),
+        ]);
+
+        $missing = collect($sources['missing'] ?? []);
+        $errors  = collect($sources['errors'] ?? []);
+
+        if ($hasExpensesInSnapshot) {
+            $gastosCodes = [DataSourceCode::Gastos->value, 'GASTOS'];
+            $missing = $missing->reject(fn ($code) => in_array($code, $gastosCodes, true));
+            $errors  = $errors->reject(fn ($code) => in_array($code, $gastosCodes, true));
         }
 
-        $path = $service->export($period);
+        if ($missing->isNotEmpty() || $errors->isNotEmpty()) {
+            return response(
+                'No se puede exportar. Faltan fuentes procesadas: ' . $missing->merge($errors)->implode(', ') . '.',
+                409
+            );
+        }
+
+        try {
+            $path = $service->export($period);
+        } catch (\Throwable $e) {
+            report($e);
+            return response('No se pudo generar el Excel: ' . $e->getMessage(), 500);
+        }
+
+        if (!file_exists($path) || filesize($path) === 0) {
+            return response('El archivo Excel generado está vacío o no existe.', 500);
+        }
+
         PeriodRadiographyExport::query()->create([
             'period_summary_id' => $summary->id,
-            'export_path' => $path,
-            'file_type' => 'excel',
-            'template_version' => config('app.version'),
-            'metadata' => ['period_id' => $period->id, 'period_label' => $period->label],
-            'exported_at' => now(),
-            'exported_by' => auth()->id(),
+            'export_path'       => $path,
+            'file_type'         => 'excel',
+            'template_version'  => config('app.version'),
+            'metadata'          => ['period_id' => $period->id, 'period_label' => $period->label],
+            'exported_at'       => now(),
+            'exported_by'       => auth()->id(),
         ]);
-        return response()->download($path, basename($path));
+
+        return response()->download($path, basename($path), [
+            'Content-Type'  => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma'        => 'no-cache',
+        ]);
     }
 
     public function exportRadiographyPdf(Period $period, RadiografiaExportService $service)
     {
-        $summary = PeriodSummary::query()->where('period_id', $period->id)->first();
-        if (!$summary || $summary->status !== 'generated' || $summary->invalidated_at) {
-            return back()->with('error', 'No existe un PDF vigente para esta radiografía.');
+        $summary = PeriodSummary::query()
+            ->where('period_id', $period->id)
+            ->where('status', 'generated')
+            ->whereNull('invalidated_at')
+            ->latest('id')
+            ->first();
+
+        if (!$summary) {
+            return response('No existe un consolidado vigente para exportar el PDF.', 409);
         }
 
-        // Always regenerate — never serve a stale cached file
-        $path = $service->exportPdf($period);
+        try {
+            $path = $service->exportPdf($period);
+        } catch (\Throwable $e) {
+            report($e);
+            return response('No se pudo generar el PDF: ' . $e->getMessage(), 500);
+        }
+
+        if (!file_exists($path) || filesize($path) === 0) {
+            return response('El archivo PDF generado está vacío o no existe.', 500);
+        }
+
         PeriodRadiographyExport::query()->create([
             'period_summary_id' => $summary->id,
-            'export_path' => $path,
-            'file_type' => 'pdf',
-            'template_version' => config('app.version'),
-            'metadata' => ['period_id' => $period->id, 'period_label' => $period->label],
-            'exported_at' => now(),
-            'exported_by' => auth()->id(),
+            'export_path'       => $path,
+            'file_type'         => 'pdf',
+            'template_version'  => config('app.version'),
+            'metadata'          => ['period_id' => $period->id, 'period_label' => $period->label],
+            'exported_at'       => now(),
+            'exported_by'       => auth()->id(),
         ]);
 
-        return response()->download($path, basename($path));
+        return response()->download($path, basename($path), [
+            'Content-Type'  => 'application/pdf',
+            'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma'        => 'no-cache',
+        ]);
     }
 
     public function status(Period $period) {
@@ -250,14 +330,41 @@ class MonthlyReportController extends Controller {
         return [DataSourceCode::NoiNomina->value, DataSourceCode::LendusIngresosCobranza->value, DataSourceCode::Gastos->value, DataSourceCode::LendusMinistraciones->value, DataSourceCode::LendusSaldosCliente->value];
     }
 
+    // Códigos que satisfacen el requisito 'gastos' (incluyendo fuentes desagregadas)
+    private function gastosEquivalentCodes(): array {
+        return [
+            DataSourceCode::Gastos->value,
+            DataSourceCode::GastosLendus->value,
+            DataSourceCode::GastosErp->value,
+        ];
+    }
+
     private function sourceStatus(Period $period): array {
-        $uploads = $period->reportUploads()->with('dataSource:id,code,name')->get();
-        $required = $this->requiredSourceCodes();
+        // Incluir uploads del periodo mensual Y de todas sus semanas componentes
+        $allPeriods  = Period::all();
+        $weeklyIds   = $period->resolveBaseWeeklyIds($allPeriods);
+        $allIds      = array_unique(array_merge([$period->id], $weeklyIds));
+
+        $uploads  = ReportUpload::query()
+            ->whereIn('period_id', $allIds)
+            ->with('dataSource:id,code,name')
+            ->get();
+
+        $required  = $this->requiredSourceCodes();
+        $gastosCodes = $this->gastosEquivalentCodes();
+
         $processed = [];
-        $errors = [];
-        $missing = [];
+        $errors    = [];
+        $missing   = [];
+
         foreach ($required as $code) {
-            $sourceUploads = $uploads->filter(fn ($upload) => $upload->dataSource?->code === $code);
+            // Para gastos aceptar cualquier variante procesada
+            $codesToCheck = $code === DataSourceCode::Gastos->value ? $gastosCodes : [$code];
+
+            $sourceUploads = $uploads->filter(
+                fn ($upload) => in_array($upload->dataSource?->code, $codesToCheck, true)
+            );
+
             if ($sourceUploads->isEmpty()) {
                 $missing[] = $code;
                 continue;

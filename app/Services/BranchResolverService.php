@@ -273,6 +273,231 @@ class BranchResolverService
     }
 
     /**
+     * Resolves a real (sucursal) branch name from a route/office name.
+     * Priority: code prefix first, then route-name table, then partial real-branch match.
+     * Returns null when the mapping is unknown.
+     */
+    public function resolveRealBranchFromRoute(?string $routeName, ?string $code = null): ?string
+    {
+        // 1. Code prefix beats everything
+        if ($code) {
+            $resolved = $this->resolveBranchNameFromCode($code);
+            if ($resolved) {
+                return $resolved;
+            }
+        }
+
+        if (!$routeName) {
+            return null;
+        }
+
+        // Normalize: uppercase + strip accents so DB values like "Fortín" match "FORTIN"
+        $upper = $this->normalizeRouteKey($routeName);
+
+        // 2. Explicit route → real branch table (evaluated FIRST — overrides fuzzy prefix)
+        //    All keys must be accent-free UPPERCASE.
+        static $routeMap = [
+            // ── Orizaba area ─────────────────────────────────────────────────
+            'ORIZABA'                => 'ORIZABA',
+            'ORIZABA SUR'            => 'ORIZABA',
+            'ORIZABA NORTE'          => 'ORIZABA',
+            'ORIZABA CENTRO'         => 'ORIZABA',
+            'RIO BLANCO'             => 'ORIZABA',
+            'RIO BLANCO NORTE'       => 'ORIZABA',
+            'RIO BLANCO SUR'         => 'ORIZABA',
+            'LA PERLA'               => 'ORIZABA',
+            'IXTACZOQUITLAN'         => 'ORIZABA',
+            'IXTACZOQUITLAN SUR'     => 'ORIZABA',
+            'IXTACZOQUITLAN NORTE'   => 'ORIZABA',
+            'IXTACZOQUITLAN CENTRO'  => 'ORIZABA',
+            'IXHUATANCILLO'          => 'ORIZABA',
+            'IXHUATANCILLO SUR'      => 'ORIZABA',
+            'FORTIN'                 => 'ORIZABA',
+            'NOGALES'                => 'ORIZABA',
+            'NOGALES SUR'            => 'ORIZABA',
+            'NOGALES NORTE'          => 'ORIZABA',
+            'CIUDAD MENDOZA'         => 'ORIZABA',
+            'RAFAEL DELGADO'         => 'ORIZABA',
+            'MOTZORONGO'             => 'ORIZABA',
+            'TLILAPAN'               => 'ORIZABA',
+            'JALAPILLA'              => 'ORIZABA',
+            'LOPEZ ARIAS'            => 'ORIZABA',
+            'LOPEZ MATEOS'           => 'ORIZABA',
+            // ── Cordoba area ─────────────────────────────────────────────────
+            'CORDOBA'                => 'CORDOBA',
+            'CORDOBA CENTRO'         => 'CORDOBA',
+            'CENTRO B'               => 'CORDOBA',
+            'CENTRO C'               => 'CORDOBA',
+            'CENTRO D'               => 'CORDOBA',
+            'COSCOMATEPEC'           => 'CORDOBA',
+            'COSCOMATEPEC DE BRAVO'  => 'CORDOBA',
+            'CHOCAMAN'               => 'CORDOBA',
+            'AMATLÁN DE LOS REYES'   => 'CORDOBA',
+            'AMATLAN DE LOS REYES'   => 'CORDOBA',
+            'YANGA'                  => 'CORDOBA',
+            // ── Cuernavaca area ──────────────────────────────────────────────
+            'CUERNAVACA'             => 'CUERNAVACA',
+            'CUERNAVACA GTE'         => 'CUERNAVACA',
+            'CUERNAVACA ORIENTE'     => 'CUERNAVACA',
+            'CUERNAVACA NORTE'       => 'CUERNAVACA',
+            'CUERNAVACA SUR'         => 'CUERNAVACA',
+            'YAUTEPEC'               => 'CUERNAVACA',
+            'JIUTEPEC'               => 'CUERNAVACA',
+            'CUAUTLA'                => 'CUERNAVACA',
+            'CUAUTLAPAN'             => 'CUERNAVACA',
+            'DOS RIOS'               => 'CUERNAVACA',
+            'CUAUTLAPAN / DOS RIOS'  => 'CUERNAVACA',
+            'CUAUTLAPAN/DOS RIOS'    => 'CUERNAVACA',
+            'VILLA ALTA'             => 'CUERNAVACA',
+            'IZACAN'                 => 'CUERNAVACA',
+            'IZTACAN'                => 'CUERNAVACA',
+            'PASO DEL MACHO'         => 'CUERNAVACA',
+            'XOCOCOTLA'              => 'CUERNAVACA',
+            'JOJUTLA'                => 'CUERNAVACA',
+            'XOCOCOTLA - JOJUTLA'    => 'CUERNAVACA',
+            'XOCOCOTLA-JOJUTLA'      => 'CUERNAVACA',
+            // ── Huamantla ────────────────────────────────────────────────────
+            'HUAMANTLA'              => 'HUAMANTLA',
+            'HUAMANTLA (VENCIDOS)'   => 'HUAMANTLA',
+            'HUAMANTLA VENCIDOS'     => 'HUAMANTLA',
+            // ── San Juan del Río ─────────────────────────────────────────────
+            'SJR'                    => 'SAN JUAN DEL RÍO',
+            'SAN JUAN DEL RIO'       => 'SAN JUAN DEL RÍO',
+            'SAN JUAN DEL RIO'       => 'SAN JUAN DEL RÍO',
+            'SAN JUAN DEL RIO CENTRO'=> 'SAN JUAN DEL RÍO',
+            // ── San Luis Potosí ──────────────────────────────────────────────
+            'SLP'                    => 'SAN LUIS POTOSI',
+            'SAN LUIS POTOSI'        => 'SAN LUIS POTOSI',
+            'SAN LUIS POTOSI CENTRO' => 'SAN LUIS POTOSI',
+            // ── Ixtlahuaca ───────────────────────────────────────────────────
+            'IXTLAHUACA'             => 'IXTLAHUACA',
+            'IXTLAHUACA CENTRO'      => 'IXTLAHUACA',
+            // ── Tenango del Valle ────────────────────────────────────────────
+            'TENANGO'                => 'TENANGO DEL VALLE',
+            'TENANGO DEL VALLE'      => 'TENANGO DEL VALLE',
+            // ── Tula / Hidalgo area ──────────────────────────────────────────
+            'TULA'                   => 'TULA',
+            'TULA CENTRO'            => 'TULA',
+            'TULA DE ALLENDE'        => 'TULA',
+            'TEZONTEPEC'             => 'TULA',
+            'TEZONTEPEC DE ALDAMA'   => 'TULA',
+            'APIZ CEN'               => 'TLAXCALA',
+            'APIZACO'                => 'TLAXCALA',
+            'APIZACO CENTRO'         => 'TLAXCALA',
+            '20 DE NOVIEMBRE'        => 'TLAXCALA',
+            'APIZ-CEN'               => 'TLAXCALA',
+            'APIZ-NOR'               => 'TLAXCALA',
+            'APIX-SUR'               => 'TLAXCALA',
+            'CHIAUTEMPAN'            => 'TLAXCALA',
+            'CONTLA'                 => 'TLAXCALA',
+            'TECOAC'                 => 'TLAXCALA',
+            'TETLANOHCAN'            => 'TLAXCALA',
+            'ZACATELCO'              => 'TLAXCALA',
+            'TEPEJI'                 => 'TULA',
+            'TLAXCOAPAN'             => 'TULA',
+            'ATITALAQUIA'            => 'TULA',
+            // ── Others (self-map) ────────────────────────────────────────────
+            'ATLACOMULCO'            => 'ATLACOMULCO',
+            'ATLIXCO'                => 'ATLIXCO',
+            'MIACATLAN'              => 'MIACATLAN',
+            'TLAXCALA'               => 'TLAXCALA',
+            'AGUASCALIENTES'         => 'AGUASCALIENTES',
+            'CHIHUAHUA'              => 'CHIHUAHUA',
+            'DURANGO'                => 'DURANGO',
+            'PACHUCA'                => 'PACHUCA',
+            'TULANCINGO'             => 'TULANCINGO',
+            // ── Corporativo ──────────────────────────────────────────────────
+            'CORPORATIVO'            => 'CORPORATIVO',
+            'CORP'                   => 'CORPORATIVO',
+            // ── Orizaba: typo/spelling variants ──────────────────────────────
+            'FORTN'                  => 'ORIZABA',
+            'IXTACZOQUITLAM'         => 'ORIZABA',
+            'IXTACZOQUITLAM SUR'     => 'ORIZABA',
+            'IXTACZOQUITLAM NORTE'   => 'ORIZABA',
+            'IXTACZOQUITLAM CENTRO'  => 'ORIZABA',
+            'IXHUATLANCILLO'         => 'ORIZABA',
+            'IXHUATLANCILLO SUR'     => 'ORIZABA',
+            // ── Cordoba extra sub-offices ─────────────────────────────────────
+            'CORDOBA ALAMEDA'        => 'CORDOBA',
+            'CORDOBA CENTRO 2'       => 'CORDOBA',
+            'CORDOBA FORTIN'         => 'CORDOBA',
+            'CORDOBA PADELMA'        => 'CORDOBA',
+            'ATZACAN'                => 'CORDOBA',
+            // ── Atlixco abbreviated routes ────────────────────────────────────
+            'ATLIX-GTE'              => 'ATLIXCO',
+            'ATLIX-MATP'             => 'ATLIXCO',
+            'ATLIX-NOR'              => 'ATLIXCO',
+            // ── San Luis Potosi routes ────────────────────────────────────────
+            'CENTRO-SLP'             => 'SAN LUIS POTOSI',
+            'ORIENTE-SLP'            => 'SAN LUIS POTOSI',
+            'SOLEDAD'                => 'SAN LUIS POTOSI',
+            // ── San Juan del Rio routes ───────────────────────────────────────
+            'SJR II'                 => 'SAN JUAN DEL RÍO',
+            'SJR 2'                  => 'SAN JUAN DEL RÍO',
+            'ESEQUIEL MONTES'        => 'SAN JUAN DEL RÍO',
+            // ── Cuernavaca extra routes ───────────────────────────────────────
+            'TEMIXCO'                => 'CUERNAVACA',
+            'XOCHITEPEC'             => 'CUERNAVACA',
+            'HUITZILAC'              => 'CUERNAVACA',
+            'XOXOCOTLA - JOJUTLA'    => 'CUERNAVACA',
+            'XOXOCOTLA  - JOJUTLA'   => 'CUERNAVACA',
+            'XOXOCOTLA-JOJUTLA'      => 'CUERNAVACA',
+            'PNT-IXTLA'              => 'CUERNAVACA',
+            // ── Miacatlan routes ──────────────────────────────────────────────
+            'MAZATEPEC'              => 'MIACATLAN',
+            'TETECALA'               => 'MIACATLAN',
+            // ── Ixtlahuaca routes ─────────────────────────────────────────────
+            'IXT - SANTA ANA'        => 'IXTLAHUACA',
+            'JIQUIPILCO'             => 'IXTLAHUACA',
+            'ALMOLOYA DE JUARES'     => 'IXTLAHUACA',
+            'ALMOLOYA DE JUAREZ'     => 'IXTLAHUACA',
+            'TEMOAYA'                => 'IXTLAHUACA',
+            // ── Tenango del Valle routes ──────────────────────────────────────
+            'TENANGO-1'              => 'TENANGO DEL VALLE',
+            'TENANCINGO-1'           => 'TENANGO DEL VALLE',
+            'CALIMAYA-2'             => 'TENANGO DEL VALLE',
+            'CAPULHUAC'              => 'TENANGO DEL VALLE',
+            'METEPEC-2'              => 'TENANGO DEL VALLE',
+            'SAN BARTOLO MORELOS'    => 'TENANGO DEL VALLE',
+        ];
+
+        if (isset($routeMap[$upper])) {
+            return $routeMap[$upper];
+        }
+
+        // 3. Route name might be a short branch code (e.g. "ORI", "TLA", "SJR", "CH")
+        //    Only try for exact 2-3 char codes to avoid false matches like CHOL → CHIHUAHUA.
+        if (strlen($upper) <= 3) {
+            $fromCode = $this->resolveBranchNameFromCode($upper);
+            if ($fromCode) {
+                return $fromCode;
+            }
+        }
+
+        // 4. Partial prefix: route name starts with a real branch name
+        foreach (array_values(array_merge(self::PREFIX_3, self::PREFIX_2)) as $realBranch) {
+            if (str_starts_with($upper, $this->normalizeRouteKey($realBranch))) {
+                return $realBranch;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Uppercases a route key and strips Spanish accent marks so that
+     * "Fortín" and "FORTIN" both match the accent-free routeMap keys.
+     */
+    private function normalizeRouteKey(string $value): string
+    {
+        $value = trim(mb_strtoupper($value, 'UTF-8'));
+        return strtr($value, [
+            'Á' => 'A', 'É' => 'E', 'Í' => 'I', 'Ó' => 'O', 'Ú' => 'U', 'Ü' => 'U', 'Ñ' => 'N',
+            'À' => 'A', 'È' => 'E', 'Ì' => 'I', 'Ò' => 'O', 'Ù' => 'U',
+        ]);
+    }
+
+    /**
      * Returns the full prefix → branch name catalog.
      */
     public function getCatalog(): array
@@ -303,6 +528,29 @@ class BranchResolverService
         $branches   = $this->realOperationalBranches();
         $branches[] = 'CORPORATIVO';
         return $branches;
+    }
+
+    /**
+     * Returns true only for real operational sucursales (prefix-resolved names).
+     * Routes like FORTIN, CENTRO B, JALAPILLA, etc. return false.
+     */
+    public function isRealOperationalBranch(string $name): bool
+    {
+        $key      = $this->normalizeRouteKey($name);
+        $realKeys = array_map(fn ($n) => $this->normalizeRouteKey($n), $this->realOperationalBranches());
+        return in_array($key, $realKeys, true);
+    }
+
+    /**
+     * Returns true for real sucursales + CORPORATIVO.
+     * Use this to decide whether a branch name is reportable.
+     */
+    public function isRealReportBranch(string $name): bool
+    {
+        if ($this->isRealOperationalBranch($name)) {
+            return true;
+        }
+        return $this->normalizeRouteKey($name) === 'CORPORATIVO';
     }
 
     private function normalizeText(string $value): string

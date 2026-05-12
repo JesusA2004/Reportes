@@ -28,7 +28,7 @@ class RadiografiaExportService
 
         $directory  = storage_path('app/radiografias');
         File::ensureDirectoryExists($directory);
-        $outputPath = $directory . '/radiografia_' . ($period->code ?: $period->id) . '.xlsx';
+        $outputPath = $directory . '/radiografia_' . ($period->code ?: $period->id) . '_' . now()->format('Ymd_His') . '.xlsx';
 
         $writer = IOFactory::createWriter($spreadsheet, 'Xlsx');
         $writer->setPreCalculateFormulas(false);
@@ -56,7 +56,7 @@ class RadiografiaExportService
 
         $directory  = storage_path('app/radiografias');
         File::ensureDirectoryExists($directory);
-        $outputPath = $directory . '/radiografia_' . ($period->code ?: $period->id) . '.pdf';
+        $outputPath = $directory . '/radiografia_' . ($period->code ?: $period->id) . '_' . now()->format('Ymd_His') . '.pdf';
 
         $pdf->save($outputPath);
 
