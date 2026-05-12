@@ -63,7 +63,7 @@ class DataSourceSeeder extends Seeder {
                 'description'         => 'Excel de gastos Lendus. Complementa al PDF: aporta la sucursal destino en préstamos intersucursales a través de columnas Observación/Justificación.',
                 'is_active'           => true,
                 'is_required_for_bd'  => false,
-                'is_required_for_report' => false,
+                'is_required_for_report' => true,
             ],
         ];
 

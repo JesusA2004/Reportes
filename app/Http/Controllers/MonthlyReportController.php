@@ -150,9 +150,12 @@ class MonthlyReportController extends Controller {
     public function consolidate(Period $period, PeriodRadiographyService $service): RedirectResponse
     {
         $status = $this->sourceStatus($period);
-        if (!empty($status['missing']) || !empty($status['errors'])) {
-            $faltantes = implode(', ', array_merge($status['missing'], $status['errors']));
-            return back()->with('error', 'No se puede generar la radiografía. Faltan fuentes o análisis procesado: ' . $faltantes . '.');
+        $allMissing = array_merge($status['missing'], $status['errors']);
+        if (!empty($allMissing)) {
+            if (in_array(DataSourceCode::GastosLendusExcel->value, $allMissing, true)) {
+                return back()->with('error', 'Falta cargar el Excel complementario de gastos Lendus. Este archivo es necesario para identificar la sucursal que recibe en préstamos intersucursales.');
+            }
+            return back()->with('error', 'No se puede generar la radiografía. Faltan fuentes o análisis procesado: ' . implode(', ', $allMissing) . '.');
         }
         $service->generate($period, auth()->id());
         return back()->with('success', 'Radiografía consolidada correctamente.');
@@ -220,6 +223,17 @@ class MonthlyReportController extends Controller {
         $missing = collect($sources['missing'] ?? []);
         $errors  = collect($sources['errors'] ?? []);
 
+        // gastos_lendus_excel is unconditionally required — never bypass, even when expenses exist.
+        // Without it, P. INTERSUC. shows "No identificada" for every intersucursal row.
+        if ($missing->contains(DataSourceCode::GastosLendusExcel->value)
+            || $errors->contains(DataSourceCode::GastosLendusExcel->value)) {
+            return response(
+                'Falta cargar el Excel complementario de gastos Lendus. Este archivo es necesario para identificar la sucursal que recibe en préstamos intersucursales.',
+                409
+            );
+        }
+
+        // Other gastos sources may be bypassed if expense data already exists in the snapshot.
         if ($hasExpensesInSnapshot) {
             $gastosCodes = [DataSourceCode::Gastos->value, 'GASTOS'];
             $missing = $missing->reject(fn ($code) => in_array($code, $gastosCodes, true));
@@ -327,7 +341,14 @@ class MonthlyReportController extends Controller {
     }
 
     private function requiredSourceCodes(): array {
-        return [DataSourceCode::NoiNomina->value, DataSourceCode::LendusIngresosCobranza->value, DataSourceCode::Gastos->value, DataSourceCode::LendusMinistraciones->value, DataSourceCode::LendusSaldosCliente->value];
+        return [
+            DataSourceCode::NoiNomina->value,
+            DataSourceCode::LendusIngresosCobranza->value,
+            DataSourceCode::Gastos->value,
+            DataSourceCode::LendusMinistraciones->value,
+            DataSourceCode::LendusSaldosCliente->value,
+            DataSourceCode::GastosLendusExcel->value,
+        ];
     }
 
     // Códigos que satisfacen el requisito 'gastos' (incluyendo fuentes desagregadas)

@@ -553,6 +553,40 @@ class BranchResolverService
         return $this->normalizeRouteKey($name) === 'CORPORATIVO';
     }
 
+    // The 13 operative branches that receive their own Excel sheet.
+    // AGUASCALIENTES gets a sheet only when it has cartera/colocación data (handled in caller).
+    private const OPERATIVE_SHEET_BRANCHES = [
+        'ATLACOMULCO',
+        'ATLIXCO',
+        'CORDOBA',
+        'CUERNAVACA',
+        'HUAMANTLA',
+        'IXTLAHUACA',
+        'MIACATLAN',
+        'ORIZABA',
+        'SAN JUAN DEL RÍO',
+        'SAN LUIS POTOSI',
+        'TENANGO DEL VALLE',
+        'TLAXCALA',
+        'TULA',
+        'AGUASCALIENTES',
+    ];
+
+    /**
+     * Returns true only for branches that should receive their own Excel sheet.
+     * Excludes CHIHUAHUA, DURANGO, CORPORATIVO, TULANCINGO, PACHUCA, etc.
+     */
+    public function isSheetBranch(string $name): bool
+    {
+        $key = $this->normalizeRouteKey($name);
+        foreach (self::OPERATIVE_SHEET_BRANCHES as $branch) {
+            if ($this->normalizeRouteKey($branch) === $key) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private function normalizeText(string $value): string
     {
         $value = trim(mb_strtolower($value));

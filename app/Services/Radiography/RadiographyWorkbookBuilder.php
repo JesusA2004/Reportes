@@ -186,7 +186,7 @@ class RadiographyWorkbookBuilder
             'Publicidad','Mecánicos','Servicios de Motocicletas','Software Póliza Anual','Pólizas',
             'Recargas Telefónicas','Emergentes','Comisiones Oxxo','Multas e Infracciones',
             'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
-            'Gastos legales',
+            'Gastos legales','Préstamos Intersucursales','IMSS','Financiamiento de Motos',
         ];
         $gastosOpTotal = 0.0;
         foreach ($gastosOp as $idx => $gasto) {
@@ -387,9 +387,24 @@ class RadiographyWorkbookBuilder
             return $name;
         };
 
+        $resolver = app(\App\Services\BranchResolverService::class);
         foreach ($branches as $branchData) {
             $branchName = $branchData['nombre'] ?? ($branchData['name'] ?? 'Sin nombre');
-            $brUp       = strtoupper(trim($branchName));
+
+            // Only create sheets for the 13 operative branches; skip AGS if it has no cartera/col/rec
+            if (!$resolver->isSheetBranch($branchName)) {
+                continue;
+            }
+            if (strtoupper(trim($branchName)) === 'AGUASCALIENTES') {
+                $carteraCheck = (float)($branchData['cartera']     ?? 0);
+                $colCheck     = (float)($branchData['colocacion']  ?? 0);
+                $recCheck     = (float)($branchData['recuperacion'] ?? 0);
+                if ($carteraCheck == 0 && $colCheck == 0 && $recCheck == 0) {
+                    continue;
+                }
+            }
+
+            $brUp = strtoupper(trim($branchName));
 
             $sheet = $ss->createSheet()->setTitle($tabName($branchName));
 
@@ -504,7 +519,8 @@ class RadiographyWorkbookBuilder
                 'Renta de Bodegas','Señora Limpieza','Eventos','Paquetería','Trámites Gubernamentales',
                 'Publicidad','Mecánicos','Servicios de Motocicletas','Software Póliza Anual','Pólizas',
                 'Recargas Telefónicas','Emergentes','Comisiones Oxxo','Multas e Infracciones',
-                'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería','Gastos legales',
+                'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
+                'Gastos legales','Préstamos Intersucursales','IMSS','Financiamiento de Motos',
             ];
             $gopTotal = 0.0;
             foreach ($gastosOpList as $idx => $gastoName) {

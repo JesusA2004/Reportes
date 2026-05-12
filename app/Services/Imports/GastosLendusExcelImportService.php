@@ -7,6 +7,7 @@ use App\Models\Employee;
 use App\Models\Expense;
 use App\Models\ReportUpload;
 use App\Services\BranchResolverService;
+use App\Support\ExpenseCategoryMapper;
 use Illuminate\Support\Facades\Storage;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 
@@ -57,7 +58,7 @@ class GastosLendusExcelImportService
                 continue;
             }
 
-            $amount = $this->toDecimal($row[$colMap['monto']] ?? null);
+            $amount = $this->toDecimal($this->col($row, $colMap['monto']));
             if ($amount === null || $amount <= 0.0) {
                 $rowsSkipped++;
                 continue;
@@ -66,14 +67,15 @@ class GastosLendusExcelImportService
             $rowsRead++;
 
             try {
-                $sucursal     = $this->str($row[$colMap['sucursal']]     ?? null);
-                $concepto     = $this->str($row[$colMap['concepto']]     ?? null);
-                $observacion  = $this->str($row[$colMap['observacion']]  ?? null);
-                $justificacion= $this->str($row[$colMap['justificacion']]?? null);
-                $folio        = $this->str($row[$colMap['folio']]        ?? null);
-                $proveedor    = $this->str($row[$colMap['proveedor']]    ?? null);
-                $solicitante  = $this->str($row[$colMap['solicitante']]  ?? null);
-                $fechaStr     = $row[$colMap['fecha']] ?? null;
+                $sucursal     = $this->str($this->col($row, $colMap['sucursal']));
+                $categoria    = $this->str($this->col($row, $colMap['categoria']));
+                $concepto     = $this->str($this->col($row, $colMap['concepto']));
+                $observacion  = $this->str($this->col($row, $colMap['observacion']));
+                $justificacion= $this->str($this->col($row, $colMap['justificacion']));
+                $folio        = $this->str($this->col($row, $colMap['folio']));
+                $proveedor    = $this->str($this->col($row, $colMap['proveedor']));
+                $solicitante  = $this->str($this->col($row, $colMap['solicitante']));
+                $fechaStr     = $this->col($row, $colMap['fecha']);
                 $date         = $this->toDate($fechaStr);
 
                 // Resolve from_branch (sucursal column) — must be a real branch
@@ -85,14 +87,16 @@ class GastosLendusExcelImportService
                         ? $this->findOrCreateBranch($fromBranchName)
                         : null);
 
-                // Detect intersucursal destination from free text
-                $searchText  = implode(' ', array_filter([$concepto, $observacion, $justificacion]));
+                // Detect intersucursal destination from combined text fields
+                $searchText  = implode(' ', array_filter([$categoria, $concepto, $observacion, $justificacion]));
                 $toBranchDetected = $this->detectToBranch($searchText);
 
                 $isIntersucursal = $toBranchDetected !== null
                     || $this->looksLikeIntersucursal($searchText);
 
-                $category = $isIntersucursal ? 'FONDEO INTERSUCURSAL' : 'LENDUS';
+                $category = $isIntersucursal
+                    ? 'Préstamos Intersucursales'
+                    : ExpenseCategoryMapper::fromFields($concepto, $categoria, $observacion);
 
                 $observationParts = array_filter([$observacion, $justificacion]);
                 $observations = $observationParts ? implode(' | ', $observationParts) : null;
@@ -146,17 +150,18 @@ class GastosLendusExcelImportService
         ];
     }
 
-    /**
-     * Scan first 20 rows for a header anchor (Fecha, Folio, Monto, Sucursal).
-     */
     private function detectHeaderRowIndex(array $rows): ?int
     {
-        $anchors = ['fecha', 'folio', 'monto', 'total', 'sucursal'];
+        $anchors = ['fecha', 'monto', 'folio', 'total', 'sucursal', 'concepto', 'empleado', 'estatus', 'observac', 'justific'];
         foreach (array_slice($rows, 0, 20, true) as $index => $row) {
             $hits = 0;
             foreach ($row as $cell) {
-                if (in_array(mb_strtolower(trim((string) $cell)), $anchors, true)) {
-                    $hits++;
+                $norm = strtr(mb_strtolower(trim((string) $cell)), ['á'=>'a','é'=>'e','í'=>'i','ó'=>'o','ú'=>'u','ü'=>'u','ñ'=>'n']);
+                foreach ($anchors as $anchor) {
+                    if (str_contains($norm, $anchor)) {
+                        $hits++;
+                        break;
+                    }
                 }
             }
             if ($hits >= 2) {
@@ -168,16 +173,22 @@ class GastosLendusExcelImportService
 
     private function buildColumnMap(array $headerRow): array
     {
+        // Actual Lendus file column layout:
+        // Col 0: Empleado | Col 1: Categoría | Col 2: Concepto | Col 3: Estatus
+        // Col 4: Fecha Creación | Col 5: Monto Gasto | Col 6: Monto pagado empleado
+        // Col 7: Monto pagado empresa | Col 11: Observación | Col 12: Justificación
         $aliases = [
-            'fecha'         => ['fecha', 'fecha creacion', 'fecha creación', 'fecha_creacion', 'fecha gasto', 'fecha de gasto'],
-            'monto'         => ['monto', 'total', 'importe', 'monto gasto', 'monto total'],
-            'sucursal'      => ['sucursal', 'oficina', 'unidad', 'sucursal origen'],
+            'solicitante'   => ['solicitante', 'empleado', 'responsable', 'usuario'],
+            'categoria'     => ['categoria', 'categoría', 'tipo'],
             'concepto'      => ['concepto', 'descripcion', 'descripción', 'motivo'],
+            'estatus'       => ['estatus', 'estado', 'status'],
+            'fecha'         => ['fecha creacion', 'fecha creación', 'fecha_creacion', 'fecha de creacion', 'fecha de creación', 'fecha gasto', 'fecha de gasto', 'fecha'],
+            'monto'         => ['monto pagado empresa', 'monto pagado por empresa', 'monto gasto', 'monto total', 'monto', 'total', 'importe'],
+            'sucursal'      => ['sucursal', 'oficina', 'unidad', 'sucursal origen'],
             'observacion'   => ['observacion', 'observación', 'observaciones', 'obs'],
             'justificacion' => ['justificacion', 'justificación', 'justificaciones', 'justif'],
             'folio'         => ['folio', 'id', 'num', 'número', 'numero'],
             'proveedor'     => ['proveedor', 'empresa', 'beneficiario'],
-            'solicitante'   => ['solicitante', 'empleado', 'responsable', 'usuario'],
         ];
 
         $map = [];
@@ -191,15 +202,16 @@ class GastosLendusExcelImportService
             }
         }
 
-        if (!isset($map['fecha']))         $map['fecha']         = 0;
-        if (!isset($map['monto']))         $map['monto']         = 1;
-        if (!isset($map['sucursal']))      $map['sucursal']      = 2;
-        if (!isset($map['concepto']))      $map['concepto']      = 3;
-        if (!isset($map['observacion']))   $map['observacion']   = 4;
-        if (!isset($map['justificacion'])) $map['justificacion'] = 5;
-        if (!isset($map['folio']))         $map['folio']         = 6;
-        if (!isset($map['proveedor']))     $map['proveedor']     = 7;
-        if (!isset($map['solicitante']))   $map['solicitante']   = 8;
+        if (!isset($map['solicitante']))   $map['solicitante']   = 0;
+        if (!isset($map['categoria']))     $map['categoria']     = 1;
+        if (!isset($map['concepto']))      $map['concepto']      = 2;
+        if (!isset($map['fecha']))         $map['fecha']         = 4;
+        if (!isset($map['monto']))         $map['monto']         = 7;
+        if (!isset($map['observacion']))   $map['observacion']   = 11;
+        if (!isset($map['justificacion'])) $map['justificacion'] = 12;
+        if (!isset($map['sucursal']))      $map['sucursal']      = null;
+        if (!isset($map['folio']))         $map['folio']         = null;
+        if (!isset($map['proveedor']))     $map['proveedor']     = null;
 
         return $map;
     }
@@ -220,11 +232,19 @@ class GastosLendusExcelImportService
         //           "PRESTAMO A XXXX", "PRÉSTAMO A XXXX", "INTERSUCURSAL A XXXX",
         //           "CREDITO A XXXX", "FONDEO XXXX" (direct branch name following)
         $patterns = [
+            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
             '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/FOND(?:EA|EO)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
             '/FOND(?:EA|EO)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
             '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/INTERSUCURSAL\s+(?:A|PARA)?\s*SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
             '/INTERSUCURSAL\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
             '/CR[EÉ]DITO\s+(?:A|PARA)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/(?:A|PARA)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/^SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/DEP[OÓ]SITO\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/APOYO\s+(?:A|PARA)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
         ];
 
         foreach ($patterns as $pattern) {
@@ -313,6 +333,11 @@ class GastosLendusExcelImportService
         }
         $v = trim((string) $value);
         return $v === '' ? null : $v;
+    }
+
+    private function col(array $row, ?int $idx): mixed
+    {
+        return $idx !== null ? ($row[$idx] ?? null) : null;
     }
 
     private function isEmptyRow(array $row): bool

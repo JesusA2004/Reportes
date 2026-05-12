@@ -5,9 +5,10 @@ namespace App\Support;
 class ExpenseStatusNormalizer
 {
     private const BILLABLE = [
+        'AUTORIZADO',
         'PAGADA',
+        'PAGADO',
         'POR COMPROBAR',
-        'POR_COMPROBAR',
         'COMPROBADA',
         'COMPROBACION ACEPTADA',
     ];

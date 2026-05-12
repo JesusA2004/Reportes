@@ -7,6 +7,7 @@ use App\Models\Employee;
 use App\Models\Expense;
 use App\Models\ReportUpload;
 use App\Services\BranchResolverService;
+use App\Support\ExpenseCategoryMapper;
 use App\Support\ExpenseStatusNormalizer;
 use Illuminate\Support\Facades\Storage;
 use PhpOffice\PhpSpreadsheet\IOFactory;
@@ -109,7 +110,7 @@ class GastosErpExcelImportService
                     'report_upload_id' => $upload->id,
                     'employee_id'      => $employee?->id,
                     'branch_id'        => $branch?->id,
-                    'category'         => 'ERP',
+                    'category'         => ExpenseCategoryMapper::fromFields($concepto, $observ),
                     'concept'          => $concepto ?? 'Sin concepto',
                     'amount'           => $total,
                     'paid_amount'      => $total,
@@ -172,7 +173,7 @@ class GastosErpExcelImportService
             'concepto'       => ['concepto'],
             'observaciones'  => ['observaciones', 'observación', 'observacion'],
             'fecha_captura'  => ['fecha captura', 'fecha de captura', 'fecha_captura'],
-            'total_final'    => ['total final requisición', 'total final requisicion', 'total final'],
+            'total_final'    => ['total final requisición', 'total final requisicion', 'total final', 'monto pagado empresa', 'monto pagado por empresa'],
         ];
 
         $map = [];

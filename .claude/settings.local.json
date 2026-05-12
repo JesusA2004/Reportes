@@ -23,7 +23,12 @@
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(c['name']\\) for c in d['commands'] if 'reportes' in c['name']]\")",
       "Bash(findstr reportes *)",
       "Bash(xargs grep -l -i \"pdf\\\\|export\\\\|radiograph\")",
-      "Bash(Get-ChildItem *)"
+      "Bash(Get-ChildItem *)",
+      "Bash(awk NR>=65 && NR<=80 {print NR\": \"$0} *)",
+      "Bash(tasklist /fi \"IMAGENAME eq php.exe\")",
+      "Bash(wmic process *)",
+      "PowerShell(Get-WmiObject *)",
+      "PowerShell(Stop-Process *)"
     ]
   }
 }

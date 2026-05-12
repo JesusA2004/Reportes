@@ -1495,14 +1495,20 @@ class RadiographySnapshotBuilder
             ->orderByDesc('amount')
             ->get();
 
-        // ── B: Excel complementario records ──────────────────────────────────
+        // ── B: Excel complementario — only intersucursal rows ────────────────
+        // The Excel covers potentially different months than the PDF.
+        // We filter to only category='Préstamos Intersucursales' to reduce false matches,
+        // then prefer rows with branch_to_detected when crossing by amount.
         $excelRows = DB::table('fact_expenses as e')
             ->leftJoin('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
             ->leftJoin('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+            ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
             ->whereIn('e.period_id', $this->dataIds)
             ->where('ds.code', 'gastos_lendus_excel')
+            ->where('e.category', 'Préstamos Intersucursales')
             ->selectRaw("
                 e.id,
+                COALESCE(b.name, '') as branch,
                 COALESCE(e.concept, e.category, 'Sin concepto') as concept,
                 e.observations,
                 e.expense_date,
@@ -1518,12 +1524,18 @@ class RadiographySnapshotBuilder
             })
             ->all();
 
-        // Index Excel records by rounded amount for O(1) lookup
+        // Index Excel intersucursal records by rounded amount.
+        // No date restriction — PDF and Excel may cover different months.
+        // Rows with branch_to_detected are prepended so they are preferred in matching.
         $excelIndex  = [];
         $usedExcelIds = [];
         foreach ($excelRows as $ex) {
             $key = (int) round((float) $ex->amount);
-            $excelIndex[$key][] = $ex;
+            if ($ex->decoded_payload['branch_to_detected'] ?? null) {
+                array_unshift($excelIndex[$key], $ex);
+            } else {
+                $excelIndex[$key][] = $ex;
+            }
         }
 
         $detail    = [];
@@ -1541,31 +1553,18 @@ class RadiographySnapshotBuilder
             // Resolve from_branch — never expose routes
             $fromBranch = $resolver->resolveRealBranchFromRoute($pdfRow->branch) ?? 'No identificada';
 
-            // ── Match PDF row against Excel records ───────────────────────
+            // ── Match PDF row against Excel intersucursal records ─────────
+            // Match by amount ±1 peso only — no date restriction because
+            // PDF and Excel may legitimately cover different months.
+            // Excel index is pre-sorted: rows with branch_to_detected come first.
             $matchedExcel = null;
             $amtKey       = (int) round($pdfAmount);
             foreach ([$amtKey, $amtKey - 1, $amtKey + 1] as $key) {
                 if (!isset($excelIndex[$key])) continue;
                 foreach ($excelIndex[$key] as $ex) {
                     if (in_array($ex->id, $usedExcelIds, true)) continue;
-                    if (!$pdfDate) {
-                        $matchedExcel = $ex;
-                        break 2;
-                    }
-                    $exDate = $ex->expense_date
-                        ? \Carbon\Carbon::parse($ex->expense_date)
-                        : null;
-                    if (!$exDate) {
-                        $matchedExcel = $ex;
-                        break 2;
-                    }
-                    if ($pdfDate->year  === $exDate->year
-                        && $pdfDate->month === $exDate->month
-                        && abs($pdfDate->diffInDays($exDate)) <= 3
-                    ) {
-                        $matchedExcel = $ex;
-                        break 2;
-                    }
+                    $matchedExcel = $ex;
+                    break 2;
                 }
             }
 
@@ -1636,6 +1635,47 @@ class RadiographySnapshotBuilder
             ];
         }
 
+        // ── C: Excel rows not matched to any PDF row ──────────────────────────
+        // These represent intersucursal transactions from months not covered by the PDF.
+        // They have a known destination (branch_to_detected) but unknown from_branch.
+        foreach ($excelRows as $ex) {
+            if (in_array($ex->id, $usedExcelIds, true)) {
+                continue;
+            }
+            $payload   = $ex->decoded_payload;
+            $exAmount  = (float) $ex->amount;
+            $exDate    = $ex->expense_date ? \Carbon\Carbon::parse($ex->expense_date) : null;
+
+            $toBranch  = 'No identificada';
+            $toBranchRaw = $payload['branch_to_detected'] ?? null;
+            if ($toBranchRaw) {
+                $toBranch = $resolver->resolveRealBranchFromRoute($toBranchRaw) ?? $toBranchRaw;
+            }
+            if ($toBranch === 'No identificada') {
+                $exText   = implode(' ', array_filter([$ex->concept, $ex->observations]));
+                $detected = $this->detectBranchFromText($exText, $resolver);
+                if ($detected) $toBranch = $detected;
+            }
+
+            $fromBranch = ($ex->branch && $ex->branch !== '')
+                ? ($resolver->resolveRealBranchFromRoute($ex->branch) ?? $ex->branch)
+                : 'Sin identificar';
+
+            $fondeaMap[$fromBranch] = ($fondeaMap[$fromBranch] ?? 0.0) + $exAmount;
+            $recibeMap[$toBranch]   = ($recibeMap[$toBranch]   ?? 0.0) + $exAmount;
+
+            $detail[] = [
+                'date'          => $exDate ? $exDate->format('d/m/Y') : '—',
+                'from_branch'   => $fromBranch,
+                'to_branch'     => $toBranch,
+                'amount'        => $exAmount,
+                'concept'       => $ex->concept,
+                'observation'   => $ex->observations ?? '',
+                'justification' => '',
+                'source'        => 'excel',
+            ];
+        }
+
         $total = array_sum(array_column($detail, 'amount'));
 
         $fondeaRows = collect($fondeaMap)
@@ -1667,10 +1707,18 @@ class RadiographySnapshotBuilder
 
         $upper    = mb_strtoupper($text);
         $patterns = [
+            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
             '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/FOND(?:EA|EO)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
             '/FOND(?:EA|EO)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
             '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/INTERSUCURSAL\s+(?:A|PARA)?\s*SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
             '/INTERSUCURSAL\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/(?:A|PARA)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/^SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/DEP[OÓ]SITO\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/APOYO\s+(?:A|PARA)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
         ];
 
         foreach ($patterns as $pattern) {
