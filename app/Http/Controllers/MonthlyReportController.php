@@ -3,6 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Enums\DataSourceCode;
+use App\Models\Branch;
+use App\Models\Employee;
 use App\Models\MonthlyEmployeeSummary;
 use App\Models\Period;
 use App\Models\PeriodRadiographyExport;
@@ -125,6 +127,53 @@ class MonthlyReportController extends Controller {
             $snapshot = $snapshotBuilder->build($period, $summary);
         }
 
+        // Operative branches: from snapshot but excluding non-operative ones
+        $nonOperativeBranches = ['CHIHUAHUA', 'DURANGO', 'CORPORATIVO'];
+        $operativeBranches = collect();
+        if ($snapshot) {
+            $snapshotBranches = $snapshot['sections']['branches'] ?? [];
+            $branchIds = array_column($snapshotBranches, 'branch_id');
+            if (!empty($branchIds)) {
+                $operativeBranches = Branch::query()
+                    ->whereIn('id', $branchIds)
+                    ->whereNotIn('name', $nonOperativeBranches)
+                    ->orderBy('name')
+                    ->get(['id', 'name'])
+                    ->map(fn ($b) => ['id' => $b->id, 'name' => $b->name])
+                    ->values();
+            }
+        }
+
+        // Gestores/employees: use only those present in the snapshot employees_gestores
+        $employees = collect();
+        if ($snapshot) {
+            $gestores = $snapshot['sections']['employees_gestores'] ?? [];
+            $empNames = array_unique(array_column($gestores, 'name'));
+            if (!empty($empNames)) {
+                $employees = Employee::query()
+                    ->orderBy('full_name')
+                    ->get(['id', 'full_name'])
+                    ->filter(fn ($e) => in_array($e->full_name, $empNames, true))
+                    ->map(fn ($e) => ['id' => $e->id, 'name' => $e->full_name])
+                    ->values();
+            }
+            // If no direct match by name, fall back to all employees
+            if ($employees->isEmpty()) {
+                $employees = Employee::query()
+                    ->orderBy('full_name')
+                    ->get(['id', 'full_name'])
+                    ->map(fn ($e) => ['id' => $e->id, 'name' => $e->full_name])
+                    ->values();
+            }
+        }
+
+        // All available periods for compare selectors
+        $allPeriods = Period::query()
+            ->orderByDesc('year')->orderByDesc('month')->orderByDesc('sequence')
+            ->get(['id', 'name', 'code', 'type', 'year', 'month'])
+            ->map(fn ($p) => ['id' => $p->id, 'label' => $p->label, 'code' => $p->code])
+            ->values();
+
         return Inertia::render('ReportesMensuales/Preview', [
             'period' => [
                 'id'         => $period->id,
@@ -144,6 +193,11 @@ class MonthlyReportController extends Controller {
             'hasPdfExport'   => $hasPdfExport,
             'excelUrl'       => route('reportes-mensuales.export-radiography', $period->id),
             'pdfUrl'         => route('reportes-mensuales.export-radiography-pdf', $period->id),
+            'branches'       => $operativeBranches,
+            'employees'      => $employees,
+            'allPeriods'     => $allPeriods,
+            'filteredExcelBaseUrl' => route('reportes-mensuales.export-filtered-radiography', $period->id),
+            'filteredPdfBaseUrl'   => route('reportes-mensuales.export-filtered-radiography-pdf', $period->id),
         ]);
     }
 
@@ -308,6 +362,78 @@ class MonthlyReportController extends Controller {
             'exported_at'       => now(),
             'exported_by'       => auth()->id(),
         ]);
+
+        return response()->download($path, basename($path), [
+            'Content-Type'  => 'application/pdf',
+            'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma'        => 'no-cache',
+        ]);
+    }
+
+    public function exportFilteredRadiography(Period $period, Request $request, RadiografiaExportService $service)
+    {
+        $summary = PeriodSummary::query()
+            ->where('period_id', $period->id)
+            ->where('status', 'generated')
+            ->whereNull('invalidated_at')
+            ->latest('id')
+            ->first();
+
+        if (!$summary) {
+            return response('No existe un consolidado vigente para exportar la radiografía.', 409);
+        }
+
+        $config = $request->only([
+            'scope', 'report_type', 'branch_id', 'employee_id',
+            'compare_period_id', 'extra_employee_expense_amount', 'extra_employee_expense_notes',
+        ]);
+
+        try {
+            $path = $service->exportWithConfig($period, $config);
+        } catch (\Throwable $e) {
+            report($e);
+            return response('No se pudo generar el Excel filtrado: ' . $e->getMessage(), 500);
+        }
+
+        if (!file_exists($path) || filesize($path) === 0) {
+            return response('El archivo Excel generado está vacío o no existe.', 500);
+        }
+
+        return response()->download($path, basename($path), [
+            'Content-Type'  => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma'        => 'no-cache',
+        ]);
+    }
+
+    public function exportFilteredRadiographyPdf(Period $period, Request $request, RadiografiaExportService $service)
+    {
+        $summary = PeriodSummary::query()
+            ->where('period_id', $period->id)
+            ->where('status', 'generated')
+            ->whereNull('invalidated_at')
+            ->latest('id')
+            ->first();
+
+        if (!$summary) {
+            return response('No existe un consolidado vigente para exportar el PDF.', 409);
+        }
+
+        $config = $request->only([
+            'scope', 'report_type', 'branch_id', 'employee_id',
+            'compare_period_id', 'extra_employee_expense_amount', 'extra_employee_expense_notes',
+        ]);
+
+        try {
+            $path = $service->exportPdfWithConfig($period, $config);
+        } catch (\Throwable $e) {
+            report($e);
+            return response('No se pudo generar el PDF filtrado: ' . $e->getMessage(), 500);
+        }
+
+        if (!file_exists($path) || filesize($path) === 0) {
+            return response('El archivo PDF generado está vacío o no existe.', 500);
+        }
 
         return response()->download($path, basename($path), [
             'Content-Type'  => 'application/pdf',

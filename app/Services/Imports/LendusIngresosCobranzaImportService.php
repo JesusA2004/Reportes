@@ -739,7 +739,9 @@ class LendusIngresosCobranzaImportService {
             'promoter_name' => ['promotor', 'asesor', 'ejecutivo', 'colaborador'],
             'client_name' => ['nombre_del_cliente', 'cliente', 'nombre_cliente'],
             'accredited_name' => ['nombre_acreditado', 'acreditado'],
-            'product_name' => ['producto_de_credito', 'producto'],
+            'product_name' => ['producto_de_credito', 'producto', 'tipo_credito', 'tipo_de_credito'],
+            'num_payments' => ['pagos', 'numero_de_pagos', 'num_pagos', 'no_pagos', 'plazo', 'numero_pagos'],
+            'periodicity' => ['periodicidad', 'frecuencia', 'frecuencia_pago'],
             'concept' => ['concepto', 'operacion', 'movimiento'],
             'transaction' => ['transaccion', 'tipo_transaccion'],
             'payment_date' => ['fecha_transaccion', 'fecha_cuota', 'fecha_pago'],
@@ -772,7 +774,12 @@ class LendusIngresosCobranzaImportService {
         $promoterName = $this->cleanString($this->valueFromRow($row, $headerMap, 'promoter_name'));
         $clientName = $this->cleanString($this->valueFromRow($row, $headerMap, 'client_name'));
         $accreditedName = $this->cleanString($this->valueFromRow($row, $headerMap, 'accredited_name'));
-        $productName = $this->cleanString($this->valueFromRow($row, $headerMap, 'product_name'));
+        $rawProductName = $this->cleanString($this->valueFromRow($row, $headerMap, 'product_name'));
+        $numPayments = (int)($this->toDecimal($this->valueFromRow($row, $headerMap, 'num_payments')) ?? 0) ?: null;
+        $periodicity = $this->cleanString($this->valueFromRow($row, $headerMap, 'periodicity'));
+        $productName = $rawProductName
+            ? $this->branchResolver->normalizeProduct($rawProductName, $numPayments, $periodicity)
+            : null;
         $concept = $this->cleanString($this->valueFromRow($row, $headerMap, 'concept'));
         $transaction = $this->cleanString($this->valueFromRow($row, $headerMap, 'transaction'));
         $paymentDate = $this->toDateValue($this->valueFromRow($row, $headerMap, 'payment_date'));

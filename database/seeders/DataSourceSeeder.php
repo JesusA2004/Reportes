@@ -18,6 +18,14 @@ class DataSourceSeeder extends Seeder {
                 'is_required_for_report' => true,
             ],
             [
+                'code'                => 'noi_nomina_fiscal',
+                'name'                => 'NOI Nómina Fiscal (complementario)',
+                'description'         => 'Archivo complementario de nómina NOI con timbrado fiscal. Procesado con el mismo importador que NOI Nómina.',
+                'is_active'           => true,
+                'is_required_for_bd'  => false,
+                'is_required_for_report' => false,
+            ],
+            [
                 'code'                => 'lendus_ministraciones',
                 'name'                => 'Lendus Ministraciones',
                 'description'         => 'Archivo de colocación / ministraciones',

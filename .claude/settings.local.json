@@ -31,7 +31,12 @@
       "PowerShell(Stop-Process *)",
       "Bash(del *)",
       "Bash(powershell \"Get-Content storage/logs/laravel.log -Tail 50\")",
-      "Bash(powershell *)"
+      "Bash(powershell *)",
+      "Bash(xargs grep -l \"fact_\")",
+      "Bash(xargs grep -l \"generar-radiografia\\\\|HistoricoGeneral\\\\|generateRadiography\")",
+      "PowerShell(Get-Process *)",
+      "PowerShell(php -l \"C:\\\\wamp64\\\\www\\\\Reportes\\\\app\\\\Services\\\\Radiography\\\\RadiographySnapshotBuilder.php\")",
+      "Bash(taskkill /F /IM php.exe)"
     ]
   }
 }

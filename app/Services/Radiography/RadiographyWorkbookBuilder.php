@@ -2049,4 +2049,917 @@ class RadiographyWorkbookBuilder
             $sheet->getColumnDimension($col)->setWidth($width);
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FILTERED / COMPARATIVE WORKBOOKS
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Build a single-branch workbook from an existing full snapshot.
+     * Sheets: RESUMEN, EMPLEADOS, GASTOS, CARTERA, COLOCACIÓN, RECUPERACIÓN, P.INTERSUC.
+     */
+    public function buildBranchFromSnapshot(
+        Period        $period,
+        PeriodSummary $summary,
+        array         $snap,
+        int           $branchId
+    ): Spreadsheet {
+        @ini_set('memory_limit', '1024M');
+
+        $branchRow = collect($snap['sections']['branches'] ?? [])
+            ->firstWhere('branch_id', $branchId);
+
+        if (!$branchRow) {
+            throw new \RuntimeException("Sucursal ID {$branchId} no encontrada en el snapshot del periodo.");
+        }
+
+        $branchName = $branchRow['nombre'];
+        $brUp       = strtoupper(trim($branchName));
+
+        $spreadsheet = new Spreadsheet();
+        $spreadsheet->getProperties()
+            ->setTitle("Radiografía {$branchName} — {$period->label}")
+            ->setCreator('Sistema de Reportes')
+            ->setSubject('Radiografía por Sucursal');
+
+        // ── Prepare supporting data ──────────────────────────────────────────
+        $payBC      = $snap['sections']['payroll_by_branch_concept']  ?? [];
+        $expMx      = $snap['sections']['expenses_matrix']            ?? [];
+        $moraBranch = $snap['sections']['mora_by_branch']             ?? [];
+        $recDet     = $snap['sections']['recovery_detail']['by_branch'] ?? [];
+        $portProd   = $snap['sections']['portfolio_by_branch_product'] ?? [];
+        $placeProd  = $snap['sections']['placement_by_branch_product'] ?? [];
+        $loans      = $snap['sections']['interbranch_loans']          ?? [];
+        $empGest    = $snap['sections']['employees_gestores']         ?? [];
+
+        $morIdx = [];
+        foreach ($moraBranch as $row) { $morIdx[strtoupper(trim($row['branch']))] = $row; }
+        $recIdx = [];
+        foreach ($recDet as $row) { $recIdx[strtoupper(trim($row['branch']))] = $row; }
+
+        $carteraB  = (float)($branchRow['cartera']      ?? 0);
+        $vencidaB  = (float)($branchRow['vencida']      ?? 0);
+        $recB      = (float)($branchRow['recuperacion']  ?? 0);
+        $colB      = (float)($branchRow['colocacion']    ?? 0);
+        $gastosB   = (float)($branchRow['gastos']        ?? 0);
+        $moraPct   = $carteraB > 0 ? round($vencidaB / $carteraB * 100, 2) : 0.0;
+
+        $morRow    = $morIdx[$brUp] ?? [];
+        $mora0_30  = (float)($morRow['mora_1_30']   ?? 0);
+        $mora31_60 = (float)($morRow['mora_31_60']  ?? 0);
+        $mora61_90 = (float)($morRow['mora_61_90']  ?? 0);
+        $mora91120 = (float)($morRow['mora_91_120'] ?? 0);
+
+        $branchPayroll = $payBC[$branchName] ?? $payBC[$brUp] ?? [];
+        $nomTotal = 0.0;
+        foreach ($branchPayroll as $concept => $amount) {
+            $k = strtoupper(trim($concept));
+            if (!str_contains($k, 'DESCUENTO') && !str_contains($k, 'DEDUCCION')) {
+                $nomTotal += (float)$amount;
+            }
+        }
+
+        $expMatrix   = $expMx['matrix']   ?? [];
+        $expBranches = $expMx['branches'] ?? [];
+        $branchKey   = '';
+        foreach ($expBranches as $eb) {
+            if (strtoupper($eb) === $brUp) { $branchKey = $eb; break; }
+        }
+        $branchExpByCategory = [];
+        if ($branchKey !== '') {
+            foreach ($expMatrix as $cat => $byBranch) {
+                $v = $byBranch[$branchKey] ?? 0.0;
+                if ($v > 0) $branchExpByCategory[strtoupper($cat)] = $v;
+            }
+        }
+        $getCat = fn (string $name) => ($branchExpByCategory[strtoupper($name)] ?? 0.0);
+
+        $loanFondea = 0.0;
+        $loanRecibe = 0.0;
+        foreach ($loans['fondea'] ?? [] as $lRow) {
+            if (strtoupper($lRow['branch']) === $brUp) { $loanFondea += (float)$lRow['total']; }
+        }
+        foreach ($loans['recibe'] ?? [] as $lRow) {
+            if (strtoupper($lRow['branch']) === $brUp) { $loanRecibe += (float)$lRow['total']; }
+        }
+
+        $utilidad = $recB - $gastosB - $nomTotal;
+
+        // ── Sheet 1: RESUMEN ─────────────────────────────────────────────────
+        $sheet = $spreadsheet->getActiveSheet()->setTitle('RESUMEN');
+        $title = strtoupper($branchName) . ' — ' . strtoupper($period->label);
+        $this->sheetTitle($sheet, 'A1:D1', $title);
+        $sheet->mergeCells('A2:D2');
+        $sheet->setCellValue('A2', 'Periodo: ' . ($period->code ?: $period->id) . '  |  Sucursal: ' . $branchName . '  |  Generado: ' . $snap['generated_at']);
+        $this->metaStyle($sheet, 'A2:D2');
+        $this->colHeaders($sheet, 3, ['A' => 'MÉTRICA', 'B' => 'VALOR', 'C' => '%', 'D' => 'OBSERVACIÓN']);
+
+        $r = 4;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '1. MÉTRICAS GENERALES'); $r++;
+        foreach ([
+            ['Valor cartera',          $carteraB,  'currency', '',     ''],
+            ['Otorgamientos',          $colB,       'currency', '',     ''],
+            ['Recuperación total',     $recB,       'currency', '',     ''],
+            ['Mora de 0 a 30 días',    $mora0_30,  'currency', $carteraB > 0 ? round($mora0_30  / $carteraB * 100, 2) : '', ''],
+            ['Mora de 31 a 60 días',   $mora31_60, 'currency', $carteraB > 0 ? round($mora31_60 / $carteraB * 100, 2) : '', ''],
+            ['Mora de 61 a 90 días',   $mora61_90, 'currency', $carteraB > 0 ? round($mora61_90 / $carteraB * 100, 2) : '', ''],
+            ['Mora de 91 a 120 días',  $mora91120, 'currency', $carteraB > 0 ? round($mora91120 / $carteraB * 100, 2) : '', ''],
+            ['Cartera vencida',        $vencidaB,  'currency', $moraPct, ''],
+        ] as $i => [$label, $value, $fmt, $pct, $obs]) {
+            $sheet->setCellValue("A{$r}", $label);
+            $sheet->setCellValue("B{$r}", $value);
+            $sheet->setCellValue("C{$r}", $pct);
+            $sheet->setCellValue("D{$r}", $obs);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $value);
+            if ($pct !== '' && $pct !== null) {
+                $sheet->getStyle("C{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            }
+            $r++;
+        }
+        $r++;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '2. INGRESOS'); $r++;
+        foreach ([
+            ['Capital por producto', $recB,  'currency'],
+            ['Intereses',            0.0,    'currency'],
+            ['Total',                $recB,  'currency'],
+        ] as $i => [$label, $val, $fmt]) {
+            $sheet->setCellValue("A{$r}", $label);
+            $sheet->setCellValue("B{$r}", $val);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $val);
+            $r++;
+        }
+        $r++;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '3. GASTOS OPERATIVOS'); $r++;
+        $gastosOpList = [
+            'Renta Oficina','Luz','Agua','Teléfono e Internet','Insumos de Cafetería',
+            'Insumos de Limpieza','Insumos de Papelería','Mobiliario y Equipo','Mantenimiento',
+            'Renta de Bodegas','Señora Limpieza','Eventos','Paquetería','Trámites Gubernamentales',
+            'Publicidad','Mecánicos','Servicios de Motocicletas','Software Póliza Anual','Pólizas',
+            'Recargas Telefónicas','Emergentes','Comisiones Oxxo','Multas e Infracciones',
+            'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
+            'Gastos legales','Préstamos Intersucursales','IMSS','Financiamiento de Motos',
+        ];
+        $gopTotal = 0.0;
+        foreach ($gastosOpList as $idx => $gastoName) {
+            $val = $getCat($gastoName);
+            $gopTotal += $val;
+            $sheet->setCellValue("A{$r}", $gastoName);
+            $sheet->setCellValue("B{$r}", $val);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $idx % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", 'currency', $val);
+            $r++;
+        }
+        $sheet->setCellValue("A{$r}", 'Total Gastos Operativos');
+        $sheet->setCellValue("B{$r}", $gopTotal > 0 ? $gopTotal : $gastosB);
+        $this->totalsRow($sheet, "A{$r}:D{$r}");
+        $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        $r += 2;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '4. NÓMINA Y CAPITAL HUMANO'); $r++;
+        $nomCats = ['Nómina' => 0.0, 'Comisiones' => 0.0, 'Vacaciones' => 0.0, 'Bonos' => 0.0, 'Gasolina' => 0.0];
+        foreach ($branchPayroll as $concept => $amount) {
+            $k = strtoupper(trim($concept));
+            foreach ($nomCats as $nom => $v) {
+                if (str_contains($k, strtoupper($nom))) { $nomCats[$nom] += (float)$amount; }
+            }
+        }
+        $nomTotal2 = 0.0;
+        foreach ($nomCats as $i2 => [$nomName, $nomVal]) {}
+        $ii = 0;
+        foreach ($nomCats as $nomName => $nomVal) {
+            $sheet->setCellValue("A{$r}", $nomName);
+            $sheet->setCellValue("B{$r}", $nomVal);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $ii % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", 'currency', $nomVal);
+            $nomTotal2 += $nomVal;
+            $ii++;
+            $r++;
+        }
+        $sheet->setCellValue("A{$r}", 'Total Nómina');
+        $sheet->setCellValue("B{$r}", $nomTotal > 0 ? $nomTotal : $nomTotal2);
+        $this->totalsRow($sheet, "A{$r}:D{$r}");
+        $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        $r += 2;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '5. PRÉSTAMOS INTERSUCURSALES'); $r++;
+        foreach ([
+            ['Activos (fondea)',  $loanFondea, 'currency'],
+            ['Pasivos (recibe)',  $loanRecibe, 'currency'],
+            ['Total',            $loanFondea + $loanRecibe, 'currency'],
+        ] as $i => [$label, $val, $fmt]) {
+            $sheet->setCellValue("A{$r}", $label);
+            $sheet->setCellValue("B{$r}", $val);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $val);
+            $r++;
+        }
+        $r++;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '6. ÍNDICE DE ROTACIÓN DE PERSONAL'); $r++;
+        foreach ([['N° personas que dejaron la empresa', 0, 'integer'], ['Índice de rotación', 0.0, 'percent']] as $i => [$label, $val, $fmt]) {
+            $sheet->setCellValue("A{$r}", $label);
+            $sheet->setCellValue("B{$r}", $val);
+            $sheet->setCellValue("D{$r}", '—');
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $val);
+            $r++;
+        }
+        $r++;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES'); $r++;
+        foreach ([
+            ['Ingresos Totales',            $recB,       'currency'],
+            ['Otorgamientos',               $colB,        'currency'],
+            ['Gastos Totales',              $gastosB,     'currency'],
+            ['Utilidad estimada',           $utilidad,    'currency'],
+            ['Préstamos intersucursales',   $loanFondea,  'currency'],
+            ['Mora 0-30 días',              $mora0_30,   'currency'],
+            ['Mora 31-60 días',             $mora31_60,  'currency'],
+            ['Mora 61-90 días',             $mora61_90,  'currency'],
+            ['Mora 91-120 días',            $mora91120,  'currency'],
+            ['Valor cartera',               $carteraB,   'currency'],
+        ] as $i => [$label, $val, $fmt]) {
+            $sheet->setCellValue("A{$r}", $label);
+            $sheet->setCellValue("B{$r}", $val);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $val);
+            $r++;
+        }
+        $r++;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '8. UTILIDAD'); $r++;
+        $sheet->setCellValue("A{$r}", 'Utilidad estimada (Rec - Gastos - Nómina)');
+        $sheet->setCellValue("B{$r}", $utilidad);
+        $this->dataRow($sheet, "A{$r}:D{$r}", true);
+        $this->applyFmt($sheet, "B{$r}", 'currency', $utilidad);
+        $r += 2;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '9. SALDO TOTAL ACUMULADO CUENTAS'); $r++;
+        $sheet->setCellValue("A{$r}", 'Total'); $sheet->setCellValue("B{$r}", 0.0);
+        $sheet->setCellValue("D{$r}", '—');
+        $this->dataRow($sheet, "A{$r}:D{$r}", true);
+        $this->applyFmt($sheet, "B{$r}", 'currency', 0.0);
+        $r += 2;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '10. OBSERVACIONES Y NOTAS'); $r++;
+        foreach (['Comentarios sobre el desempeño financiero', 'Factores de riesgo y oportunidades', 'Recomendaciones'] as $idx => $obs) {
+            $sheet->setCellValue("A{$r}", $obs);
+            $sheet->mergeCells("B{$r}:D{$r}");
+            $this->dataRow($sheet, "A{$r}:D{$r}", $idx % 2 === 0);
+            $sheet->getStyle("A{$r}:D{$r}")->getAlignment()->setWrapText(true);
+            $sheet->getRowDimension($r)->setRowHeight(30);
+            $r++;
+        }
+        $sheet->getColumnDimension('A')->setWidth(42);
+        $sheet->getColumnDimension('B')->setWidth(22);
+        $sheet->getColumnDimension('C')->setWidth(10);
+        $sheet->getColumnDimension('D')->setWidth(30);
+        $sheet->freezePane('A4');
+
+        // ── Sheet 2: EMPLEADOS ───────────────────────────────────────────────
+        $empSheet = $spreadsheet->createSheet()->setTitle('EMPLEADOS');
+        $this->sheetTitle($empSheet, 'A1:H1', 'EMPLEADOS / GESTORES — ' . $branchName . ' — ' . strtoupper($period->label));
+        $this->colHeaders($empSheet, 2, ['A' => 'NOMBRE', 'B' => 'SUCURSAL', 'C' => 'PAGOS', 'D' => 'BONOS', 'E' => 'DESCUENTOS', 'F' => 'GASTOS', 'G' => 'NETO', 'H' => 'COLOCACIÓN']);
+        $branchEmployees = collect($empGest)->filter(fn ($e) => strtoupper($e['branch'] ?? '') === $brUp)->values();
+        $er = 3;
+        foreach ($branchEmployees as $i => $emp) {
+            $empSheet->setCellValue("A{$er}", $emp['name']);
+            $empSheet->setCellValue("B{$er}", $emp['branch']);
+            $empSheet->setCellValue("C{$er}", $emp['pagos']      ?? 0);
+            $empSheet->setCellValue("D{$er}", $emp['bonos']      ?? 0);
+            $empSheet->setCellValue("E{$er}", $emp['descuentos'] ?? 0);
+            $empSheet->setCellValue("F{$er}", $emp['gastos']     ?? 0);
+            $empSheet->setCellValue("G{$er}", $emp['neto']       ?? 0);
+            $empSheet->setCellValue("H{$er}", $emp['colocacion'] ?? 0);
+            $this->dataRow($empSheet, "A{$er}:H{$er}", $i % 2 === 0);
+            foreach (['C', 'D', 'E', 'F', 'G', 'H'] as $col) {
+                $empSheet->getStyle("{$col}{$er}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            }
+            $er++;
+        }
+        if ($branchEmployees->isEmpty()) { $empSheet->setCellValue('A3', 'Sin empleados asignados a esta sucursal.'); }
+        $this->setColWidths($empSheet, ['A' => 36, 'B' => 18, 'C' => 16, 'D' => 14, 'E' => 14, 'F' => 14, 'G' => 16, 'H' => 16]);
+
+        // ── Sheet 3: GASTOS ──────────────────────────────────────────────────
+        $gasSheet = $spreadsheet->createSheet()->setTitle('GASTOS');
+        $this->sheetTitle($gasSheet, 'A1:C1', 'GASTOS — ' . $branchName . ' — ' . strtoupper($period->label));
+        $this->colHeaders($gasSheet, 2, ['A' => 'CATEGORÍA', 'B' => 'MONTO', 'C' => '%']);
+        $totalGastosSheet = array_sum($branchExpByCategory);
+        $gr = 3;
+        foreach ($branchExpByCategory as $cat => $val) {
+            $gasSheet->setCellValue("A{$gr}", $cat);
+            $gasSheet->setCellValue("B{$gr}", $val);
+            $gasSheet->setCellValue("C{$gr}", $totalGastosSheet > 0 ? round($val / $totalGastosSheet * 100, 2) : 0);
+            $this->dataRow($gasSheet, "A{$gr}:C{$gr}", $gr % 2 === 0);
+            $gasSheet->getStyle("B{$gr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $gasSheet->getStyle("C{$gr}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            $gr++;
+        }
+        $gasSheet->setCellValue("A{$gr}", 'Total'); $gasSheet->setCellValue("B{$gr}", $totalGastosSheet > 0 ? $totalGastosSheet : $gastosB);
+        $this->totalsRow($gasSheet, "A{$gr}:C{$gr}");
+        $gasSheet->getStyle("B{$gr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        $this->setColWidths($gasSheet, ['A' => 38, 'B' => 20, 'C' => 10]);
+
+        // ── Sheet 4: CARTERA ─────────────────────────────────────────────────
+        $portSheet = $spreadsheet->createSheet()->setTitle('CARTERA');
+        $this->sheetTitle($portSheet, 'A1:D1', 'CARTERA — ' . $branchName . ' — ' . strtoupper($period->label));
+        $this->colHeaders($portSheet, 2, ['A' => 'PRODUCTO', 'B' => 'CARTERA', 'C' => 'CARTERA VENCIDA', 'D' => 'MORA %']);
+        $portRows = collect($portProd)->filter(fn ($p) => strtoupper($p['branch'] ?? '') === $brUp)->values();
+        $pr = 3;
+        foreach ($portRows as $i => $row) {
+            $portSheet->setCellValue("A{$pr}", $row['product'] ?? $row['producto'] ?? '—');
+            $portSheet->setCellValue("B{$pr}", $row['cartera'] ?? $row['balance'] ?? 0);
+            $portSheet->setCellValue("C{$pr}", $row['vencida'] ?? 0);
+            $moraPP = ($row['cartera'] ?? 0) > 0 ? round(($row['vencida'] ?? 0) / $row['cartera'] * 100, 2) : 0;
+            $portSheet->setCellValue("D{$pr}", $moraPP);
+            $this->dataRow($portSheet, "A{$pr}:D{$pr}", $i % 2 === 0);
+            foreach (['B', 'C'] as $col) { $portSheet->getStyle("{$col}{$pr}")->getNumberFormat()->setFormatCode(self::CURRENCY); }
+            $portSheet->getStyle("D{$pr}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            $pr++;
+        }
+        $portSheet->setCellValue("A{$pr}", 'Total'); $portSheet->setCellValue("B{$pr}", $carteraB); $portSheet->setCellValue("C{$pr}", $vencidaB); $portSheet->setCellValue("D{$pr}", $moraPct);
+        $this->totalsRow($portSheet, "A{$pr}:D{$pr}");
+        foreach (['B', 'C'] as $col) { $portSheet->getStyle("{$col}{$pr}")->getNumberFormat()->setFormatCode(self::CURRENCY); }
+        $this->setColWidths($portSheet, ['A' => 28, 'B' => 20, 'C' => 20, 'D' => 10]);
+
+        // ── Sheet 5: COLOCACIÓN ──────────────────────────────────────────────
+        $colSheet = $spreadsheet->createSheet()->setTitle('COLOCACIÓN');
+        $this->sheetTitle($colSheet, 'A1:D1', 'COLOCACIÓN — ' . $branchName . ' — ' . strtoupper($period->label));
+        $this->colHeaders($colSheet, 2, ['A' => 'PRODUCTO', 'B' => 'MONTO', 'C' => 'CRÉDITOS', 'D' => '%']);
+        $colRows = collect($placeProd)->filter(fn ($p) => strtoupper($p['branch'] ?? '') === $brUp)->values();
+        $totalColSheet = $colRows->sum(fn ($p) => $p['monto'] ?? $p['amount'] ?? 0);
+        $cr = 3;
+        foreach ($colRows as $i => $row) {
+            $monto = $row['monto'] ?? $row['amount'] ?? 0;
+            $colSheet->setCellValue("A{$cr}", $row['product'] ?? $row['producto'] ?? '—');
+            $colSheet->setCellValue("B{$cr}", $monto);
+            $colSheet->setCellValue("C{$cr}", $row['creditos'] ?? $row['operaciones'] ?? 0);
+            $colSheet->setCellValue("D{$cr}", $totalColSheet > 0 ? round($monto / $totalColSheet * 100, 2) : 0);
+            $this->dataRow($colSheet, "A{$cr}:D{$cr}", $i % 2 === 0);
+            $colSheet->getStyle("B{$cr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $colSheet->getStyle("D{$cr}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            $cr++;
+        }
+        $colSheet->setCellValue("A{$cr}", 'Total'); $colSheet->setCellValue("B{$cr}", $colB);
+        $this->totalsRow($colSheet, "A{$cr}:D{$cr}");
+        $colSheet->getStyle("B{$cr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        $this->setColWidths($colSheet, ['A' => 28, 'B' => 20, 'C' => 12, 'D' => 10]);
+
+        // ── Sheet 6: RECUPERACIÓN ────────────────────────────────────────────
+        $recSheet = $spreadsheet->createSheet()->setTitle('RECUPERACIÓN');
+        $this->sheetTitle($recSheet, 'A1:E1', 'RECUPERACIÓN — ' . $branchName . ' — ' . strtoupper($period->label));
+        $this->colHeaders($recSheet, 2, ['A' => 'CONCEPTO', 'B' => 'CAPITAL', 'C' => 'INTERÉS', 'D' => 'IVA', 'E' => 'TOTAL']);
+        $recRow  = $recIdx[$brUp] ?? [];
+        $rr = 3;
+        foreach ([
+            ['Capital',     (float)($recRow['capital']   ?? 0), 'B'],
+            ['Intereses',   (float)($recRow['interest']  ?? 0), 'C'],
+            ['IVA',         (float)($recRow['tax']       ?? 0), 'D'],
+            ['Cargos',      (float)($recRow['charges']   ?? 0), 'E'],
+        ] as $i => [$label, $val, $col]) {
+            $recSheet->setCellValue("A{$rr}", $label);
+            $recSheet->setCellValue($col . $rr, $val);
+            $this->dataRow($recSheet, "A{$rr}:E{$rr}", $i % 2 === 0);
+            $recSheet->getStyle($col . $rr)->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $rr++;
+        }
+        $recSheet->setCellValue("A{$rr}", 'Total'); $recSheet->setCellValue("E{$rr}", $recB);
+        $this->totalsRow($recSheet, "A{$rr}:E{$rr}");
+        $recSheet->getStyle("E{$rr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        $this->setColWidths($recSheet, ['A' => 22, 'B' => 18, 'C' => 18, 'D' => 14, 'E' => 18]);
+
+        // ── Sheet 7: P. INTERSUC. ────────────────────────────────────────────
+        $lSheet = $spreadsheet->createSheet()->setTitle('P. INTERSUC.');
+        $this->sheetTitle($lSheet, 'A1:D1', 'PRÉSTAMOS INTERSUCURSALES — ' . $branchName . ' — ' . strtoupper($period->label));
+        $this->colHeaders($lSheet, 2, ['A' => 'ROL', 'B' => 'CONTRAPARTE', 'C' => 'MONTO', 'D' => 'FECHA']);
+        $lr = 3;
+        foreach ($loans['detail'] ?? [] as $i => $det) {
+            $from = strtoupper($det['from_branch'] ?? '');
+            $to   = strtoupper($det['to_branch']   ?? '');
+            if ($from !== $brUp && $to !== $brUp) continue;
+            $rol  = $from === $brUp ? 'Fondea' : 'Recibe';
+            $cprt = $from === $brUp ? ($det['to_branch'] ?? '—') : ($det['from_branch'] ?? '—');
+            $lSheet->setCellValue("A{$lr}", $rol);
+            $lSheet->setCellValue("B{$lr}", $cprt);
+            $lSheet->setCellValue("C{$lr}", (float)($det['amount'] ?? $det['total'] ?? 0));
+            $lSheet->setCellValue("D{$lr}", $det['date'] ?? '—');
+            $this->dataRow($lSheet, "A{$lr}:D{$lr}", $i % 2 === 0);
+            $lSheet->getStyle("C{$lr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $lr++;
+        }
+        if ($lr === 3) { $lSheet->setCellValue('A3', 'Sin préstamos intersucursales para esta sucursal en el periodo.'); }
+        $this->setColWidths($lSheet, ['A' => 14, 'B' => 28, 'C' => 18, 'D' => 16]);
+
+        if ($spreadsheet->getSheetCount() > 1) {
+            try {
+                $idx = $spreadsheet->getIndex($spreadsheet->getSheetByName('Worksheet'));
+                if ($idx !== null) $spreadsheet->removeSheetByIndex($idx);
+            } catch (\Throwable) {}
+        }
+        $spreadsheet->setActiveSheetIndex(0);
+        return $spreadsheet;
+    }
+
+    /**
+     * Build an employee/gestor-specific workbook from an existing full snapshot.
+     * Sheets: RESUMEN, NÓMINA, COLOCACIÓN, CARTERA
+     */
+    public function buildEmployeeFromSnapshot(
+        Period        $period,
+        PeriodSummary $summary,
+        array         $snap,
+        int           $employeeId,
+        float         $extraExpenseAmount = 0.0,
+        string        $extraExpenseNotes  = ''
+    ): Spreadsheet {
+        @ini_set('memory_limit', '1024M');
+
+        // Look up employee name from DB then find in snapshot
+        $employee = \App\Models\Employee::find($employeeId);
+        if (!$employee) {
+            throw new \RuntimeException("Empleado ID {$employeeId} no encontrado.");
+        }
+
+        $canonicalizer = app(\App\Services\EmployeeNameCanonicalizer::class);
+        $empNormTarget = $canonicalizer->normalize($employee->full_name ?? '');
+
+        $empGest = $snap['sections']['employees_gestores'] ?? [];
+        $empRow  = null;
+        foreach ($empGest as $e) {
+            if ($canonicalizer->normalize($e['name'] ?? '') === $empNormTarget) {
+                $empRow = $e;
+                break;
+            }
+        }
+
+        // Fallback: partial match
+        if (!$empRow) {
+            foreach ($empGest as $e) {
+                $norm = $canonicalizer->normalize($e['name'] ?? '');
+                if ($norm && str_contains($norm, $empNormTarget) || str_contains($empNormTarget, $norm)) {
+                    $empRow = $e;
+                    break;
+                }
+            }
+        }
+
+        $empName   = $employee->full_name;
+        $empBranch = $empRow['branch'] ?? 'Sin asignar';
+        $pagos     = (float)($empRow['pagos']        ?? 0);
+        $bonos     = (float)($empRow['bonos']        ?? 0);
+        $desctos   = (float)($empRow['descuentos']   ?? 0);
+        $gastos    = (float)($empRow['gastos']        ?? 0) + $extraExpenseAmount;
+        $neto      = (float)($empRow['neto']          ?? ($pagos + $bonos - $desctos));
+        $coloc     = (float)($empRow['colocacion']    ?? 0);
+        $ops       = (int)($empRow['operaciones']     ?? 0);
+        $rec       = (float)($empRow['recuperacion']  ?? 0);
+        $cartera   = (float)($empRow['cartera']       ?? 0);
+        $vencida   = (float)($empRow['vencida']       ?? 0);
+        $mora      = $cartera > 0 ? round($vencida / $cartera * 100, 2) : (float)($empRow['mora'] ?? 0);
+
+        $utilidad  = $rec - $gastos - ($pagos + $bonos - $desctos);
+
+        $spreadsheet = new Spreadsheet();
+        $spreadsheet->getProperties()
+            ->setTitle("Radiografía Gestor {$empName} — {$period->label}")
+            ->setCreator('Sistema de Reportes');
+
+        // ── Sheet 1: RESUMEN ─────────────────────────────────────────────────
+        $sheet = $spreadsheet->getActiveSheet()->setTitle('RESUMEN');
+        $this->sheetTitle($sheet, 'A1:D1', mb_strtoupper($empName) . ' — ' . strtoupper($period->label));
+        $sheet->mergeCells('A2:D2');
+        $sheet->setCellValue('A2', "Gestor / Empleado: {$empName}  |  Sucursal: {$empBranch}  |  Periodo: {$period->label}");
+        $this->metaStyle($sheet, 'A2:D2');
+        $this->colHeaders($sheet, 3, ['A' => 'MÉTRICA', 'B' => 'VALOR', 'C' => '%', 'D' => 'OBSERVACIÓN']);
+
+        $r = 4;
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '1. MÉTRICAS GENERALES'); $r++;
+        foreach ([
+            ['Recuperación', $rec,     'currency', '', ''],
+            ['Colocación',   $coloc,   'currency', '', ''],
+            ['Operaciones',  $ops,     'integer',  '', ''],
+            ['Cartera',      $cartera, 'currency', '', ''],
+            ['Cartera vencida', $vencida, 'currency', $mora, ''],
+            ['Mora %',       $mora,    'percent',  '', ''],
+        ] as $i => [$label, $value, $fmt, $pct, $obs]) {
+            $sheet->setCellValue("A{$r}", $label);
+            $sheet->setCellValue("B{$r}", $value);
+            $sheet->setCellValue("C{$r}", $pct);
+            $sheet->setCellValue("D{$r}", $obs);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $value);
+            if ($pct !== '') { $sheet->getStyle("C{$r}")->getNumberFormat()->setFormatCode(self::PERCENT); }
+            $r++;
+        }
+        $r++;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '2. NÓMINA'); $r++;
+        foreach ([
+            ['Pagos',       $pagos,  'currency'],
+            ['Bonos',       $bonos,  'currency'],
+            ['Descuentos',  $desctos, 'currency'],
+            ['Neto',        $neto,   'currency'],
+        ] as $i => [$label, $val, $fmt]) {
+            $sheet->setCellValue("A{$r}", $label); $sheet->setCellValue("B{$r}", $val);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $val);
+            $r++;
+        }
+        $r++;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '3. GASTOS'); $r++;
+        $sheet->setCellValue("A{$r}", 'Gastos directos'); $sheet->setCellValue("B{$r}", (float)($empRow['gastos'] ?? 0));
+        $this->dataRow($sheet, "A{$r}:D{$r}", true);
+        $this->applyFmt($sheet, "B{$r}", 'currency', (float)($empRow['gastos'] ?? 0));
+        $r++;
+        if ($extraExpenseAmount > 0) {
+            $sheet->setCellValue("A{$r}", 'Gasto general asignado al gestor');
+            $sheet->setCellValue("B{$r}", $extraExpenseAmount);
+            $sheet->setCellValue("D{$r}", $extraExpenseNotes ?: '—');
+            $this->dataRow($sheet, "A{$r}:D{$r}", false);
+            $this->applyFmt($sheet, "B{$r}", 'currency', $extraExpenseAmount);
+            $r++;
+        }
+        $sheet->setCellValue("A{$r}", 'Total Gastos'); $sheet->setCellValue("B{$r}", $gastos);
+        $this->totalsRow($sheet, "A{$r}:D{$r}");
+        $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        $r += 2;
+
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '4. UTILIDAD ESTIMADA'); $r++;
+        $sheet->setCellValue("A{$r}", 'Rec - (Pagos + Bonos - Desctos) - Gastos');
+        $sheet->setCellValue("B{$r}", $utilidad);
+        $this->dataRow($sheet, "A{$r}:D{$r}", true);
+        $this->applyFmt($sheet, "B{$r}", 'currency', $utilidad);
+        $r += 2;
+
+        if ($extraExpenseNotes) {
+            $this->sectionHeader($sheet, "A{$r}:D{$r}", 'OBSERVACIONES'); $r++;
+            $sheet->setCellValue("A{$r}", $extraExpenseNotes);
+            $sheet->mergeCells("A{$r}:D{$r}");
+            $this->dataRow($sheet, "A{$r}:D{$r}", true);
+            $sheet->getStyle("A{$r}:D{$r}")->getAlignment()->setWrapText(true);
+            $sheet->getRowDimension($r)->setRowHeight(40);
+        }
+
+        $sheet->getColumnDimension('A')->setWidth(42);
+        $sheet->getColumnDimension('B')->setWidth(22);
+        $sheet->getColumnDimension('C')->setWidth(10);
+        $sheet->getColumnDimension('D')->setWidth(35);
+        $sheet->freezePane('A4');
+
+        // ── Sheet 2: NÓMINA DETAIL (from DB) ─────────────────────────────────
+        $noiSheet = $spreadsheet->createSheet()->setTitle('NÓMINA');
+        $this->sheetTitle($noiSheet, 'A1:E1', 'DETALLE DE NÓMINA — ' . mb_strtoupper($empName));
+        $this->colHeaders($noiSheet, 2, ['A' => 'CONCEPTO', 'B' => 'TIPO', 'C' => 'MONTO', 'D' => 'FECHA', 'E' => 'PERIODO NÓMINA']);
+        $resolveDataIds = app(\App\Services\Radiography\RadiographySnapshotBuilder::class)
+            ->resolveDataIdsPublic($period);
+        $noiRows = \Illuminate\Support\Facades\DB::table('fact_noi_movements as n')
+            ->join('employees as e', 'n.employee_id', '=', 'e.id')
+            ->whereIn('n.period_id', $resolveDataIds)
+            ->where('n.employee_id', $employeeId)
+            ->selectRaw('n.concept, n.concept_type, n.amount, n.movement_date, n.payroll_type')
+            ->orderBy('n.movement_date')
+            ->get();
+        $nr = 3;
+        foreach ($noiRows as $i => $row) {
+            $noiSheet->setCellValue("A{$nr}", $row->concept ?? '—');
+            $noiSheet->setCellValue("B{$nr}", $row->concept_type ?? '—');
+            $noiSheet->setCellValue("C{$nr}", (float)$row->amount);
+            $noiSheet->setCellValue("D{$nr}", $row->movement_date ?? '—');
+            $noiSheet->setCellValue("E{$nr}", $row->payroll_type ?? '—');
+            $this->dataRow($noiSheet, "A{$nr}:E{$nr}", $i % 2 === 0);
+            $noiSheet->getStyle("C{$nr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $nr++;
+        }
+        if ($noiRows->isEmpty()) { $noiSheet->setCellValue('A3', 'Sin movimientos de nómina NOI para este empleado en el periodo.'); }
+        $this->setColWidths($noiSheet, ['A' => 38, 'B' => 16, 'C' => 18, 'D' => 16, 'E' => 20]);
+
+        // ── Sheet 3: COLOCACIÓN ──────────────────────────────────────────────
+        $colEmpSheet = $spreadsheet->createSheet()->setTitle('COLOCACIÓN');
+        $this->sheetTitle($colEmpSheet, 'A1:D1', 'COLOCACIÓN — ' . mb_strtoupper($empName));
+        $this->colHeaders($colEmpSheet, 2, ['A' => 'PRODUCTO', 'B' => 'MONTO', 'C' => 'CRÉDITOS', 'D' => 'SUCURSAL']);
+        $canonicalizer2 = app(\App\Services\EmployeeNameCanonicalizer::class);
+        $placRows = \Illuminate\Support\Facades\DB::table('fact_placements as p')
+            ->leftJoin('branches as b', 'p.branch_id', '=', 'b.id')
+            ->whereIn('p.period_id', $resolveDataIds)
+            ->where(fn ($q) => $q->whereRaw('LOWER(p.promoter_name) LIKE ?', ['%' . mb_strtolower($employee->full_name) . '%']))
+            ->selectRaw('p.product_name, SUM(p.amount) as monto, COUNT(*) as creditos, b.name as sucursal')
+            ->groupBy('p.product_name', 'b.name')
+            ->get();
+        $plr = 3;
+        foreach ($placRows as $i => $row) {
+            $colEmpSheet->setCellValue("A{$plr}", $row->product_name ?? '—');
+            $colEmpSheet->setCellValue("B{$plr}", (float)$row->monto);
+            $colEmpSheet->setCellValue("C{$plr}", (int)$row->creditos);
+            $colEmpSheet->setCellValue("D{$plr}", $row->sucursal ?? '—');
+            $this->dataRow($colEmpSheet, "A{$plr}:D{$plr}", $i % 2 === 0);
+            $colEmpSheet->getStyle("B{$plr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $plr++;
+        }
+        if ($placRows->isEmpty()) { $colEmpSheet->setCellValue('A3', 'Sin colocación registrada para este gestor en el periodo.'); }
+        $this->setColWidths($colEmpSheet, ['A' => 28, 'B' => 18, 'C' => 12, 'D' => 22]);
+
+        // ── Sheet 4: CARTERA ─────────────────────────────────────────────────
+        $portEmpSheet = $spreadsheet->createSheet()->setTitle('CARTERA');
+        $this->sheetTitle($portEmpSheet, 'A1:E1', 'CARTERA Y MORA — ' . mb_strtoupper($empName));
+        $this->colHeaders($portEmpSheet, 2, ['A' => 'PRODUCTO', 'B' => 'CARTERA', 'C' => 'VENCIDA', 'D' => 'MORA %', 'E' => 'SUCURSAL']);
+        $portEmpRows = \Illuminate\Support\Facades\DB::table('fact_portfolios as po')
+            ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $resolveDataIds)
+            ->where(fn ($q) => $q->whereRaw('LOWER(po.promoter_name) LIKE ?', ['%' . mb_strtolower($employee->full_name) . '%']))
+            ->selectRaw('po.product_name, SUM(po.balance) as cartera, SUM(CASE WHEN po.days_past_due>0 THEN po.balance ELSE 0 END) as vencida, b.name as sucursal')
+            ->groupBy('po.product_name', 'b.name')
+            ->get();
+        $por = 3;
+        foreach ($portEmpRows as $i => $row) {
+            $moraPp = (float)$row->cartera > 0 ? round((float)$row->vencida / (float)$row->cartera * 100, 2) : 0;
+            $portEmpSheet->setCellValue("A{$por}", $row->product_name ?? '—');
+            $portEmpSheet->setCellValue("B{$por}", (float)$row->cartera);
+            $portEmpSheet->setCellValue("C{$por}", (float)$row->vencida);
+            $portEmpSheet->setCellValue("D{$por}", $moraPp);
+            $portEmpSheet->setCellValue("E{$por}", $row->sucursal ?? '—');
+            $this->dataRow($portEmpSheet, "A{$por}:E{$por}", $i % 2 === 0);
+            foreach (['B', 'C'] as $col) { $portEmpSheet->getStyle("{$col}{$por}")->getNumberFormat()->setFormatCode(self::CURRENCY); }
+            $portEmpSheet->getStyle("D{$por}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            $por++;
+        }
+        if ($portEmpRows->isEmpty()) { $portEmpSheet->setCellValue('A3', 'Sin cartera registrada para este gestor en el periodo.'); }
+        $this->setColWidths($portEmpSheet, ['A' => 28, 'B' => 18, 'C' => 18, 'D' => 10, 'E' => 22]);
+
+        try {
+            $idx = $spreadsheet->getIndex($spreadsheet->getSheetByName('Worksheet'));
+            if ($idx !== null) $spreadsheet->removeSheetByIndex($idx);
+        } catch (\Throwable) {}
+
+        $spreadsheet->setActiveSheetIndex(0);
+        return $spreadsheet;
+    }
+
+    /**
+     * Build a comparative workbook from two period snapshots.
+     * Compares the 10 sections between periods (or filtered to branch/employee).
+     */
+    public function buildComparativeFromSnapshots(
+        Period  $currentPeriod,
+        array   $currentSnap,
+        Period  $comparePeriod,
+        array   $compareSnap,
+        array   $config = []
+    ): Spreadsheet {
+        @ini_set('memory_limit', '1024M');
+
+        $scope    = $config['scope']    ?? 'general';
+        $branchId = $config['branch_id']   ?? null;
+        $empId    = $config['employee_id'] ?? null;
+
+        // Resolve labels
+        $labelCur = strtoupper($currentPeriod->label);
+        $labelCmp = strtoupper($comparePeriod->label);
+        $scopeLabel = 'General';
+        $branchName = null;
+
+        if ($scope === 'branch' && $branchId) {
+            $branchRow  = collect($currentSnap['sections']['branches'] ?? [])->firstWhere('branch_id', (int)$branchId);
+            $branchName = $branchRow['nombre'] ?? "Sucursal #{$branchId}";
+            $scopeLabel = $branchName;
+        } elseif ($scope === 'employee' && $empId) {
+            $emp        = \App\Models\Employee::find($empId);
+            $scopeLabel = $emp->full_name ?? "Empleado #{$empId}";
+        }
+
+        // Helper: get branch-level value from snapshot
+        $branchVal = function (array $snap, string $field) use ($branchId, $branchName): float {
+            if (!$branchId) return 0.0;
+            $brUp = strtoupper(trim($branchName ?? ''));
+            $branches = $snap['sections']['branches'] ?? [];
+            $row = collect($branches)->firstWhere('branch_id', (int)$branchId);
+            if (!$row) { $row = collect($branches)->first(fn ($b) => strtoupper($b['nombre'] ?? '') === $brUp); }
+            return (float)($row[$field] ?? 0);
+        };
+
+        // Helper: get employee value from snapshot
+        $canonicalizer = app(\App\Services\EmployeeNameCanonicalizer::class);
+        $empVal = function (array $snap, string $field) use ($empId, $canonicalizer): float {
+            if (!$empId) return 0.0;
+            $emp = \App\Models\Employee::find($empId);
+            $target = $canonicalizer->normalize($emp->full_name ?? '');
+            $rows = $snap['sections']['employees_gestores'] ?? [];
+            foreach ($rows as $r) {
+                if ($canonicalizer->normalize($r['name'] ?? '') === $target) {
+                    return (float)($r[$field] ?? 0);
+                }
+            }
+            return 0.0;
+        };
+
+        // Get metric values from both snapshots
+        $get = function (array $snap, string $path) use ($scope, $branchVal, $empVal, $branchId, $empId): float {
+            if ($scope === 'branch' && $branchId) {
+                return match ($path) {
+                    'cartera'      => $branchVal($snap, 'cartera'),
+                    'colocacion'   => $branchVal($snap, 'colocacion'),
+                    'recuperacion' => $branchVal($snap, 'recuperacion'),
+                    'gastos'       => $branchVal($snap, 'gastos'),
+                    'mora'         => $branchVal($snap, 'mora'),
+                    'vencida'      => $branchVal($snap, 'vencida'),
+                    'pagos'        => (float)($snap['sections']['payroll']['pagos'] ?? 0),
+                    'bonos'        => (float)($snap['sections']['payroll']['bonos'] ?? 0),
+                    'descuentos'   => (float)($snap['sections']['payroll']['descuentos'] ?? 0),
+                    'neto'         => (float)($snap['sections']['payroll']['neto'] ?? 0),
+                    default        => (float)data_get($snap, $path, 0),
+                };
+            }
+            if ($scope === 'employee' && $empId) {
+                return match ($path) {
+                    'recuperacion' => $empVal($snap, 'recuperacion'),
+                    'colocacion'   => $empVal($snap, 'colocacion'),
+                    'cartera'      => $empVal($snap, 'cartera'),
+                    'vencida'      => $empVal($snap, 'vencida'),
+                    'pagos'        => $empVal($snap, 'pagos'),
+                    'bonos'        => $empVal($snap, 'bonos'),
+                    'descuentos'   => $empVal($snap, 'descuentos'),
+                    'neto'         => $empVal($snap, 'neto'),
+                    'gastos'       => $empVal($snap, 'gastos'),
+                    default        => 0.0,
+                };
+            }
+            // General scope: use summary
+            return match ($path) {
+                'cartera'      => (float)($snap['summary']['portfolio_total']   ?? 0),
+                'colocacion'   => (float)($snap['summary']['placement_total']   ?? 0),
+                'recuperacion' => (float)($snap['summary']['recovery_total']    ?? 0),
+                'gastos'       => (float)($snap['summary']['expenses_total']    ?? 0),
+                'vencida'      => (float)($snap['summary']['overdue_portfolio'] ?? 0),
+                'mora'         => (float)($snap['summary']['mora_index']        ?? 0),
+                'pagos'        => (float)($snap['sections']['payroll']['pagos']     ?? 0),
+                'bonos'        => (float)($snap['sections']['payroll']['bonos']     ?? 0),
+                'descuentos'   => (float)($snap['sections']['payroll']['descuentos'] ?? 0),
+                'neto'         => (float)($snap['sections']['payroll']['neto']       ?? 0),
+                default        => (float)data_get($snap, $path, 0),
+            };
+        };
+
+        $spreadsheet = new Spreadsheet();
+        $spreadsheet->getProperties()
+            ->setTitle("Comparativo {$labelCmp} vs {$labelCur}")
+            ->setCreator('Sistema de Reportes');
+
+        $sheet = $spreadsheet->getActiveSheet()->setTitle('COMPARATIVO');
+        $reportType = $config['report_type'] ?? 'month_vs_month';
+        $typeLabel  = match ($reportType) {
+            'bimester_vs_bimester' => 'COMPARATIVO BIMESTRE',
+            'quarter_vs_quarter'   => 'COMPARATIVO TRIMESTRE',
+            default                => 'COMPARATIVO MES VS MES',
+        };
+        $this->sheetTitle($sheet, 'A1:G1', "{$typeLabel} — {$labelCmp} vs {$labelCur}" . ($scopeLabel !== 'General' ? " — {$scopeLabel}" : ''));
+        $sheet->mergeCells('A2:G2');
+        $sheet->setCellValue('A2', "Alcance: {$scopeLabel}  |  Periodo comparado: {$comparePeriod->label}  |  Periodo actual: {$currentPeriod->label}  |  Generado: " . now('America/Mexico_City')->format('d/m/Y H:i'));
+        $this->metaStyle($sheet, 'A2:G2');
+
+        // Column headers
+        $sheet->setCellValue('A3', 'MÉTRICA');
+        $sheet->setCellValue('B3', $labelCmp);
+        $sheet->setCellValue('C3', '%');
+        $sheet->setCellValue('D3', $labelCur);
+        $sheet->setCellValue('E3', '%');
+        $sheet->setCellValue('F3', 'DIFERENCIA');
+        $sheet->setCellValue('G3', 'VAR %');
+        $hdrRange = 'A3:G3';
+        $sheet->getStyle($hdrRange)->applyFromArray([
+            'font'      => ['bold' => true, 'size' => 9, 'color' => ['argb' => self::FG_HDR]],
+            'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => self::BG_HDR]],
+            'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER],
+            'borders'   => ['bottom' => ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => self::FG_HDR]]],
+        ]);
+        $sheet->getRowDimension(3)->setRowHeight(18);
+
+        $r = 4;
+
+        // Helper: write comparison row
+        $writeComp = function (int &$r, string $label, float $prev, float $curr, string $fmt, bool $alt) use ($sheet): void {
+            $diff   = $curr - $prev;
+            $varPct = $prev != 0 ? round($diff / abs($prev) * 100, 2) : ($curr != 0 ? 100.0 : 0.0);
+            $base   = max(abs($prev), abs($curr));
+            $prevPct = $base > 0 ? round(abs($prev) / $base * 100, 2) : 0;
+            $currPct = $base > 0 ? round(abs($curr) / $base * 100, 2) : 0;
+
+            $sheet->setCellValue("A{$r}", $label);
+            $sheet->setCellValue("B{$r}", $prev);
+            $sheet->setCellValue("C{$r}", $prevPct);
+            $sheet->setCellValue("D{$r}", $curr);
+            $sheet->setCellValue("E{$r}", $currPct);
+            $sheet->setCellValue("F{$r}", $diff);
+            $sheet->setCellValue("G{$r}", $varPct);
+
+            $this->dataRow($sheet, "A{$r}:G{$r}", $alt);
+            $fmtCode = $fmt === 'currency' ? self::CURRENCY : ($fmt === 'percent' ? self::PERCENT : self::INTEGER);
+            foreach (['B', 'D', 'F'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode($fmtCode);
+            }
+            foreach (['C', 'E'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            }
+            $sheet->getStyle("G{$r}")->getNumberFormat()->setFormatCode('0.00"%"');
+            // Color the variance: green if positive, red if negative
+            if ($varPct > 0) {
+                $sheet->getStyle("G{$r}")->getFont()->getColor()->setARGB('FF15803D');
+            } elseif ($varPct < 0) {
+                $sheet->getStyle("G{$r}")->getFont()->getColor()->setARGB(self::FG_RED);
+            }
+            $r++;
+        };
+
+        // ── Section 1: Métricas Generales ────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '1. MÉTRICAS GENERALES'); $r++;
+        $cartPrev = $get($compareSnap, 'cartera');
+        $cartCurr = $get($currentSnap, 'cartera');
+        foreach ([
+            ['Valor cartera',      $cartPrev, $cartCurr, 'currency'],
+            ['Otorgamientos',      $get($compareSnap,'colocacion'), $get($currentSnap,'colocacion'), 'currency'],
+            ['Recuperación total', $get($compareSnap,'recuperacion'), $get($currentSnap,'recuperacion'), 'currency'],
+            ['Cartera vencida',    $get($compareSnap,'vencida'), $get($currentSnap,'vencida'), 'currency'],
+            ['Mora %',             $get($compareSnap,'mora'), $get($currentSnap,'mora'), 'percent'],
+        ] as $i => [$label, $prev, $curr, $fmt]) {
+            $writeComp($r, $label, $prev, $curr, $fmt, $i % 2 === 0);
+        }
+        $r++;
+
+        // ── Section 2: Ingresos ──────────────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '2. INGRESOS'); $r++;
+        $writeComp($r, 'Recuperación (ingresos)', $get($compareSnap,'recuperacion'), $get($currentSnap,'recuperacion'), 'currency', true);
+        $r++;
+
+        // ── Section 3: Gastos Operativos ─────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '3. GASTOS OPERATIVOS'); $r++;
+        $writeComp($r, 'Total Gastos', $get($compareSnap,'gastos'), $get($currentSnap,'gastos'), 'currency', true);
+        $r++;
+
+        // ── Section 4: Nómina ────────────────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '4. NÓMINA Y CAPITAL HUMANO'); $r++;
+        foreach ([
+            ['Pagos',       'pagos'],
+            ['Bonos',       'bonos'],
+            ['Descuentos',  'descuentos'],
+            ['Neto',        'neto'],
+        ] as $i => [$label, $key]) {
+            $writeComp($r, $label, $get($compareSnap,$key), $get($currentSnap,$key), 'currency', $i % 2 === 0);
+        }
+        $r++;
+
+        // ── Section 5: Préstamos Intersucursales ─────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '5. PRÉSTAMOS INTERSUCURSALES'); $r++;
+        $loanPrev = (float)($compareSnap['sections']['interbranch_loans']['total'] ?? 0);
+        $loanCurr = (float)($currentSnap['sections']['interbranch_loans']['total'] ?? 0);
+        $writeComp($r, 'Total Intersucursal', $loanPrev, $loanCurr, 'currency', true);
+        $r++;
+
+        // ── Section 6: Rotación ──────────────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '6. ÍNDICE DE ROTACIÓN DE PERSONAL'); $r++;
+        $sheet->setCellValue("A{$r}", 'Sin datos disponibles');
+        $this->dataRow($sheet, "A{$r}:G{$r}", true);
+        $r += 2;
+
+        // ── Section 7: Tendencias ────────────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES'); $r++;
+        foreach ([
+            ['Recuperación',   'recuperacion'],
+            ['Otorgamientos',  'colocacion'],
+            ['Gastos Totales', 'gastos'],
+        ] as $i => [$label, $key]) {
+            $writeComp($r, $label, $get($compareSnap,$key), $get($currentSnap,$key), 'currency', $i % 2 === 0);
+        }
+        $utilPrev = $get($compareSnap,'recuperacion') - $get($compareSnap,'gastos') - ($get($compareSnap,'pagos') + $get($compareSnap,'bonos') - $get($compareSnap,'descuentos'));
+        $utilCurr = $get($currentSnap,'recuperacion') - $get($currentSnap,'gastos') - ($get($currentSnap,'pagos') + $get($currentSnap,'bonos') - $get($currentSnap,'descuentos'));
+        $writeComp($r, 'Utilidad estimada', $utilPrev, $utilCurr, 'currency', true);
+        $r++;
+
+        // ── Section 8: Utilidad ──────────────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '8. UTILIDAD'); $r++;
+        $writeComp($r, 'Utilidad estimada', $utilPrev, $utilCurr, 'currency', true);
+        $r++;
+
+        // ── Sections 9-10: N/A ───────────────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '9. SALDO TOTAL ACUMULADO CUENTAS'); $r++;
+        $sheet->setCellValue("A{$r}", 'Sin datos disponibles'); $this->dataRow($sheet, "A{$r}:G{$r}", true); $r += 2;
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '10. OBSERVACIONES Y NOTAS'); $r++;
+        $sheet->setCellValue("A{$r}", 'Comparativo generado automáticamente. Revisar con fuentes originales para detalles.');
+        $sheet->mergeCells("A{$r}:G{$r}");
+        $this->dataRow($sheet, "A{$r}:G{$r}", true);
+
+        $this->setColWidths($sheet, ['A' => 42, 'B' => 20, 'C' => 8, 'D' => 20, 'E' => 8, 'F' => 18, 'G' => 10]);
+        $sheet->freezePane('A4');
+
+        try {
+            $idx = $spreadsheet->getIndex($spreadsheet->getSheetByName('Worksheet'));
+            if ($idx !== null) $spreadsheet->removeSheetByIndex($idx);
+        } catch (\Throwable) {}
+
+        $spreadsheet->setActiveSheetIndex(0);
+        return $spreadsheet;
+    }
 }

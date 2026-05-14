@@ -9,6 +9,9 @@ namespace App\Support;
 class ExpenseCategoryMapper
 {
     private const MAP = [
+        // Envío de utilidad a corporativo — must come before Emergentes fallback
+        'EXCEDENTE'               => 'Envío de utilidad a corporativo',
+
         // Intersucursal / Fondeo — must come first (most specific)
         'PRESTAMO INTERSUCURSAL'  => 'Préstamos Intersucursales',
         'PRESTAMO SUCURSAL'       => 'Préstamos Intersucursales',
@@ -38,6 +41,9 @@ class ExpenseCategoryMapper
         'DATOS MOVILES'           => 'Teléfono e Internet',
 
         // Software / Licencias
+        'CHAT GPT'                => 'Software Póliza Anual',
+        'CHATGPT'                 => 'Software Póliza Anual',
+        'ASPEL'                   => 'Software Póliza Anual',
         'SOFTWARE'                => 'Software Póliza Anual',
         'LICENCIA'                => 'Software Póliza Anual',
 
@@ -74,6 +80,7 @@ class ExpenseCategoryMapper
         'ELECTRICIDAD'            => 'Luz',
         'CFE'                     => 'Luz',
         'LUZ'                     => 'Luz',
+        'GARRAFON'                => 'Agua',
         'AGUA'                    => 'Agua',
 
         // Mobiliario y equipo
@@ -87,9 +94,13 @@ class ExpenseCategoryMapper
         'GASOLINA'                => 'Gasolina',
         'COMBUSTIBLE'             => 'Gasolina',
 
-        // Transportes
+        // Transportes / Paquetería
+        'DHL'                     => 'Paquetería',
+        'FEDEX'                   => 'Paquetería',
+        'GUIAS'                   => 'Paquetería',
         'TAXI'                    => 'Transportes',
         'TRANSPORTE'              => 'Transportes',
+        'DILIGENCIAS'             => 'Viáticos',
         'VIATICO'                 => 'Viáticos',
         'FLETE'                   => 'Fletes',
 
@@ -100,8 +111,13 @@ class ExpenseCategoryMapper
         'PEGOTE'                  => 'Pegotes',
 
         // Motocicletas / Mecánicos
+        'TALLER REPARACION MOTO'  => 'Servicios de Motocicletas',
+        'TALLER REPARACION DE MOTO' => 'Servicios de Motocicletas',
         'MOTOCICLETA'             => 'Servicios de Motocicletas',
         'SERVICIO DE MOTO'        => 'Servicios de Motocicletas',
+        'MANO DE OBRA'            => 'Servicios de Motocicletas',
+        'SPROCKET'                => 'Servicios de Motocicletas',
+        'SERVICE MOTO'            => 'Servicios de Motocicletas',
         'MOTO'                    => 'Servicios de Motocicletas',
         'MECANICO'                => 'Mecánicos',
         'MECANICA'                => 'Mecánicos',
@@ -118,6 +134,7 @@ class ExpenseCategoryMapper
 
         // Paquetería / Envíos
         'PAQUETERIA'              => 'Paquetería',
+        'MENSAJERIA'              => 'Paquetería',
         'ENVIO'                   => 'Paquetería',
 
         // Eventos

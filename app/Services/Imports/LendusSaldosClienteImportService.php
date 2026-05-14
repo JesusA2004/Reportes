@@ -238,6 +238,7 @@ class LendusSaldosClienteImportService
                     'saldo_capital',
                     'total_a_pagar',
                     'total_pagado',
+                    'total_atrasado',
                     'estatus',
                     'substatus',
                     'contrato',
@@ -245,6 +246,7 @@ class LendusSaldosClienteImportService
                     'num_contrato',
                     'dias_vencido',
                     'dias_vencidos',
+                    'dias_mora',
                     'capital_atrasado',
                     'producto_de_credito',
                     'numero_de_pagos',
@@ -338,14 +340,14 @@ class LendusSaldosClienteImportService
                 'total_a_pagar',
             ],
             'past_due_balance' => [
-                'capital_atrasado',
+                'total_atrasado',          // highest priority — includes all overdue components
                 'saldo_capital_atrasado',
-                'total_atrasado',
                 'saldo_vencido',
                 'cartera_vencida',
                 'monto_vencido',
                 'importe_vencido',
                 'capital_vencido',
+                'capital_atrasado',        // lower priority — capital only, may miss interest
                 'saldo_mora',
                 'mora',
             ],

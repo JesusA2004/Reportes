@@ -42,30 +42,97 @@ class RadiographySnapshotBuilder
                 ->where('days_past_due', '>', 0)
                 ->exists();
             if ($hasOverdueDays) {
+                // Use past_due_balance (total_atrasado) for overdue metric
                 $vencidaFallback = (float) \App\Models\Portfolio::query()
                     ->whereIn('period_id', $this->dataIds)
                     ->where('days_past_due', '>', 0)
-                    ->sum('balance');
+                    ->sum('past_due_balance');
+                if ($vencidaFallback === 0.0) {
+                    $vencidaFallback = (float) \App\Models\Portfolio::query()
+                        ->whereIn('period_id', $this->dataIds)
+                        ->where('days_past_due', '>', 0)
+                        ->sum('balance');
+                }
                 $carteraTotal = (float) ($gm['valor_cartera_total'] ?? 0);
                 $gm['cartera_vencida_total'] = $vencidaFallback;
                 $gm['mora_porcentaje'] = $carteraTotal > 0 ? round($vencidaFallback / $carteraTotal * 100, 2) : 0;
             }
         }
 
-        // If global_metrics totals are still zero but fact tables have data, recalculate inline
+        // Always recalculate cartera/vencida from operative branches only.
+        // global_metrics may include CHIHUAHUA/DURANGO/AGUASCALIENTES data from old consolidations.
+        $nonOperativeNames = ['chihuahua', 'durango', 'aguascalientes', 'corporativo'];
+        $filteredCartera = (float) DB::table('fact_portfolios as po')
+            ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $this->dataIds)
+            ->where(function ($q) use ($nonOperativeNames) {
+                $q->whereNull('b.name')
+                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOperativeNames);
+            })
+            ->sum('po.balance');
+        if ($filteredCartera > 0) {
+            $gm['valor_cartera_total'] = $filteredCartera;
+        }
         if (($gm['valor_cartera_total'] ?? 0) == 0) {
             $gm['valor_cartera_total']   = (float) DB::table('fact_portfolios')->whereIn('period_id', $this->dataIds)->sum('balance');
-            $gm['cartera_vencida_total'] = (float) DB::table('fact_portfolios')->whereIn('period_id', $this->dataIds)->where('days_past_due', '>', 0)->sum('balance');
-            $ct = $gm['valor_cartera_total'];
-            $cv = $gm['cartera_vencida_total'];
-            $gm['mora_porcentaje'] = $ct > 0 ? round($cv / $ct * 100, 2) : 0;
         }
-        if (($gm['colocacion_total'] ?? 0) == 0) {
+        $filteredVencida = (float) DB::table('fact_portfolios as po')
+            ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $this->dataIds)
+            ->where(function ($q) use ($nonOperativeNames) {
+                $q->whereNull('b.name')
+                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOperativeNames);
+            })
+            ->where('po.days_past_due', '>', 0)
+            ->sum('po.past_due_balance');
+        if ($filteredVencida === 0.0) {
+            $filteredVencida = (float) DB::table('fact_portfolios as po')
+                ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
+                ->whereIn('po.period_id', $this->dataIds)
+                ->where(function ($q) use ($nonOperativeNames) {
+                    $q->whereNull('b.name')
+                      ->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOperativeNames);
+                })
+                ->where('po.days_past_due', '>', 0)
+                ->sum('po.balance');
+        }
+        if ($filteredVencida > 0) {
+            $gm['cartera_vencida_total'] = $filteredVencida;
+        }
+        $ct = (float)($gm['valor_cartera_total'] ?? 0);
+        $cv = (float)($gm['cartera_vencida_total'] ?? 0);
+        $gm['mora_porcentaje'] = $ct > 0 ? round($cv / $ct * 100, 2) : 0;
+
+        // Colocación: filter to operative branches
+        $filteredColocacion = (float) DB::table('fact_placements as p')
+            ->leftJoin('branches as b', 'p.branch_id', '=', 'b.id')
+            ->whereIn('p.period_id', $this->dataIds)
+            ->where(function ($q) use ($nonOperativeNames) {
+                $q->whereNull('b.name')
+                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOperativeNames);
+            })
+            ->sum('p.amount');
+        if ($filteredColocacion > 0) {
+            $gm['colocacion_total'] = $filteredColocacion;
+        } elseif (($gm['colocacion_total'] ?? 0) == 0) {
             $gm['colocacion_total'] = (float) DB::table('fact_placements')->whereIn('period_id', $this->dataIds)->sum('amount');
         }
-        if (($gm['recuperacion_total'] ?? 0) == 0) {
+
+        // Recuperación: filter to operative branches
+        $filteredRecuperacion = (float) DB::table('fact_recoveries as r')
+            ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $this->dataIds)
+            ->where(function ($q) use ($nonOperativeNames) {
+                $q->whereNull('b.name')
+                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOperativeNames);
+            })
+            ->sum('r.total_amount');
+        if ($filteredRecuperacion > 0) {
+            $gm['recuperacion_total'] = $filteredRecuperacion;
+        } elseif (($gm['recuperacion_total'] ?? 0) == 0) {
             $gm['recuperacion_total'] = (float) DB::table('fact_recoveries')->whereIn('period_id', $this->dataIds)->sum('total_amount');
         }
+
         if (($gm['gasto_total'] ?? 0) == 0) {
             $gm['gasto_total'] = (float) DB::table('fact_expenses')->whereIn('period_id', $this->dataIds)->sum('amount');
         }
@@ -147,6 +214,11 @@ class RadiographySnapshotBuilder
     }
 
     // ── PERIOD IDS RESOLVER ───────────────────────────────────────────────────
+
+    public function resolveDataIdsPublic(Period $period): array
+    {
+        return $this->resolveDataIds($period);
+    }
 
     private function resolveDataIds(Period $period): array
     {
@@ -468,7 +540,7 @@ class RadiographySnapshotBuilder
                     ->whereIn('period_id', $this->dataIds)
                     ->where('branch_id', $bs->branch_id)
                     ->where('days_past_due', '>', 0)
-                    ->sum('balance');
+                    ->sum('past_due_balance');
             }
             $mora   = $cartera > 0 ? round($vencida / $cartera * 100, 2) : (float)($m['mora_porcentaje'] ?? 0);
             $nombre = $branch?->name ?? "Sucursal #{$bs->branch_id}";
@@ -509,7 +581,8 @@ class RadiographySnapshotBuilder
 
             $nombre  = $branch?->name ?? "Sucursal #{$bId}";
             $cartera = (float) Portfolio::query()->whereIn('period_id', $this->dataIds)->where('branch_id', $bId)->sum('balance');
-            $vencida = (float) Portfolio::query()->whereIn('period_id', $this->dataIds)->where('branch_id', $bId)->where('days_past_due', '>', 0)->sum('balance');
+            $vencidaPdb = (float) Portfolio::query()->whereIn('period_id', $this->dataIds)->where('branch_id', $bId)->where('days_past_due', '>', 0)->sum('past_due_balance');
+            $vencida = $vencidaPdb > 0 ? $vencidaPdb : (float) Portfolio::query()->whereIn('period_id', $this->dataIds)->where('branch_id', $bId)->where('days_past_due', '>', 0)->sum('balance');
             // Use mapped recovery; fall back to direct branch query only if not found in map
             $recuperacion = $recoveryByBranch[$this->normalizeText($nombre)]
                 ?? (float) Recovery::query()->whereIn('period_id', $this->dataIds)->where('branch_id', $bId)->sum('total_amount');
@@ -650,17 +723,24 @@ class RadiographySnapshotBuilder
             ['label' => 'Mora 180+',     'min' => 181, 'max' => 99999 ],
         ];
 
+        $nonOperativeNames = ['chihuahua', 'durango', 'aguascalientes', 'corporativo'];
+
         $results = [];
         foreach ($defs as $d) {
-            $rows = DB::table('fact_portfolios')
-                ->whereIn('period_id', $this->dataIds)
-                ->where('days_past_due', '>=', $d['min'])
-                ->where('days_past_due', '<=', $d['max'])
+            $rows = DB::table('fact_portfolios as po')
+                ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
+                ->whereIn('po.period_id', $this->dataIds)
+                ->where(function ($q) use ($nonOperativeNames) {
+                    $q->whereNull('b.name')
+                      ->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOperativeNames);
+                })
+                ->where('po.days_past_due', '>=', $d['min'])
+                ->where('po.days_past_due', '<=', $d['max'])
                 ->selectRaw('
                     COUNT(*) as contratos,
-                    SUM(balance) as balance,
-                    SUM(past_due_balance) as past_due,
-                    SUM(COALESCE(capital_due, 0)) as capital_due_sum
+                    SUM(po.balance) as balance,
+                    SUM(COALESCE(po.past_due_balance, 0)) as past_due,
+                    SUM(COALESCE(po.capital_due, 0)) as capital_due_sum
                 ')
                 ->first();
 
@@ -673,7 +753,8 @@ class RadiographySnapshotBuilder
             $pastDue    = (float)($rows?->past_due ?? 0);
             $capitalDue = (float)($rows?->capital_due_sum ?? 0);
 
-            $vencida = $capitalDue > 0 ? $capitalDue : $pastDue;
+            // Prefer total_atrasado (past_due_balance) over capital_atrasado (capital_due)
+            $vencida = $pastDue > 0 ? $pastDue : ($capitalDue > 0 ? $capitalDue : 0);
             if ($vencida === 0.0 && $d['min'] > 0 && $balance > 0) {
                 $vencida = $balance;
             }
@@ -1871,7 +1952,12 @@ class RadiographySnapshotBuilder
             ->join('branches as b', 'po.branch_id', '=', 'b.id')
             ->whereIn('po.period_id', $this->dataIds)
             ->when(!empty($realBranchNames), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNames))
-            ->selectRaw('b.name as branch, po.days_past_due, SUM(po.balance) as balance')
+            ->selectRaw('
+                b.name as branch,
+                po.days_past_due,
+                SUM(po.balance) as balance,
+                SUM(COALESCE(po.past_due_balance, 0)) as past_due_balance
+            ')
             ->groupBy('po.branch_id', 'b.name', 'po.days_past_due')
             ->get();
 
@@ -1880,10 +1966,13 @@ class RadiographySnapshotBuilder
             $branch = $row->branch;
             $dpd    = (int) $row->days_past_due;
             $bal    = (float) $row->balance;
+            $pdb    = (float) $row->past_due_balance;
 
             foreach ($defs as $def) {
                 if ($dpd >= $def['min'] && $dpd <= $def['max']) {
-                    $byBranch[$branch][$def['label']] = ($byBranch[$branch][$def['label']] ?? 0.0) + $bal;
+                    // al_corriente uses full balance; overdue buckets use past_due_balance
+                    $amount = $def['label'] === 'al_corriente' ? $bal : ($pdb > 0 ? $pdb : $bal);
+                    $byBranch[$branch][$def['label']] = ($byBranch[$branch][$def['label']] ?? 0.0) + $amount;
                     break;
                 }
             }
@@ -1993,13 +2082,13 @@ class RadiographySnapshotBuilder
         if ($names === null) {
             try {
                 $resolver = app(BranchResolverService::class);
+                // Only the 13 operative financial branches — excludes AGUASCALIENTES,
+                // CHIHUAHUA, DURANGO, CORPORATIVO from cartera/mora/colocación/recuperación.
                 $names = array_map(
                     fn ($n) => $this->normalizeText($n),
-                    array_values($resolver->getCatalog())
+                    $resolver->operativeFinancialBranches()
                 );
-                // Always allow CORPORATIVO
-                $names[] = 'corporativo';
-                $names   = array_values(array_unique($names));
+                $names = array_values(array_unique($names));
             } catch (\Throwable $e) {
                 $names = [];
             }

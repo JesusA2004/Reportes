@@ -65,7 +65,8 @@ class ReportAnalysisService
                     ]);
                 };
                 return match ($sourceCode) {
-                    DataSourceCode::NoiNomina->value              => $this->noiNominaImportService->handle($upload, $progress),
+                    DataSourceCode::NoiNomina->value,
+                    DataSourceCode::NoiNominaFiscal->value        => $this->noiNominaImportService->handle($upload, $progress),
                     DataSourceCode::Gastos->value                 => $this->gastosImportService->handle($upload, $progress),
                     DataSourceCode::GastosLendus->value           => $this->gastosLendusPdfImportService->handle($upload, $progress),
                     DataSourceCode::GastosErp->value              => $this->gastosErpExcelImportService->handle($upload, $progress),

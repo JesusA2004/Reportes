@@ -70,6 +70,8 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::get('/{period}/preview', [MonthlyReportController::class, 'previewPage'])->name('preview');
             Route::get('/{period}/radiografia.xlsx', [MonthlyReportController::class, 'exportRadiography'])->name('export-radiography');
             Route::get('/{period}/radiografia.pdf', [MonthlyReportController::class, 'exportRadiographyPdf'])->name('export-radiography-pdf');
+            Route::get('/{period}/export-filtrado.xlsx', [MonthlyReportController::class, 'exportFilteredRadiography'])->name('export-filtered-radiography');
+            Route::get('/{period}/export-filtrado.pdf', [MonthlyReportController::class, 'exportFilteredRadiographyPdf'])->name('export-filtered-radiography-pdf');
             Route::get('/{period}/consolidado.csv', [MonthlyReportController::class, 'exportSummary'])->name('export-summary');
         });
 });

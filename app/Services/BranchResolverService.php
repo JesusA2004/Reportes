@@ -165,14 +165,19 @@ class BranchResolverService
         return $this->branchCache[$normalized] = $branch;
     }
 
+    // Products that must always pass through unchanged — never normalized
+    private const SPECIAL_PASSTHROUGH_PATTERN = 'COMADRES|PRIORITY|GANACREDIT|OFICINA MR LANA|CORPORATIVO MENSUAL|CREDITO CORPORATIVO|A LA MEDIDA';
+
     /**
      * Normalizes a raw product name using Número de pagos and Periodicidad.
      *
      * Rules:
-     * - "MR LANA DIARIO i20/i30/i60" + num_payments=20 → "i20"
+     * - "MR LANA DIARIO i20/i30/i40/i60" + num_payments → "i20"/"i30"/"i40"/"i60"
+     * - "CREDITO DIARIO I20" style → i20
+     * - "CREDITO SEMANAL 12" style → s12
      * - Periodicidad SEMANAL + num_payments=12/16/20/24 → "s12","s16","s20","s24"
-     *   (unless product already has a specific CRECE/commercial name)
-     * - CRECE12 SAC, CRECE24 SAC → kept as-is
+     * - Periodicidad DIARIO + num_payments=20/30/40/60 → "i20","i30","i40","i60"
+     * - CRECE12 SAC, CRECE24 SAC, special products → kept as-is
      */
     public function normalizeProduct(string $product, ?int $numPayments = null, ?string $periodicity = null): string
     {
@@ -183,21 +188,45 @@ class BranchResolverService
 
         $upper = strtoupper($product);
 
-        // MR LANA DIARIO / LANA DIARIO with multi-option slash notation (i20/i30/i60)
-        if ((str_contains($upper, 'LANA') && str_contains($upper, 'DIARIO'))
+        // Special named products that must NEVER be altered
+        if (preg_match('/' . self::SPECIAL_PASSTHROUGH_PATTERN . '/i', $upper)) {
+            return $product;
+        }
+
+        // MR LANA DIARIO / LANA DIARIO / CREDITO DIARIO with multi-option slash notation
+        if ((str_contains($upper, 'DIARIO') && (str_contains($upper, 'LANA') || str_contains($upper, 'CREDITO') || str_contains($upper, 'MR')))
             || preg_match('/\bi\d+\s*\/\s*i\d+/i', $product)
         ) {
-            if ($numPayments !== null && in_array($numPayments, [20, 30, 60], true)) {
+            if ($numPayments !== null && in_array($numPayments, [20, 30, 40, 60], true)) {
                 return 'i' . $numPayments;
             }
         }
 
-        // MR LANA SEMANAL with multi-option slash notation (s12/s16/s20/s24)
-        if ((str_contains($upper, 'LANA') && str_contains($upper, 'SEMANAL'))
+        // MR LANA SEMANAL / CREDITO SEMANAL with multi-option slash notation
+        if ((str_contains($upper, 'SEMANAL') && (str_contains($upper, 'LANA') || str_contains($upper, 'CREDITO') || str_contains($upper, 'MR')))
             || preg_match('/\bs\d+\s*\/\s*s\d+/i', $product)
         ) {
             if ($numPayments !== null && in_array($numPayments, [12, 16, 20, 24], true)) {
                 return 's' . $numPayments;
+            }
+        }
+
+        // "CREDITO SEMANAL 12" pattern — num embedded in product name
+        if (str_contains($upper, 'SEMANAL') && preg_match('/\b(\d+)\b/', $upper, $m)) {
+            $n = (int) $m[1];
+            if (in_array($n, [12, 16, 20, 24], true)) {
+                $hasSpecificName = preg_match('/CRECE|A LA MEDIDA|COMERCIAL|REESTRUCTURA|UNIFICACION/i', $upper);
+                if (!$hasSpecificName) {
+                    return 's' . $n;
+                }
+            }
+        }
+
+        // "CREDITO DIARIO I20" pattern — i-code embedded in product name
+        if (str_contains($upper, 'DIARIO') && preg_match('/[Ii](\d+)/', $upper, $m)) {
+            $n = (int) $m[1];
+            if (in_array($n, [20, 30, 40, 60], true)) {
+                return 'i' . $n;
             }
         }
 
@@ -216,7 +245,7 @@ class BranchResolverService
 
         // Diario + standard payment counts → normalize only if no specific product name
         if ($periodicity !== null && strtoupper(trim($periodicity)) === 'DIARIO' && $numPayments !== null) {
-            if (in_array($numPayments, [20, 30, 60], true)) {
+            if (in_array($numPayments, [20, 30, 40, 60], true)) {
                 $hasSpecificName = preg_match(
                     '/CRECE|A LA MEDIDA|COMERCIAL|REESTRUCTURA|UNIFICACION/i',
                     $upper
@@ -227,8 +256,8 @@ class BranchResolverService
             }
         }
 
-        // Bare diario code: "I20", "I30", "I60" → normalize to lowercase
-        if (preg_match('/^[Ii](20|30|60)$/', $product)) {
+        // Bare diario code: "I20", "I30", "I40", "I60" → normalize to lowercase
+        if (preg_match('/^[Ii](20|30|40|60)$/', $product)) {
             return 'i' . substr($product, 1);
         }
 
@@ -554,7 +583,6 @@ class BranchResolverService
     }
 
     // The 13 operative branches that receive their own Excel sheet.
-    // AGUASCALIENTES gets a sheet only when it has cartera/colocación data (handled in caller).
     private const OPERATIVE_SHEET_BRANCHES = [
         'ATLACOMULCO',
         'ATLIXCO',
@@ -569,8 +597,17 @@ class BranchResolverService
         'TENANGO DEL VALLE',
         'TLAXCALA',
         'TULA',
-        'AGUASCALIENTES',
     ];
+
+    /**
+     * Returns the 13 operative financial branches.
+     * Excludes AGUASCALIENTES, CHIHUAHUA, DURANGO, CORPORATIVO — none of these
+     * count for cartera, colocación, recuperación or mora calculations.
+     */
+    public function operativeFinancialBranches(): array
+    {
+        return self::OPERATIVE_SHEET_BRANCHES;
+    }
 
     /**
      * Returns true only for branches that should receive their own Excel sheet.

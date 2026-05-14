@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { ArrowLeft, AlertTriangle, FileSpreadsheet, FileText, Search } from 'lucide-vue-next'
+import { ArrowLeft, AlertTriangle, FileSpreadsheet, FileText, Search, ChevronDown, ChevronUp, Download } from 'lucide-vue-next'
 import AppLayout from '@/layouts/AppLayout.vue'
 
 defineOptions({ layout: AppLayout })
@@ -13,7 +13,58 @@ const props = defineProps<{
     hasPdfExport: boolean
     excelUrl: string
     pdfUrl: string
+    branches: { id: number; name: string }[]
+    employees: { id: number; name: string }[]
+    allPeriods: { id: number; label: string; code: string }[]
+    filteredExcelBaseUrl: string
+    filteredPdfBaseUrl: string
 }>()
+
+// ── Filtered export config ───────────────────────────────────────────────────
+const showFilteredPanel = ref(false)
+const filteredScope      = ref<'general' | 'branch' | 'employee'>('general')
+const filteredType       = ref<'simple' | 'month_vs_month' | 'bimester_vs_bimester' | 'quarter_vs_quarter'>('simple')
+const filteredBranchId   = ref<number | null>(null)
+const filteredEmployeeId = ref<number | null>(null)
+const filteredComparePeriodId = ref<number | null>(null)
+const filteredExtraAmount = ref<string>('')
+const filteredExtraNotes  = ref<string>('')
+
+const isComparative = computed(() => filteredType.value !== 'simple')
+
+function buildFilteredUrl(format: 'xlsx' | 'pdf'): string {
+    const base = format === 'xlsx' ? props.filteredExcelBaseUrl : props.filteredPdfBaseUrl
+    const params = new URLSearchParams()
+
+    params.set('report_type', filteredType.value)
+
+    if (isComparative.value) {
+        if (filteredComparePeriodId.value) params.set('compare_period_id', String(filteredComparePeriodId.value))
+        if (filteredScope.value !== 'general') params.set('scope', filteredScope.value)
+        if (filteredScope.value === 'branch' && filteredBranchId.value) params.set('branch_id', String(filteredBranchId.value))
+        if (filteredScope.value === 'employee' && filteredEmployeeId.value) params.set('employee_id', String(filteredEmployeeId.value))
+    } else {
+        params.set('scope', filteredScope.value)
+        if (filteredScope.value === 'branch' && filteredBranchId.value) params.set('branch_id', String(filteredBranchId.value))
+        if (filteredScope.value === 'employee') {
+            if (filteredEmployeeId.value) params.set('employee_id', String(filteredEmployeeId.value))
+            if (filteredExtraAmount.value) params.set('extra_employee_expense_amount', filteredExtraAmount.value)
+            if (filteredExtraNotes.value) params.set('extra_employee_expense_notes', filteredExtraNotes.value)
+        }
+    }
+
+    return base + '?' + params.toString()
+}
+
+const filteredXlsxUrl = computed(() => buildFilteredUrl('xlsx'))
+const filteredPdfUrl  = computed(() => buildFilteredUrl('pdf'))
+
+const canDownloadFiltered = computed(() => {
+    if (isComparative.value && !filteredComparePeriodId.value) return false
+    if (!isComparative.value && filteredScope.value === 'branch' && !filteredBranchId.value) return false
+    if (!isComparative.value && filteredScope.value === 'employee' && !filteredEmployeeId.value) return false
+    return true
+})
 
 type TabKey = 'resumen' | 'productos' | 'sucursales' | 'empleados' | 'cartera' | 'gastos' | 'incidencias'
 const activeTab = ref<TabKey>('resumen')
@@ -159,6 +210,116 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                     <div class="rounded-2xl border border-white/70 bg-white p-4 shadow-sm hover:shadow-md transition">
                         <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Gastos</p>
                         <p class="mt-1 text-xl font-black text-slate-950">{{ money(sum.expenses_total) }}</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- FILTERED EXPORT PANEL -->
+            <div class="mx-auto max-w-screen-2xl px-6 pb-2">
+                <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                    <button @click="showFilteredPanel = !showFilteredPanel"
+                            class="flex w-full items-center justify-between px-5 py-3.5 text-sm font-bold text-slate-700 hover:bg-slate-50 transition">
+                        <span class="flex items-center gap-2">
+                            <Download class="size-4 text-indigo-500" />
+                            Reportes filtrados (por sucursal, gestor o comparativo)
+                        </span>
+                        <ChevronDown v-if="!showFilteredPanel" class="size-4 text-slate-400" />
+                        <ChevronUp v-else class="size-4 text-slate-400" />
+                    </button>
+
+                    <div v-if="showFilteredPanel" class="border-t px-5 py-4 space-y-4">
+                        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+
+                            <!-- Tipo de reporte -->
+                            <div>
+                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Tipo de reporte</label>
+                                <select v-model="filteredType"
+                                        class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                                    <option value="simple">Simple</option>
+                                    <option value="month_vs_month">Mes vs Mes</option>
+                                    <option value="bimester_vs_bimester">Bimestre vs Bimestre</option>
+                                    <option value="quarter_vs_quarter">Trimestre vs Trimestre</option>
+                                </select>
+                            </div>
+
+                            <!-- Alcance (solo simple) -->
+                            <div>
+                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Alcance</label>
+                                <select v-model="filteredScope"
+                                        class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                                    <option value="general">General</option>
+                                    <option value="branch">Por sucursal</option>
+                                    <option value="employee">Por gestor</option>
+                                </select>
+                            </div>
+
+                            <!-- Periodo a comparar (comparativos) -->
+                            <div v-if="isComparative">
+                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Periodo a comparar</label>
+                                <select v-model="filteredComparePeriodId"
+                                        class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                                    <option :value="null">— Seleccionar —</option>
+                                    <option v-for="p in allPeriods.filter(p => p.id !== period.id)" :key="p.id" :value="p.id">{{ p.label }}</option>
+                                </select>
+                            </div>
+
+                            <!-- Sucursal -->
+                            <div v-if="filteredScope === 'branch'">
+                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Sucursal</label>
+                                <select v-model="filteredBranchId"
+                                        class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                                    <option :value="null">— Seleccionar —</option>
+                                    <option v-for="b in branches" :key="b.id" :value="b.id">{{ b.name }}</option>
+                                </select>
+                            </div>
+
+                            <!-- Gestor -->
+                            <div v-if="filteredScope === 'employee'">
+                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Gestor / Empleado</label>
+                                <select v-model="filteredEmployeeId"
+                                        class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                                    <option :value="null">— Seleccionar —</option>
+                                    <option v-for="e in employees" :key="e.id" :value="e.id">{{ e.name }}</option>
+                                </select>
+                            </div>
+
+                        </div>
+
+                        <!-- Gasto extra (solo empleado) -->
+                        <div v-if="filteredScope === 'employee'" class="grid gap-4 sm:grid-cols-2">
+                            <div>
+                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Gasto general asignado ($)</label>
+                                <input v-model="filteredExtraAmount" type="number" min="0" step="0.01"
+                                       placeholder="0.00"
+                                       class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100" />
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Notas del gasto</label>
+                                <input v-model="filteredExtraNotes" type="text" placeholder="Descripción del gasto asignado…"
+                                       class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100" />
+                            </div>
+                        </div>
+
+                        <!-- Buttons -->
+                        <div class="flex flex-wrap gap-2 pt-1">
+                            <a :href="canDownloadFiltered ? filteredXlsxUrl : '#'"
+                               :class="canDownloadFiltered ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-slate-300 pointer-events-none opacity-50'"
+                               class="inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm font-bold text-white transition">
+                                <FileSpreadsheet class="size-4" /> Descargar Excel
+                            </a>
+                            <a :href="canDownloadFiltered ? filteredPdfUrl : '#'"
+                               :class="canDownloadFiltered ? 'bg-rose-600 hover:bg-rose-500' : 'bg-slate-300 pointer-events-none opacity-50'"
+                               class="inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm font-bold text-white transition">
+                                <FileText class="size-4" /> Descargar PDF
+                            </a>
+                            <p v-if="!canDownloadFiltered" class="self-center text-xs text-amber-600 font-semibold">
+                                Selecciona
+                                <span v-if="isComparative">un periodo a comparar</span>
+                                <span v-else-if="filteredScope === 'branch'">una sucursal</span>
+                                <span v-else-if="filteredScope === 'employee'">un gestor</span>
+                                para descargar.
+                            </p>
+                        </div>
                     </div>
                 </div>
             </div>
