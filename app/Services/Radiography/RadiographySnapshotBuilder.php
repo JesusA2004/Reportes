@@ -1531,7 +1531,8 @@ class RadiographySnapshotBuilder
         $usedExcelIds = [];
         foreach ($excelRows as $ex) {
             $key = (int) round((float) $ex->amount);
-            if ($ex->decoded_payload['branch_to_detected'] ?? null) {
+            $excelIndex[$key] ??= [];
+            if (($ex->decoded_payload['branch_to_detected'] ?? null) !== null) {
                 array_unshift($excelIndex[$key], $ex);
             } else {
                 $excelIndex[$key][] = $ex;

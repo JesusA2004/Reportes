@@ -28,7 +28,10 @@
       "Bash(tasklist /fi \"IMAGENAME eq php.exe\")",
       "Bash(wmic process *)",
       "PowerShell(Get-WmiObject *)",
-      "PowerShell(Stop-Process *)"
+      "PowerShell(Stop-Process *)",
+      "Bash(del *)",
+      "Bash(powershell \"Get-Content storage/logs/laravel.log -Tail 50\")",
+      "Bash(powershell *)"
     ]
   }
 }
