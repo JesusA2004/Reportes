@@ -481,6 +481,12 @@ class NoiNominaImportService
         $conceptType = $this->cleanString($this->valueFromRow($row, $headerMap, 'concept_type'));
         $amount = $this->toDecimal($this->valueFromRow($row, $headerMap, 'amount'));
         $quantity = $this->toDecimal($this->valueFromRow($row, $headerMap, 'quantity'));
+
+        // Deducciones (D###) must be stored as positive absolute values.
+        // The SnapshotBuilder subtracts them; if they arrive as negative, abs() prevents double-negation.
+        if ($amount !== null && $concept && preg_match('/^D\d{3}\b/i', trim($concept)) && $amount < 0) {
+            $amount = abs($amount);
+        }
         $payrollType = $this->cleanString($this->valueFromRow($row, $headerMap, 'payroll_type'));
         $movementDate = $this->toDateValue($this->valueFromRow($row, $headerMap, 'movement_date'));
 
@@ -518,6 +524,11 @@ class NoiNominaImportService
         $concept = $this->normalizeText($mapped['concept']);
 
         if (in_array($concept, ['acumulado', 'total', 'totales', 'subtotal', 'sub_total'], true)) {
+            return false;
+        }
+
+        // P107 MONTO MAXIMO DIARIO is a system reference value, not a financial payment
+        if (preg_match('/^p107\b/i', $concept)) {
             return false;
         }
 

@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\Period;
+use App\Support\RegionNorteFilter;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
@@ -35,12 +36,17 @@ class DebugProductosCommand extends Command
         $this->line("  Data IDs: [" . implode(', ', $dataIds) . "]");
         $this->line('');
 
+        $nonOp = RegionNorteFilter::names();
+
         // ── 1. Productos en Ministraciones (colocación) ────────────────
-        $this->info('── 1. Colocación por producto (fact_placements) ──');
-        $placements = DB::table('fact_placements')
-            ->whereIn('period_id', $dataIds)
-            ->selectRaw("COALESCE(product_name, '(sin producto)') as producto, COUNT(*) as ops, SUM(amount) as total")
-            ->groupByRaw("COALESCE(product_name, '(sin producto)')")
+        $this->info('── 1. Colocación por producto (fact_placements, operativas) ──');
+        $placements = DB::table('fact_placements as p')
+            ->leftJoin('branches as b', 'p.branch_id', '=', 'b.id')
+            ->whereIn('p.period_id', $dataIds)
+            ->where(function ($q) use ($nonOp) { $q->whereNull('b.name')->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOp); })
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
+            ->selectRaw("COALESCE(p.product_name, '(sin producto)') as producto, COUNT(*) as ops, SUM(p.amount) as total")
+            ->groupByRaw("COALESCE(p.product_name, '(sin producto)')")
             ->orderByDesc('total')
             ->get();
 
@@ -53,11 +59,15 @@ class DebugProductosCommand extends Command
         $this->line('');
 
         // ── 2. Productos en Cobranza (recuperación) ────────────────────
-        $this->info('── 2. Recuperación por producto (fact_recoveries) ──');
-        $recoveries = DB::table('fact_recoveries')
-            ->whereIn('period_id', $dataIds)
-            ->selectRaw("COALESCE(product_name, '(sin producto)') as producto, COUNT(*) as ops, SUM(total_amount) as total")
-            ->groupByRaw("COALESCE(product_name, '(sin producto)')")
+        $this->info('── 2. Recuperación por producto (fact_recoveries, operativas, solo PAGO) ──');
+        $recoveries = RegionNorteFilter::applyRecoveryFilter(
+            DB::table('fact_recoveries as r')
+                ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+                ->whereIn('r.period_id', $dataIds)
+                ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+        )
+            ->selectRaw("COALESCE(r.product_name, '(sin producto)') as producto, COUNT(*) as ops, SUM(r.total_amount) as total")
+            ->groupByRaw("COALESCE(r.product_name, '(sin producto)')")
             ->orderByDesc('total')
             ->get();
 
@@ -70,11 +80,14 @@ class DebugProductosCommand extends Command
         $this->line('');
 
         // ── 3. Productos en Cartera (saldos) ───────────────────────────
-        $this->info('── 3. Cartera por producto (fact_portfolios) ──');
-        $portfolio = DB::table('fact_portfolios')
-            ->whereIn('period_id', $dataIds)
-            ->selectRaw("COALESCE(product_name, '(sin producto)') as producto, COUNT(*) as contratos, SUM(balance) as total, SUM(COALESCE(past_due_balance,0)) as vencida")
-            ->groupByRaw("COALESCE(product_name, '(sin producto)')")
+        $this->info('── 3. Cartera por producto (fact_portfolios, operativas) ──');
+        $portfolio = DB::table('fact_portfolios as po')
+            ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $dataIds)
+            ->where(function ($q) use ($nonOp) { $q->whereNull('b.name')->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOp); })
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
+            ->selectRaw("COALESCE(po.product_name, '(sin producto)') as producto, COUNT(*) as contratos, SUM(po.balance) as total, SUM(COALESCE(po.past_due_balance,0)) as vencida")
+            ->groupByRaw("COALESCE(po.product_name, '(sin producto)')")
             ->orderByDesc('total')
             ->get();
 
@@ -142,12 +155,16 @@ class DebugProductosCommand extends Command
         $this->line('');
 
         // ── 6. Top 10 nombres RAW en cobranza (sin normalizar) ────────
-        $this->info('── 6. Muestra de nombres RAW en Ingresos Cobranza (product_name pre-normalización almacenado) ──');
-        $rawCobranza = DB::table('fact_recoveries')
-            ->whereIn('period_id', $dataIds)
-            ->whereNotNull('product_name')
-            ->selectRaw('product_name, COUNT(*) as cnt, SUM(total_amount) as total')
-            ->groupBy('product_name')
+        $this->info('── 6. Muestra de nombres RAW en Ingresos Cobranza (operativas, PAGO) ──');
+        $rawCobranza = RegionNorteFilter::applyRecoveryFilter(
+            DB::table('fact_recoveries as r')
+                ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+                ->whereIn('r.period_id', $dataIds)
+                ->whereNotNull('r.product_name')
+                ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+        )
+            ->selectRaw('r.product_name, COUNT(*) as cnt, SUM(r.total_amount) as total')
+            ->groupBy('r.product_name')
             ->orderByDesc('total')
             ->limit(20)
             ->get();

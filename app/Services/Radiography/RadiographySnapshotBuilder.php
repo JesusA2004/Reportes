@@ -15,6 +15,8 @@ use App\Models\Portfolio;
 use App\Models\Recovery;
 use App\Services\BranchResolverService;
 use App\Services\EmployeeNameCanonicalizer;
+use App\Support\OperationalExclusion;
+use App\Support\RegionNorteFilter;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -59,16 +61,21 @@ class RadiographySnapshotBuilder
             }
         }
 
-        // Always recalculate cartera/vencida from operative branches only.
-        // global_metrics may include CHIHUAHUA/DURANGO/AGUASCALIENTES data from old consolidations.
-        $nonOperativeNames = ['chihuahua', 'durango', 'aguascalientes', 'corporativo'];
+        // Recalculate cartera/vencida/colocación from operative branches only.
+        // Exclude: Región Norte (by unambiguous name) + Corporativo/Falso/Inactiva/Vacante.
+        $norteNames = RegionNorteFilter::names();
+        $opExclNames = OperationalExclusion::names();
+        $excludeNames = array_merge($norteNames, $opExclNames);
+
         $filteredCartera = (float) DB::table('fact_portfolios as po')
             ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
             ->whereIn('po.period_id', $this->dataIds)
-            ->where(function ($q) use ($nonOperativeNames) {
+            ->where(function ($q) use ($excludeNames) {
                 $q->whereNull('b.name')
-                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOperativeNames);
+                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $excludeNames);
             })
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
             ->sum('po.balance');
         if ($filteredCartera > 0) {
             $gm['valor_cartera_total'] = $filteredCartera;
@@ -79,20 +86,24 @@ class RadiographySnapshotBuilder
         $filteredVencida = (float) DB::table('fact_portfolios as po')
             ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
             ->whereIn('po.period_id', $this->dataIds)
-            ->where(function ($q) use ($nonOperativeNames) {
+            ->where(function ($q) use ($excludeNames) {
                 $q->whereNull('b.name')
-                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOperativeNames);
+                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $excludeNames);
             })
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
             ->where('po.days_past_due', '>', 0)
             ->sum('po.past_due_balance');
         if ($filteredVencida === 0.0) {
             $filteredVencida = (float) DB::table('fact_portfolios as po')
                 ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
                 ->whereIn('po.period_id', $this->dataIds)
-                ->where(function ($q) use ($nonOperativeNames) {
+                ->where(function ($q) use ($excludeNames) {
                     $q->whereNull('b.name')
-                      ->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOperativeNames);
+                      ->orWhereNotIn(DB::raw('LOWER(b.name)'), $excludeNames);
                 })
+                ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
+                ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
                 ->where('po.days_past_due', '>', 0)
                 ->sum('po.balance');
         }
@@ -103,13 +114,19 @@ class RadiographySnapshotBuilder
         $cv = (float)($gm['cartera_vencida_total'] ?? 0);
         $gm['mora_porcentaje'] = $ct > 0 ? round($cv / $ct * 100, 2) : 0;
 
-        // Colocación: filter to operative branches
+        // Colocación: exclude Norte + Corporativo/Falso + reestructuras
         $filteredColocacion = (float) DB::table('fact_placements as p')
             ->leftJoin('branches as b', 'p.branch_id', '=', 'b.id')
             ->whereIn('p.period_id', $this->dataIds)
-            ->where(function ($q) use ($nonOperativeNames) {
+            ->where(function ($q) use ($excludeNames) {
                 $q->whereNull('b.name')
-                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOperativeNames);
+                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $excludeNames);
+            })
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
+            ->where(function ($q) {
+                $q->whereNull('p.product_name')
+                  ->orWhereRaw("p.product_name NOT REGEXP ?", ['REESTRUCTURA|UNIFICACION|UNIFICACIÓN|RECURSOS PROPIOS']);
             })
             ->sum('p.amount');
         if ($filteredColocacion > 0) {
@@ -118,15 +135,16 @@ class RadiographySnapshotBuilder
             $gm['colocacion_total'] = (float) DB::table('fact_placements')->whereIn('period_id', $this->dataIds)->sum('amount');
         }
 
-        // Recuperación: filter to operative branches
-        $filteredRecuperacion = (float) DB::table('fact_recoveries as r')
-            ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
-            ->whereIn('r.period_id', $this->dataIds)
-            ->where(function ($q) use ($nonOperativeNames) {
-                $q->whereNull('b.name')
-                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOperativeNames);
-            })
-            ->sum('r.total_amount');
+        // Recuperación: precise Norte filter (accredited prefix + zone + unambiguous names)
+        // + Corporativo/Falso/Inactiva operational exclusion (separate from Norte).
+        $filteredRecuperacion = (float) OperationalExclusion::applyTo(
+            RegionNorteFilter::applyRecoveryFilter(
+                DB::table('fact_recoveries as r')
+                    ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+                    ->whereIn('r.period_id', $this->dataIds)
+                    ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+            )
+        )->sum('r.total_amount');
         if ($filteredRecuperacion > 0) {
             $gm['recuperacion_total'] = $filteredRecuperacion;
         } elseif (($gm['recuperacion_total'] ?? 0) == 0) {
@@ -134,7 +152,22 @@ class RadiographySnapshotBuilder
         }
 
         if (($gm['gasto_total'] ?? 0) == 0) {
-            $gm['gasto_total'] = (float) DB::table('fact_expenses')->whereIn('period_id', $this->dataIds)->sum('amount');
+            // Use only gastos_lendus (PDF) + gastos_erp as monetary sources — Excel duplicates PDF amounts.
+            // Exclude Envío utilidad, Nómina y Capital Humano, Préstamos Intersucursales (shown separately).
+            $nonOpCategories = [
+                'Envío de utilidad a corporativo',
+                'Nómina y Capital Humano',
+                'Préstamos Intersucursales',
+            ];
+            $monetarySources = DB::table('data_sources')
+                ->whereIn('code', ['gastos_lendus', 'gastos_erp'])
+                ->pluck('id');
+            $gm['gasto_total'] = (float) DB::table('fact_expenses as e')
+                ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+                ->whereIn('e.period_id', $this->dataIds)
+                ->whereIn('ru.data_source_id', $monetarySources)
+                ->whereNotIn(DB::raw('COALESCE(e.category, \'\')'), $nonOpCategories)
+                ->sum('e.amount');
         }
 
         $payroll           = $this->buildPayroll($period);
@@ -723,17 +756,19 @@ class RadiographySnapshotBuilder
             ['label' => 'Mora 180+',     'min' => 181, 'max' => 99999 ],
         ];
 
-        $nonOperativeNames = ['chihuahua', 'durango', 'aguascalientes', 'corporativo'];
+        $excludeNames = array_merge(RegionNorteFilter::names(), OperationalExclusion::names());
 
         $results = [];
         foreach ($defs as $d) {
             $rows = DB::table('fact_portfolios as po')
                 ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
                 ->whereIn('po.period_id', $this->dataIds)
-                ->where(function ($q) use ($nonOperativeNames) {
+                ->where(function ($q) use ($excludeNames) {
                     $q->whereNull('b.name')
-                      ->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOperativeNames);
+                      ->orWhereNotIn(DB::raw('LOWER(b.name)'), $excludeNames);
                 })
+                ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
+                ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
                 ->where('po.days_past_due', '>=', $d['min'])
                 ->where('po.days_past_due', '<=', $d['max'])
                 ->selectRaw('

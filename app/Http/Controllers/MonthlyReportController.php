@@ -128,7 +128,7 @@ class MonthlyReportController extends Controller {
         }
 
         // Operative branches: from snapshot but excluding non-operative ones
-        $nonOperativeBranches = ['CHIHUAHUA', 'DURANGO', 'CORPORATIVO'];
+        $nonOperativeBranches = ['CHIHUAHUA', 'DURANGO', 'VICTORIA DE DURANGO', 'AGUASCALIENTES', 'CORPORATIVO', 'FALSO'];
         $operativeBranches = collect();
         if ($snapshot) {
             $snapshotBranches = $snapshot['sections']['branches'] ?? [];

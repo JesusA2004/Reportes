@@ -6,6 +6,8 @@ use App\Models\Period;
 use App\Models\PeriodRadiographyExport;
 use App\Models\PeriodRadiographyRun;
 use App\Models\PeriodSummary;
+use App\Support\OperationalExclusion;
+use App\Support\RegionNorteFilter;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
@@ -111,22 +113,67 @@ class DebugRadiografiaCommand extends Command
         // ── 5. Totales reales en fact_* usando dataIds ────────────────
         $this->info('── 5. Totales reales en fact_* (con dataIds) ──');
 
-        $carteraTotal = (float) DB::table('fact_portfolios')->whereIn('period_id', $dataIds)->sum('balance');
-        $vencidaTotal = (float) DB::table('fact_portfolios')->whereIn('period_id', $dataIds)->where('days_past_due', '>', 0)->sum('balance');
-        $colocacion   = (float) DB::table('fact_placements')->whereIn('period_id', $dataIds)->sum('amount');
-        $recuperacion = (float) DB::table('fact_recoveries')->whereIn('period_id', $dataIds)->sum('total_amount');
+        $nonOp = array_merge(RegionNorteFilter::names(), OperationalExclusion::names());
+
+        $carteraBruto = (float) DB::table('fact_portfolios')->whereIn('period_id', $dataIds)->sum('balance');
+        $carteraTotal = (float) DB::table('fact_portfolios as po')
+            ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $dataIds)
+            ->where(function ($q) use ($nonOp) { $q->whereNull('b.name')->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOp); })
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
+            ->sum('po.balance');
+        $vencidaTotal = (float) DB::table('fact_portfolios as po')
+            ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $dataIds)
+            ->where(function ($q) use ($nonOp) { $q->whereNull('b.name')->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOp); })
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
+            ->where('po.days_past_due', '>', 0)
+            ->sum('po.past_due_balance');
+        $colocacion = (float) DB::table('fact_placements as p')
+            ->leftJoin('branches as b', 'p.branch_id', '=', 'b.id')
+            ->whereIn('p.period_id', $dataIds)
+            ->where(function ($q) use ($nonOp) { $q->whereNull('b.name')->orWhereNotIn(DB::raw('LOWER(b.name)'), $nonOp); })
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
+            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
+            ->where(function ($q) { $q->whereNull('p.product_name')->orWhereRaw("p.product_name NOT REGEXP ?", ['REESTRUCTURA|UNIFICACION|RECURSOS PROPIOS']); })
+            ->sum('p.amount');
+        $recuperacion = (float) OperationalExclusion::applyTo(
+            RegionNorteFilter::applyRecoveryFilter(
+                DB::table('fact_recoveries as r')
+                    ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+                    ->whereIn('r.period_id', $dataIds)
+                    ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+            )
+        )->sum('r.total_amount');
         $gastos       = (float) DB::table('fact_expenses')->whereIn('period_id', $dataIds)->sum('amount');
         $nContratos   = (int)   DB::table('fact_portfolios')->whereIn('period_id', $dataIds)->count();
         $nMinistr     = (int)   DB::table('fact_placements')->whereIn('period_id', $dataIds)->count();
         $nNoi         = (int)   DB::table('fact_noi_movements')->whereIn('period_id', $dataIds)->distinct('employee_id')->count('employee_id');
 
-        $this->line(sprintf("  %-28s $%s  (%d contratos)", 'Cartera total',     number_format($carteraTotal, 2), $nContratos));
-        $this->line(sprintf("  %-28s $%s",                  'Cartera vencida',   number_format($vencidaTotal, 2)));
-        $this->line(sprintf("  %-28s %.2f%%",               'Mora %',            $carteraTotal > 0 ? round($vencidaTotal / $carteraTotal * 100, 2) : 0));
-        $this->line(sprintf("  %-28s $%s  (%d ops)",        'Colocación',        number_format($colocacion, 2), $nMinistr));
-        $this->line(sprintf("  %-28s $%s",                  'Recuperación',      number_format($recuperacion, 2)));
-        $this->line(sprintf("  %-28s $%s",                  'Gastos',            number_format($gastos, 2)));
-        $this->line(sprintf("  %-28s %d",                   'Empleados (NOI)',   $nNoi));
+        // Targets Abril 2026
+        $targets = [
+            'cartera'      => 39_130_054.53,
+            'colocacion'   => 14_538_964.00,
+            'recuperacion' => 18_323_749.55,
+        ];
+
+        $mkLine = fn ($label, $val, $target) =>
+            sprintf("  %-28s $%-16s target=$%-16s dif=%s",
+                $label,
+                number_format($val, 2),
+                number_format($target, 2),
+                abs($val - $target) < 10 ? '<fg=green>' . number_format($val - $target, 2) . '</>' : '<fg=yellow>' . number_format($val - $target, 2) . '</>'
+            );
+
+        $this->line(sprintf("  %-28s bruto=$%s", 'Cartera total (bruto)', number_format($carteraBruto, 2)));
+        $this->line($mkLine('Cartera total (operativa)', $carteraTotal, $targets['cartera']) . sprintf(' (%d cttos)', $nContratos));
+        $this->line(sprintf("  %-28s $%s", 'Cartera vencida (past_due)', number_format($vencidaTotal, 2)));
+        $this->line($mkLine('Colocación (sin restr)', $colocacion, $targets['colocacion']) . sprintf(' (%d ops)', $nMinistr));
+        $this->line($mkLine('Recuperación', $recuperacion, $targets['recuperacion']));
+        $this->line(sprintf("  %-28s $%s", 'Gastos (bruto)', number_format($gastos, 2)));
+        $this->line(sprintf("  %-28s %d", 'Empleados (NOI)', $nNoi));
         $this->line('');
 
         // ── 6. Totales por section (debug secciones) ──────────────────

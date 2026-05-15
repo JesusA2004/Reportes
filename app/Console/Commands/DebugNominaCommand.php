@@ -44,12 +44,12 @@ class DebugNominaCommand extends Command
         $this->line("  Data IDs: [" . implode(', ', $dataIds) . "]");
         $this->line('');
 
-        // ── 1. Totales por tipo de movimiento ─────────────────────────
-        $this->info('── 1. Totales por tipo de movimiento (movement_type) ──');
+        // ── 1. Totales por concept_type ───────────────────────────────
+        $this->info('── 1. Totales por concept_type ──');
         $byType = DB::table('fact_noi_movements')
             ->whereIn('period_id', $dataIds)
-            ->selectRaw("COALESCE(movement_type, '(sin tipo)') as tipo, COUNT(DISTINCT employee_id) as empleados, SUM(amount) as total")
-            ->groupByRaw("COALESCE(movement_type, '(sin tipo)')")
+            ->selectRaw("COALESCE(concept_type, '(sin tipo)') as tipo, COUNT(DISTINCT employee_id) as empleados, SUM(amount) as total")
+            ->groupByRaw("COALESCE(concept_type, '(sin tipo)')")
             ->orderByDesc('total')
             ->get();
 
@@ -59,6 +59,36 @@ class DebugNominaCommand extends Command
             $grandTotal += (float)$row->total;
         }
         $this->line(sprintf('  %-28s           $%s', 'TOTAL', number_format($grandTotal, 2)));
+        $this->line('');
+
+        // ── 1b. Totales por concepto (código NOI P001, P002, D004…) ───
+        $this->info('── 1b. Totales por concepto NOI (top 30 por monto absoluto) ──');
+        $byConcept = DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->selectRaw("concept, concept_type, SUM(amount) as total, COUNT(DISTINCT employee_id) as empleados")
+            ->groupBy('concept', 'concept_type')
+            ->orderByRaw('ABS(SUM(amount)) DESC')
+            ->limit(30)
+            ->get();
+
+        $totPercep  = 0.0;
+        $totDeducc  = 0.0;
+        foreach ($byConcept as $r) {
+            $isDed = str_starts_with(strtoupper(trim($r->concept ?? '')), 'D');
+            $this->line(sprintf('  %-40s %s  emps=%d  $%s',
+                mb_substr($r->concept ?? '—', 0, 40),
+                str_pad($r->concept_type ?? '—', 12),
+                $r->empleados,
+                number_format((float)$r->total, 2)));
+            if ($isDed) {
+                $totDeducc += (float)$r->total;
+            } else {
+                $totPercep += (float)$r->total;
+            }
+        }
+        $this->line(sprintf('  Percepciones (P###) approx: $%s', number_format($totPercep, 2)));
+        $this->line(sprintf('  Deducciones (D###) approx:  $%s', number_format($totDeducc, 2)));
+        $this->line(sprintf('  Neto approx:                $%s', number_format($totPercep - $totDeducc, 2)));
         $this->line('');
 
         // ── 2. Totales por fuente de datos ────────────────────────────
@@ -154,21 +184,57 @@ class DebugNominaCommand extends Command
         }
 
         // ── 6. Referencia vs calculado ────────────────────────────────
-        $this->info('── 6. Referencia vs calculado (para validación) ──');
-        $nomina      = $byType->where('tipo', 'nomina')->sum('total') ?: $byType->where('tipo', 'pago')->sum('total');
-        $comisiones  = $byType->where('tipo', 'comision')->sum('total') ?: $byType->where('tipo', 'comisiones')->sum('total');
-        $bonos       = $byType->where('tipo', 'bono')->sum('total') ?: $byType->where('tipo', 'bonos')->sum('total');
+        $this->info('── 6. Referencia vs calculado (targets Abril 2026) ──');
 
-        $this->line(sprintf('  Nómina (movtype)    : $%s', number_format((float)$nomina, 2)));
-        $this->line(sprintf('  Comisiones (mvtype) : $%s', number_format((float)$comisiones, 2)));
-        $this->line(sprintf('  Bonos (mvtype)      : $%s', number_format((float)$bonos, 2)));
+        // Nómina = P001 SUELDO
+        $nomina = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereRaw("concept LIKE 'P001%'")
+            ->sum('amount');
+        // Comisiones = P002
+        $comisiones = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereRaw("concept LIKE 'P002%'")
+            ->sum('amount');
+        // Bonos = P108 + P109 + P120 + P123
+        $bonos = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereRaw("concept REGEXP '^P(108|109|120|123)'")
+            ->sum('amount');
+        // Total percepciones
+        $percep = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereRaw("LOWER(COALESCE(concept_type,'')) = 'percepcion'")
+            ->sum('amount');
+        // Total deducciones
+        $deduc = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereRaw("LOWER(COALESCE(concept_type,'')) IN ('deduccion','descuento')")
+            ->sum('amount');
+
+        $targets = [
+            'Nómina (P001)'    => [1_075_509.70, $nomina],
+            'Comisiones (P002)' => [716_885.13, $comisiones],
+            'Bonos (P1xx)'     => [291_655.85, $bonos],
+        ];
+
+        foreach ($targets as $label => [$target, $calc]) {
+            $diff = $calc - $target;
+            $ok   = abs($diff) < 1.0 ? '<fg=green>✓</>' : '<fg=yellow>⚠</>';
+            $this->line(sprintf('  %s %-22s calculado=$%-14s target=$%-14s dif=%s',
+                $ok, $label,
+                number_format($calc, 2),
+                number_format($target, 2),
+                number_format($diff, 2)));
+        }
+        $this->line(sprintf('  %-24s percepciones=$%s  deducciones=$%s  neto=$%s',
+            'Total NOI:',
+            number_format($percep, 2),
+            number_format($deduc, 2),
+            number_format($percep - $deduc, 2)));
         $this->line('');
-        $this->line('  Referencia manual:');
-        $this->line('    Nómina      target: $1,075,509.70');
-        $this->line('    Comisiones  target: $716,885.13');
-        $this->line('    Bonos       target: $291,655.85');
-        $this->line('');
-        $this->line('  Nota: si los tipos de movimiento difieren, revisar sección 1 para ver los valores exactos de "tipo".');
+        $this->line('  Targets Abril 2026: Nómina $1,075,509.70 | Comisiones $716,885.13 | Bonos $291,655.85');
+        $this->line('  Total manual: $1,928,818.31 (NO FISCAL=$1,498,877.31 + FISCAL=$429,941.00)');
         $this->line('');
 
         $this->info("══════════════════════════════════════════════════════════════");

@@ -2,280 +2,308 @@
 
 namespace App\Console\Commands;
 
-use App\Models\ReportUpload;
+use App\Models\Period;
+use App\Support\OperationalExclusion;
+use App\Support\RegionNorteFilter;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
-use OpenSpout\Reader\XLSX\Options as XlsxOptions;
-use OpenSpout\Reader\XLSX\Reader as XlsxReader;
-use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
-use PhpOffice\PhpSpreadsheet\IOFactory;
+use Illuminate\Support\Facades\DB;
 
 class DebugCobranzaCommand extends Command
 {
-    protected $signature = 'reportes:debug-cobranza {uploadId : ID del ReportUpload de Lendus Ingresos Cobranza}';
-    protected $description = 'Diagnóstico del archivo Lendus Ingresos Cobranza para Actualizar BD (solo lectura, sin modificar datos)';
+    protected $signature   = 'reportes:debug-cobranza {period_id : ID del periodo mensual}';
+    protected $description = 'Diagnóstico de cobranza en BD: totales por Transacción/Estatus, desglose capital/interés/impuesto/cargos, diferencia contra target.';
+
+    // Referencia manual Abril 2026
+    private const TARGET_TOTAL_INGRESOS  = 18_332_149.55;
+    private const TARGET_RECUPERACION    = 18_323_749.55;
 
     public function handle(): int
     {
-        $uploadId = (int) $this->argument('uploadId');
-        $upload   = ReportUpload::query()->with('dataSource')->find($uploadId);
+        $periodId = (int) $this->argument('period_id');
+        $period   = Period::find($periodId);
 
-        if (!$upload) {
-            $this->error("ReportUpload #{$uploadId} no encontrado.");
+        if (!$period) {
+            $this->error("Periodo #{$periodId} no encontrado.");
             return self::FAILURE;
         }
 
+        $allPeriods = Period::all();
+        $weeklyIds  = $period->resolveBaseWeeklyIds($allPeriods);
+        $dataIds    = array_values(array_unique(array_merge(
+            empty($weeklyIds) ? [] : $weeklyIds,
+            [$period->id]
+        )));
+
         $this->line('');
-        $this->line("=== reportes:debug-cobranza | Upload #{$uploadId} | " . now()->format('Y-m-d H:i:s') . " ===");
-        $this->line("Fuente   : " . ($upload->dataSource?->name ?? 'N/D'));
-        $this->line("Periodo  : {$upload->period_id}");
-        $this->line("Path     : {$upload->stored_path}");
-
-        if (!$upload->stored_path) {
-            $this->error('Sin stored_path. El archivo no fue guardado correctamente.');
-            return self::FAILURE;
-        }
-
-        $diskExists = Storage::disk('public')->exists($upload->stored_path);
-        $this->line("Existe   : " . ($diskExists ? 'SÍ' : 'NO — ERROR'));
-
-        if (!$diskExists) {
-            $this->error('Archivo físico no encontrado en storage/public.');
-            return self::FAILURE;
-        }
-
-        $absolutePath = Storage::disk('public')->path($upload->stored_path);
-        $fileSizeKb   = round(filesize($absolutePath) / 1024, 1);
-        $this->line("Tamaño   : {$fileSizeKb} KB");
-
-        // ── 1. Sheet info via PhpSpreadsheet ────────────────────────────────
+        $this->info("══════════════════════════════════════════════════════════════");
+        $this->info("  DEBUG COBRANZA — {$period->label} (ID #{$periodId})");
+        $this->info("══════════════════════════════════════════════════════════════");
+        $this->line("  Data IDs: [" . implode(', ', $dataIds) . "]");
         $this->line('');
-        $this->line('--- Info de hoja (PhpSpreadsheet listWorksheetInfo) ---');
 
-        $t0         = microtime(true);
-        $psReader   = IOFactory::createReaderForFile($absolutePath);
-        $psReader->setReadDataOnly(true);
-        $sheetsInfo = $psReader->listWorksheetInfo($absolutePath);
-        $this->line("listWorksheetInfo: " . $this->ms($t0) . " ms");
+        // ── 1. Totales globales en fact_recoveries ─────────────────────
+        $this->info('── 1. Totales globales en fact_recoveries ──');
+        $glob = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->selectRaw('COUNT(*) as filas, SUM(capital) as capital, SUM(interest) as interes, SUM(tax) as impuesto, SUM(charges) as cargos, SUM(total_amount) as total')
+            ->first();
 
-        if (empty($sheetsInfo)) {
-            $this->error('No se encontraron hojas.');
-            return self::FAILURE;
-        }
-
-        foreach ($sheetsInfo as $i => $info) {
-            $this->line("  [{$i}] '{$info['worksheetName']}' — {$info['totalRows']} filas × última col {$info['lastColumnLetter']}");
-        }
-
-        $sheetInfo  = $sheetsInfo[0];
-        $highestRow = (int) $sheetInfo['totalRows'];
-
-        // ── 2. Header detection via OpenSpout (first 30 non-empty rows) ─────
+        $totalBD = (float)($glob->total ?? 0);
+        $this->line(sprintf('  Filas            : %d', $glob->filas ?? 0));
+        $this->line(sprintf('  Capital          : $%s  (manual ref: $12,883,858.49)', number_format((float)($glob->capital ?? 0), 2)));
+        $this->line(sprintf('  Interés          : $%s  (manual ref: $4,545,211.24)', number_format((float)($glob->interes ?? 0), 2)));
+        $this->line(sprintf('  Impuesto         : $%s  (manual ref: $727,231.40)', number_format((float)($glob->impuesto ?? 0), 2)));
+        $this->line(sprintf('  Cargos/Multas    : $%s  (manual ref: $149,384.52 + $18,063.90)', number_format((float)($glob->cargos ?? 0), 2)));
+        $this->line(sprintf('  Total importado  : $%s', number_format($totalBD, 2)));
         $this->line('');
-        $this->line('--- Detección de encabezados (OpenSpout, primeras 30 filas) ---');
 
-        $t1          = microtime(true);
-        $buffer      = [];
-        $spoutReader = new XlsxReader(new XlsxOptions(SHOULD_FORMAT_DATES: false, SHOULD_PRESERVE_EMPTY_ROWS: false));
-        $spoutReader->open($absolutePath);
+        // ── 2. Totales por Transacción (desde raw_payload) ────────────
+        $this->info('── 2. Totales por Transacción (raw_payload.transaction) ──');
+        $rows = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->selectRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) as transaccion, COUNT(*) as filas, SUM(total_amount) as total")
+            ->groupByRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction'))")
+            ->orderByDesc('total')
+            ->get();
 
-        foreach ($spoutReader->getSheetIterator() as $sheet) {
-            foreach ($sheet->getRowIterator() as $row) {
-                $buffer[] = $row->toArray();
-                if (count($buffer) >= 30) break;
-            }
-            break;
+        $totalByTrans = 0.0;
+        foreach ($rows as $r) {
+            $transLabel = $r->transaccion ?: '(NULL / vacío)';
+            $this->line(sprintf('  %-30s filas=%-6d total=$%s', mb_substr($transLabel, 0, 30), $r->filas, number_format((float)$r->total, 2)));
+            $totalByTrans += (float)$r->total;
         }
-        $spoutReader->close();
-
-        $this->line("Lectura 30 filas (OpenSpout): " . $this->ms($t1) . " ms, " . count($buffer) . " filas obtenidas");
-
-        // Detect header row — use cellToString to safely handle dates/bools
-        $headerRowIndex = 0;
-        $bestScore      = -1;
-        $headerKeywords = [
-            'oficina', 'ruta', 'sucursal', 'zona', 'promotor', 'asesor',
-            'ejecutivo', 'cliente', 'nombre_del_cliente', 'transaccion',
-            'fecha_transaccion', 'concepto', 'acreditado',
-        ];
-
-        foreach ($buffer as $idx => $row) {
-            if (!is_array($row)) continue;
-            $score = 0;
-            foreach ($row as $cell) {
-                $norm = $this->normalizeHeader($this->cellToString($cell));
-                if (in_array($norm, $headerKeywords, true)) $score++;
-            }
-            if ($score > $bestScore) { $bestScore = $score; $headerRowIndex = $idx; }
-        }
-
-        $this->line("Fila de encabezado: buffer índice {$headerRowIndex}, score={$bestScore}");
-
-        $headerRow = $buffer[$headerRowIndex] ?? [];
-        $nonEmpty  = array_filter(
-            array_map(fn($v) => $this->cellToString($v), $headerRow),
-            fn($v) => $v !== ''
-        );
-        $this->line("Encabezados no vacíos: " . implode(' | ', $nonEmpty));
-
-        // ── 3. Column mapping ───────────────────────────────────────────────
+        $this->line(sprintf('  %-30s SUMA:  $%s', '', number_format($totalByTrans, 2)));
         $this->line('');
-        $this->line('--- Mapeo de columnas para Actualizar BD ---');
 
-        $columnAliases = [
-            'promoter_name' => ['promotor', 'asesor', 'ejecutivo', 'colaborador'],
-            'branch_name'   => ['oficina', 'ruta', 'sucursal', 'oficina_ruta'],
-        ];
+        // ── 3. Totales por Estatus pago (desde raw_payload) ───────────
+        $this->info('── 3. Totales por Estatus pago (raw_payload.concept / estatus derivado) ──');
+        $byConcepto = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->selectRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.concept')) as concepto, COUNT(*) as filas, SUM(total_amount) as total")
+            ->groupByRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.concept'))")
+            ->orderByDesc('total')
+            ->get();
 
-        $headerMap = [];
-        foreach ($columnAliases as $field => $aliases) {
-            foreach ($headerRow as $colIdx => $header) {
-                $norm = $this->normalizeHeader($this->cellToString($header));
-                if (in_array($norm, $aliases, true)) {
-                    $headerMap[$field] = (int) $colIdx;
-                    break;
-                }
-            }
+        foreach ($byConcepto as $r) {
+            $label = $r->concepto ?: '(NULL)';
+            $this->line(sprintf('  %-35s filas=%-6d total=$%s', mb_substr($label, 0, 35), $r->filas, number_format((float)$r->total, 2)));
         }
-
-        foreach ($columnAliases as $field => $_) {
-            if (isset($headerMap[$field])) {
-                $colIdx    = $headerMap[$field];
-                $colLetter = Coordinate::stringFromColumnIndex($colIdx + 1);
-                $rawHeader = $this->cellToString($headerRow[$colIdx] ?? null);
-                $this->line("  {$field}: col {$colLetter} (índice {$colIdx}) — '{$rawHeader}'");
-            } else {
-                $this->warn("  {$field}: NO ENCONTRADA");
-            }
-        }
-
-        if (!isset($headerMap['promoter_name'])) {
-            $this->error('promoter_name es obligatoria — el proceso fallaría aquí.');
-            return self::FAILURE;
-        }
-
-        $promoterColIdx = $headerMap['promoter_name'];
-        $branchColIdx   = $headerMap['branch_name'] ?? null;
-
-        // ── 4. First 5 valid data rows ──────────────────────────────────────
         $this->line('');
-        $this->line('--- Primeras filas de datos válidas (máx 5, desde buffer) ---');
 
-        $shown = 0;
-        foreach (array_slice($buffer, $headerRowIndex + 1, 20) as $row) {
-            if (!is_array($row)) continue;
-            $promoter = trim($this->cellToString($row[$promoterColIdx] ?? null));
-            if ($promoter === '') continue;
-            $branch = $branchColIdx !== null ? trim($this->cellToString($row[$branchColIdx] ?? null)) : '';
-            $this->line("  Promotor: '{$promoter}'  |  Sucursal: '" . ($branch ?: '—') . "'");
-            $shown++;
-            if ($shown >= 5) break;
+        // ── 4. Transacción × Concepto (combinado) ─────────────────────
+        $this->info('── 4. Transacción × Concepto (top 20 combinaciones) ──');
+        $combined = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->selectRaw("
+                JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) as transaccion,
+                JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.concept')) as concepto,
+                COUNT(*) as filas,
+                SUM(total_amount) as total
+            ")
+            ->groupByRaw("
+                JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')),
+                JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.concept'))
+            ")
+            ->orderByDesc('total')
+            ->limit(20)
+            ->get();
+
+        foreach ($combined as $r) {
+            $this->line(sprintf('  %-20s | %-25s | filas=%-5d | $%s',
+                mb_substr($r->transaccion ?? '(null)', 0, 20),
+                mb_substr($r->concepto ?? '(null)', 0, 25),
+                $r->filas,
+                number_format((float)$r->total, 2)));
         }
-
-        if ($shown === 0) {
-            $this->warn('No se encontraron filas con promotor en los primeros 30 registros.');
-        }
-
-        // ── 5. OpenSpout streaming speed test (first 1000 data rows) ────────
         $this->line('');
-        $this->line('--- Estimación de velocidad: OpenSpout streaming (primeras 1000 filas de datos) ---');
 
-        $t2           = microtime(true);
-        $testCount    = 0;
-        $withPromoter = 0;
-        $bufferIdx    = 0;
+        // ── 5. Filtro Norte preciso sobre PAGO ────────────────────────
+        $this->info('── 5. Filtro Norte preciso sobre PAGO (raw_payload + sucursal inequívoca) ──');
+        $this->line('  Regla: excluir PAGO solo con evidencia Norte clara:');
+        $this->line('    a) Sucursal inequívoca Norte (CHIHUAHUA, DURANGO, VIS-NOR, CER-GRAN…)');
+        $this->line('    b) Prefijo acreditado CH/DG + dígito en raw_payload.accredited_name');
+        $this->line('    c) Zona Norte en raw_payload.zone_name');
+        $this->line('  Nombres genéricos (CENTRO, VILLAS, FACTOR…) NO se excluyen sin evidencia.');
+        $this->line('');
 
-        $testReader = new XlsxReader(new XlsxOptions(SHOULD_FORMAT_DATES: false, SHOULD_PRESERVE_EMPTY_ROWS: false));
-        $testReader->open($absolutePath);
+        $norteExpr = RegionNorteFilter::norteDetectionExpr('r', 'b');
 
-        foreach ($testReader->getSheetIterator() as $sheet) {
-            foreach ($sheet->getRowIterator() as $row) {
-                $bufferIdx++;
-                if ($bufferIdx <= $headerRowIndex + 1) continue;
-                $values = $row->toArray();
-                $testCount++;
-                $promoter = trim($this->cellToString($values[$promoterColIdx] ?? null));
-                if ($promoter !== '') $withPromoter++;
-                if ($testCount >= 1_000) break;
-            }
-            break;
+        // Total PAGO bruto
+        $pagoBruto = (float) DB::table('fact_recoveries as r')
+            ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $dataIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+            ->sum('r.total_amount');
+
+        // PAGO excluido Norte (cualquier evidencia)
+        $pagoExcluidoNorte = (float) DB::table('fact_recoveries as r')
+            ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $dataIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+            ->whereRaw($norteExpr)
+            ->sum('r.total_amount');
+
+        // Desglose: excluido solo por sucursal inequívoca
+        $unambig = RegionNorteFilter::names();
+        $pagoExclSucursal = (float) DB::table('fact_recoveries as r')
+            ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $dataIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+            ->whereNotNull('b.name')
+            ->whereIn(DB::raw('LOWER(b.name)'), $unambig)
+            ->sum('r.total_amount');
+
+        // Desglose: excluido por prefijo acreditado CH/DG
+        $pagoExclPrefijo = (float) DB::table('fact_recoveries as r')
+            ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $dataIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+            // exclude what's already caught by unambiguous branch to avoid double count
+            ->where(function ($q) use ($unambig) {
+                $q->whereNull('b.name')->orWhereNotIn(DB::raw('LOWER(b.name)'), $unambig);
+            })
+            ->whereRaw(
+                "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload,'$.accredited_name')),'') REGEXP ?",
+                ['^(CH|DG)[0-9]']
+            )
+            ->sum('r.total_amount');
+
+        // Desglose: excluido por zone_name Norte
+        $pagoExclZona = (float) DB::table('fact_recoveries as r')
+            ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $dataIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+            ->where(function ($q) use ($unambig) {
+                $q->whereNull('b.name')->orWhereNotIn(DB::raw('LOWER(b.name)'), $unambig);
+            })
+            ->whereRaw(
+                "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload,'$.accredited_name')),'') NOT REGEXP ?",
+                ['^(CH|DG)[0-9]']
+            )
+            ->whereRaw(
+                "UPPER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload,'$.zone_name')),'')) REGEXP ?",
+                ['CHIHUAHUA|DURANGO|AGUASCALIENTES|MATRIZ NORTE|REGION NORTE']
+            )
+            ->sum('r.total_amount');
+
+        // PAGO excluido por Corporativo / Falso / Inactiva (NOT Norte)
+        $pagoExclCorporativo = (float) DB::table('fact_recoveries as r')
+            ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $dataIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+            // Must NOT be Norte already
+            ->whereRaw("NOT ({$norteExpr})")
+            ->whereNotNull('b.name')
+            ->whereIn(DB::raw('LOWER(b.name)'), OperationalExclusion::names())
+            ->sum('r.total_amount');
+
+        // Operative PAGO final: Norte out + Corporativo/Falso out
+        $pagoOperativo = (float) OperationalExclusion::applyTo(
+            RegionNorteFilter::applyRecoveryFilter(
+                DB::table('fact_recoveries as r')
+                    ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+                    ->whereIn('r.period_id', $dataIds)
+                    ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+            )
+        )->sum('r.total_amount');
+
+        $targetRec = self::TARGET_RECUPERACION;
+        $diffOp    = $pagoOperativo - $targetRec;
+
+        $this->line(sprintf('  PAGO bruto total              : $%s', number_format($pagoBruto, 2)));
+        $this->line(sprintf('  ── Excluido por Norte ─────────────────────────────────────────'));
+        $this->line(sprintf('     Sucursal Norte inequívoca   : -$%s', number_format($pagoExclSucursal, 2)));
+        $this->line(sprintf('     Prefijo acreditado CH/DG    : -$%s', number_format($pagoExclPrefijo, 2)));
+        $this->line(sprintf('     Zona Norte                  : -$%s', number_format($pagoExclZona, 2)));
+        $this->line(sprintf('     Total excluido Norte        : -$%s', number_format($pagoExcluidoNorte, 2)));
+        $this->line(sprintf('  ── Excluido por Corporativo/Falso ────────────────────────────'));
+        $this->line(sprintf('     Corporativo / Falso         : -$%s', number_format($pagoExclCorporativo, 2)));
+        $this->line(sprintf('  ──────────────────────────────────────────────────────────────'));
+        $this->line(sprintf('  PAGO operativo final          :  $%s', number_format($pagoOperativo, 2)));
+        $this->line(sprintf('  Target recuperación           :  $%s', number_format($targetRec, 2)));
+        $diffColor = abs($diffOp) < 1000 ? 'green' : (abs($diffOp) < 50000 ? 'yellow' : 'red');
+        $this->line(sprintf("  Diferencia                    :  <fg={$diffColor}>%s%s</>",
+            $diffOp >= 0 ? '+' : '', number_format($diffOp, 2)));
+        $this->line('');
+
+        // Top registros excluidos por Norte (PAGO)
+        $this->info('── 5b. Top registros PAGO excluidos por Norte ──');
+        $topExcluidos = DB::table('fact_recoveries as r')
+            ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $dataIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+            ->whereRaw($norteExpr)
+            ->selectRaw("
+                COALESCE(b.name,'(sin sucursal)') as sucursal,
+                MAX(JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload,'$.accredited_name'))) as acreditado_muestra,
+                MAX(JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload,'$.zone_name'))) as zona_muestra,
+                COUNT(*) as filas,
+                SUM(r.total_amount) as total
+            ")
+            ->groupByRaw("b.id, b.name")
+            ->orderByDesc('total')
+            ->limit(20)
+            ->get();
+
+        foreach ($topExcluidos as $row) {
+            $branchLower = strtolower($row->sucursal ?? '');
+            $isNorte     = in_array($branchLower, $unambig, true);
+            $acr         = substr($row->acreditado_muestra ?? '', 0, 8);
+            $acr2        = substr($acr, 0, 2);
+            $reason = $isNorte ? 'Norte inequívoca' :
+                (preg_match('/^(CH|DG)\d/', $acr) ? "prefijo {$acr2} (Norte)" :
+                    "zona Norte:{$row->zona_muestra}");
+            $this->line(sprintf('  ✗ %-22s %-10s %-8s filas=%-4d $%s  [%s]',
+                mb_substr($row->sucursal, 0, 22),
+                mb_substr($row->acreditado_muestra ?? '(null)', 0, 10),
+                mb_substr($row->zona_muestra ?? '(null)', 0, 8),
+                $row->filas,
+                number_format((float)$row->total, 2),
+                $reason));
         }
-        $testReader->close();
+        $this->line('');
 
-        $msFirst1k = $this->ms($t2);
-        $this->line("OpenSpout 1000 filas de datos: {$msFirst1k} ms, {$withPromoter} con promotor");
+        // Rutas genéricas detectadas pero conservadas (no Norte según evidencia)
+        $this->info('── 5c. Rutas genéricas conservadas (no excluidas por falta de evidencia Norte) ──');
+        $genericNames = ['centro', 'villas', 'manantial', 'factor', 'universal', 'supervisor', 'pri', 'industrial', 'santa fe'];
+        $genericRows = DB::table('fact_recoveries as r')
+            ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $dataIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+            ->whereIn(DB::raw('LOWER(b.name)'), $genericNames)
+            ->whereRaw("NOT ({$norteExpr})")
+            ->selectRaw("COALESCE(b.name,'?') as sucursal, COUNT(*) as filas, SUM(r.total_amount) as total")
+            ->groupBy('b.id', 'b.name')
+            ->orderByDesc('total')
+            ->get();
 
-        $dataRows    = max(1, $highestRow - ($headerRowIndex + 1));
-        $estimatedMs = ($dataRows / 1000) * (float) $msFirst1k;
-        $this->line("Total filas datos: ~{$dataRows}");
-        $this->line("Tiempo estimado total: ~" . round($estimatedMs / 1000, 1) . " s");
-
-        // ── 6. Full streaming count (skip if file > 20k rows) ───────────────
-        if ($highestRow <= 20_000) {
-            $this->line('');
-            $this->line('--- Conteo completo (archivo ≤ 20k filas) ---');
-            $t3         = microtime(true);
-            $totalData  = 0;
-            $totalPromo = 0;
-            $skipped    = 0;
-            $fullReader = new XlsxReader(new XlsxOptions(SHOULD_FORMAT_DATES: false, SHOULD_PRESERVE_EMPTY_ROWS: false));
-            $fullReader->open($absolutePath);
-            $rowIdx = 0;
-            foreach ($fullReader->getSheetIterator() as $sheet) {
-                foreach ($sheet->getRowIterator() as $row) {
-                    $rowIdx++;
-                    if ($rowIdx <= $headerRowIndex + 1) continue;
-                    $values = $row->toArray();
-                    $totalData++;
-                    $p = trim($this->cellToString($values[$promoterColIdx] ?? null));
-                    if ($p !== '') $totalPromo++;
-                    else $skipped++;
-                }
-                break;
-            }
-            $fullReader->close();
-            $this->line("Lectura completa: " . $this->ms($t3) . " ms");
-            $this->line("Filas de datos: {$totalData}, con promotor: {$totalPromo}, sin promotor: {$skipped}");
+        if ($genericRows->isEmpty()) {
+            $this->line('  Ninguna ruta genérica conservada.');
         } else {
-            $this->line('');
-            $this->line("(Archivo > 20k filas — conteo completo omitido)");
+            foreach ($genericRows as $row) {
+                $this->line(sprintf('  ~ %-22s filas=%-4d $%s  [conservada — no es Norte según payload]',
+                    mb_substr($row->sucursal, 0, 22), $row->filas, number_format((float)$row->total, 2)));
+            }
         }
-
         $this->line('');
-        $this->info('Diagnóstico completado. No se modificó ningún dato.');
-        $this->line("Librería: OpenSpout " . \Composer\InstalledVersions::getPrettyVersion('openspout/openspout'));
+
+        // ── 6. Diferencia contra targets ──────────────────────────────
+        $this->info('── 6. Diferencia contra targets ──');
+        $targetIng    = self::TARGET_TOTAL_INGRESOS;
+        $diffRec      = $totalBD - $targetRec;
+        $diffIng      = $totalBD - $targetIng;
+
+        $this->line(sprintf('  Total importado BD (bruto) : $%s', number_format($totalBD, 2)));
+        $this->line(sprintf('  PAGO operativo (Norte out) : $%s   dif vs target=%s',
+            number_format($pagoOperativo, 2),
+            number_format($diffOp, 2)));
+        $this->line(sprintf('  Target recuperación        : $%s', number_format($targetRec, 2)));
+        $this->line(sprintf('  Target total ingresos      : $%s', number_format($targetIng, 2)));
+        $this->line('');
+
+        $this->info("══════════════════════════════════════════════════════════════");
+        $this->line('');
+
         return self::SUCCESS;
-    }
-
-    private function cellToString(mixed $value): string
-    {
-        if ($value === null) {
-            return '';
-        }
-
-        if ($value instanceof \DateTimeInterface) {
-            return $value->format('Y-m-d');
-        }
-
-        if (is_bool($value)) {
-            return $value ? '1' : '0';
-        }
-
-        if (is_scalar($value)) {
-            return trim((string) $value);
-        }
-
-        return trim((string) json_encode($value, JSON_UNESCAPED_UNICODE));
-    }
-
-    private function ms(float $t0): string
-    {
-        return (string) round((microtime(true) - $t0) * 1000, 1);
-    }
-
-    private function normalizeHeader(string $value): string
-    {
-        return Str::of($value)->ascii()->lower()->replaceMatches('/[^a-z0-9]+/', '_')->trim('_')->value();
     }
 }

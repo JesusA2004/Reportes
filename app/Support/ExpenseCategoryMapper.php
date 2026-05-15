@@ -19,14 +19,16 @@ class ExpenseCategoryMapper
         'FONDEO'                  => 'Préstamos Intersucursales',
         'FONDEA'                  => 'Préstamos Intersucursales',
 
-        // IMSS
-        'IMSS'                    => 'IMSS',
+        // Nómina y Capital Humano — before more generic terms
+        'NOMINA'                  => 'Nómina y Capital Humano',
+        'DEDUCCION'               => 'Nómina y Capital Humano',
+        'IMSS'                    => 'Nómina y Capital Humano',
 
         // Financiamiento — specific phrases before generic "MOTO"/"CELULAR"
-        'FINANCIAMIENTO MOTO'     => 'Financiamiento de Motos',
-        'FIN MOTO'                => 'Financiamiento de Motos',
-        'FINANCIAMIENTO DE MOTO'  => 'Financiamiento de Motos',
-        'PAGO MOTO'               => 'Financiamiento de Motos',
+        'FINANCIAMIENTO MOTO'     => 'Nómina y Capital Humano',
+        'FIN MOTO'                => 'Nómina y Capital Humano',
+        'FINANCIAMIENTO DE MOTO'  => 'Nómina y Capital Humano',
+        'PAGO MOTO'               => 'Nómina y Capital Humano',
         'FINANCIAMIENTO CELULAR'  => 'Financiamiento Celular',
         'PAGO CELULAR'            => 'Financiamiento Celular',
         'CELULAR'                 => 'Financiamiento Celular',
@@ -52,7 +54,7 @@ class ExpenseCategoryMapper
         'SEGURO'                  => 'Pólizas',
 
         // Cascos
-        'CASCO'                   => 'Cascos',
+        'CASCO'                   => 'Nómina y Capital Humano',
 
         // Papelería / Insumos
         'PAPELERIA'               => 'Insumos de Papelería',
@@ -147,12 +149,12 @@ class ExpenseCategoryMapper
         // Oxxo
         'OXXO'                    => 'Comisiones Oxxo',
 
-        // Gastos médicos
-        'GASTOS MEDICOS'          => 'Gastos médicos',
+        // Gastos médicos — específicos de nómina → Nómina y Capital Humano
+        'GASTOS MEDICOS'          => 'Nómina y Capital Humano',
         'MEDICO'                  => 'Gastos médicos',
 
         // Finiquito
-        'FINIQUITO'               => 'Finiquito',
+        'FINIQUITO'               => 'Nómina y Capital Humano',
 
         // Formatería
         'FORMATER'                => 'Formatería',
@@ -174,14 +176,14 @@ class ExpenseCategoryMapper
 
     /**
      * Map combined text fields (concept, category, observations…) to a category.
-     * First match wins. Falls back to 'Emergentes'.
+     * First match wins. Falls back to 'Gastos Operativos'.
      */
     public static function fromFields(?string ...$parts): string
     {
         $text = implode(' ', array_filter(array_map(fn($p) => $p !== null ? trim($p) : null, $parts)));
 
         if ($text === '') {
-            return 'Emergentes';
+            return 'Gastos Operativos';
         }
 
         $upper = strtr(mb_strtoupper($text), [
@@ -194,6 +196,6 @@ class ExpenseCategoryMapper
             }
         }
 
-        return 'Emergentes';
+        return 'Gastos Operativos';
     }
 }

@@ -111,6 +111,18 @@ class LendusSaldosClienteImportService
                 // Capital atrasado (more precise overdue amount)
                 $capitalDue = $this->toDecimal($this->value($row, $map, 'capital_due'));
 
+                // Individual mora components — sum them to get the real past_due total
+                $interesAtrasado      = $this->toDecimal($this->value($row, $map, 'interes_atrasado')) ?? 0.0;
+                $impuestoAtrasado     = $this->toDecimal($this->value($row, $map, 'impuesto_atrasado')) ?? 0.0;
+                $saldoInteresMor      = $this->toDecimal($this->value($row, $map, 'saldo_interes_moratorio')) ?? 0.0;
+                $saldoImpuestoMor     = $this->toDecimal($this->value($row, $map, 'saldo_impuesto_interes_moratorio')) ?? 0.0;
+
+                // If we have individual components, compute the real mora total from all columns
+                $moraFromComponents = ($capitalDue ?? 0.0) + $interesAtrasado + $impuestoAtrasado + $saldoInteresMor + $saldoImpuestoMor;
+                if ($moraFromComponents > 0 && $moraFromComponents > $pastDue) {
+                    $pastDue = round($moraFromComponents, 2);
+                }
+
                 // Days past due — use Días Vencido column
                 $daysPastDue = (int) ($this->toDecimal($this->value($row, $map, 'days_past_due')) ?? 0);
 
@@ -195,8 +207,13 @@ class LendusSaldosClienteImportService
             }
         }
 
-        // 3. Fall back to route/office column name (existing behavior)
+        // 3. Fall back to route/office column: resolve to REAL branch first, then DB lookup
         if ($routeName) {
+            $realBranchName = $this->branchResolver->resolveRealBranchFromRoute($routeName);
+            if ($realBranchName) {
+                return $this->branchResolver->findOrCreateBranchByName($realBranchName);
+            }
+            // Last resort: direct name lookup (for cases where routeName IS the real branch name)
             $normalized = $this->normalize($routeName);
             return Branch::query()
                 ->where('normalized_name', $normalized)
@@ -357,6 +374,30 @@ class LendusSaldosClienteImportService
                 'importe_atrasado',
                 'importe_vencido',
                 'saldo_atrasado',
+            ],
+            'interes_atrasado' => [
+                'interes_atrasado',
+                'interes_vencido',
+                'intereses_atrasados',
+                'interes_mora',
+            ],
+            'impuesto_atrasado' => [
+                'impuesto_atrasado',
+                'iva_atrasado',
+                'impuesto_vencido',
+                'impuesto_mora',
+            ],
+            'saldo_interes_moratorio' => [
+                'saldo_interes_moratorio',
+                'interes_moratorio',
+                'moratorio_interes',
+                'saldo_moratorio_interes',
+            ],
+            'saldo_impuesto_interes_moratorio' => [
+                'saldo_impuesto_interes_moratorio',
+                'impuesto_interes_moratorio',
+                'saldo_impuesto_moratorio',
+                'moratorio_impuesto',
             ],
             'days_past_due' => [
                 'dias_vencido',

@@ -7,6 +7,7 @@ use App\Models\Employee;
 use App\Models\Expense;
 use App\Models\ReportUpload;
 use App\Services\BranchResolverService;
+use App\Support\ExpenseCategoryMapper;
 use Illuminate\Support\Facades\Storage;
 use Smalot\PdfParser\Parser;
 
@@ -246,10 +247,11 @@ class GastosLendusPdfImportService
     {
         $cu = mb_strtoupper(trim($concept));
         if (str_starts_with($cu, 'FONDEO A') || str_contains($cu, 'FONDEO') || str_contains($cu, 'PRESTAMO INTERSUCURSAL')) {
-            return 'FONDEO / PRESTAMO INTERSUCURSAL';
+            return 'Préstamos Intersucursales';
         }
 
-        return $category ?: 'Sin categoría';
+        // Use mapper on concept + PDF category to produce a normalized category
+        return ExpenseCategoryMapper::fromFields($concept, $category);
     }
 
     private function resolveBranch(string $name): ?Branch
