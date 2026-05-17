@@ -36,7 +36,11 @@
       "Bash(xargs grep -l \"generar-radiografia\\\\|HistoricoGeneral\\\\|generateRadiography\")",
       "PowerShell(Get-Process *)",
       "PowerShell(php -l \"C:\\\\wamp64\\\\www\\\\Reportes\\\\app\\\\Services\\\\Radiography\\\\RadiographySnapshotBuilder.php\")",
-      "Bash(taskkill /F /IM php.exe)"
+      "Bash(taskkill /F /IM php.exe)",
+      "Bash(composer dump-autoload *)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('autoload',{}\\), indent=2\\)\\)\")",
+      "Bash(grep -v \"^//\")",
+      "Bash(grep -v \"^$\")"
     ]
   }
 }
