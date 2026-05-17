@@ -40,7 +40,10 @@
       "Bash(composer dump-autoload *)",
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('autoload',{}\\), indent=2\\)\\)\")",
       "Bash(grep -v \"^//\")",
-      "Bash(grep -v \"^$\")"
+      "Bash(grep -v \"^$\")",
+      "Bash(xargs grep -l \"fact_recoveries\\\\|fact_portfolios\\\\|fact_placements\\\\|fact_expenses\")",
+      "Bash(Get-Item \"C:\\\\Users\\\\JESUSA~1\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--wamp64-www-Reportes\\\\68eb2307-ed0a-4b37-8143-909119914d00\\\\tasks\\\\bbfbb1j4q.output\")",
+      "Bash(Select-Object Length, LastWriteTime)"
     ]
   }
 }

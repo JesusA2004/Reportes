@@ -4,6 +4,7 @@ namespace App\Services\Radiography;
 
 use App\Models\Period;
 use App\Services\BranchResolverService;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -78,10 +79,13 @@ class BranchRadiographyCalculator
             return array_values($summaries);
         }
 
+        $corporativoIds = $maps['corporativo'];
+
         $this->accumulateCartera($dataIds, $operativeIds, $operativeMap, $summaries);
         $this->accumulateColocacion($dataIds, $operativeIds, $operativeMap, $summaries);
-        $this->accumulateRecuperacion($dataIds, $operativeIds, $operativeMap, $summaries);
-        $this->accumulateMora($dataIds, $operativeIds, $operativeMap, $summaries);
+        $this->accumulateRecuperacion($dataIds, $operativeIds, $operativeMap, $summaries, $corporativoIds);
+        $daysDelta = $this->computeDpdDelta($period, $dataIds);
+        $this->accumulateMora($dataIds, $operativeIds, $operativeMap, $summaries, $daysDelta);
         $this->accumulateGastos($dataIds, $operativeIds, $operativeMap, $summaries);
         $this->accumulateNomina($dataIds, $operativeIds, $operativeMap, $summaries);
 
@@ -158,7 +162,7 @@ class BranchRadiographyCalculator
 
     // ── Recuperación (solo transacciones PAGO) ───────────────────────────────
 
-    private function accumulateRecuperacion(array $dataIds, array $branchIds, array $operativeMap, array &$summaries): void
+    private function accumulateRecuperacion(array $dataIds, array $branchIds, array $operativeMap, array &$summaries, array $corporativoIds = []): void
     {
         // Pass 1: branches already mapped to an operative sucursal via branch_id
         $rows = DB::table('fact_recoveries')
@@ -183,9 +187,11 @@ class BranchRadiographyCalculator
 
         // Pass 2: route branches not in operativeMap (e.g. CUITLAHUAC, ATOTONILCO…)
         // Resolve them to an operative sucursal via the accredited_name prefix (first 3 chars).
+        // CORPORATIVO branches are explicitly excluded even if their prefix maps to an operative sucursal.
         $fallback = DB::table('fact_recoveries')
             ->whereIn('period_id', $dataIds)
             ->whereNotIn('branch_id', $branchIds)
+            ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
             ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) = 'PAGO'")
             ->selectRaw("
                 branch_id,
@@ -214,8 +220,13 @@ class BranchRadiographyCalculator
     }
 
     // ── Mora por bucket ──────────────────────────────────────────────────────
+    //
+    // days_past_due in fact_portfolios reflects the DPD at the time the
+    // Lendus saldos file was uploaded, which is typically 13-16 days after
+    // the period's end_date. We subtract $daysDelta to get the DPD at
+    // period-end, and skip contracts that were current at that cutoff.
 
-    private function accumulateMora(array $dataIds, array $branchIds, array $operativeMap, array &$summaries): void
+    private function accumulateMora(array $dataIds, array $branchIds, array $operativeMap, array &$summaries, int $daysDelta = 0): void
     {
         $rows = DB::table('fact_portfolios')
             ->whereIn('period_id', $dataIds)
@@ -231,20 +242,50 @@ class BranchRadiographyCalculator
                 continue;
             }
 
-            $dpd  = (int)   $row->days_past_due;
+            $adjDpd = max(0, (int) $row->days_past_due - $daysDelta);
+
+            if ($adjDpd === 0) {
+                continue; // current at period-end cutoff
+            }
+
             // Prefer past_due_balance; fall back to full balance when not populated
             $mora = (float) $row->mora > 0 ? (float) $row->mora : (float) $row->balance;
 
             $bucket = match (true) {
-                $dpd <= 30  => 'mora_0_30',
-                $dpd <= 60  => 'mora_31_60',
-                $dpd <= 90  => 'mora_61_90',
-                $dpd <= 120 => 'mora_91_120',
-                default     => 'mora_120_plus',
+                $adjDpd <= 30  => 'mora_0_30',
+                $adjDpd <= 60  => 'mora_31_60',
+                $adjDpd <= 90  => 'mora_61_90',
+                $adjDpd <= 120 => 'mora_91_120',
+                default        => 'mora_120_plus',
             };
 
             $summaries[$suc][$bucket] += $mora;
         }
+    }
+
+    // Returns the number of days between the period's end_date and the
+    // lendus_saldos_cliente upload date. Returns 0 when data is unavailable.
+    private function computeDpdDelta(Period $period, array $dataIds): int
+    {
+        if (!$period->end_date) {
+            return 0;
+        }
+
+        $uploadedAt = DB::table('report_uploads as ru')
+            ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+            ->whereIn('ru.period_id', $dataIds)
+            ->where('ds.code', 'lendus_saldos_cliente')
+            ->orderByDesc('ru.uploaded_at')
+            ->value('ru.uploaded_at');
+
+        if (!$uploadedAt) {
+            return 0;
+        }
+
+        $endDate    = Carbon::parse($period->end_date)->startOfDay();
+        $uploadDate = Carbon::parse($uploadedAt)->startOfDay();
+
+        return max(0, (int) $endDate->diffInDays($uploadDate));
     }
 
     // ── Gastos por categoría (excedentes, fondeo, gastos_op) ────────────────

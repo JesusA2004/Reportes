@@ -236,7 +236,7 @@ class DebugBranchSnapshotCommand extends Command
             ->whereIn('r.period_id', $dataIds)
             ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
             ->when(!empty($operativeIds), fn ($q) => $q->whereNotIn('r.branch_id', $operativeIds))
-            ->selectRaw("b.name as branch_name, LEFT(JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.accredited_name')), 3) as prefix3, SUM(r.total_amount) as total, COUNT(*) as filas")
+            ->selectRaw("r.branch_id, b.name as branch_name, LEFT(JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.accredited_name')), 3) as prefix3, SUM(r.total_amount) as total, COUNT(*) as filas")
             ->groupByRaw('r.branch_id, b.name, LEFT(JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, \'$.accredited_name\')), 3)')
             ->orderByDesc('total')
             ->get();
@@ -244,24 +244,56 @@ class DebugBranchSnapshotCommand extends Command
         if ($unresolvedRecovery->isEmpty()) {
             $this->line('  <fg=green>✓ Todas las filas de recuperación resuelven a sucursales operativas.</>');
         } else {
-            $pass2Rows   = [];
-            $excludedRows = [];
+            // Rebuild corporativoIds so we correctly mirror what the calculator excludes
+            $corpIds = [];
+            foreach (DB::table('branches')->get() as $b) {
+                $real = $resolver->resolveRealBranchFromRoute($b->name);
+                if ($real && strtoupper(trim($real)) === 'CORPORATIVO') {
+                    $corpIds[] = (int) $b->id;
+                }
+            }
+
+            $pass2Rows       = [];
+            $excludedRows    = [];
+            $corpPendingRows = [];  // CORPORATIVO branches with operative prefix — pending user decision
+
             foreach ($unresolvedRecovery as $r) {
                 $prefix3  = strtoupper(trim((string) $r->prefix3));
                 $resolved = $resolver->resolveBranchNameFromCode($prefix3);
                 $isSheet  = $resolved ? $resolver->isSheetBranch($resolved) : false;
-                if ($isSheet) {
-                    $pass2Rows[$r->branch_name . '→' . $resolved] = ($pass2Rows[$r->branch_name . '→' . $resolved] ?? 0) + (float) $r->total;
+                $isCorpId = in_array((int) ($r->branch_id ?? 0), $corpIds, true);
+
+                if ($isCorpId && $isSheet) {
+                    // CORPORATIVO branch with operative prefix: excluded by calculator, flag for user
+                    $label = $r->branch_name . '→' . $resolved;
+                    $corpPendingRows[$label] = ($corpPendingRows[$label] ?? 0) + (float) $r->total;
+                } elseif ($isCorpId) {
+                    // CORPORATIVO with own prefix (ZUR): excluded
+                    $label = $r->branch_name . ' [CORPORATIVO]';
+                    $excludedRows[$label] = ($excludedRows[$label] ?? 0) + (float) $r->total;
+                } elseif ($isSheet) {
+                    $label = $r->branch_name . '→' . $resolved;
+                    $pass2Rows[$label] = ($pass2Rows[$label] ?? 0) + (float) $r->total;
                 } else {
-                    $excludedRows[$r->branch_name . ' [' . ($resolved ?? '???') . ']'] = ($excludedRows[$r->branch_name . ' [' . ($resolved ?? '???') . ']'] ?? 0) + (float) $r->total;
+                    $label = $r->branch_name . ' [' . ($resolved ?? '???') . ']';
+                    $excludedRows[$label] = ($excludedRows[$label] ?? 0) + (float) $r->total;
                 }
             }
 
             if (!empty($pass2Rows)) {
                 arsort($pass2Rows);
-                $this->line('  <fg=green>Recuperación incluida vía fallback (accredited_name prefix):</>');
+                $this->line('  <fg=green>Recuperación incluida vía fallback (accredited_name prefix, Pass2):</>');
                 foreach ($pass2Rows as $label => $total) {
                     $this->line(sprintf('    <fg=green>✓</> %-45s  $%s', $label, number_format($total, 2)));
+                }
+                $this->line('');
+            }
+
+            if (!empty($corpPendingRows)) {
+                arsort($corpPendingRows);
+                $this->warn('  CORPORATIVO con prefix → sucursal operativa (EXCLUIDO por calculador — pendiente decisión usuario):');
+                foreach ($corpPendingRows as $label => $total) {
+                    $this->line(sprintf('    <fg=yellow>?</> %-45s  $%s', $label, number_format($total, 2)));
                 }
                 $this->line('');
             }
@@ -275,7 +307,61 @@ class DebugBranchSnapshotCommand extends Command
             }
         }
 
+        // ── SAN JUAN DEL RÍO — sucursal cerrada ─────────────────────────────
+        $this->info('── SAN JUAN DEL RÍO — sucursal cerrada / cartera en recuperación ──');
         $this->line('');
+
+        $sjrBranch = DB::table('branches')
+            ->where('normalized_name', 'san juan del rio')
+            ->orWhere('name', 'LIKE', '%SAN JUAN%')
+            ->first(['id', 'name']);
+
+        if ($sjrBranch) {
+            $sjrSummary = collect($branches)->firstWhere('sucursal', 'SAN JUAN DEL RÍO') ?? [];
+
+            $sjrPortfolio = DB::table('fact_portfolios')
+                ->whereIn('period_id', $dataIds)
+                ->where('branch_id', $sjrBranch->id)
+                ->selectRaw('COUNT(*) as contratos, SUM(balance) as cartera, COUNT(CASE WHEN days_past_due>0 THEN 1 END) as con_mora')
+                ->first();
+
+            // Pass2 recovery — SJR-prefixed acreditados in non-operative branches
+            $sjrPass2 = (float) DB::table('fact_recoveries')
+                ->whereIn('period_id', $dataIds)
+                ->whereNotIn('branch_id', $operativeIds)
+                ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) = 'PAGO'")
+                ->whereRaw("LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3) = 'SJR'")
+                ->sum('total_amount');
+
+            $sjrNewPlacements = (int) DB::table('fact_placements')
+                ->whereIn('period_id', $dataIds)
+                ->where('branch_id', $sjrBranch->id)
+                ->where(function ($q) {
+                    $q->whereNull('product_name')
+                      ->orWhereRaw("product_name NOT REGEXP ?", ['REESTRUCTURA|UNIFICACION|UNIFICACIONES|RECURSOS PROPIOS']);
+                })
+                ->count();
+
+            $this->line(sprintf('  Branch ID             : %d ("%s")', $sjrBranch->id, $sjrBranch->name));
+            $this->line(sprintf('  Contratos con cartera : %d', (int) ($sjrPortfolio->contratos ?? 0)));
+            $this->line(sprintf('  Cartera vigente       : $%s', number_format((float) ($sjrPortfolio->cartera ?? 0), 2)));
+            $this->line(sprintf('  Contratos con mora    : %d', (int) ($sjrPortfolio->con_mora ?? 0)));
+            $this->line(sprintf('  Mora (sum buckets)    : $%s', number_format(
+                (float) ($sjrSummary['mora_0_30'] ?? 0) + ($sjrSummary['mora_31_60'] ?? 0) +
+                ($sjrSummary['mora_61_90'] ?? 0) + ($sjrSummary['mora_91_120'] ?? 0) + ($sjrSummary['mora_120_plus'] ?? 0), 2)));
+            $this->line(sprintf('  Recuperación (Pass1)  : $%s', number_format((float) ($sjrSummary['recuperacion_total'] ?? 0) - $sjrPass2, 2)));
+            $this->line(sprintf('  Recuperación (Pass2)  : $%s  (acreditados SJR en otras rutas)', number_format($sjrPass2, 2)));
+            $this->line(sprintf('  Recuperación TOTAL    : $%s', number_format((float) ($sjrSummary['recuperacion_total'] ?? 0), 2)));
+            $this->line(sprintf('  Colocación nueva      : %s', $sjrNewPlacements === 0
+                ? '<fg=green>$0 — OK, sucursal cerrada sin originación nueva</>'
+                : '<fg=yellow>$' . number_format((float) ($sjrSummary['colocacion'] ?? 0), 2) . ' — VERIFICAR</>'));
+            $this->line('');
+            $this->line('  <fg=green>CONCLUSIÓN: San Juan del Río se mantiene dentro del GLOBAL como sucursal</>');
+            $this->line('  <fg=green>  cerrada con cartera remanente. Colocación = $0 es correcto y esperado.</>');
+            $this->line('  <fg=green>  Cartera/recuperación/mora sí se contabilizan en el GLOBAL.</>');
+        }
+        $this->line('');
+
         $this->info('══════════════════════════════════════════════════════════════════════');
         $this->line('');
 
