@@ -127,16 +127,14 @@ class MonthlyReportController extends Controller {
             $snapshot = $snapshotBuilder->build($period, $summary);
         }
 
-        // Operative branches: from snapshot but excluding non-operative ones
-        $nonOperativeBranches = ['CHIHUAHUA', 'DURANGO', 'VICTORIA DE DURANGO', 'AGUASCALIENTES', 'CORPORATIVO', 'FALSO'];
+        // Operative branches: use branch_radiography.branches (exactly the 13 op branches)
         $operativeBranches = collect();
         if ($snapshot) {
-            $snapshotBranches = $snapshot['sections']['branches'] ?? [];
-            $branchIds = array_column($snapshotBranches, 'branch_id');
-            if (!empty($branchIds)) {
+            $brBranches = $snapshot['branch_radiography']['branches'] ?? [];
+            $branchNames = array_column($brBranches, 'sucursal');
+            if (!empty($branchNames)) {
                 $operativeBranches = Branch::query()
-                    ->whereIn('id', $branchIds)
-                    ->whereNotIn('name', $nonOperativeBranches)
+                    ->whereIn('name', $branchNames)
                     ->orderBy('name')
                     ->get(['id', 'name'])
                     ->map(fn ($b) => ['id' => $b->id, 'name' => $b->name])
@@ -167,11 +165,20 @@ class MonthlyReportController extends Controller {
             }
         }
 
-        // All available periods for compare selectors
+        // All available periods for compare selectors (with snapshot flag for comparativo protection)
+        $periodsWithSnap = PeriodSummary::where('status', 'generated')
+            ->pluck('period_id')
+            ->flip();
         $allPeriods = Period::query()
             ->orderByDesc('year')->orderByDesc('month')->orderByDesc('sequence')
             ->get(['id', 'name', 'code', 'type', 'year', 'month'])
-            ->map(fn ($p) => ['id' => $p->id, 'label' => $p->label, 'code' => $p->code])
+            ->map(fn ($p) => [
+                'id'           => $p->id,
+                'label'        => $p->label,
+                'code'         => $p->code,
+                'type'         => $p->type,
+                'has_snapshot' => $periodsWithSnap->has($p->id),
+            ])
             ->values();
 
         return Inertia::render('ReportesMensuales/Preview', [

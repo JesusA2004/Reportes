@@ -14,9 +14,11 @@ use Illuminate\Support\Facades\DB;
  */
 class BranchRadiographyCalculator
 {
-    private const EXCEDENTES_CAT = 'Envío de utilidad a corporativo';
-    private const FONDEO_CAT     = 'Préstamos Intersucursales';
-    private const NOMINA_CAT     = 'Nómina y Capital Humano';
+    private const EXCEDENTES_CAT     = 'Envío de utilidad a corporativo';
+    private const FONDEO_CAT         = 'Préstamos Intersucursales';
+    private const NOMINA_CAT         = 'Nómina y Capital Humano';
+    // Categories that appear as gastos but belong to the Nómina section (shown there, not in gastos)
+    private const NOMINA_EXPENSE_CATS = ['Gasolina', 'Financiamiento Celular'];
 
     // Categories that appear in Lendus PDF — ERP rows with these categories are
     // excluded to avoid double-counting with Lendus.
@@ -109,8 +111,8 @@ class BranchRadiographyCalculator
 
         foreach ($branches as $branch) {
             foreach ($branch as $key => $val) {
-                if ($key === 'sucursal') {
-                    continue;
+                if ($key === 'sucursal' || $key === 'gastos_detalle' || $key === 'nomina_detalle') {
+                    continue; // array fields handled separately
                 }
                 if (array_key_exists($key, $global)) {
                     $global[$key] += $val;
@@ -120,8 +122,27 @@ class BranchRadiographyCalculator
 
         // Add unassigned EMPLOYEE amounts to GLOBAL (employees belong to the period regardless of branch).
         // gastos_operativos de Corporativo NO se suman al GLOBAL operativo de las 13 sucursales.
-        foreach (['nomina_total', 'comisiones', 'bonos'] as $key) {
+        foreach (['nomina_total', 'comisiones', 'bonos', 'vacaciones', 'prima_vacacional'] as $key) {
             $global[$key] += (float) ($unassigned[$key] ?? 0);
+        }
+
+        // Sum gastos_detalle across all branches for GLOBAL breakdown
+        $global['gastos_detalle'] = [];
+        foreach ($branches as $branch) {
+            foreach ($branch['gastos_detalle'] ?? [] as $concept => $amount) {
+                $global['gastos_detalle'][$concept] = ($global['gastos_detalle'][$concept] ?? 0.0) + (float) $amount;
+            }
+        }
+
+        // Sum nomina_detalle across all branches + unassigned for GLOBAL breakdown
+        $global['nomina_detalle'] = [];
+        foreach ($branches as $branch) {
+            foreach ($branch['nomina_detalle'] ?? [] as $label => $amount) {
+                $global['nomina_detalle'][$label] = ($global['nomina_detalle'][$label] ?? 0.0) + (float) $amount;
+            }
+        }
+        foreach ($unassigned['nomina_detalle'] ?? [] as $label => $amount) {
+            $global['nomina_detalle'][$label] = ($global['nomina_detalle'][$label] ?? 0.0) + (float) $amount;
         }
 
         return $global;
@@ -336,8 +357,8 @@ class BranchRadiographyCalculator
                 ->whereIn('e.period_id', $dataIds)
                 ->whereIn('e.branch_id', $queryIds)
                 ->where('ru.data_source_id', $lendusId)
-                ->selectRaw("e.branch_id, COALESCE(e.category, 'Sin categoría') as category, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
-                ->groupBy('e.branch_id', 'e.category')
+                ->selectRaw("e.branch_id, COALESCE(e.category, 'Sin categoría') as category, COALESCE(e.concept, '') as concept, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
+                ->groupBy('e.branch_id', 'e.category', 'e.concept')
                 ->get();
         }
 
@@ -348,8 +369,8 @@ class BranchRadiographyCalculator
                 ->whereIn('e.branch_id', $queryIds)
                 ->where('ru.data_source_id', $erpId)
                 ->whereNotIn('e.category', self::LENDUS_PRESENT_CATS)
-                ->selectRaw("e.branch_id, COALESCE(e.category, 'Sin categoría') as category, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
-                ->groupBy('e.branch_id', 'e.category')
+                ->selectRaw("e.branch_id, COALESCE(e.category, 'Sin categoría') as category, COALESCE(e.concept, '') as concept, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
+                ->groupBy('e.branch_id', 'e.category', 'e.concept')
                 ->get();
         }
 
@@ -370,12 +391,20 @@ class BranchRadiographyCalculator
                 $suc = $operativeMap[$branchId] ?? null;
                 $isCorp = isset($corpIdSet[$branchId]);
 
+                $isNominaExpense = in_array($cat, self::NOMINA_EXPENSE_CATS, true);
+
                 if ($suc && isset($summaries[$suc])) {
                     // Operative branch
-                    if ($isExcedente)   { $summaries[$suc]['excedentes']       += $amt; }
-                    elseif ($isFondeo)  { $summaries[$suc]['prestamos_fondea'] += $amt; }
-                    elseif ($isNomina)  { /* skip — accumulateNomina() handles this */ }
-                    else                { $summaries[$suc]['gastos_operativos'] += $amt; }
+                    if ($isExcedente)       { $summaries[$suc]['excedentes']       += $amt; }
+                    elseif ($isFondeo)      { $summaries[$suc]['prestamos_fondea'] += $amt; }
+                    elseif ($isNomina)      { /* skip — accumulateNomina() handles this */ }
+                    elseif ($isNominaExpense){ /* skip — accumulateNomina() queries Gasolina/Celular separately */ }
+                    else {
+                        $summaries[$suc]['gastos_operativos'] += $amt;
+                        $concept = (string)($row->concept ?? '');
+                        $canonical = $this->canonicalGastoConcept($cat, $concept);
+                        $summaries[$suc]['gastos_detalle'][$canonical] = ($summaries[$suc]['gastos_detalle'][$canonical] ?? 0.0) + $amt;
+                    }
                 } elseif ($isCorp) {
                     // CORPORATIVO gastos go to unassigned (excedentes/fondeo from corp still tracked on corp branch normally)
                     if (!$isExcedente && !$isFondeo && !$isNomina) {
@@ -404,12 +433,15 @@ class BranchRadiographyCalculator
 
     private function accumulateNomina(array $dataIds, array $operativeMap, array &$summaries, array &$unassigned): void
     {
+        $operativeIds = array_keys($operativeMap);
+
+        // ── Percepciones NOI: P001 Sueldo, P002 Comisiones, P009 Vacaciones, P010 Prima, P1xx Bonos
         $rows = DB::table('fact_noi_movements as n')
             ->leftJoin('employee_branch_assignments as eba', 'n.employee_id', '=', 'eba.employee_id')
             ->leftJoin('employees as e', 'n.employee_id', '=', 'e.id')
             ->whereIn('n.period_id', $dataIds)
             ->where('n.concept_type', 'percepcion')
-            ->whereRaw("n.concept REGEXP '^P(001|002|108|109|120|123)'")
+            ->whereRaw("n.concept REGEXP '^P(001|002|009|010|108|109|120|123)'")
             ->selectRaw("
                 COALESCE(eba.branch_id, -1) AS assigned_branch_id,
                 n.concept,
@@ -427,6 +459,8 @@ class BranchRadiographyCalculator
             $bucket = match (true) {
                 str_starts_with($concept, 'P001')                          => 'nomina_total',
                 str_starts_with($concept, 'P002')                          => 'comisiones',
+                str_starts_with($concept, 'P009')                          => 'vacaciones',
+                str_starts_with($concept, 'P010')                          => 'prima_vacacional',
                 (bool) preg_match('/^P(108|109|120|123)/', $concept)       => 'bonos',
                 default                                                     => null,
             };
@@ -436,7 +470,6 @@ class BranchRadiographyCalculator
             }
 
             if ($branchId === -1) {
-                // No assignment in employee_branch_assignments
                 $unassigned[$bucket] += $amount;
                 continue;
             }
@@ -445,8 +478,84 @@ class BranchRadiographyCalculator
             if ($suc && isset($summaries[$suc])) {
                 $summaries[$suc][$bucket] += $amount;
             } else {
-                // Assigned to a non-operative branch (Corp/Norte/etc.) → unassigned
                 $unassigned[$bucket] += $amount;
+            }
+        }
+
+        // ── Deducciones NOI: Infonavit, Pensión, Servicio Moto, Préstamo Moto
+        $dedRows = DB::table('fact_noi_movements as n')
+            ->leftJoin('employee_branch_assignments as eba', 'n.employee_id', '=', 'eba.employee_id')
+            ->whereIn('n.period_id', $dataIds)
+            ->where('n.concept_type', 'deduccion')
+            ->whereRaw("n.concept REGEXP '^D(094|010|113|123|004)'")
+            ->selectRaw("COALESCE(eba.branch_id, -1) AS assigned_branch_id, n.concept, SUM(n.amount) AS total")
+            ->groupByRaw("COALESCE(eba.branch_id, -1), n.concept")
+            ->get();
+
+        foreach ($dedRows as $row) {
+            $branchId = (int) $row->assigned_branch_id;
+            $concept  = (string) $row->concept;
+            $amount   = (float) $row->total;
+
+            $label = match (true) {
+                str_starts_with($concept, 'D094') => 'Descuentos Infonavit',
+                str_starts_with($concept, 'D010') => 'Pensión Alimenticia',
+                str_starts_with($concept, 'D113') => 'Descuento Servicios Moto',
+                str_starts_with($concept, 'D123') => 'Financiamiento de Motos (desc.)',
+                str_starts_with($concept, 'D004') => 'Préstamo Personal',
+                default                           => 'Otros descuentos NOI',
+            };
+
+            if ($branchId === -1) {
+                $unassigned['nomina_detalle'][$label] = ($unassigned['nomina_detalle'][$label] ?? 0.0) + $amount;
+                continue;
+            }
+
+            $suc = $operativeMap[$branchId] ?? null;
+            if ($suc && isset($summaries[$suc])) {
+                $summaries[$suc]['nomina_detalle'][$label] = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amount;
+            } else {
+                $unassigned['nomina_detalle'][$label] = ($unassigned['nomina_detalle'][$label] ?? 0.0) + $amount;
+            }
+        }
+
+        // ── Gastos de nómina desde fact_expenses: Gasolina, Financiamiento Celular,
+        //    IMSS, Cascos, Gastos Médicos, Finiquito, Financiamiento Moto (por concepto)
+        if (!empty($operativeIds)) {
+            $sourceIds = DB::table('data_sources')
+                ->whereIn('code', ['gastos_lendus', 'gastos_erp'])
+                ->pluck('id');
+
+            $expRows = DB::table('fact_expenses as e')
+                ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+                ->whereIn('e.period_id', $dataIds)
+                ->whereIn('e.branch_id', $operativeIds)
+                ->whereIn('ru.data_source_id', $sourceIds)
+                ->where(function ($q) {
+                    $q->whereIn('e.category', ['Gasolina', 'Financiamiento Celular'])
+                      ->orWhere(function ($q2) {
+                          $q2->whereIn('e.category', ['Nómina y Capital Humano', 'Nomina y Capital Humano'])
+                             ->whereNotIn('e.concept', ['NOMINA', 'DEDUCCIONES', 'DEDUCCIONES GENERALES', 'GASTOS EMERGENTES', 'GASTOS POR TRANSPORTE']);
+                      });
+                })
+                ->selectRaw("e.branch_id, e.category, COALESCE(e.concept,'') as concept, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
+                ->groupBy('e.branch_id', 'e.category', 'e.concept')
+                ->get();
+
+            foreach ($expRows as $row) {
+                $branchId = (int) $row->branch_id;
+                $cat      = (string) $row->category;
+                $con      = strtoupper(trim((string) $row->concept));
+                $amount   = (float) $row->total;
+
+                $label = $this->canonicalNominaExpense($cat, $con);
+
+                $suc = $operativeMap[$branchId] ?? null;
+                if ($suc && isset($summaries[$suc])) {
+                    $summaries[$suc]['nomina_detalle'][$label] = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amount;
+                } else {
+                    $unassigned['nomina_detalle'][$label] = ($unassigned['nomina_detalle'][$label] ?? 0.0) + $amount;
+                }
             }
         }
 
@@ -498,6 +607,8 @@ class BranchRadiographyCalculator
             'interes_recuperado'  => 0.0,
             'impuesto_recuperado' => 0.0,
             'charges'             => 0.0,
+            'cargos_inicio'       => 0.0,
+            'comision_apertura'   => 0.0,
             'recuperacion_total'  => 0.0,
             'mora_0_30'           => 0.0,
             'mora_31_60'          => 0.0,
@@ -505,12 +616,123 @@ class BranchRadiographyCalculator
             'mora_91_120'         => 0.0,
             'mora_120_plus'       => 0.0,
             'gastos_operativos'   => 0.0,
+            'gastos_detalle'      => [],   // canonical_concept => amount (summed from source data)
             'nomina_total'        => 0.0,
             'comisiones'          => 0.0,
             'bonos'               => 0.0,
+            'vacaciones'          => 0.0,
+            'prima_vacacional'    => 0.0,
+            'nomina_detalle'      => [],   // display_label => amount (IMSS, gasolina, finiquito, etc.)
             'excedentes'          => 0.0,
             'prestamos_fondea'    => 0.0,
         ];
+    }
+
+    /**
+     * Maps a fact_expenses category + concept to a canonical nómina display label.
+     */
+    private function canonicalNominaExpense(string $category, string $concept): string
+    {
+        $cat = strtoupper(trim($category));
+        $con = strtoupper(trim($concept));
+
+        if ($cat === 'GASOLINA') {
+            return 'Gasolina';
+        }
+        if ($cat === 'FINANCIAMIENTO CELULAR' || str_contains($con, 'CELULAR')) {
+            return 'Financiamiento Celular';
+        }
+        return match (true) {
+            str_contains($con, 'IMSS')                                                              => 'IMSS',
+            str_contains($con, 'CASCO')                                                             => 'Cascos',
+            str_contains($con, 'MEDICO') || str_contains($con, 'MÉDICO')                           => 'Gastos médicos',
+            str_contains($con, 'FINIQUITO')                                                         => 'Finiquito',
+            str_contains($con, 'FINANCIAMIENTO MOTO') || str_contains($con, 'MOTO')                => 'Financiamiento de Motos',
+            str_contains($con, 'UNIFORME')                                                          => 'Descuento de uniformes',
+            str_contains($con, 'INFONAVIT')                                                         => 'Descuentos Infonavit',
+            str_contains($con, 'PENSION') || str_contains($con, 'PENSIÓN')                         => 'Pensión Alimenticia',
+            str_contains($con, 'MR LANA') || str_contains($con, 'TIENDA')                          => 'Descuentos Tienda Mr Lana',
+            str_contains($con, 'PRESTAMO Z') || str_contains($con, 'PRÉSTAMO Z')                   => 'Anticipo de nómina',
+            default                                                                                 => 'Otros conceptos nómina',
+        };
+    }
+
+    /**
+     * Maps a raw DB expense category + concept to the canonical display name used in the Excel.
+     * Concept is used when category is generic (e.g. 'Gastos Operativos').
+     * Unrecognized categories fall back to 'Emergentes' so no amount is lost.
+     */
+    private function canonicalGastoConcept(string $category, string $concept = ''): string
+    {
+        $cat  = strtoupper(trim($category));
+        $con  = strtoupper(trim($concept));
+        // Combined string for catch-all matching
+        $both = $cat . ' ' . $con;
+
+        // Exact category matches first (most specific)
+        return match (true) {
+            // --- Category-level direct matches ---
+            str_contains($cat, 'INSUMOS DE CAFETERIA') || str_contains($cat, 'INSUMOS DE CAFETERÍA')        => 'Insumos de Cafetería',
+            str_contains($cat, 'INSUMOS DE LIMPIEZA')                                                        => 'Insumos de Limpieza',
+            str_contains($cat, 'INSUMOS DE PAPELERIA') || str_contains($cat, 'INSUMOS DE PAPELERÍA')        => 'Insumos de Papelería',
+            str_contains($cat, 'SERVICIOS DE LIMPIEZA')                                                      => 'Señora Limpieza',
+            str_contains($cat, 'SERVICIOS DE MOTOCICLETAS') || str_contains($cat, 'SERVICIOS MOTO')         => 'Servicios de Motocicletas',
+            str_contains($cat, 'SOFTWARE PÓLIZA') || str_contains($cat, 'SOFTWARE POLIZA')                  => 'Software Póliza Anual',
+            str_contains($cat, 'RENTA DE BODEGAS') || str_contains($cat, 'RENTAS BODEGAS')                  => 'Renta de Bodegas',
+            str_contains($cat, 'RENTA OFICINA') || str_contains($cat, 'RENTAS OFICINAS')                    => 'Renta Oficina',
+            str_contains($cat, 'RECARGAS TELEFÓNICAS') || str_contains($cat, 'RECARGAS TELEFONICAS')        => 'Recargas Telefónicas',
+            str_contains($cat, 'COMISIONES OXXO')                                                            => 'Comisiones Oxxo',
+            str_contains($cat, 'MULTAS E INFRACCIONES')                                                      => 'Multas e Infracciones',
+            str_contains($cat, 'TRÁMITES GUBERNAMENTALES') || str_contains($cat, 'TRAMITES GUBERNAMENTALES') => 'Trámites Gubernamentales',
+            str_contains($cat, 'MOBILIARIO Y EQUIPO')                                                        => 'Mobiliario y Equipo',
+            str_contains($cat, 'MANTENIMIENTO')                                                              => 'Mantenimiento',
+            str_contains($cat, 'PAQUETERÍA') || str_contains($cat, 'PAQUETERIA')                            => 'Paquetería',
+            str_contains($cat, 'TELÉFONO E INTERNET') || str_contains($cat, 'TELEFONO E INTERNET')          => 'Teléfono e Internet',
+            str_contains($cat, 'PÓLIZAS') || str_contains($cat, 'POLIZAS')                                  => 'Pólizas',
+            str_contains($cat, 'PUBLICIDAD')                                                                  => 'Publicidad',
+            str_contains($cat, 'MECÁNICOS') || str_contains($cat, 'MECANICOS')                              => 'Mecánicos',
+            str_contains($cat, 'TRANSPORTES')                                                                => 'Transportes',
+            str_contains($cat, 'PEGOTES')                                                                    => 'Pegotes',
+            str_contains($cat, 'PERMISOS VEHICULARES')                                                       => 'Permisos Vehiculares',
+            str_contains($cat, 'VIÁTICOS') || str_contains($cat, 'VIATICOS')                                => 'Viáticos',
+            str_contains($cat, 'FLETES')                                                                     => 'Fletes',
+            str_contains($cat, 'FORMATERÍA') || str_contains($cat, 'FORMATERIA')                            => 'Formatería',
+            str_contains($cat, 'EVENTOS')                                                                    => 'Eventos',
+            str_contains($cat, 'GASTOS LEGALES')                                                             => 'Gastos legales',
+            $cat === 'LUZ'                                                                                    => 'Luz',
+            $cat === 'AGUA'                                                                                   => 'Agua',
+            // --- Concept-level matching for generic categories (e.g. 'Gastos Operativos') ---
+            str_contains($both, 'CAFETERIA') || str_contains($both, 'CAFETERÍA')                            => 'Insumos de Cafetería',
+            str_contains($both, 'LIMPIEZA') && str_contains($both, 'SEÑORA')                                 => 'Señora Limpieza',
+            str_contains($both, 'LIMPIEZA')                                                                  => 'Insumos de Limpieza',
+            str_contains($both, 'PAPELERIA') || str_contains($both, 'PAPELERÍA')                            => 'Insumos de Papelería',
+            str_contains($both, 'RENTA') && str_contains($both, 'BODEGA')                                   => 'Renta de Bodegas',
+            str_contains($both, 'RENTA') && !str_contains($both, 'BODEGA')                                  => 'Renta Oficina',
+            str_contains($both, 'OXXO') || str_contains($both, 'TRANSACCION')                               => 'Comisiones Oxxo',
+            str_contains($both, 'MOTOCICLETA') || str_contains($both, 'MOTO') && str_contains($both, 'SERVICIO') => 'Servicios de Motocicletas',
+            str_contains($both, 'POLIZA ANUAL') || str_contains($both, 'PÓLIZA ANUAL') || str_contains($both, 'SOFTWARE') || str_contains($both, 'LICENCIA') => 'Software Póliza Anual',
+            str_contains($both, 'POLIZA') || str_contains($both, 'PÓLIZA') || str_contains($both, 'SEGURO') => 'Pólizas',
+            str_contains($both, 'RECARGA')                                                                   => 'Recargas Telefónicas',
+            str_contains($both, 'INTERNET') || str_contains($both, 'TELEFON')                               => 'Teléfono e Internet',
+            str_contains($both, 'LUZ') || str_contains($both, 'ELECTR')                                     => 'Luz',
+            str_contains($both, 'AGUA')                                                                      => 'Agua',
+            str_contains($both, 'MOBILIARIO') || str_contains($both, 'EQUIPO DE COMPUTO') || str_contains($both, 'ACCESORIOS EQUIPO') => 'Mobiliario y Equipo',
+            str_contains($both, 'MANTENIMIENTO')                                                             => 'Mantenimiento',
+            str_contains($both, 'PAQUETERIA') || str_contains($both, 'PAQUETERÍA') || str_contains($both, 'ENVIO') => 'Paquetería',
+            str_contains($both, 'GUBERNAMENTAL') || str_contains($both, 'TRAMITE')                          => 'Trámites Gubernamentales',
+            str_contains($both, 'PUBLICIDAD')                                                                => 'Publicidad',
+            str_contains($both, 'MECANICO') || str_contains($both, 'MECÁNICO')                              => 'Mecánicos',
+            str_contains($both, 'MULTA') || str_contains($both, 'INFRACCION')                               => 'Multas e Infracciones',
+            str_contains($both, 'TRANSPORTE') || str_contains($both, 'TAXI') || str_contains($both, 'RUTA') || str_contains($both, 'DILIGENCIA') => 'Transportes',
+            str_contains($both, 'PEGOTE')                                                                    => 'Pegotes',
+            str_contains($both, 'PERMISO')                                                                   => 'Permisos Vehiculares',
+            str_contains($both, 'VIATICO') || str_contains($both, 'VIÁTICO') || str_contains($both, 'SUPERVISION') || str_contains($both, 'CAPACITACION') => 'Viáticos',
+            str_contains($both, 'FLETE')                                                                     => 'Fletes',
+            str_contains($both, 'FORMATERIA') || str_contains($both, 'FORMATERÍA')                          => 'Formatería',
+            str_contains($both, 'EVENTO')                                                                    => 'Eventos',
+            str_contains($both, 'LEGAL') || str_contains($both, 'DOMINIO')                                  => 'Gastos legales',
+            default                                                                                          => 'Emergentes',
+        };
     }
 
     private function emptyUnassigned(): array
@@ -519,6 +741,9 @@ class BranchRadiographyCalculator
             'nomina_total'      => 0.0,
             'comisiones'        => 0.0,
             'bonos'             => 0.0,
+            'vacaciones'        => 0.0,
+            'prima_vacacional'  => 0.0,
+            'nomina_detalle'    => [],   // display_label => amount
             'gastos_operativos' => 0.0,
             'empleados'         => [],   // per-employee detail for SIN ASIGNAR sheet
             'gastos_items'      => [],   // per-gasto detail for SIN ASIGNAR sheet

@@ -483,7 +483,7 @@ class RadiographySnapshotBuilder
 
     private function buildProducts(Period $period): array
     {
-        $excludeAll = self::PRODUCT_SPECIAL_PATTERN . '|' . self::PRODUCT_RESTRUCTURE_PATTERN . '|SEGURO';
+        $excludeAll = self::PRODUCT_SPECIAL_PATTERN . '|' . self::PRODUCT_RESTRUCTURE_PATTERN . '|SEGURO|RECURSOS PROPIOS';
 
         $placements = DB::table('fact_placements')
             ->whereIn('period_id', $this->dataIds)

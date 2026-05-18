@@ -203,7 +203,7 @@ class ReportUploadController extends Controller {
                 'branch_name' => $e->employeeBranchAssignments->first()?->branch?->name,
             ]);
 
-        return Inertia::render('historico-general/index', [
+        return Inertia::render('Historico-General/index', [
             'periods'         => $periods,
             'sources'         => $sources,
             'groupedUploads'  => $groupedUploads,

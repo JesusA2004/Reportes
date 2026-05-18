@@ -50,7 +50,12 @@
       "Bash(Get-Content *)",
       "Bash(tasklist)",
       "Bash(findstr /i \"php\")",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(dir \"C:\\\\wamp64\\\\www\\\\Reportes\\\\storage\\\\app\\\\radiografias\\\\\" 2>&1 *)",
+      "Bash(Get-Process php *)",
+      "Bash(Select-Object Id, CPU, StartTime)",
+      "Bash(Format-Table)",
+      "Bash(2>&1)"
     ]
   }
 }

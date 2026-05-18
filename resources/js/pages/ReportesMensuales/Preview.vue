@@ -15,7 +15,7 @@ const props = defineProps<{
     pdfUrl: string
     branches: { id: number; name: string }[]
     employees: { id: number; name: string }[]
-    allPeriods: { id: number; label: string; code: string }[]
+    allPeriods: { id: number; label: string; code: string; type: string; has_snapshot: boolean }[]
     filteredExcelBaseUrl: string
     filteredPdfBaseUrl: string
 }>()
@@ -31,6 +31,22 @@ const filteredExtraAmount = ref<string>('')
 const filteredExtraNotes  = ref<string>('')
 
 const isComparative = computed(() => filteredType.value !== 'simple')
+
+const periodTypeForFilter = computed((): string | null => {
+    if (filteredType.value === 'month_vs_month') return 'monthly'
+    if (filteredType.value === 'bimester_vs_bimester') return 'bimestral'
+    if (filteredType.value === 'quarter_vs_quarter') return 'quarterly'
+    return null
+})
+
+const comparePeriodOptions = computed(() => {
+    const ptype = periodTypeForFilter.value
+    return props.allPeriods.filter(p => {
+        if (p.id === props.period.id) return false
+        if (ptype && p.type !== ptype) return false
+        return true
+    })
+})
 
 function buildFilteredUrl(format: 'xlsx' | 'pdf'): string {
     const base = format === 'xlsx' ? props.filteredExcelBaseUrl : props.filteredPdfBaseUrl
@@ -60,13 +76,17 @@ const filteredXlsxUrl = computed(() => buildFilteredUrl('xlsx'))
 const filteredPdfUrl  = computed(() => buildFilteredUrl('pdf'))
 
 const canDownloadFiltered = computed(() => {
-    if (isComparative.value && !filteredComparePeriodId.value) return false
+    if (isComparative.value) {
+        if (!filteredComparePeriodId.value) return false
+        const cmp = props.allPeriods.find((p: any) => p.id === filteredComparePeriodId.value)
+        if (!cmp?.has_snapshot) return false
+    }
     if (!isComparative.value && filteredScope.value === 'branch' && !filteredBranchId.value) return false
     if (!isComparative.value && filteredScope.value === 'employee' && !filteredEmployeeId.value) return false
     return true
 })
 
-type TabKey = 'resumen' | 'productos' | 'sucursales' | 'empleados' | 'cartera' | 'gastos' | 'incidencias'
+type TabKey = 'resumen' | 'radiografia' | 'productos' | 'sucursales' | 'empleados' | 'cartera' | 'gastos' | 'incidencias'
 const activeTab = ref<TabKey>('resumen')
 
 const snap    = computed(() => props.snapshot)
@@ -84,6 +104,109 @@ const gastosByConcept  = computed(() => gastos.value?.byConcept ?? [])
 const gastosByBranch   = computed(() => gastos.value?.byBranch ?? [])
 const gastosByEmployee = computed(() => gastos.value?.byEmployee ?? [])
 const gastosBySource   = computed(() => gastos.value?.bySource ?? [])
+
+// Branch radiography — calculator-sourced, same source as Excel
+const branchRadiography = computed(() => snap.value?.branch_radiography ?? null)
+const brGlobal = computed(() => branchRadiography.value?.global ?? null)
+
+// ── Sección 2: Ingresos ──────────────────────────────────────────────────────
+const ingrCapital   = computed(() => Number(brGlobal.value?.capital_recuperado)  || 0)
+const ingrInteres   = computed(() => Number(brGlobal.value?.interes_recuperado)  || 0)
+const ingrImpuesto  = computed(() => Number(brGlobal.value?.impuesto_recuperado) || 0)
+const ingrMultas    = computed(() => Number(brGlobal.value?.charges)             || 0)
+const ingrCargosIni = computed(() => Number(brGlobal.value?.cargos_inicio)       || 0)
+const ingrComAper   = computed(() => Number(brGlobal.value?.comision_apertura)   || 0)
+const ingrTotal     = computed(() => ingrCapital.value + ingrInteres.value + ingrImpuesto.value + ingrMultas.value + ingrCargosIni.value + ingrComAper.value)
+
+// ── Sección 4: Nómina ────────────────────────────────────────────────────────
+const nomNomina   = computed(() => Number(brGlobal.value?.nomina_total)    || 0)
+const nomComis    = computed(() => Number(brGlobal.value?.comisiones)      || 0)
+const nomVac      = computed(() => Number(brGlobal.value?.vacaciones)      || 0)
+const nomPrimaVac = computed(() => Number(brGlobal.value?.prima_vacacional)|| 0)
+const nomBonos    = computed(() => Number(brGlobal.value?.bonos)           || 0)
+
+const NOM_DETALLE_ORDER = ['IMSS','Descuentos Infonavit','Finiquito','Gastos médicos','Gasolina','Financiamiento de Motos','Financiamiento de Motos (desc.)','Descuento Servicios Moto','Financiamiento Celular','Cascos','Descuento de uniformes','Pensión Alimenticia','Préstamo Personal','Anticipo de nómina','Otros conceptos nómina','Otros descuentos NOI']
+
+const nomDetalle = computed<{ label: string; value: number }[]>(() => {
+    const det = brGlobal.value?.nomina_detalle as Record<string, number> | undefined
+    if (!det) return []
+    const rows: { label: string; value: number }[] = []
+    const seen = new Set<string>()
+    for (const label of NOM_DETALLE_ORDER) {
+        const v = Number(det[label]) || 0
+        if (v > 0) { rows.push({ label, value: v }); seen.add(label) }
+    }
+    for (const [label, raw] of Object.entries(det)) {
+        if (!seen.has(label) && Number(raw) > 0) rows.push({ label, value: Number(raw) })
+    }
+    return rows
+})
+
+const nomTotal = computed(() => {
+    const base = nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value
+    return base + nomDetalle.value.reduce((s, r) => s + r.value, 0)
+})
+
+// ── Sección 5: Préstamos intersucursales ─────────────────────────────────────
+const fondeoGlobal = computed(() => Number(brGlobal.value?.prestamos_fondea) || 0)
+
+// ── Sección 7: Análisis ──────────────────────────────────────────────────────
+const recGlobal   = computed(() => Number(brGlobal.value?.recuperacion_total) || 0)
+const colGlobal   = computed(() => Number(brGlobal.value?.colocacion)         || 0)
+const carteraGlobal = computed(() => Number(brGlobal.value?.valor_cartera)    || 0)
+const excGlobal   = computed(() => Number(brGlobal.value?.excedentes)         || 0)
+const mora0_30g   = computed(() => Number(brGlobal.value?.mora_0_30)          || 0)
+const mora31_60g  = computed(() => Number(brGlobal.value?.mora_31_60)         || 0)
+const mora61_90g  = computed(() => Number(brGlobal.value?.mora_61_90)         || 0)
+const mora91_120g = computed(() => Number(brGlobal.value?.mora_91_120)        || 0)
+
+const mora120plusG  = computed(() => Number(brGlobal.value?.mora_120_plus)       || 0)
+const moraTotalGlobal = computed(() => mora0_30g.value + mora31_60g.value + mora61_90g.value + mora91_120g.value + mora120plusG.value)
+
+// ── Sección 8: Utilidad ──────────────────────────────────────────────────────
+const utilidadGlobal = computed(() => recGlobal.value - brGlobalGastosTotal.value - nomTotal.value)
+
+// ── KPI primario (branch_radiography → fallback summary) ─────────────────────
+const kpiRec     = computed(() => brGlobal.value ? recGlobal.value     : Number(snap.value?.summary?.recovery_total ?? 0))
+const kpiCol     = computed(() => brGlobal.value ? colGlobal.value     : Number(snap.value?.summary?.placement_total ?? 0))
+const kpiCartera = computed(() => brGlobal.value ? carteraGlobal.value : Number(snap.value?.summary?.portfolio_total ?? 0))
+const kpiMora    = computed(() => brGlobal.value ? moraTotalGlobal.value : Number(snap.value?.summary?.overdue_portfolio ?? 0))
+const kpiMoraPct = computed(() => kpiCartera.value > 0 ? kpiMora.value / kpiCartera.value * 100 : Number(snap.value?.summary?.mora_index ?? 0))
+const kpiGastos  = computed(() => brGlobal.value ? brGlobalGastosTotal.value : Number(snap.value?.summary?.expenses_total ?? 0))
+const kpiNomina  = computed(() => nomTotal.value || Number(snap.value?.summary?.net_payroll ?? 0))
+const kpiUtil    = computed(() => brGlobal.value ? utilidadGlobal.value : 0)
+const kpiEmp     = computed(() => Number(snap.value?.summary?.employees_count ?? 0))
+
+const sucursalesRows = computed(() => {
+    const branches = branchRadiography.value?.branches
+    if (branches?.length) {
+        return (branches as any[]).map(b => {
+            const moraSum = (Number(b.mora_0_30)||0) + (Number(b.mora_31_60)||0) + (Number(b.mora_61_90)||0) + (Number(b.mora_91_120)||0) + (Number(b.mora_120_plus)||0)
+            const cartVal = Number(b.valor_cartera) || 0
+            return {
+                nombre: b.sucursal,
+                recuperacion: b.recuperacion_total,
+                colocacion: b.colocacion,
+                cartera: cartVal,
+                vencida: moraSum,
+                mora: cartVal > 0 ? moraSum / cartVal * 100 : 0,
+                gastos: b.gastos_operativos,
+                nomina: (Number(b.nomina_total)||0) + (Number(b.comisiones)||0) + (Number(b.bonos)||0),
+            }
+        })
+    }
+    return (snap.value?.sections?.branches ?? []) as any[]
+})
+
+const brGlobalGastos = computed(() => {
+    const det = branchRadiography.value?.global?.gastos_detalle as Record<string, number> | undefined
+    if (!det) return []
+    return Object.entries(det)
+        .map(([concepto, total]) => ({ concepto, total: Number(total) }))
+        .filter(c => c.total > 0)
+        .sort((a, b) => b.total - a.total)
+})
+const brGlobalGastosTotal = computed(() => Number(branchRadiography.value?.global?.gastos_operativos) || 0)
 
 // Empleados/Gestores fusionados
 const empGest = computed(() => snap.value?.sections?.employees_gestores ?? [])
@@ -121,13 +244,14 @@ const pct  = (v: number) => Number(v || 0).toFixed(2) + '%'
 const num  = (v: number) => new Intl.NumberFormat('es-MX').format(Number(v || 0))
 
 const tabs: { key: TabKey; label: string; badge?: string }[] = [
-    { key: 'resumen',     label: 'Resumen' },
-    { key: 'productos',   label: 'Productos' },
-    { key: 'sucursales',  label: 'Sucursales' },
-    { key: 'empleados',   label: 'Empleados / Gestores' },
-    { key: 'cartera',     label: 'Cartera y mora' },
-    { key: 'gastos',      label: 'Gastos' },
-    { key: 'incidencias', label: 'Incidencias' },
+    { key: 'resumen',      label: 'Resumen' },
+    { key: 'radiografia',  label: 'Radiografía' },
+    { key: 'productos',    label: 'Productos' },
+    { key: 'sucursales',   label: 'Sucursales' },
+    { key: 'empleados',    label: 'Empleados / Gestores' },
+    { key: 'cartera',      label: 'Cartera y mora' },
+    { key: 'gastos',       label: 'Gastos' },
+    { key: 'incidencias',  label: 'Incidencias' },
 ]
 </script>
 
@@ -177,39 +301,40 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
             <!-- KPI CARDS -->
             <div class="mx-auto max-w-screen-2xl px-6 py-5">
                 <div class="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
-                    <div class="rounded-2xl border border-white/70 bg-white p-4 shadow-sm hover:shadow-md transition">
+                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition">
                         <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Empleados</p>
-                        <p class="mt-1 text-xl font-black text-slate-950">{{ num(sum.employees_count) }}</p>
+                        <p class="mt-1 text-xl font-black text-slate-950">{{ num(kpiEmp) }}</p>
                     </div>
-                    <div class="rounded-2xl border border-white/70 bg-white p-4 shadow-sm hover:shadow-md transition">
+                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition">
                         <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Recuperación</p>
-                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(sum.recovery_total) }}</p>
+                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(kpiRec) }}</p>
                     </div>
-                    <div class="rounded-2xl border border-white/70 bg-white p-4 shadow-sm hover:shadow-md transition">
+                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition">
                         <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Colocación</p>
-                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(sum.placement_total) }}</p>
+                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(kpiCol) }}</p>
                     </div>
-                    <div class="rounded-2xl border border-white/70 bg-white p-4 shadow-sm hover:shadow-md transition"
-                         :class="sum.mora_index > 25 ? 'border-red-200 bg-red-50' : ''">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Mora</p>
-                        <p class="mt-1 text-xl font-black" :class="sum.mora_index > 25 ? 'text-red-700' : 'text-slate-950'">{{ pct(sum.mora_index) }}</p>
+                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition"
+                         :class="kpiMoraPct > 25 ? 'border-red-200 bg-red-50' : ''">
+                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Mora %</p>
+                        <p class="mt-1 text-xl font-black" :class="kpiMoraPct > 25 ? 'text-red-700' : 'text-slate-950'">{{ pct(kpiMoraPct) }}</p>
                     </div>
-                    <div class="rounded-2xl border border-white/70 bg-white p-4 shadow-sm hover:shadow-md transition">
+                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition">
                         <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Cartera</p>
-                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(sum.portfolio_total) }}</p>
+                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(kpiCartera) }}</p>
                     </div>
-                    <div class="rounded-2xl border border-white/70 bg-white p-4 shadow-sm hover:shadow-md transition"
-                         :class="sum.overdue_portfolio > 0 ? 'border-red-200 bg-red-50' : ''">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">C. Vencida</p>
-                        <p class="mt-1 text-xl font-black" :class="sum.overdue_portfolio > 0 ? 'text-red-700' : 'text-slate-950'">{{ money(sum.overdue_portfolio) }}</p>
+                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition"
+                         :class="kpiMora > 0 ? 'border-red-200 bg-red-50' : ''">
+                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Mora total</p>
+                        <p class="mt-1 text-xl font-black" :class="kpiMora > 0 ? 'text-red-700' : 'text-slate-950'">{{ money(kpiMora) }}</p>
                     </div>
-                    <div class="rounded-2xl border border-white/70 bg-white p-4 shadow-sm hover:shadow-md transition">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Neto nómina</p>
-                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(sum.net_payroll) }}</p>
+                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition">
+                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Nómina</p>
+                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(kpiNomina) }}</p>
                     </div>
-                    <div class="rounded-2xl border border-white/70 bg-white p-4 shadow-sm hover:shadow-md transition">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Gastos</p>
-                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(sum.expenses_total) }}</p>
+                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition"
+                         :class="kpiUtil < 0 ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50'">
+                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Utilidad</p>
+                        <p class="mt-1 text-xl font-black" :class="kpiUtil < 0 ? 'text-red-700' : 'text-emerald-800'">{{ money(kpiUtil) }}</p>
                     </div>
                 </div>
             </div>
@@ -259,8 +384,13 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                 <select v-model="filteredComparePeriodId"
                                         class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
                                     <option :value="null">— Seleccionar —</option>
-                                    <option v-for="p in allPeriods.filter(p => p.id !== period.id)" :key="p.id" :value="p.id">{{ p.label }}</option>
+                                    <option v-for="p in comparePeriodOptions" :key="p.id" :value="p.id" :disabled="!p.has_snapshot">
+                                        {{ p.label }}{{ !p.has_snapshot ? ' (sin radiografía)' : '' }}
+                                    </option>
                                 </select>
+                                <p v-if="comparePeriodOptions.length === 0" class="mt-1 text-xs text-amber-600">
+                                    No hay periodos del mismo tipo disponibles para comparar.
+                                </p>
                             </div>
 
                             <!-- Sucursal -->
@@ -313,11 +443,10 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                 <FileText class="size-4" /> Descargar PDF
                             </a>
                             <p v-if="!canDownloadFiltered" class="self-center text-xs text-amber-600 font-semibold">
-                                Selecciona
-                                <span v-if="isComparative">un periodo a comparar</span>
-                                <span v-else-if="filteredScope === 'branch'">una sucursal</span>
-                                <span v-else-if="filteredScope === 'employee'">un gestor</span>
-                                para descargar.
+                                <span v-if="isComparative && !filteredComparePeriodId">Selecciona un periodo a comparar.</span>
+                                <span v-else-if="isComparative && filteredComparePeriodId && !allPeriods.find((p: any) => p.id === filteredComparePeriodId)?.has_snapshot">El periodo seleccionado no tiene radiografía generada.</span>
+                                <span v-else-if="filteredScope === 'branch'">Selecciona una sucursal.</span>
+                                <span v-else-if="filteredScope === 'employee'">Selecciona un gestor.</span>
                             </p>
                         </div>
                     </div>
@@ -346,12 +475,13 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                             <h3 class="mb-3 text-xs font-black uppercase tracking-wider text-slate-500">Métricas financieras</h3>
                             <table class="w-full text-sm">
                                 <tr v-for="row in [
-                                    ['Recuperación total',  money(sum.recovery_total)],
-                                    ['Colocación total',    money(sum.placement_total)],
-                                    ['Cartera total',       money(sum.portfolio_total)],
-                                    ['Cartera vencida',     money(sum.overdue_portfolio)],
-                                    ['Índice de mora',      pct(sum.mora_index)],
-                                    ['Gastos totales',      money(sum.expenses_total)],
+                                    ['Recuperación total',   money(kpiRec)],
+                                    ['Colocación total',     money(kpiCol)],
+                                    ['Cartera total',        money(kpiCartera)],
+                                    ['Mora total',           money(kpiMora)],
+                                    ['Índice de mora',       pct(kpiMoraPct)],
+                                    ['Gastos operativos',    money(kpiGastos)],
+                                    ['Utilidad del periodo', money(kpiUtil)],
                                 ]" :key="row[0]" class="border-b last:border-0">
                                     <td class="py-2 text-slate-600 font-medium">{{ row[0] }}</td>
                                     <td class="py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
@@ -359,15 +489,16 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                             </table>
                         </div>
                         <div class="rounded-2xl border bg-white p-5 shadow-sm">
-                            <h3 class="mb-3 text-xs font-black uppercase tracking-wider text-slate-500">Nómina / empleados</h3>
+                            <h3 class="mb-3 text-xs font-black uppercase tracking-wider text-slate-500">Nómina y capital humano</h3>
                             <table class="w-full text-sm">
                                 <tr v-for="row in [
-                                    ['Total empleados',  num(pay.total_empleados)],
-                                    ['Pagos',            money(pay.pagos)],
-                                    ['Bonos',            money(pay.bonos)],
-                                    ['Descuentos',       money(pay.descuentos)],
-                                    ['Gastos empleados', money(pay.gastos)],
-                                    ['Neto acumulado',   money(pay.neto)],
+                                    ['Total empleados',       num(kpiEmp)],
+                                    ['Nómina (sueldos)',      money(nomNomina)],
+                                    ['Comisiones',            money(nomComis)],
+                                    ['Vacaciones',            money(nomVac)],
+                                    ['Prima vacacional',      money(nomPrimaVac)],
+                                    ['Bonos',                 money(nomBonos)],
+                                    ['Total nómina completa', money(nomTotal)],
                                 ]" :key="row[0]" class="border-b last:border-0">
                                     <td class="py-2 text-slate-600 font-medium">{{ row[0] }}</td>
                                     <td class="py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
@@ -440,6 +571,251 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                     </div>
                 </div>
 
+                <!-- ══════════ RADIOGRAFÍA ══════════ -->
+                <div v-show="activeTab === 'radiografia'" class="space-y-5">
+
+                    <div v-if="!brGlobal" class="rounded-2xl border bg-amber-50 p-6 text-sm text-amber-700">
+                        Sin datos de radiografía. Genera el informe primero.
+                    </div>
+
+                    <template v-else>
+
+                        <!-- 1. MÉTRICAS GENERALES -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="bg-indigo-700 px-5 py-2.5">
+                                <span class="text-xs font-black uppercase tracking-wider text-white">1. Métricas Generales</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr v-for="(row, i) in [
+                                        ['Valor de cartera',               moneyFull(carteraGlobal)],
+                                        ['Otorgamientos',                   moneyFull(colGlobal)],
+                                        ['Recuperación total',              moneyFull(recGlobal)],
+                                        ['Mora 0 – 30 días',               moneyFull(mora0_30g)],
+                                        ['Mora 31 – 60 días',              moneyFull(mora31_60g)],
+                                        ['Mora 61 – 90 días',              moneyFull(mora61_90g)],
+                                        ['Mora 91 – 120 días',             moneyFull(mora91_120g)],
+                                        ['Mora total',                     moneyFull(mora0_30g + mora31_60g + mora61_90g + mora91_120g)],
+                                        ['Envío de utilidad a corporativo', moneyFull(excGlobal)],
+                                    ]" :key="row[0]"
+                                        class="border-b last:border-0"
+                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
+                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- 2. INGRESOS -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="bg-indigo-700 px-5 py-2.5">
+                                <span class="text-xs font-black uppercase tracking-wider text-white">2. Ingresos</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr v-for="(row, i) in ([
+                                        ['Capital recuperado',     ingrCapital,   ingrCapital > 0],
+                                        ['Intereses recuperados',  ingrInteres,   ingrInteres > 0],
+                                        ['Impuestos recuperados',  ingrImpuesto,  ingrImpuesto > 0],
+                                        ['Multas / cargos',        ingrMultas,    ingrMultas > 0],
+                                        ['Cargos al inicio',       ingrCargosIni, ingrCargosIni > 0],
+                                        ['Comisión apertura',      ingrComAper,   ingrComAper > 0],
+                                    ] as [string, number, boolean][]).filter(r => r[2])"
+                                        :key="row[0]"
+                                        class="border-b last:border-0"
+                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
+                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(row[1]) }}</td>
+                                    </tr>
+                                    <tr class="bg-indigo-50 border-t-2 border-indigo-200">
+                                        <td class="px-5 py-2 font-black text-indigo-900">Total ingresos</td>
+                                        <td class="px-5 py-2 text-right font-black text-indigo-900">{{ moneyFull(ingrTotal) }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- 3. GASTOS OPERATIVOS -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="bg-indigo-700 px-5 py-2.5">
+                                <span class="text-xs font-black uppercase tracking-wider text-white">3. Gastos Operativos</span>
+                            </div>
+                            <div v-if="!brGlobalGastos.length" class="px-5 py-4 text-sm text-slate-400">Sin gastos registrados.</div>
+                            <table v-else class="w-full text-sm">
+                                <tbody>
+                                    <tr v-for="(c, i) in brGlobalGastos" :key="c.concepto"
+                                        class="border-b last:border-0"
+                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
+                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ c.concepto }}</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(c.total) }}</td>
+                                    </tr>
+                                    <tr class="bg-indigo-50 border-t-2 border-indigo-200">
+                                        <td class="px-5 py-2 font-black text-indigo-900">Total gastos operativos</td>
+                                        <td class="px-5 py-2 text-right font-black text-indigo-900">{{ moneyFull(brGlobalGastosTotal) }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- 4. NÓMINA Y CAPITAL HUMANO -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="bg-indigo-700 px-5 py-2.5">
+                                <span class="text-xs font-black uppercase tracking-wider text-white">4. Nómina y Capital Humano</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr v-for="(row, i) in ([
+                                        ['Nómina',           nomNomina,   nomNomina > 0],
+                                        ['Comisiones',       nomComis,    nomComis > 0],
+                                        ['Vacaciones',       nomVac,      nomVac > 0],
+                                        ['Prima vacacional', nomPrimaVac, nomPrimaVac > 0],
+                                        ['Bonos',            nomBonos,    nomBonos > 0],
+                                    ] as [string, number, boolean][]).filter(r => r[2])"
+                                        :key="row[0]"
+                                        class="border-b last:border-0"
+                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
+                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(row[1]) }}</td>
+                                    </tr>
+                                    <tr v-for="(d, j) in nomDetalle" :key="d.label"
+                                        class="border-b last:border-0"
+                                        :class="(j + 5) % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
+                                        <td class="px-5 py-2 text-slate-600 font-medium pl-8">{{ d.label }}</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(d.value) }}</td>
+                                    </tr>
+                                    <tr class="bg-indigo-50 border-t-2 border-indigo-200">
+                                        <td class="px-5 py-2 font-black text-indigo-900">Total nómina y capital humano</td>
+                                        <td class="px-5 py-2 text-right font-black text-indigo-900">{{ moneyFull(nomTotal) }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- 5. PRÉSTAMOS INTERSUCURSALES -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="bg-indigo-700 px-5 py-2.5">
+                                <span class="text-xs font-black uppercase tracking-wider text-white">5. Préstamos Intersucursales</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr v-for="(row, i) in [
+                                        ['Activos (fondea)',  moneyFull(fondeoGlobal)],
+                                        ['Pasivos (recibe)', moneyFull(fondeoGlobal)],
+                                        ['Total',            moneyFull(fondeoGlobal)],
+                                    ]" :key="row[0]"
+                                        class="border-b last:border-0"
+                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
+                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- 6. ÍNDICE DE ROTACIÓN -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="bg-indigo-700 px-5 py-2.5">
+                                <span class="text-xs font-black uppercase tracking-wider text-white">6. Índice de Rotación de Personal</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr v-for="(row, i) in [
+                                        ['N° de personas que dejaron la empresa', '—'],
+                                        ['Promedio de personas en el periodo',    num(snap?.summary?.employees_count ?? 0)],
+                                        ['Índice de rotación',                   '—'],
+                                    ]" :key="row[0]"
+                                        class="border-b last:border-0"
+                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
+                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- 7. ANÁLISIS DE TENDENCIAS -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="bg-indigo-700 px-5 py-2.5">
+                                <span class="text-xs font-black uppercase tracking-wider text-white">7. Análisis de Tendencias y Proyecciones</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr v-for="(row, i) in [
+                                        ['Saldo inicial en caja',             moneyFull(0)],
+                                        ['Ingresos totales',                  moneyFull(recGlobal)],
+                                        ['Otorgamientos',                     moneyFull(colGlobal)],
+                                        ['Gastos totales',                    moneyFull(brGlobalGastosTotal)],
+                                        ['Utilidad',                          moneyFull(utilidadGlobal)],
+                                        ['Saldo final en caja',               moneyFull(0)],
+                                        ['Préstamos inter sucursales',        moneyFull(fondeoGlobal)],
+                                        ['Envío de utilidad a corporativo',   moneyFull(excGlobal)],
+                                        ['Diferencia',                        moneyFull(0)],
+                                        ['Mora de 0 a 30 días',               moneyFull(mora0_30g)],
+                                        ['Mora de 31 a 60 días',              moneyFull(mora31_60g)],
+                                        ['Mora de 61 a 90 días',              moneyFull(mora61_90g)],
+                                        ['Mora de 91 a 120 días',             moneyFull(mora91_120g)],
+                                        ['Valor cartera',                     moneyFull(carteraGlobal)],
+                                    ]" :key="row[0]"
+                                        class="border-b last:border-0"
+                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
+                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- 8. UTILIDAD -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="bg-indigo-700 px-5 py-2.5">
+                                <span class="text-xs font-black uppercase tracking-wider text-white">8. Utilidad</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr class="bg-white border-b">
+                                        <td class="px-5 py-2 text-slate-600 font-medium">Recuperación total</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(recGlobal) }}</td>
+                                    </tr>
+                                    <tr class="bg-slate-50 border-b">
+                                        <td class="px-5 py-2 text-slate-600 font-medium">Menos: Gastos operativos</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(brGlobalGastosTotal) }}</td>
+                                    </tr>
+                                    <tr class="bg-white border-b">
+                                        <td class="px-5 py-2 text-slate-600 font-medium">Menos: Nómina y capital humano</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(nomTotal) }}</td>
+                                    </tr>
+                                    <tr :class="utilidadGlobal >= 0 ? 'bg-emerald-50 border-t-2 border-emerald-300' : 'bg-red-50 border-t-2 border-red-300'">
+                                        <td class="px-5 py-2 font-black" :class="utilidadGlobal >= 0 ? 'text-emerald-900' : 'text-red-900'">Utilidad del periodo</td>
+                                        <td class="px-5 py-2 text-right font-black text-xl" :class="utilidadGlobal >= 0 ? 'text-emerald-900' : 'text-red-900'">{{ moneyFull(utilidadGlobal) }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- 9. SALDO TOTAL ACUMULADO -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="bg-indigo-700 px-5 py-2.5">
+                                <span class="text-xs font-black uppercase tracking-wider text-white">9. Saldo Total Acumulado Cuentas</span>
+                            </div>
+                            <div class="px-5 py-4 text-sm text-slate-400 italic">Sin fuente de caja en BD — dato a llenar manualmente.</div>
+                        </div>
+
+                        <!-- 10. OBSERVACIONES -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="bg-indigo-700 px-5 py-2.5">
+                                <span class="text-xs font-black uppercase tracking-wider text-white">10. Observaciones y Notas</span>
+                            </div>
+                            <div class="px-5 py-4 space-y-3">
+                                <div class="h-8 rounded border border-dashed border-slate-200 bg-slate-50"></div>
+                                <div class="h-8 rounded border border-dashed border-slate-200 bg-slate-50"></div>
+                                <div class="h-8 rounded border border-dashed border-slate-200 bg-slate-50"></div>
+                            </div>
+                        </div>
+
+                    </template>
+                </div>
+
                 <!-- ══════════ PRODUCTOS ══════════ -->
                 <div v-show="activeTab === 'productos'">
                     <div v-if="!snap.sections?.products?.length" class="rounded-2xl border bg-white p-10 text-center text-sm text-slate-400">
@@ -495,17 +871,17 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
 
                 <!-- ══════════ SUCURSALES ══════════ -->
                 <div v-show="activeTab === 'sucursales'">
-                    <div v-if="!snap.sections?.branches?.length" class="rounded-2xl border bg-white p-10 text-center text-sm text-slate-400">Sin datos por sucursal.</div>
+                    <div v-if="!sucursalesRows.length" class="rounded-2xl border bg-white p-10 text-center text-sm text-slate-400">Sin datos por sucursal.</div>
                     <div v-else class="space-y-4">
                         <!-- Gráfica cartera por sucursal -->
                         <div class="rounded-2xl border bg-white p-5 shadow-sm">
                             <h3 class="mb-4 text-xs font-black uppercase tracking-wider text-slate-500">Cartera por sucursal</h3>
                             <div class="space-y-2">
-                                <div v-for="b in snap.sections.branches" :key="b.branch_id" class="flex items-center gap-3">
+                                <div v-for="b in sucursalesRows" :key="b.nombre" class="flex items-center gap-3">
                                     <div class="w-28 shrink-0 truncate text-xs font-semibold text-slate-700">{{ b.nombre }}</div>
                                     <div class="flex-1 rounded-full bg-slate-100 h-4 overflow-hidden">
                                         <div class="h-full rounded-full bg-sky-500 transition-all"
-                                             :style="{ width: (snap.sections.branches[0]?.cartera > 0 ? Math.min(100, b.cartera / snap.sections.branches[0].cartera * 100) : 0) + '%' }"></div>
+                                             :style="{ width: (sucursalesRows[0]?.cartera > 0 ? Math.min(100, b.cartera / sucursalesRows[0].cartera * 100) : 0) + '%' }"></div>
                                     </div>
                                     <div class="w-24 shrink-0 text-right text-xs font-black text-slate-800">{{ money(b.cartera) }}</div>
                                 </div>
@@ -520,13 +896,14 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                         <th class="px-4 py-3 text-right">Recuperación</th>
                                         <th class="px-4 py-3 text-right">Colocación</th>
                                         <th class="px-4 py-3 text-right">Cartera</th>
-                                        <th class="px-4 py-3 text-right">Vencida</th>
+                                        <th class="px-4 py-3 text-right">Mora $</th>
                                         <th class="px-4 py-3 text-right">Mora %</th>
-                                        <th class="px-4 py-3 text-right">Gastos</th>
+                                        <th class="px-4 py-3 text-right">Gastos Op.</th>
+                                        <th class="px-4 py-3 text-right">Nómina</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <tr v-for="b in snap.sections.branches" :key="b.branch_id" class="border-t hover:bg-slate-50">
+                                    <tr v-for="b in sucursalesRows" :key="b.nombre" class="border-t hover:bg-slate-50">
                                         <td class="px-4 py-2.5 font-bold">{{ b.nombre }}</td>
                                         <td class="px-4 py-2.5 text-right">{{ moneyFull(b.recuperacion) }}</td>
                                         <td class="px-4 py-2.5 text-right">{{ moneyFull(b.colocacion) }}</td>
@@ -534,6 +911,7 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                         <td class="px-4 py-2.5 text-right font-bold" :class="b.vencida > 0 ? 'text-red-700' : ''">{{ moneyFull(b.vencida) }}</td>
                                         <td class="px-4 py-2.5 text-right font-bold" :class="b.mora > 25 ? 'text-red-700' : ''">{{ pct(b.mora) }}</td>
                                         <td class="px-4 py-2.5 text-right">{{ moneyFull(b.gastos) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ b.nomina != null ? moneyFull(b.nomina) : '—' }}</td>
                                     </tr>
                                 </tbody>
                             </table>
@@ -620,15 +998,15 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                     <div class="grid grid-cols-3 gap-3">
                         <div class="rounded-2xl border bg-white p-4 shadow-sm">
                             <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Cartera total</p>
-                            <p class="mt-1 text-xl font-black">{{ moneyFull(sum.portfolio_total) }}</p>
+                            <p class="mt-1 text-xl font-black">{{ moneyFull(kpiCartera) }}</p>
                         </div>
-                        <div class="rounded-2xl border bg-white p-4 shadow-sm" :class="sum.overdue_portfolio > 0 ? 'border-red-200' : ''">
-                            <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Cartera vencida</p>
-                            <p class="mt-1 text-xl font-black" :class="sum.overdue_portfolio > 0 ? 'text-red-700' : ''">{{ moneyFull(sum.overdue_portfolio) }}</p>
+                        <div class="rounded-2xl border bg-white p-4 shadow-sm" :class="kpiMora > 0 ? 'border-red-200' : ''">
+                            <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Mora total</p>
+                            <p class="mt-1 text-xl font-black" :class="kpiMora > 0 ? 'text-red-700' : ''">{{ moneyFull(kpiMora) }}</p>
                         </div>
-                        <div class="rounded-2xl border bg-white p-4 shadow-sm" :class="sum.mora_index > 25 ? 'border-red-200' : ''">
+                        <div class="rounded-2xl border bg-white p-4 shadow-sm" :class="kpiMoraPct > 25 ? 'border-red-200' : ''">
                             <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Índice mora</p>
-                            <p class="mt-1 text-xl font-black" :class="sum.mora_index > 25 ? 'text-red-700' : ''">{{ pct(sum.mora_index) }}</p>
+                            <p class="mt-1 text-xl font-black" :class="kpiMoraPct > 25 ? 'text-red-700' : ''">{{ pct(kpiMoraPct) }}</p>
                         </div>
                     </div>
 
@@ -681,8 +1059,8 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                     <div class="rounded-2xl border bg-white p-5 shadow-sm">
                         <div class="flex items-center justify-between">
                             <div>
-                                <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Gastos totales del periodo</p>
-                                <p class="mt-1 text-3xl font-black text-slate-950">{{ moneyFull(gastosTotal) }}</p>
+                                <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Gastos operativos del periodo</p>
+                                <p class="mt-1 text-3xl font-black text-slate-950">{{ moneyFull(kpiGastos) }}</p>
                             </div>
                             <div class="flex gap-3">
                                 <div v-for="s in gastosBySource" :key="s.fuente" class="rounded-xl bg-slate-50 border px-4 py-2 text-center">
@@ -693,13 +1071,29 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                         </div>
                     </div>
 
-                    <div v-if="!gastosByCategory.length" class="rounded-2xl border bg-white p-10 text-center text-sm text-slate-400">Sin gastos registrados para este periodo.</div>
+                    <div v-if="!gastosByCategory.length && !brGlobalGastos.length" class="rounded-2xl border bg-white p-10 text-center text-sm text-slate-400">Sin gastos registrados para este periodo.</div>
 
-                    <div v-else class="grid gap-4 lg:grid-cols-2">
+                    <!-- Gastos operativos canónicos (fuente: branch_radiography) -->
+                    <div v-if="brGlobalGastos.length" class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                        <div class="bg-slate-50 border-b px-4 py-2 flex items-center justify-between">
+                            <span class="text-xs font-bold uppercase tracking-wider text-slate-500">Gastos operativos por concepto</span>
+                            <span class="text-xs font-black text-slate-800">Total: {{ moneyFull(brGlobalGastosTotal) }}</span>
+                        </div>
+                        <table class="w-full text-xs">
+                            <tbody>
+                                <tr v-for="c in brGlobalGastos" :key="c.concepto" class="border-b last:border-0 hover:bg-slate-50">
+                                    <td class="px-4 py-2 font-semibold text-slate-700">{{ c.concepto }}</td>
+                                    <td class="px-4 py-2 text-right font-black">{{ moneyFull(c.total) }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div v-if="gastosByCategory.length" class="grid gap-4 lg:grid-cols-2">
 
                         <!-- Por categoría -->
                         <div class="rounded-2xl border bg-white p-5 shadow-sm">
-                            <h3 class="mb-4 text-xs font-black uppercase tracking-wider text-slate-500">Por categoría</h3>
+                            <h3 class="mb-4 text-xs font-black uppercase tracking-wider text-slate-500">Por categoría (fuente bruta)</h3>
                             <div class="space-y-2">
                                 <div v-for="c in gastosByCategory" :key="c.categoria" class="flex items-center gap-3">
                                     <div class="flex-1 min-w-0">

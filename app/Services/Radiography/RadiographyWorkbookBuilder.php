@@ -47,25 +47,11 @@ class RadiographyWorkbookBuilder
             ->setSubject('Radiografía Financiera')
             ->setDescription('Generado automáticamente — sin plantilla');
 
-        // Sheet order per business requirements
+        // Sheet order: GLOBAL first, then branch sheets, SIN ASIGNAR, PRODUCTOS
         $this->buildGlobalSheet($spreadsheet, $period, $snap);
-        $this->buildBranchSheets($spreadsheet, $period, $snap);   // one sheet per real branch
-        $this->buildInterbranchLoansSheet($spreadsheet, $period, $snap);
-        $this->buildNominasSheet($spreadsheet, $period, $snap);
-        $this->buildGastosMatrixSheet($spreadsheet, $period, $snap);
-        $this->buildPortfolioValueSheet($spreadsheet, $period, $snap);
-        $this->buildRecuperacionSheet($spreadsheet, $period, $snap);
-        $this->buildMoraSheet($spreadsheet, $period, $snap);
-        $this->buildCorporateFundingSheet($spreadsheet, $period, $snap);
-        $this->buildPlacementSheet($spreadsheet, $period, $snap);
-        $this->buildCategoriesSheet($spreadsheet, $period, $snap);
-        $this->buildEmpleadosSheet($spreadsheet, $period, $snap);
-        // PRODUCTOS and CARTERA Y MORA kept at end for reference
-        $this->buildProductosSheet($spreadsheet, $period, $snap);
-        $this->buildCarteraSheet($spreadsheet, $period, $snap);
-        // SIN ASIGNAR: empleados/gastos sin sucursal, no afecta cartera/mora/recuperación/colocación
+        $this->buildBranchSheets($spreadsheet, $period, $snap);
         $this->buildSinAsignarSheet($spreadsheet, $period, $snap);
-        // buildSucursalesSheet, buildIncidenciasSheet, buildMetadataSheet intentionally omitted
+        $this->buildProductosSheet($spreadsheet, $period, $snap);
 
         // Remove default empty sheet if it exists
         if ($spreadsheet->getSheetCount() > 1) {
@@ -75,9 +61,7 @@ class RadiographyWorkbookBuilder
             } catch (\Throwable) {}
         }
 
-        // ÍNDICE goes first — built after all sheets exist so hyperlinks resolve correctly
-        $this->buildIndiceSheet($spreadsheet, $period, $snap);
-        $spreadsheet->setActiveSheetIndex(0);
+        $spreadsheet->setActiveSheetIndex(0); // GLOBAL is already first
 
         return $spreadsheet;
     }
@@ -103,22 +87,21 @@ class RadiographyWorkbookBuilder
         $funding = $snap['sections']['corporate_funding'] ?? [];
         $payBC   = $snap['sections']['payroll_by_branch_concept'] ?? [];
 
-        $this->sheetTitle($sheet, 'A1:D1', 'RADIOGRAFÍA GLOBAL — ' . strtoupper($period->label));
-        $sheet->mergeCells('A2:D2');
+        $this->sheetTitle($sheet, 'A1:C1', 'RADIOGRAFÍA GLOBAL — ' . strtoupper($period->label));
+        $sheet->mergeCells('A2:C2');
         $sheet->setCellValue('A2', 'Periodo: ' . ($period->code ?: $period->id) . '  |  Generado: ' . $snap['generated_at']);
-        $this->metaStyle($sheet, 'A2:D2');
+        $this->metaStyle($sheet, 'A2:C2');
 
-        $this->colHeaders($sheet, 3, ['A' => 'MÉTRICA', 'B' => 'VALOR', 'C' => '%', 'D' => 'OBSERVACIÓN']);
+        $this->colHeaders($sheet, 3, ['A' => 'MÉTRICA', 'B' => 'VALOR', 'C' => '%']);
 
         // Helper: write a section block; returns next row
-        $writeRows = function (int $startRow, array $items) use ($sheet, $sum): int {
+        $writeRows = function (int $startRow, array $items) use ($sheet): int {
             $r = $startRow;
-            foreach ($items as $i => [$label, $value, $fmt, $pct, $obs]) {
+            foreach ($items as $i => [$label, $value, $fmt, $pct]) {
                 $sheet->setCellValue("A{$r}", $label);
                 $sheet->setCellValue("B{$r}", $value);
                 $sheet->setCellValue("C{$r}", $pct);
-                $sheet->setCellValue("D{$r}", $obs);
-                $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+                $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
                 $this->applyFmt($sheet, "B{$r}", $fmt, $value);
                 if ($pct !== '' && $pct !== null) {
                     $sheet->getStyle("C{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
@@ -157,47 +140,65 @@ class RadiographyWorkbookBuilder
         $r = 4;
 
         // ── 1. Métricas Generales ─────────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '1. MÉTRICAS GENERALES');
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '1. MÉTRICAS GENERALES');
         $r++;
         $r = $writeRows($r, [
-            ['Valor cartera global',         $carteraTotal,  'currency', '', 'GLOBAL = suma 13 sucursales'],
-            ['Otorgamientos',                $colTotal,      'currency', '', ''],
-            ['Recuperación total',           $recTotal,      'currency', '', ''],
-            ['Mora de 0 a 30 días',          $mora0_30,      'currency', $carteraTotal > 0 ? round($mora0_30 / $carteraTotal * 100, 2) : '', ''],
-            ['Mora de 31 a 60 días',         $mora31_60,     'currency', $carteraTotal > 0 ? round($mora31_60 / $carteraTotal * 100, 2) : '', ''],
-            ['Mora de 61 a 90 días',         $mora61_90,     'currency', $carteraTotal > 0 ? round($mora61_90 / $carteraTotal * 100, 2) : '', ''],
-            ['Mora de 91 a 120 días',        $mora91_120,    'currency', $carteraTotal > 0 ? round($mora91_120 / $carteraTotal * 100, 2) : '', ''],
-            ['Mora total',                   $moraTotal,     'currency', $carteraTotal > 0 ? round($moraTotal / $carteraTotal * 100, 2) : '', ''],
-            ['Envío de utilidad a corporativo', $excedentes, 'currency', '', ''],
-            ['Créditos personal (colocados)', (int)($snap['sections']['placement_by_branch_product'] ? array_sum(array_column($snap['sections']['placement_by_branch_product'], 'creditos')) : 0), 'integer', '', ''],
+            ['Valor cartera global',         $carteraTotal,  'currency', ''],
+            ['Otorgamientos',                $colTotal,      'currency', ''],
+            ['Recuperación total',           $recTotal,      'currency', ''],
+            ['Mora de 0 a 30 días',          $mora0_30,      'currency', $carteraTotal > 0 ? round($mora0_30 / $carteraTotal * 100, 2) : ''],
+            ['Mora de 31 a 60 días',         $mora31_60,     'currency', $carteraTotal > 0 ? round($mora31_60 / $carteraTotal * 100, 2) : ''],
+            ['Mora de 61 a 90 días',         $mora61_90,     'currency', $carteraTotal > 0 ? round($mora61_90 / $carteraTotal * 100, 2) : ''],
+            ['Mora de 91 a 120 días',        $mora91_120,    'currency', $carteraTotal > 0 ? round($mora91_120 / $carteraTotal * 100, 2) : ''],
+            ['Mora total',                   $moraTotal,     'currency', $carteraTotal > 0 ? round($moraTotal / $carteraTotal * 100, 2) : ''],
+            ['Envío de utilidad a corporativo', $excedentes, 'currency', ''],
         ]);
         $r++;
 
         // ── 2. Ingresos ───────────────────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '2. INGRESOS');
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '2. INGRESOS');
         $r++;
-        $bySource = collect($expDet['bySource'] ?? []);
-        $ingCapital = $recTotal; // best proxy available
-        $r = $writeRows($r, [
-            ['Capital por producto',          $ingCapital, 'currency', '', ''],
-            ['Intereses por producto',         0.0,        'currency', '', '—'],
-            ['Impuestos por producto',         0.0,        'currency', '', '—'],
-            ['Multas por producto',            0.0,        'currency', '', '—'],
-            ['Cargos al inicio',              0.0,         'currency', '', '—'],
-            ['Comisión por apertura',         0.0,         'currency', '', '—'],
-            ['Ingreso créditos vencidos (+90d)', 0.0,      'currency', '', '—'],
-            ['Total',                         $ingCapital, 'currency', '', ''],
-        ]);
-        $r++;
+        $ingrCapital   = $brCalcGlobal ? (float)$brCalcGlobal['capital_recuperado']  : 0.0;
+        $ingrInteres   = $brCalcGlobal ? (float)$brCalcGlobal['interes_recuperado']  : 0.0;
+        $ingrImpuesto  = $brCalcGlobal ? (float)$brCalcGlobal['impuesto_recuperado'] : 0.0;
+        $ingrMuletas   = $brCalcGlobal ? (float)$brCalcGlobal['charges']             : 0.0;
+        $ingrCargosIni = $brCalcGlobal ? (float)$brCalcGlobal['cargos_inicio']       : 0.0;
+        $ingrComAper   = $brCalcGlobal ? (float)$brCalcGlobal['comision_apertura']   : 0.0;
+        $ingrVencidos  = 0.0; // no hay cruce confiable con +90 días
+        $ingrTotal     = $ingrCapital + $ingrInteres + $ingrImpuesto + $ingrMuletas + $ingrCargosIni + $ingrComAper + $ingrVencidos;
+
+        $ingrItems = [
+            ['Capital por producto',                   $ingrCapital,   'currency'],
+            ['Intereses por producto',                 $ingrInteres,   'currency'],
+            ['Impuestos por producto',                 $ingrImpuesto,  'currency'],
+            ['Multas por producto',                    $ingrMuletas,   'currency'],
+            ['Cargos al inicio',                       $ingrCargosIni, 'currency'],
+            ['Comisión por apertura',                  $ingrComAper,   'currency'],
+            ['Ingreso de créditos vencidos (+90 días)',$ingrVencidos,  'currency'],
+        ];
+        $ingrIdx = 0;
+        foreach ($ingrItems as [$ingrLabel, $ingrVal, $ingrFmt]) {
+            if ($ingrVal == 0.0) continue;
+            $sheet->setCellValue("A{$r}", $ingrLabel);
+            $sheet->setCellValue("B{$r}", $ingrVal);
+            $sheet->setCellValue("C{$r}", '');
+            $this->dataRow($sheet, "A{$r}:C{$r}", $ingrIdx % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $ingrFmt, $ingrVal);
+            $ingrIdx++;
+            $r++;
+        }
+        $sheet->setCellValue("A{$r}", 'Total Ingresos');
+        $sheet->setCellValue("B{$r}", $ingrTotal);
+        $this->totalsRow($sheet, "A{$r}:C{$r}");
+        $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        $r += 2;
 
         // ── 3. Gastos Operativos ──────────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '3. GASTOS OPERATIVOS');
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '3. GASTOS OPERATIVOS');
         $r++;
-        $catMap = [];
-        foreach ($expDet['byCategory'] ?? [] as $catRow) {
-            $catMap[strtoupper(trim($catRow['categoria']))] = (float)$catRow['total'];
-        }
-        $getCat = fn (string $name) => $catMap[strtoupper($name)] ?? 0.0;
+        // Source: BranchRadiographyCalculator gastos_detalle (GLOBAL = suma 13 sucursales, excluye Norte y Corporativo)
+        $globalGastosDetalle = (array)($brCalcGlobal['gastos_detalle'] ?? []);
+        $getGDet = fn (string $name) => (float)($globalGastosDetalle[$name] ?? 0.0);
 
         $gastosOp = [
             'Renta Oficina','Luz','Agua','Teléfono e Internet','Insumos de Cafetería',
@@ -206,168 +207,178 @@ class RadiographyWorkbookBuilder
             'Publicidad','Mecánicos','Servicios de Motocicletas','Software Póliza Anual','Pólizas',
             'Recargas Telefónicas','Emergentes','Comisiones Oxxo','Multas e Infracciones',
             'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
-            'Gastos legales','Préstamos Intersucursales','IMSS','Financiamiento de Motos',
+            'Gastos legales','IMSS','Financiamiento de Motos',
         ];
         $gastosOpTotal = 0.0;
-        foreach ($gastosOp as $idx => $gasto) {
-            $val = $getCat($gasto);
+        $gastosOpIdx = 0;
+        foreach ($gastosOp as $gasto) {
+            $val = $getGDet($gasto);
             $gastosOpTotal += $val;
+            if ($val == 0.0) continue; // skip zero rows
             $sheet->setCellValue("A{$r}", $gasto);
             $sheet->setCellValue("B{$r}", $val);
             $sheet->setCellValue("C{$r}", '');
-            $sheet->setCellValue("D{$r}", '');
-            $this->dataRow($sheet, "A{$r}:D{$r}", $idx % 2 === 0);
+            $this->dataRow($sheet, "A{$r}:C{$r}", $gastosOpIdx % 2 === 0);
             $this->applyFmt($sheet, "B{$r}", 'currency', $val);
+            $gastosOpIdx++;
             $r++;
         }
         $sheet->setCellValue("A{$r}", 'Total Gastos Operativos');
         $sheet->setCellValue("B{$r}", $gastosOpTotal);
-        $this->totalsRow($sheet, "A{$r}:D{$r}");
+        $this->totalsRow($sheet, "A{$r}:C{$r}");
         $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
 
         // ── 4. Nómina y Capital Humano ────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '4. NÓMINA Y CAPITAL HUMANO');
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '4. NÓMINA Y CAPITAL HUMANO');
         $r++;
-        // Aggregate all branches payroll concepts
-        $nominaConcepts = [];
-        foreach ($payBC as $branchConcepts) {
-            foreach ($branchConcepts as $concept => $amount) {
-                $key = strtoupper(trim($concept));
-                $nominaConcepts[$key] = ($nominaConcepts[$key] ?? 0.0) + (float)$amount;
+        // Source: BranchRadiographyCalculator (GLOBAL = suma 13 sucursales + SIN ASIGNAR)
+        $globalNomina    = $brCalcGlobal ? (float)$brCalcGlobal['nomina_total']     : (float)$pay['pagos'];
+        $globalComisions = $brCalcGlobal ? (float)$brCalcGlobal['comisiones']       : 0.0;
+        $globalBonos     = $brCalcGlobal ? (float)$brCalcGlobal['bonos']            : (float)$pay['bonos'];
+        $globalVacac     = $brCalcGlobal ? (float)$brCalcGlobal['vacaciones']       : 0.0;
+        $globalPrimaVac  = $brCalcGlobal ? (float)$brCalcGlobal['prima_vacacional'] : 0.0;
+        $globalNomDet    = (array)($brCalcGlobal['nomina_detalle'] ?? []);
+
+        // Ordered display list: scalars first, then detail items
+        $nomDisplayOrder = [
+            'Nómina'           => $globalNomina,
+            'Comisiones'       => $globalComisions,
+            'Vacaciones'       => $globalVacac,
+            'Prima vacacional' => $globalPrimaVac,
+            'Bonos'            => $globalBonos,
+        ];
+        // Append nomina_detalle items in a canonical order
+        $nomDetalleOrder = [
+            'IMSS','Descuentos Infonavit','Finiquito','Gastos médicos',
+            'Gasolina','Financiamiento de Motos','Financiamiento de Motos (desc.)',
+            'Descuento Servicios Moto','Financiamiento Celular','Cascos',
+            'Descuento de uniformes','Pensión Alimenticia','Préstamo Personal',
+            'Anticipo de nómina','Otros conceptos nómina','Otros descuentos NOI',
+        ];
+        foreach ($nomDetalleOrder as $detKey) {
+            if (isset($globalNomDet[$detKey]) && $globalNomDet[$detKey] > 0) {
+                $nomDisplayOrder[$detKey] = $globalNomDet[$detKey];
             }
         }
-        $getNom = fn (string $name) => $nominaConcepts[strtoupper($name)] ?? 0.0;
-        $nominaItems = [
-            'Nomina','Comisiones','Vacaciones','Prima Vacacional','Bonos','Bonos Aceleradores',
-            'IMSS','Descuentos Infonavit','Finiquito','Gastos médicos','Gasolina',
-            'Financiamiento de Motos','Descuento Servicios Moto','Financiamiento Celular','Cascos',
-            'Descuento de uniformes','Descuento gastos sin comprobar',
-            'Descuento extravío tarjeta de circulación','Descuentos Tienda Mr Lana',
-            'Descuento Servicios Automóvil','Descuento faltante en caja','Anticipo de nómina',
-            'Formatería','Pensión Alimenticia',
-        ];
+        // Any remaining detail items not in the ordered list
+        foreach ($globalNomDet as $detKey => $detVal) {
+            if (!isset($nomDisplayOrder[$detKey]) && $detVal > 0) {
+                $nomDisplayOrder[$detKey] = $detVal;
+            }
+        }
+
         $nomTotal = 0.0;
-        $nomTotal = $pay['pagos'] + $pay['bonos'];
-        $r = $writeRows($r, [
-            ['Nómina',             $pay['pagos'],     'currency', '', ''],
-            ['Comisiones',         0.0,               'currency', '', '—'],
-            ['Vacaciones',         0.0,               'currency', '', '—'],
-            ['Prima Vacacional',   0.0,               'currency', '', '—'],
-            ['Bonos',              $pay['bonos'],     'currency', '', ''],
-            ['Bonos Aceleradores', 0.0,               'currency', '', '—'],
-            ['IMSS',               0.0,               'currency', '', '—'],
-            ['Descuentos Infonavit',0.0,              'currency', '', '—'],
-            ['Finiquito',          0.0,               'currency', '', '—'],
-            ['Gastos médicos',     0.0,               'currency', '', '—'],
-            ['Gasolina',           $getCat('Gasolina'),'currency','',''],
-            ['Financiamiento de Motos', $getCat('Financiamiento de Motos'), 'currency','',''],
-            ['Descuento Servicios Moto', 0.0,         'currency', '', '—'],
-            ['Financiamiento Celular', 0.0,           'currency', '', '—'],
-            ['Cascos',             $getCat('Cascos'), 'currency', '', ''],
-            ['Descuento de uniformes', 0.0,           'currency', '', '—'],
-            ['Descuento gastos sin comprobar', 0.0,   'currency', '', '—'],
-            ['Descuento extravío tarj. circulación', 0.0, 'currency', '', '—'],
-            ['Descuentos Tienda Mr Lana', 0.0,        'currency', '', '—'],
-            ['Descuento Servicios Automóvil', 0.0,    'currency', '', '—'],
-            ['Descuento faltante en caja', 0.0,       'currency', '', '—'],
-            ['Anticipo de nómina', 0.0,               'currency', '', '—'],
-            ['Formatería',         0.0,               'currency', '', '—'],
-            ['Pensión Alimenticia', 0.0,              'currency', '', '—'],
-        ]);
+        $nomIdx   = 0;
+        foreach ($nomDisplayOrder as $nomName => $nomVal) {
+            if ($nomVal == 0) continue;
+            $sheet->setCellValue("A{$r}", $nomName);
+            $sheet->setCellValue("B{$r}", $nomVal);
+            $sheet->setCellValue("C{$r}", '');
+            $this->dataRow($sheet, "A{$r}:C{$r}", $nomIdx % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", 'currency', $nomVal);
+            $nomTotal += $nomVal;
+            $nomIdx++;
+            $r++;
+        }
         $sheet->setCellValue("A{$r}", 'Total Nómina y Capital Humano');
         $sheet->setCellValue("B{$r}", $nomTotal);
-        $this->totalsRow($sheet, "A{$r}:D{$r}");
+        $this->totalsRow($sheet, "A{$r}:C{$r}");
         $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
 
         // ── 5. Préstamos Intersucursales ──────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '5. PRÉSTAMOS INTERSUCURSALES');
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '5. PRÉSTAMOS INTERSUCURSALES');
         $r++;
         $loanTotal = (float)($loans['total'] ?? 0);
+        $brGlobalFondea = $brCalcGlobal ? (float)$brCalcGlobal['prestamos_fondea'] : $loanTotal;
         $r = $writeRows($r, [
-            ['Activos (fondea)', $loanTotal, 'currency', '', ''],
-            ['Pasivos (recibe)', $loanTotal, 'currency', '', ''],
-            ['Total',           $loanTotal, 'currency', '', ''],
+            ['Activos (fondea)',  $brGlobalFondea, 'currency', ''],
+            ['Pasivos (recibe)',  $brGlobalFondea, 'currency', ''],
+            ['Total',            $brGlobalFondea, 'currency', ''],
         ]);
         $r++;
 
-        // ── 6. Índice de Rotación de Personal ────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '6. ÍNDICE DE ROTACIÓN DE PERSONAL');
+        // ── 6. Índice de rotación de personal ────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '6. ÍNDICE DE ROTACIÓN DE PERSONAL');
         $r++;
         $r = $writeRows($r, [
-            ['N° personas que dejaron la empresa', 0, 'integer', '', '—'],
-            ['Promedio de personas en el periodo', (int)$sum['employees_count'], 'integer', '', ''],
-            ['Índice de rotación', 0.0, 'percent', '', '—'],
+            ['N° de personas que dejaron la empresa', 0, 'integer', ''],
+            ['Promedio de personas en el periodo',    0, 'integer', ''],
+            ['Índice de rotación',                   0, 'percent',  ''],
         ]);
         $r++;
 
         // ── 7. Análisis de Tendencias y Proyecciones ──────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES');
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES');
         $r++;
-        $gastosTotal = (float)$sum['expenses_total'];
-        $utilidad    = $recTotal - $gastosTotal - $nomTotal;
+        $gastosTotal  = $gastosOpTotal;
+        $utilidad     = $recTotal - $gastosTotal - $nomTotal;
+        $excGlobal    = $brCalcGlobal ? (float)$brCalcGlobal['excedentes'] : $excedentes;
+        $mora0_30g    = $brCalcGlobal ? (float)$brCalcGlobal['mora_0_30']    : $mora0_30;
+        $mora31_60g   = $brCalcGlobal ? (float)$brCalcGlobal['mora_31_60']   : $mora31_60;
+        $mora61_90g   = $brCalcGlobal ? (float)$brCalcGlobal['mora_61_90']   : $mora61_90;
+        $mora91_120g  = $brCalcGlobal ? (float)$brCalcGlobal['mora_91_120']  : $mora91_120;
         $r = $writeRows($r, [
-            ['Saldo inicial en caja',      0.0,           'currency', '', '—'],
-            ['Ingresos Totales',           $recTotal,     'currency', '', ''],
-            ['Otorgamientos',              (float)$sum['placement_total'], 'currency', '', ''],
-            ['Gastos Totales',             $gastosTotal,  'currency', '', ''],
-            ['Utilidad',                   $utilidad,     'currency', '', ''],
-            ['Saldo final en caja',        0.0,           'currency', '', '—'],
-            ['Préstamos intersucursales',  $loanTotal,    'currency', '', ''],
-            ['Envío de utilidad a corporativo', (float)($funding['total'] ?? 0), 'currency', '', ''],
-            ['Diferencia',                 0.0,           'currency', '', '—'],
-            ['Mora de 0 a 30 días',        $mora0_30,     'currency', '', ''],
-            ['Mora de 31 a 60 días',       $mora31_60,    'currency', '', ''],
-            ['Mora de 61 a 90 días',       $mora61_90,    'currency', '', ''],
-            ['Mora de 91 a 120 días',      $mora91_120,   'currency', '', ''],
-            ['Valor cartera',              $carteraTotal, 'currency', '', ''],
+            ['Saldo inicial en caja',              0,              'currency', ''],
+            ['Ingresos Totales',                   $recTotal,      'currency', ''],
+            ['Otorgamientos',                      $colTotal,      'currency', ''],
+            ['Gastos Totales',                     $gastosTotal,   'currency', ''],
+            ['Utilidad',                           $utilidad,      'currency', ''],
+            ['Saldo final en caja',                0,              'currency', ''],
+            ['Préstamos inter sucursales',         $brGlobalFondea,'currency', ''],
+            ['Envío de utilidad a corporativo',    $excGlobal,     'currency', ''],
+            ['Diferencia',                         0,              'currency', ''],
+            ['Mora de 0 a 30 días',                $mora0_30g,     'currency', ''],
+            ['Mora de 31 a 60 días',               $mora31_60g,    'currency', ''],
+            ['Mora de 61 a 90 días',               $mora61_90g,    'currency', ''],
+            ['Mora de 91 a 120 días',              $mora91_120g,   'currency', ''],
+            ['Valor cartera',                      $carteraTotal,  'currency', ''],
         ]);
         $r++;
 
         // ── 8. Utilidad ───────────────────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '8. UTILIDAD');
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. UTILIDAD');
         $r++;
         $r = $writeRows($r, [
-            ['Total', $utilidad, 'currency', '', ''],
+            ['Total', $utilidad, 'currency', ''],
         ]);
         $r++;
 
         // ── 9. Saldo Total Acumulado Cuentas ──────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '9. SALDO TOTAL ACUMULADO CUENTAS');
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '9. SALDO TOTAL ACUMULADO CUENTAS');
         $r++;
         $r = $writeRows($r, [
-            ['Total', 0.0, 'currency', '', '—'],
+            ['Total', 0, 'currency', ''],
         ]);
         $r++;
 
         // ── 10. Observaciones y Notas ─────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '10. OBSERVACIONES Y NOTAS');
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '10. OBSERVACIONES Y NOTAS');
         $r++;
-        $obsRows = [
-            ['Comentarios sobre el desempeño financiero', ''],
-            ['Factores de riesgo y oportunidades',        ''],
-            ['Recomendaciones para optimización financiera', ''],
-        ];
-        foreach ($obsRows as $i => [$label, $val]) {
-            $sheet->setCellValue("A{$r}", $label);
-            $sheet->setCellValue("B{$r}", $val);
-            $sheet->mergeCells("B{$r}:D{$r}");
-            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
-            $sheet->getStyle("A{$r}:D{$r}")->getAlignment()->setWrapText(true);
-            $sheet->getRowDimension($r)->setRowHeight(30);
+        foreach ([
+            'Comentarios sobre el desempeño financiero:',
+            'Factores de riesgo y oportunidades:',
+            'Recomendaciones para optimización financiera:',
+        ] as $i => $obsLabel) {
+            $sheet->setCellValue("A{$r}", $obsLabel);
+            $sheet->setCellValue("B{$r}", '');
+            $sheet->mergeCells("B{$r}:C{$r}");
+            $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
+            $sheet->getStyle("A{$r}")->getFont()->setBold(false);
+            $sheet->getRowDimension($r)->setRowHeight(24);
             $r++;
         }
+        $r++;
 
         $sheet->getColumnDimension('A')->setWidth(42);
         $sheet->getColumnDimension('B')->setWidth(22);
         $sheet->getColumnDimension('C')->setWidth(10);
-        $sheet->getColumnDimension('D')->setWidth(30);
         $sheet->freezePane('A4');
 
         // Hyperlinks to each sucursal tab
         $r += 2;
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '11. DETALLE POR SUCURSAL');
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '11. DETALLE POR SUCURSAL');
         $r++;
         $operativeSucursales = [
             'ATLACOMULCO','ATLIXCO','CORDOBA','CUERNAVACA','HUAMANTLA',
@@ -382,25 +393,7 @@ class RadiographyWorkbookBuilder
             $sheet->setCellValue("A{$r}", $suc);
             $sheet->getCell("A{$r}")->getHyperlink()->setUrl("sheet://{$tabName}!A1");
             $sheet->getStyle("A{$r}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
-
-            // Cartera and recuperacion values from calculator
-            $calcB = $snap['branch_radiography']['branches'][$i] ?? null;
-            $calcMatchB = null;
-            foreach ($snap['branch_radiography']['branches'] ?? [] as $b) {
-                if (strtoupper(trim($b['sucursal'])) === $suc) {
-                    $calcMatchB = $b;
-                    break;
-                }
-            }
-            if ($calcMatchB) {
-                $sheet->setCellValue("B{$r}", (float)$calcMatchB['valor_cartera']);
-                $sheet->setCellValue("C{$r}", (float)$calcMatchB['recuperacion_total']);
-                $sheet->setCellValue("D{$r}", $suc === 'SAN JUAN DEL RÍO' ? 'Sucursal cerrada / cartera en recuperación' : '');
-                $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
-                $sheet->getStyle("C{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
-            }
-
-            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
             $r++;
         }
     }
@@ -518,18 +511,15 @@ class RadiographyWorkbookBuilder
             }
             $this->sheetTitle($sheet, 'A1:D1', $titleText);
 
-            // Navigation: back links to ÍNDICE and GLOBAL
-            $sheet->setCellValue('A2', '← ÍNDICE');
-            $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://ÍNDICE!A1');
+            // Navigation: back link to GLOBAL
+            $sheet->setCellValue('A2', '← GLOBAL');
+            $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
             $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
-            $sheet->setCellValue('B2', '← GLOBAL');
-            $sheet->getCell('B2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
-            $sheet->getStyle('B2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
-            $sheet->setCellValue('C2', 'Periodo: ' . ($period->code ?: $period->id));
-            $this->metaStyle($sheet, 'C2:D2');
-            $sheet->mergeCells('C2:D2');
+            $sheet->setCellValue('B2', 'Periodo: ' . ($period->code ?: $period->id));
+            $this->metaStyle($sheet, 'B2:C2');
+            $sheet->mergeCells('B2:C2');
 
-            $this->colHeaders($sheet, 3, ['A' => 'MÉTRICA', 'B' => 'VALOR', 'C' => '%', 'D' => 'OBSERVACIÓN']);
+            $this->colHeaders($sheet, 3, ['A' => 'MÉTRICA', 'B' => 'VALOR', 'C' => '%']);
             $recRow    = $recIdx[$brUp] ?? [];
 
             // Payroll for this branch
@@ -563,34 +553,36 @@ class RadiographyWorkbookBuilder
                 if (strtoupper($lRow['branch']) === $brUp) { $loanB += (float)$lRow['total']; break; }
             }
 
-            $utilidad = $recB - $gastosB - $nomTotal;
+            $nomTotalCalc = $calc
+                ? ((float)$calc['nomina_total'] + (float)$calc['comisiones'] + (float)$calc['bonos'])
+                : $nomTotal;
+            $utilidad = $recB - $gastosB - $nomTotalCalc;
 
             $r = 4;
 
             // 1. Métricas Generales
-            $this->sectionHeader($sheet, "A{$r}:D{$r}", '1. MÉTRICAS GENERALES');
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '1. MÉTRICAS GENERALES');
             $r++;
             $metricItems = [
-                ['Valor cartera',          $carteraB,   'currency', '', $isSJR ? 'Sucursal cerrada / cartera en recuperación' : ''],
-                ['Otorgamientos',          $colB,       'currency', '', $isSJR ? 'Sucursal cerrada — colocación $0' : ''],
-                ['Recuperación total',     $recB,       'currency', '', ''],
-                ['Mora de 0 a 30 días',    $mora0_30,   'currency', $carteraB > 0 ? round($mora0_30  / $carteraB * 100, 2) : '', ''],
-                ['Mora de 31 a 60 días',   $mora31_60,  'currency', $carteraB > 0 ? round($mora31_60 / $carteraB * 100, 2) : '', ''],
-                ['Mora de 61 a 90 días',   $mora61_90,  'currency', $carteraB > 0 ? round($mora61_90 / $carteraB * 100, 2) : '', ''],
-                ['Mora de 91 a 120 días',  $mora91120,  'currency', $carteraB > 0 ? round($mora91120 / $carteraB * 100, 2) : '', ''],
-                ['Mora 120+ días',         $mora120p,   'currency', $carteraB > 0 ? round($mora120p  / $carteraB * 100, 2) : '', ''],
-                ['Mora total',             $vencidaB,   'currency', $moraPct, ''],
-                ['Gastos operativos',      $gastosB,    'currency', '', ''],
-                ['Nómina (P001)',           $nomCalc,    'currency', '', ''],
-                ['Excedentes corp.',       $excedCalc,  'currency', '', ''],
-                ['Préstamos intersuc.',    $fondeoCalc, 'currency', '', ''],
+                ['Valor cartera',          $carteraB,   'currency', ''],
+                ['Otorgamientos',          $colB,       'currency', ''],
+                ['Recuperación total',     $recB,       'currency', ''],
+                ['Mora de 0 a 30 días',    $mora0_30,   'currency', $carteraB > 0 ? round($mora0_30  / $carteraB * 100, 2) : ''],
+                ['Mora de 31 a 60 días',   $mora31_60,  'currency', $carteraB > 0 ? round($mora31_60 / $carteraB * 100, 2) : ''],
+                ['Mora de 61 a 90 días',   $mora61_90,  'currency', $carteraB > 0 ? round($mora61_90 / $carteraB * 100, 2) : ''],
+                ['Mora de 91 a 120 días',  $mora91120,  'currency', $carteraB > 0 ? round($mora91120 / $carteraB * 100, 2) : ''],
+                ['Mora 120+ días',         $mora120p,   'currency', $carteraB > 0 ? round($mora120p  / $carteraB * 100, 2) : ''],
+                ['Mora total',             $vencidaB,   'currency', $moraPct],
+                ['Gastos operativos',      $gastosB,    'currency', ''],
+                ['Nómina (P001)',           $nomCalc,    'currency', ''],
+                ['Excedentes corp.',       $excedCalc,  'currency', ''],
+                ['Préstamos intersuc.',    $fondeoCalc, 'currency', ''],
             ];
-            foreach ($metricItems as $i => [$label, $value, $fmt, $pct, $obs]) {
+            foreach ($metricItems as $i => [$label, $value, $fmt, $pct]) {
                 $sheet->setCellValue("A{$r}", $label);
                 $sheet->setCellValue("B{$r}", $value);
                 $sheet->setCellValue("C{$r}", $pct);
-                $sheet->setCellValue("D{$r}", $obs);
-                $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+                $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
                 $this->applyFmt($sheet, "B{$r}", $fmt, $value);
                 if ($pct !== '' && $pct !== null) {
                     $sheet->getStyle("C{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
@@ -600,27 +592,46 @@ class RadiographyWorkbookBuilder
             }
             $r++;
 
-            // 2. Ingresos
-            $this->sectionHeader($sheet, "A{$r}:D{$r}", '2. INGRESOS');
+            // 2. Ingresos (per branch from calculator)
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '2. INGRESOS');
             $r++;
-            foreach ([
-                ['Capital por producto', $recB, 'currency'],
-                ['Intereses por producto', 0.0, 'currency'],
-                ['Impuestos por producto', 0.0, 'currency'],
-                ['Comisión por apertura', 0.0, 'currency'],
-                ['Total', $recB, 'currency'],
-            ] as $i => [$label, $val, $fmt]) {
-                $sheet->setCellValue("A{$r}", $label);
-                $sheet->setCellValue("B{$r}", $val);
-                $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
-                $this->applyFmt($sheet, "B{$r}", $fmt, $val);
+            $bIngrCapital  = $calc ? (float)$calc['capital_recuperado']  : 0.0;
+            $bIngrInteres  = $calc ? (float)$calc['interes_recuperado']  : 0.0;
+            $bIngrImpuesto = $calc ? (float)$calc['impuesto_recuperado'] : 0.0;
+            $bIngrMuletas  = $calc ? (float)$calc['charges']             : 0.0;
+            $bIngrTotal    = $bIngrCapital + $bIngrInteres + $bIngrImpuesto + $bIngrMuletas;
+            $bIngrItems = [
+                'Capital por producto'                    => $bIngrCapital,
+                'Intereses por producto'                  => $bIngrInteres,
+                'Impuestos por producto'                  => $bIngrImpuesto,
+                'Multas por producto'                     => $bIngrMuletas,
+                'Cargos al inicio'                        => 0.0,
+                'Comisión por apertura'                   => 0.0,
+                'Ingreso de créditos vencidos (+90 días)' => 0.0,
+            ];
+            $bIngrIdx = 0;
+            foreach ($bIngrItems as $bILabel => $bIVal) {
+                if ($bIVal == 0.0) continue;
+                $sheet->setCellValue("A{$r}", $bILabel);
+                $sheet->setCellValue("B{$r}", $bIVal);
+                $this->dataRow($sheet, "A{$r}:C{$r}", $bIngrIdx % 2 === 0);
+                $this->applyFmt($sheet, "B{$r}", 'currency', $bIVal);
+                $bIngrIdx++;
                 $r++;
             }
-            $r++;
+            $sheet->setCellValue("A{$r}", 'Total Ingresos');
+            $sheet->setCellValue("B{$r}", $bIngrTotal);
+            $this->totalsRow($sheet, "A{$r}:C{$r}");
+            $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $r += 2;
 
             // 3. Gastos Operativos
-            $this->sectionHeader($sheet, "A{$r}:D{$r}", '3. GASTOS OPERATIVOS');
+            // Source: BranchRadiographyCalculator gastos_detalle — each row is a real amount,
+            // total = sum of visible rows (no fallback to a phantom total).
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '3. GASTOS OPERATIVOS');
             $r++;
+            $branchGDetalle = (array)($calc['gastos_detalle'] ?? []);
+            $getBGDet = fn (string $name) => (float)($branchGDetalle[$name] ?? 0.0);
             $gastosOpList = [
                 'Renta Oficina','Luz','Agua','Teléfono e Internet','Insumos de Cafetería',
                 'Insumos de Limpieza','Insumos de Papelería','Mobiliario y Equipo','Mantenimiento',
@@ -628,156 +639,181 @@ class RadiographyWorkbookBuilder
                 'Publicidad','Mecánicos','Servicios de Motocicletas','Software Póliza Anual','Pólizas',
                 'Recargas Telefónicas','Emergentes','Comisiones Oxxo','Multas e Infracciones',
                 'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
-                'Gastos legales','Préstamos Intersucursales','IMSS','Financiamiento de Motos',
+                'Gastos legales','IMSS','Financiamiento de Motos',
             ];
             $gopTotal = 0.0;
-            foreach ($gastosOpList as $idx => $gastoName) {
-                $val = $getCat($gastoName);
+            $gopIdx = 0;
+            foreach ($gastosOpList as $gastoName) {
+                $val = $getBGDet($gastoName);
                 $gopTotal += $val;
+                if ($val == 0.0) continue; // skip zero rows
                 $sheet->setCellValue("A{$r}", $gastoName);
                 $sheet->setCellValue("B{$r}", $val);
-                $this->dataRow($sheet, "A{$r}:D{$r}", $idx % 2 === 0);
+                $this->dataRow($sheet, "A{$r}:C{$r}", $gopIdx % 2 === 0);
                 $this->applyFmt($sheet, "B{$r}", 'currency', $val);
+                $gopIdx++;
                 $r++;
             }
+            // Total must equal the sum of visible rows — no fallback to external total
             $sheet->setCellValue("A{$r}", 'Total Gastos Operativos');
-            $sheet->setCellValue("B{$r}", $gopTotal > 0 ? $gopTotal : $gastosB);
-            $this->totalsRow($sheet, "A{$r}:D{$r}");
+            $sheet->setCellValue("B{$r}", $gopTotal);
+            $this->totalsRow($sheet, "A{$r}:C{$r}");
             $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
             $r += 2;
 
-            // 4. Nómina
-            $this->sectionHeader($sheet, "A{$r}:D{$r}", '4. NÓMINA Y CAPITAL HUMANO');
+            // 4. Nómina y Capital Humano — expanded (same structure as GLOBAL)
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '4. NÓMINA Y CAPITAL HUMANO');
             $r++;
-            $nomItems = [
-                'Nómina' => 0.0, 'Comisiones' => 0.0, 'Vacaciones' => 0.0,
-                'Bonos' => 0.0, 'Gasolina' => 0.0,
+            $brNomina    = $calc ? (float)$calc['nomina_total']     : 0.0;
+            $brComisions = $calc ? (float)$calc['comisiones']       : 0.0;
+            $brBonos     = $calc ? (float)$calc['bonos']            : 0.0;
+            $brVacac     = $calc ? (float)$calc['vacaciones']       : 0.0;
+            $brPrimaVac  = $calc ? (float)$calc['prima_vacacional'] : 0.0;
+            $brNomDet    = (array)($calc['nomina_detalle'] ?? []);
+
+            $brNomDisplay = [
+                'Nómina'           => $brNomina,
+                'Comisiones'       => $brComisions,
+                'Vacaciones'       => $brVacac,
+                'Prima vacacional' => $brPrimaVac,
+                'Bonos'            => $brBonos,
             ];
-            foreach ($branchPayroll as $concept => $amount) {
-                $k = strtoupper(trim($concept));
-                foreach ($nomItems as $nom => $v) {
-                    if (str_contains($k, strtoupper($nom))) {
-                        $nomItems[$nom] += (float)$amount;
-                    }
+            $brNomDetalleOrder = [
+                'IMSS','Descuentos Infonavit','Finiquito','Gastos médicos',
+                'Gasolina','Financiamiento de Motos','Financiamiento de Motos (desc.)',
+                'Descuento Servicios Moto','Financiamiento Celular','Cascos',
+                'Descuento de uniformes','Pensión Alimenticia','Préstamo Personal',
+                'Anticipo de nómina','Otros conceptos nómina','Otros descuentos NOI',
+            ];
+            foreach ($brNomDetalleOrder as $detKey) {
+                if (isset($brNomDet[$detKey]) && $brNomDet[$detKey] > 0) {
+                    $brNomDisplay[$detKey] = $brNomDet[$detKey];
                 }
             }
-            foreach ($nomItems as $idx => [$nomName, $nomVal]) {
-                // already keyed
+            foreach ($brNomDet as $detKey => $detVal) {
+                if (!isset($brNomDisplay[$detKey]) && $detVal > 0) {
+                    $brNomDisplay[$detKey] = $detVal;
+                }
             }
-            $i2 = 0;
+
             $nomTotal2 = 0.0;
-            foreach ($nomItems as $nomName => $nomVal) {
+            $i2 = 0;
+            foreach ($brNomDisplay as $nomName => $nomVal) {
+                if ($nomVal == 0.0) continue;
                 $sheet->setCellValue("A{$r}", $nomName);
                 $sheet->setCellValue("B{$r}", $nomVal);
-                $this->dataRow($sheet, "A{$r}:D{$r}", $i2 % 2 === 0);
+                $this->dataRow($sheet, "A{$r}:C{$r}", $i2 % 2 === 0);
                 $this->applyFmt($sheet, "B{$r}", 'currency', $nomVal);
                 $nomTotal2 += $nomVal;
                 $i2++;
                 $r++;
             }
-            $sheet->setCellValue("A{$r}", 'Total Nómina');
-            $sheet->setCellValue("B{$r}", $nomTotal > 0 ? $nomTotal : $nomTotal2);
-            $this->totalsRow($sheet, "A{$r}:D{$r}");
+            $sheet->setCellValue("A{$r}", 'Total Nómina y Capital Humano');
+            $sheet->setCellValue("B{$r}", $nomTotal2);
+            $this->totalsRow($sheet, "A{$r}:C{$r}");
             $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
             $r += 2;
 
             // 5. Préstamos Intersucursales
-            $this->sectionHeader($sheet, "A{$r}:D{$r}", '5. PRÉSTAMOS INTERSUCURSALES');
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '5. PRÉSTAMOS INTERSUCURSALES');
             $r++;
             foreach ([
-                ['Activos (fondea)', $loanB, 'currency'],
-                ['Pasivos (recibe)', 0.0, 'currency'],
-                ['Total', $loanB, 'currency'],
+                ['Fondeo otorgado', $fondeoCalc, 'currency'],
+                ['Total', $fondeoCalc, 'currency'],
             ] as $i => [$label, $val, $fmt]) {
                 $sheet->setCellValue("A{$r}", $label);
                 $sheet->setCellValue("B{$r}", $val);
-                $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+                $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
                 $this->applyFmt($sheet, "B{$r}", $fmt, $val);
                 $r++;
             }
             $r++;
 
-            // 6. Índice de Rotación
-            $this->sectionHeader($sheet, "A{$r}:D{$r}", '6. ÍNDICE DE ROTACIÓN DE PERSONAL');
+            // 6. Índice de rotación de personal (estructura siempre presente)
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '6. ÍNDICE DE ROTACIÓN DE PERSONAL');
             $r++;
             foreach ([
-                ['N° personas que dejaron la empresa', 0, 'integer'],
-                ['Promedio de personas en el periodo', 0, 'integer'],
-                ['Índice de rotación', 0.0, 'percent'],
+                ['N° de personas que dejaron la empresa', 0, 'integer'],
+                ['Promedio de personas en el periodo',    0, 'integer'],
+                ['Índice de rotación',                   0, 'percent'],
             ] as $i => [$label, $val, $fmt]) {
                 $sheet->setCellValue("A{$r}", $label);
                 $sheet->setCellValue("B{$r}", $val);
-                $sheet->setCellValue("D{$r}", '—');
-                $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+                $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
                 $this->applyFmt($sheet, "B{$r}", $fmt, $val);
                 $r++;
             }
             $r++;
 
             // 7. Análisis de Tendencias
-            $this->sectionHeader($sheet, "A{$r}:D{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES');
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES');
             $r++;
+            $brNomTotal  = $nomTotal2;
+            $brUtilidad  = $recB - $gopTotal - $brNomTotal;
+            $brFondeoB   = $calc ? (float)$calc['prestamos_fondea'] : $fondeoCalc;
+            $brExcedCalc = $calc ? (float)$calc['excedentes']       : $excedCalc;
             foreach ([
-                ['Saldo inicial en caja', 0.0, 'currency'],
-                ['Ingresos Totales', $recB, 'currency'],
-                ['Otorgamientos', $colB, 'currency'],
-                ['Gastos Totales', $gastosB, 'currency'],
-                ['Utilidad', $utilidad, 'currency'],
-                ['Saldo final en caja', 0.0, 'currency'],
-                ['Préstamos intersucursales', $loanB, 'currency'],
-                ['Mora de 0 a 30 días', $mora0_30, 'currency'],
-                ['Mora de 31 a 60 días', $mora31_60, 'currency'],
-                ['Mora de 61 a 90 días', $mora61_90, 'currency'],
-                ['Mora de 91 a 120 días', $mora91120, 'currency'],
-                ['Valor cartera', $carteraB, 'currency'],
+                ['Saldo inicial en caja',              0,           'currency'],
+                ['Ingresos Totales',                   $recB,       'currency'],
+                ['Otorgamientos',                      $colB,       'currency'],
+                ['Gastos Totales',                     $gopTotal,   'currency'],
+                ['Utilidad',                           $brUtilidad, 'currency'],
+                ['Saldo final en caja',                0,           'currency'],
+                ['Préstamos inter sucursales',         $brFondeoB,  'currency'],
+                ['Envío de utilidad a corporativo',    $brExcedCalc,'currency'],
+                ['Diferencia',                         0,           'currency'],
+                ['Mora de 0 a 30 días',                $mora0_30,   'currency'],
+                ['Mora de 31 a 60 días',               $mora31_60,  'currency'],
+                ['Mora de 61 a 90 días',               $mora61_90,  'currency'],
+                ['Mora de 91 a 120 días',              $mora91120,  'currency'],
+                ['Valor cartera',                      $carteraB,   'currency'],
             ] as $i => [$label, $val, $fmt]) {
                 $sheet->setCellValue("A{$r}", $label);
                 $sheet->setCellValue("B{$r}", $val);
-                $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+                $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
                 $this->applyFmt($sheet, "B{$r}", $fmt, $val);
                 $r++;
             }
             $r++;
 
             // 8. Utilidad
-            $this->sectionHeader($sheet, "A{$r}:D{$r}", '8. UTILIDAD');
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. UTILIDAD');
             $r++;
             $sheet->setCellValue("A{$r}", 'Total');
-            $sheet->setCellValue("B{$r}", $utilidad);
-            $this->dataRow($sheet, "A{$r}:D{$r}", true);
-            $this->applyFmt($sheet, "B{$r}", 'currency', $utilidad);
+            $sheet->setCellValue("B{$r}", $brUtilidad);
+            $this->dataRow($sheet, "A{$r}:C{$r}", true);
+            $this->applyFmt($sheet, "B{$r}", 'currency', $brUtilidad);
             $r += 2;
 
-            // 9. Saldo Total Acumulado
-            $this->sectionHeader($sheet, "A{$r}:D{$r}", '9. SALDO TOTAL ACUMULADO CUENTAS');
+            // 9. Saldo Total Acumulado Cuentas
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '9. SALDO TOTAL ACUMULADO CUENTAS');
             $r++;
             $sheet->setCellValue("A{$r}", 'Total');
-            $sheet->setCellValue("B{$r}", 0.0);
-            $sheet->setCellValue("D{$r}", '—');
-            $this->dataRow($sheet, "A{$r}:D{$r}", true);
-            $this->applyFmt($sheet, "B{$r}", 'currency', 0.0);
+            $sheet->setCellValue("B{$r}", 0);
+            $this->dataRow($sheet, "A{$r}:C{$r}", true);
+            $this->applyFmt($sheet, "B{$r}", 'currency', 0);
             $r += 2;
 
-            // 10. Observaciones
-            $this->sectionHeader($sheet, "A{$r}:D{$r}", '10. OBSERVACIONES Y NOTAS');
+            // 10. Observaciones y Notas
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '10. OBSERVACIONES Y NOTAS');
             $r++;
             foreach ([
-                'Comentarios sobre el desempeño financiero',
-                'Factores de riesgo y oportunidades',
-                'Recomendaciones para optimización financiera',
-            ] as $idx => $obs) {
-                $sheet->setCellValue("A{$r}", $obs);
-                $sheet->mergeCells("B{$r}:D{$r}");
-                $this->dataRow($sheet, "A{$r}:D{$r}", $idx % 2 === 0);
-                $sheet->getStyle("A{$r}:D{$r}")->getAlignment()->setWrapText(true);
-                $sheet->getRowDimension($r)->setRowHeight(30);
+                'Comentarios sobre el desempeño financiero:',
+                'Factores de riesgo y oportunidades:',
+                'Recomendaciones para optimización financiera:',
+            ] as $i => $obsLabel) {
+                $sheet->setCellValue("A{$r}", $obsLabel);
+                $sheet->setCellValue("B{$r}", '');
+                $sheet->mergeCells("B{$r}:C{$r}");
+                $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
+                $sheet->getRowDimension($r)->setRowHeight(24);
                 $r++;
             }
+            $r++;
 
             $sheet->getColumnDimension('A')->setWidth(42);
             $sheet->getColumnDimension('B')->setWidth(22);
             $sheet->getColumnDimension('C')->setWidth(10);
-            $sheet->getColumnDimension('D')->setWidth(30);
             $sheet->freezePane('A4');
         }
     }
@@ -792,17 +828,14 @@ class RadiographyWorkbookBuilder
         $gastos     = $unassigned['gastos_items'] ?? [];
 
         $label = strtoupper($period->label ?? ($period->code ?: 'Periodo'));
-        $this->sheetTitle($sheet, 'A1:E1', 'SIN ASIGNAR — PENDIENTE DE ASIGNACIÓN — ' . $label);
+        $this->sheetTitle($sheet, 'A1:E1', 'SIN ASIGNAR — ' . $label);
 
-        $sheet->setCellValue('A2', '← ÍNDICE');
-        $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://ÍNDICE!A1');
+        $sheet->setCellValue('A2', '← GLOBAL');
+        $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
         $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
-        $sheet->setCellValue('B2', '← GLOBAL');
-        $sheet->getCell('B2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
-        $sheet->getStyle('B2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
-        $sheet->setCellValue('C2', 'Estos montos SÍ se suman al GLOBAL (nómina/gastos). NO afectan cartera/mora/recuperación/colocación.');
-        $this->metaStyle($sheet, 'C2:E2');
-        $sheet->mergeCells('C2:E2');
+        $sheet->setCellValue('B2', 'Empleados o conceptos sin sucursal asignada. Se muestran para control administrativo.');
+        $this->metaStyle($sheet, 'B2:E2');
+        $sheet->mergeCells('B2:E2');
 
         $r = 4;
 
@@ -810,7 +843,7 @@ class RadiographyWorkbookBuilder
         $this->sectionHeader($sheet, "A{$r}:E{$r}", '1. EMPLEADOS SIN SUCURSAL ASIGNADA');
         $r++;
 
-        $this->colHeaders($sheet, $r, ['A' => 'EMPLEADO', 'B' => 'P001 SUELDO', 'C' => 'P002 COMISIONES', 'D' => 'BONOS', 'E' => 'FUENTE / ACCIÓN']);
+        $this->colHeaders($sheet, $r, ['A' => 'EMPLEADO', 'B' => 'P001 SUELDO', 'C' => 'P002 COMISIONES', 'D' => 'BONOS', 'E' => 'NOTA']);
         $r++;
 
         if (empty($empleados)) {
@@ -826,7 +859,7 @@ class RadiographyWorkbookBuilder
                 $sheet->setCellValue("B{$r}", (float)($emp['p001'] ?? 0));
                 $sheet->setCellValue("C{$r}", (float)($emp['p002'] ?? 0));
                 $sheet->setCellValue("D{$r}", (float)($emp['bonos'] ?? 0));
-                $sheet->setCellValue("E{$r}", ($emp['fuente'] ?? '') . ' — Agregar a employee_branch_assignments');
+                $sheet->setCellValue("E{$r}", $emp['fuente'] ?? '');
                 $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
                 $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
                 $sheet->getStyle("C{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
@@ -841,7 +874,7 @@ class RadiographyWorkbookBuilder
             $sheet->setCellValue("B{$r}", $totalP001);
             $sheet->setCellValue("C{$r}", $totalP002);
             $sheet->setCellValue("D{$r}", $totalBonos);
-            $sheet->setCellValue("E{$r}", 'Incluido en GLOBAL');
+            $sheet->setCellValue("E{$r}", 'Control administrativo');
             $this->totalsRow($sheet, "A{$r}:E{$r}");
             $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
             $sheet->getStyle("C{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
@@ -851,16 +884,8 @@ class RadiographyWorkbookBuilder
 
         $r++;
 
-        // ── Gastos Corporativo — REFERENCIA ADMINISTRATIVA, NO en GLOBAL ────────
-        $this->sectionHeader($sheet, "A{$r}:E{$r}", '2. GASTOS CORPORATIVO — REFERENCIA ADMINISTRATIVA (NO incluido en GLOBAL operativo)');
-        $r++;
-
-        // Nota prominente
-        $sheet->setCellValue("A{$r}", '⚠ Estos gastos NO se suman al GLOBAL operativo de las 13 sucursales. Solo se muestran como referencia administrativa.');
-        $sheet->mergeCells("A{$r}:E{$r}");
-        $sheet->getStyle("A{$r}")->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFB91C1C'));
-        $sheet->getStyle("A{$r}")->getFill()->setFillType(\PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID)
-            ->getStartColor()->setARGB('FFFFF3CD');
+        // ── Gastos sin sucursal asignada ─────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:E{$r}", '2. GASTOS SIN SUCURSAL ASIGNADA');
         $r++;
 
         $this->colHeaders($sheet, $r, ['A' => 'CONCEPTO', 'B' => 'MONTO (REFERENCIA)', 'C' => 'ORIGEN', 'D' => '', 'E' => 'NOTA']);
@@ -876,15 +901,15 @@ class RadiographyWorkbookBuilder
                 $sheet->setCellValue("A{$r}", $g['concepto'] ?? '');
                 $sheet->setCellValue("B{$r}", (float)($g['monto'] ?? 0));
                 $sheet->setCellValue("C{$r}", $g['origen'] ?? '');
-                $sheet->setCellValue("E{$r}", 'NO en GLOBAL operativo');
+                $sheet->setCellValue("E{$r}", '');
                 $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
                 $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
                 $totalGastos += (float)($g['monto'] ?? 0);
                 $r++;
             }
-            $sheet->setCellValue("A{$r}", 'TOTAL GASTOS CORPORATIVO (referencia)');
+            $sheet->setCellValue("A{$r}", 'TOTAL GASTOS SIN SUCURSAL (referencia)');
             $sheet->setCellValue("B{$r}", $totalGastos);
-            $sheet->setCellValue("C{$r}", 'NO incluido en GLOBAL operativo');
+            $sheet->setCellValue("C{$r}", '');
             $this->totalsRow($sheet, "A{$r}:E{$r}");
             $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
             $r++;
@@ -893,20 +918,14 @@ class RadiographyWorkbookBuilder
         $r += 2;
 
         // ── Nota aclaratoria ─────────────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:E{$r}", '3. REGLA DE INCLUSIÓN EN GLOBAL');
+        $this->sectionHeader($sheet, "A{$r}:E{$r}", '3. NOTA ADMINISTRATIVA');
         $r++;
-        $notas = [
-            'Nómina (P001), comisiones (P002) y bonos SIN ASIGNAR SÍ se suman al GLOBAL (empleados pertenecen al periodo).',
-            'Gastos Corporativo NO se suman al GLOBAL operativo de las 13 sucursales — solo referencia administrativa.',
-            'Cartera, mora, recuperación y colocación NO dependen de empleados — salen por sucursal/ruta/oficina.',
-            'Para reasignar un empleado: agregar registro en tabla employee_branch_assignments.',
-        ];
-        foreach ($notas as $i => $nota) {
-            $sheet->setCellValue("A{$r}", ($i + 1) . '. ' . $nota);
-            $sheet->mergeCells("A{$r}:E{$r}");
-            $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
-            $r++;
-        }
+        $sheet->setCellValue("A{$r}", 'Estos registros se muestran para control administrativo y revisión posterior. Para asignar un empleado a una sucursal, contactar al administrador del sistema.');
+        $sheet->mergeCells("A{$r}:E{$r}");
+        $this->dataRow($sheet, "A{$r}:E{$r}", true);
+        $sheet->getStyle("A{$r}:E{$r}")->getAlignment()->setWrapText(true);
+        $sheet->getRowDimension($r)->setRowHeight(30);
+        $r++;
 
         $sheet->getColumnDimension('A')->setWidth(50);
         $sheet->getColumnDimension('B')->setWidth(18);
