@@ -28,7 +28,10 @@ class RadiographySnapshotBuilder
     private array $branchCache = [];
     private array $dataIds     = [];
 
-    public function __construct(private readonly EmployeeNameCanonicalizer $canonicalizer) {}
+    public function __construct(
+        private readonly EmployeeNameCanonicalizer $canonicalizer,
+        private readonly BranchRadiographyCalculator $branchCalculator,
+    ) {}
 
     public function build(Period $period, PeriodSummary $summary): array
     {
@@ -196,6 +199,35 @@ class RadiographySnapshotBuilder
             }
         }
 
+        // Build per-branch and GLOBAL data using BranchRadiographyCalculator.
+        // Returns ['branches' => [...13 summaries...], 'unassigned' => [...]]
+        // GLOBAL = suma de 13 sucursales + unassigned (solo nómina/comisiones/bonos/gastos).
+        // Cartera / recuperación / colocación / mora ONLY from branches (not unassigned).
+        $branchCalcResult   = $this->branchCalculator->buildBranches($period, $this->dataIds);
+        $branchCalcBranches = $branchCalcResult['branches'];
+        $branchCalcUnassigned = $branchCalcResult['unassigned'];
+        $branchCalcGlobal   = $this->branchCalculator->sumGlobal($branchCalcBranches, $branchCalcUnassigned);
+
+        // Prefer BranchRadiographyCalculator totals for the primary summary metrics
+        $calcCartera     = (float) $branchCalcGlobal['valor_cartera'];
+        $calcRecuperacion= (float) $branchCalcGlobal['recuperacion_total'];
+        $calcColocacion  = (float) $branchCalcGlobal['colocacion'];
+        $calcMoraTotal   = $branchCalcGlobal['mora_0_30'] + $branchCalcGlobal['mora_31_60']
+                         + $branchCalcGlobal['mora_61_90'] + $branchCalcGlobal['mora_91_120']
+                         + $branchCalcGlobal['mora_120_plus'];
+
+        if ($calcCartera > 0) {
+            $gm['valor_cartera_total']   = $calcCartera;
+            $gm['cartera_vencida_total'] = $calcMoraTotal;
+            $gm['mora_porcentaje']       = $calcCartera > 0 ? round($calcMoraTotal / $calcCartera * 100, 2) : 0;
+        }
+        if ($calcRecuperacion > 0) {
+            $gm['recuperacion_total'] = $calcRecuperacion;
+        }
+        if ($calcColocacion > 0) {
+            $gm['colocacion_total'] = $calcColocacion;
+        }
+
         return [
             'period' => [
                 'id'         => $period->id,
@@ -206,6 +238,11 @@ class RadiographySnapshotBuilder
             ],
             'generated_at' => now('America/Mexico_City')->format('d/m/Y H:i'),
             'version'      => $summary->version ?? 1,
+            'branch_radiography' => [
+                'branches'   => $branchCalcBranches,
+                'global'     => $branchCalcGlobal,
+                'unassigned' => $branchCalcUnassigned,
+            ],
             'summary' => [
                 'employees_count'       => $payroll['total_empleados'],
                 'recovery_total'        => (float)($gm['recuperacion_total'] ?? 0),

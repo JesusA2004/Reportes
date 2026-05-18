@@ -23,5 +23,11 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        //
+        $exceptions->render(function (\Illuminate\Http\Exceptions\PostTooLargeException $e, \Illuminate\Http\Request $request) {
+            $maxMb = round(((int) ini_get('post_max_size')) ?: 50);
+            if ($request->expectsJson() || $request->wantsJson()) {
+                return response()->json(['message' => "El archivo es demasiado grande. Máximo permitido: {$maxMb} MB."], 413);
+            }
+            return back()->withErrors(['file' => "El archivo es demasiado grande. Máximo permitido: {$maxMb} MB."]);
+        });
     })->create();

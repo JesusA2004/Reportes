@@ -37,7 +37,7 @@ class StoreReportUploadRequest extends FormRequest
                 'required',
                 'file',
                 $this->allowedMimes(),
-                'max:20480',
+                'max:131072',
             ],
             'notes' => [
                 'nullable',

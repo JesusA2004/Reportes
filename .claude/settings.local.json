@@ -43,7 +43,14 @@
       "Bash(grep -v \"^$\")",
       "Bash(xargs grep -l \"fact_recoveries\\\\|fact_portfolios\\\\|fact_placements\\\\|fact_expenses\")",
       "Bash(Get-Item \"C:\\\\Users\\\\JESUSA~1\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--wamp64-www-Reportes\\\\68eb2307-ed0a-4b37-8143-909119914d00\\\\tasks\\\\bbfbb1j4q.output\")",
-      "Bash(Select-Object Length, LastWriteTime)"
+      "Bash(Select-Object Length, LastWriteTime)",
+      "Bash(Select-Object FullName)",
+      "Bash(Get-Content \"C:\\\\Users\\\\JESUSA~1\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--wamp64-www-Reportes\\\\991b77aa-11c6-49c2-a9e2-a2f93a7475b7\\\\tasks\\\\b60hy1s7q.output\" -Wait)",
+      "Bash(Select-String -Pattern \".*\" --SimpleMatch)",
+      "Bash(Get-Content *)",
+      "Bash(tasklist)",
+      "Bash(findstr /i \"php\")",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }

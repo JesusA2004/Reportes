@@ -59,44 +59,51 @@ class BranchRadiographyCalculator
     }
 
     /**
-     * Builds per-branch summaries for the 13 operative branches.
+     * Builds per-branch summaries for the 13 operative branches plus an unassigned bucket.
      *
-     * Returns an indexed array of branch_summary objects.
+     * Returns ['branches' => [...13 summaries...], 'unassigned' => [nómina/comisiones/bonos/gastos sin sucursal]]
+     * GLOBAL must be computed via sumGlobal($branches, $unassigned) to include unassigned amounts.
      */
     public function buildBranches(Period $period, array $dataIds): array
     {
         $maps            = $this->buildBranchMap();
         $operativeMap    = $maps['operative'];
         $operativeIds    = array_keys($operativeMap);
+        $corporativoIds  = $maps['corporativo'];
 
-        // Initialize all 13 branches even if they have no data this period
         $summaries = [];
         foreach ($this->resolver->operativeFinancialBranches() as $sucursal) {
             $summaries[$sucursal] = $this->emptyBranchSummary($sucursal);
         }
 
+        $unassigned = $this->emptyUnassigned();
+
         if (empty($operativeIds)) {
-            return array_values($summaries);
+            return ['branches' => array_values($summaries), 'unassigned' => $unassigned];
         }
 
-        $corporativoIds = $maps['corporativo'];
-
+        // Cartera / colocación / recuperación / mora: branch_id / ruta, NO empleados
         $this->accumulateCartera($dataIds, $operativeIds, $operativeMap, $summaries);
         $this->accumulateColocacion($dataIds, $operativeIds, $operativeMap, $summaries);
         $this->accumulateRecuperacion($dataIds, $operativeIds, $operativeMap, $summaries, $corporativoIds);
         $daysDelta = $this->computeDpdDelta($period, $dataIds);
         $this->accumulateMora($dataIds, $operativeIds, $operativeMap, $summaries, $daysDelta);
-        $this->accumulateGastos($dataIds, $operativeIds, $operativeMap, $summaries);
-        $this->accumulateNomina($dataIds, $operativeIds, $operativeMap, $summaries);
 
-        return array_values($summaries);
+        // Gastos: branch_id de Lendus/ERP; Corporativo → unassigned; Norte → excluido
+        $this->accumulateGastos($dataIds, $operativeIds, $operativeMap, $summaries, $corporativoIds, $unassigned);
+
+        // Nómina/comisiones/bonos: employee_branch_assignments; sin match → unassigned
+        $this->accumulateNomina($dataIds, $operativeMap, $summaries, $unassigned);
+
+        return ['branches' => array_values($summaries), 'unassigned' => $unassigned];
     }
 
     /**
      * Sums all branch metrics to produce the GLOBAL summary.
-     * GLOBAL = SUM(branches) — never recalculated from raw facts independently.
+     * GLOBAL = SUM(branches) + unassigned(nómina/comisiones/bonos/gastos).
+     * Cartera / recuperación / colocación / mora come ONLY from branches (not unassigned).
      */
-    public function sumGlobal(array $branches): array
+    public function sumGlobal(array $branches, array $unassigned = []): array
     {
         $global = $this->emptyBranchSummary('GLOBAL');
 
@@ -109,6 +116,12 @@ class BranchRadiographyCalculator
                     $global[$key] += $val;
                 }
             }
+        }
+
+        // Add unassigned EMPLOYEE amounts to GLOBAL (employees belong to the period regardless of branch).
+        // gastos_operativos de Corporativo NO se suman al GLOBAL operativo de las 13 sucursales.
+        foreach (['nomina_total', 'comisiones', 'bonos'] as $key) {
+            $global[$key] += (float) ($unassigned[$key] ?? 0);
         }
 
         return $global;
@@ -297,8 +310,14 @@ class BranchRadiographyCalculator
     //   • gastos_erp    → ONLY categories absent from Lendus (LENDUS_PRESENT_CATS)
     //                     to avoid double-counting overlapping categories.
 
-    private function accumulateGastos(array $dataIds, array $branchIds, array $operativeMap, array &$summaries): void
-    {
+    private function accumulateGastos(
+        array $dataIds,
+        array $branchIds,
+        array $operativeMap,
+        array &$summaries,
+        array $corporativoIds = [],
+        array &$unassigned = [],
+    ): void {
         $sourceIds = DB::table('data_sources')
             ->whereIn('code', ['gastos_lendus', 'gastos_erp'])
             ->pluck('id', 'code');
@@ -306,26 +325,27 @@ class BranchRadiographyCalculator
         $lendusId = $sourceIds['gastos_lendus'] ?? null;
         $erpId    = $sourceIds['gastos_erp'] ?? null;
 
+        // IDs to query: operative branches + corporativo (corporativo goes to unassigned)
+        $queryIds = array_unique(array_merge($branchIds, $corporativoIds));
+
         $queries = [];
 
-        // Lendus: all categories (excedentes/fondeo/nómina split in PHP below)
         if ($lendusId) {
             $queries[] = DB::table('fact_expenses as e')
                 ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
                 ->whereIn('e.period_id', $dataIds)
-                ->whereIn('e.branch_id', $branchIds)
+                ->whereIn('e.branch_id', $queryIds)
                 ->where('ru.data_source_id', $lendusId)
                 ->selectRaw("e.branch_id, COALESCE(e.category, 'Sin categoría') as category, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
                 ->groupBy('e.branch_id', 'e.category')
                 ->get();
         }
 
-        // ERP: only categories NOT present in Lendus (avoids double-count)
         if ($erpId) {
             $queries[] = DB::table('fact_expenses as e')
                 ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
                 ->whereIn('e.period_id', $dataIds)
-                ->whereIn('e.branch_id', $branchIds)
+                ->whereIn('e.branch_id', $queryIds)
                 ->where('ru.data_source_id', $erpId)
                 ->whereNotIn('e.category', self::LENDUS_PRESENT_CATS)
                 ->selectRaw("e.branch_id, COALESCE(e.category, 'Sin categoría') as category, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
@@ -333,79 +353,134 @@ class BranchRadiographyCalculator
                 ->get();
         }
 
+        $corpIdSet = array_flip($corporativoIds);
+
         foreach ($queries as $rows) {
             foreach ($rows as $row) {
-                $suc = $operativeMap[(int) $row->branch_id] ?? null;
-                if (!$suc || !isset($summaries[$suc])) {
-                    continue;
-                }
-
+                $branchId = (int) $row->branch_id;
                 $cat      = (string) $row->category;
                 $catUpper = strtoupper($cat);
-                $amt      = (float)  $row->total;
+                $amt      = (float) $row->total;
 
-                if ($cat === self::EXCEDENTES_CAT || str_contains($catUpper, 'EXCEDENTE')) {
-                    $summaries[$suc]['excedentes'] += $amt;
-                } elseif ($cat === self::FONDEO_CAT || str_contains($catUpper, 'FONDEO') || str_contains($catUpper, 'INTERSUCURSAL')) {
-                    $summaries[$suc]['prestamos_fondea'] += $amt;
-                } elseif ($cat === self::NOMINA_CAT || str_contains($catUpper, 'NOMINA') || str_contains($catUpper, 'NÓMINA')) {
-                    // skip — nómina is accumulated by accumulateNomina() from NOI data
-                } else {
-                    $summaries[$suc]['gastos_operativos'] += $amt;
+                // Determine which bucket
+                $isExcedente = $cat === self::EXCEDENTES_CAT || str_contains($catUpper, 'EXCEDENTE');
+                $isFondeo    = $cat === self::FONDEO_CAT || str_contains($catUpper, 'FONDEO') || str_contains($catUpper, 'INTERSUCURSAL');
+                $isNomina    = $cat === self::NOMINA_CAT || str_contains($catUpper, 'NOMINA') || str_contains($catUpper, 'NÓMINA');
+
+                $suc = $operativeMap[$branchId] ?? null;
+                $isCorp = isset($corpIdSet[$branchId]);
+
+                if ($suc && isset($summaries[$suc])) {
+                    // Operative branch
+                    if ($isExcedente)   { $summaries[$suc]['excedentes']       += $amt; }
+                    elseif ($isFondeo)  { $summaries[$suc]['prestamos_fondea'] += $amt; }
+                    elseif ($isNomina)  { /* skip — accumulateNomina() handles this */ }
+                    else                { $summaries[$suc]['gastos_operativos'] += $amt; }
+                } elseif ($isCorp) {
+                    // CORPORATIVO gastos go to unassigned (excedentes/fondeo from corp still tracked on corp branch normally)
+                    if (!$isExcedente && !$isFondeo && !$isNomina) {
+                        $unassigned['gastos_operativos'] += $amt;
+                        $unassigned['gastos_items'][] = [
+                            'concepto' => $cat,
+                            'monto'    => $amt,
+                            'origen'   => 'CORPORATIVO (ERP/Lendus)',
+                        ];
+                    }
                 }
+                // Norte and other non-operative non-corp branches remain excluded
             }
         }
     }
 
-    // ── Nómina (NOI P001 SUELDO, allocated via Lendus NOMINA proportions) ───
+    // ── Nómina / Comisiones / Bonos (via employee_branch_assignments) ───────
     //
-    // GLOBAL nómina = SUM of NOI P001 SUELDO (base salary only, ~3% below target).
-    // Per-branch allocation uses Lendus "NOMINA" concept amounts as weights,
-    // then scales the entire branch distribution to match the NOI total.
+    // Per-branch allocation uses employee_branch_assignments directly.
+    // Employees WITHOUT a branch assignment → unassigned bucket.
+    // Employees assigned to a non-operative branch → unassigned bucket.
+    // GLOBAL = SUM(branches) + unassigned (all employees always counted).
+    //
+    // Sources: NOMINANUEVA (noi_nomina) + NOMINAF (noi_nomina_fiscal).
+    // P001 SUELDO → nomina_total | P002 → comisiones | P108/109/120/123 → bonos.
 
-    private function accumulateNomina(array $dataIds, array $branchIds, array $operativeMap, array &$summaries): void
+    private function accumulateNomina(array $dataIds, array $operativeMap, array &$summaries, array &$unassigned): void
     {
-        $noiTotal = (float) DB::table('fact_noi_movements')
-            ->whereIn('period_id', $dataIds)
-            ->where('concept', 'P001 SUELDO')
-            ->where('concept_type', 'percepcion')
-            ->sum('amount');
-
-        if ($noiTotal <= 0) {
-            return;
-        }
-
-        $lendusId = DB::table('data_sources')->where('code', 'gastos_lendus')->value('id');
-
-        if (!$lendusId) {
-            return;
-        }
-
-        // Lendus "NOMINA" concept amounts per operative branch (for proportional weights)
-        $lendusRows = DB::table('fact_expenses as e')
-            ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
-            ->whereIn('e.period_id', $dataIds)
-            ->whereIn('e.branch_id', $branchIds)
-            ->where('ru.data_source_id', $lendusId)
-            ->where('e.concept', 'NOMINA')
-            ->selectRaw('e.branch_id, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total')
-            ->groupBy('e.branch_id')
+        $rows = DB::table('fact_noi_movements as n')
+            ->leftJoin('employee_branch_assignments as eba', 'n.employee_id', '=', 'eba.employee_id')
+            ->leftJoin('employees as e', 'n.employee_id', '=', 'e.id')
+            ->whereIn('n.period_id', $dataIds)
+            ->where('n.concept_type', 'percepcion')
+            ->whereRaw("n.concept REGEXP '^P(001|002|108|109|120|123)'")
+            ->selectRaw("
+                COALESCE(eba.branch_id, -1) AS assigned_branch_id,
+                n.concept,
+                SUM(n.amount) AS total,
+                COUNT(DISTINCT n.employee_id) AS emps
+            ")
+            ->groupByRaw("COALESCE(eba.branch_id, -1), n.concept")
             ->get();
 
-        $lendusTotal = (float) $lendusRows->sum(fn ($r) => (float) $r->total);
+        foreach ($rows as $row) {
+            $branchId = (int) $row->assigned_branch_id;
+            $concept  = (string) $row->concept;
+            $amount   = (float) $row->total;
 
-        if ($lendusTotal <= 0) {
-            return;
-        }
+            $bucket = match (true) {
+                str_starts_with($concept, 'P001')                          => 'nomina_total',
+                str_starts_with($concept, 'P002')                          => 'comisiones',
+                (bool) preg_match('/^P(108|109|120|123)/', $concept)       => 'bonos',
+                default                                                     => null,
+            };
 
-        $scaleFactor = $noiTotal / $lendusTotal;
-
-        foreach ($lendusRows as $row) {
-            $suc = $operativeMap[(int) $row->branch_id] ?? null;
-            if (!$suc || !isset($summaries[$suc])) {
+            if ($bucket === null) {
                 continue;
             }
-            $summaries[$suc]['nomina_total'] += (float) $row->total * $scaleFactor;
+
+            if ($branchId === -1) {
+                // No assignment in employee_branch_assignments
+                $unassigned[$bucket] += $amount;
+                continue;
+            }
+
+            $suc = $operativeMap[$branchId] ?? null;
+            if ($suc && isset($summaries[$suc])) {
+                $summaries[$suc][$bucket] += $amount;
+            } else {
+                // Assigned to a non-operative branch (Corp/Norte/etc.) → unassigned
+                $unassigned[$bucket] += $amount;
+            }
+        }
+
+        // Collect per-employee detail for the SIN ASIGNAR sheet
+        $unassignedEmps = DB::table('fact_noi_movements as n')
+            ->leftJoin('employee_branch_assignments as eba', 'n.employee_id', '=', 'eba.employee_id')
+            ->leftJoin('employees as emp', 'n.employee_id', '=', 'emp.id')
+            ->join('report_uploads as ru', 'n.report_upload_id', '=', 'ru.id')
+            ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+            ->whereIn('n.period_id', $dataIds)
+            ->where('n.concept_type', 'percepcion')
+            ->whereRaw("n.concept REGEXP '^P(001|002|108|109|120|123)'")
+            ->whereNull('eba.employee_id')
+            ->selectRaw("
+                COALESCE(emp.full_name, CONCAT('Emp#', n.employee_id)) AS nombre,
+                n.employee_id,
+                ds.code AS fuente,
+                SUM(CASE WHEN n.concept LIKE 'P001%' THEN n.amount ELSE 0 END) AS p001,
+                SUM(CASE WHEN n.concept LIKE 'P002%' THEN n.amount ELSE 0 END) AS p002,
+                SUM(CASE WHEN n.concept REGEXP '^P(108|109|120|123)' THEN n.amount ELSE 0 END) AS bonos
+            ")
+            ->groupBy('n.employee_id', 'emp.full_name', 'ds.id', 'ds.code')
+            ->orderByDesc('p001')
+            ->get();
+
+        foreach ($unassignedEmps as $emp) {
+            $unassigned['empleados'][] = [
+                'nombre'  => $emp->nombre,
+                'emp_id'  => $emp->employee_id,
+                'fuente'  => $emp->fuente,
+                'p001'    => (float) $emp->p001,
+                'p002'    => (float) $emp->p002,
+                'bonos'   => (float) $emp->bonos,
+            ];
         }
     }
 
@@ -431,8 +506,22 @@ class BranchRadiographyCalculator
             'mora_120_plus'       => 0.0,
             'gastos_operativos'   => 0.0,
             'nomina_total'        => 0.0,
+            'comisiones'          => 0.0,
+            'bonos'               => 0.0,
             'excedentes'          => 0.0,
             'prestamos_fondea'    => 0.0,
+        ];
+    }
+
+    private function emptyUnassigned(): array
+    {
+        return [
+            'nomina_total'      => 0.0,
+            'comisiones'        => 0.0,
+            'bonos'             => 0.0,
+            'gastos_operativos' => 0.0,
+            'empleados'         => [],   // per-employee detail for SIN ASIGNAR sheet
+            'gastos_items'      => [],   // per-gasto detail for SIN ASIGNAR sheet
         ];
     }
 }

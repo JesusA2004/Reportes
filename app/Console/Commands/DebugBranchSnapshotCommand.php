@@ -43,8 +43,10 @@ class DebugBranchSnapshotCommand extends Command
 
         // ── Construir summaries ───────────────────────────────────────────────
         $this->line('  Construyendo branch summaries (resolviendo branch_id → sucursal real)...');
-        $branches = $this->calculator->buildBranches($period, $dataIds);
-        $global   = $this->calculator->sumGlobal($branches);
+        $result     = $this->calculator->buildBranches($period, $dataIds);
+        $branches   = $result['branches'];
+        $unassigned = $result['unassigned'];
+        $global     = $this->calculator->sumGlobal($branches, $unassigned);
         $this->line('  OK — ' . count($branches) . ' sucursales operativas procesadas.');
         $this->line('');
 
