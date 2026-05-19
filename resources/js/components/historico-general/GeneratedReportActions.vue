@@ -4,15 +4,55 @@ import { Download, ExternalLink, FileSpreadsheet, FileText } from 'lucide-vue-ne
 import SectionHeader from './SectionHeader.vue'
 import StatusBadge from './StatusBadge.vue'
 
-const props = defineProps<{ period: any }>()
+const props = defineProps<{ period: any; config?: any }>()
 
-const canExport  = computed(() => !!props.period?.can_export_radiography)
-const isRunning  = computed(() => !!props.period?.radiography_running)
-const previewUrl = computed(() =>
-    props.period?.radiography_ready ? `/reportes-mensuales/${props.period.id}/preview` : null
+const canExport = computed(() => !!props.period?.can_export_radiography)
+const isRunning = computed(() => !!props.period?.radiography_running)
+
+const isFiltered = computed(() =>
+    props.config?.scope === 'branch' || props.config?.scope === 'employee'
 )
-const excelUrl = computed(() => props.period ? `/reportes-mensuales/${props.period.id}/radiografia.xlsx` : '#')
-const pdfUrl   = computed(() => props.period ? `/reportes-mensuales/${props.period.id}/radiografia.pdf` : '#')
+
+const filteredParams = computed(() => {
+    if (!isFiltered.value) return ''
+    const p = new URLSearchParams({ scope: props.config.scope, report_type: props.config.report_type ?? 'simple' })
+    if (props.config.scope === 'branch'   && props.config.branch_id)   p.set('branch_id',   String(props.config.branch_id))
+    if (props.config.scope === 'employee' && props.config.employee_id) p.set('employee_id', String(props.config.employee_id))
+    return '?' + p.toString()
+})
+
+const excelUrl = computed(() => {
+    if (!props.period) return '#'
+    return isFiltered.value
+        ? `/reportes-mensuales/${props.period.id}/export-filtrado.xlsx${filteredParams.value}`
+        : `/reportes-mensuales/${props.period.id}/radiografia.xlsx`
+})
+
+const pdfUrl = computed(() => {
+    if (!props.period) return '#'
+    return isFiltered.value
+        ? `/reportes-mensuales/${props.period.id}/export-filtrado.pdf${filteredParams.value}`
+        : `/reportes-mensuales/${props.period.id}/radiografia.pdf`
+})
+
+const previewUrl = computed(() => {
+    if (!props.period?.radiography_ready) return null
+    const base = `/reportes-mensuales/${props.period.id}/preview`
+    if (props.config?.scope === 'branch'   && props.config.branch_id)   return `${base}?scope=branch&branch_id=${props.config.branch_id}`
+    if (props.config?.scope === 'employee' && props.config.employee_id) return `${base}?scope=employee&employee_id=${props.config.employee_id}`
+    return base
+})
+
+const excelSubtitle = computed(() => {
+    if (props.config?.scope === 'branch')   return 'Filtrado por sucursal · sin plantilla'
+    if (props.config?.scope === 'employee') return 'Filtrado por gestor · sin plantilla'
+    return 'Generado desde cero · sin plantilla'
+})
+const pdfSubtitle = computed(() => {
+    if (props.config?.scope === 'branch')   return 'Diseño filtrado por sucursal'
+    if (props.config?.scope === 'employee') return 'Diseño filtrado por gestor'
+    return 'Diseño con tablas y métricas'
+})
 </script>
 
 <template>
@@ -35,7 +75,7 @@ const pdfUrl   = computed(() => props.period ? `/reportes-mensuales/${props.peri
                 <span>
                     <FileSpreadsheet class="mb-3 size-7 text-emerald-700" />
                     <span class="block font-black text-slate-950">Descargar Excel</span>
-                    <span class="text-xs text-slate-600">Generado desde cero · sin plantilla</span>
+                    <span class="text-xs text-slate-600">{{ excelSubtitle }}</span>
                 </span>
                 <Download class="size-5 text-emerald-700" />
             </a>
@@ -51,7 +91,7 @@ const pdfUrl   = computed(() => props.period ? `/reportes-mensuales/${props.peri
                 <span>
                     <FileText class="mb-3 size-7 text-rose-700" />
                     <span class="block font-black text-slate-950">Descargar PDF</span>
-                    <span class="text-xs text-slate-600">Diseño con tablas y métricas</span>
+                    <span class="text-xs text-slate-600">{{ pdfSubtitle }}</span>
                 </span>
                 <Download class="size-5 text-rose-700" />
             </a>

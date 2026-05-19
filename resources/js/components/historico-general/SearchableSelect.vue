@@ -41,9 +41,9 @@ function toggle() {
 }
 
 function pick(id: number) {
-    emit('update:modelValue', id)
     open.value = false
     search.value = ''
+    emit('update:modelValue', id)
 }
 
 function clear(event: Event) {
@@ -101,7 +101,7 @@ watch(open, (val) => {
                         :key="item.id"
                         class="flex cursor-pointer items-center gap-3 px-4 py-2.5 transition hover:bg-indigo-50"
                         :class="modelValue === item.id ? 'bg-indigo-50/60' : ''"
-                        @click="pick(item.id)"
+                        @click.stop="pick(item.id)"
                     >
                         <Check class="size-4 shrink-0 text-indigo-600 transition" :class="modelValue === item.id ? 'opacity-100' : 'opacity-0'" />
                         <div class="min-w-0">

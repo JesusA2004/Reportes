@@ -47,8 +47,13 @@ class RadiographyWorkbookBuilder
             ->setSubject('Radiografía Financiera')
             ->setDescription('Generado automáticamente — sin plantilla');
 
-        // Sheet order: GLOBAL first, then branch sheets, SIN ASIGNAR, PRODUCTOS
+        // Sheet order: GLOBAL, analysis sheets, branch sheets, SIN ASIGNAR, PRODUCTOS
         $this->buildGlobalSheet($spreadsheet, $period, $snap);
+        $this->buildValorCarteraSheet($spreadsheet, $period, $snap);
+        $this->buildMorasSheet($spreadsheet, $period, $snap);
+        $this->buildIngresosSheet($spreadsheet, $period, $snap);
+        $this->buildGastosSheet($spreadsheet, $period, $snap);
+        $this->buildNominaSheet($spreadsheet, $period, $snap);
         $this->buildBranchSheets($spreadsheet, $period, $snap);
         $this->buildSinAsignarSheet($spreadsheet, $period, $snap);
         $this->buildProductosSheet($spreadsheet, $period, $snap);
@@ -92,7 +97,25 @@ class RadiographyWorkbookBuilder
         $sheet->setCellValue('A2', 'Periodo: ' . ($period->code ?: $period->id) . '  |  Generado: ' . $snap['generated_at']);
         $this->metaStyle($sheet, 'A2:C2');
 
-        $this->colHeaders($sheet, 3, ['A' => 'MÉTRICA', 'B' => 'VALOR', 'C' => '%']);
+        // ── Navegación rápida a hojas de análisis ──────────────────────────────
+        $navLinks = [
+            'A3' => ['→ VALOR CARTERA', 'VALOR CARTERA'],
+            'B3' => ['→ MORAS',         'MORAS'],
+            'C3' => ['→ INGRESOS',      'INGRESOS'],
+            'A4' => ['→ GASTOS',        'GASTOS'],
+            'B4' => ['→ NÓMINA',        'NÓMINA'],
+            'C4' => ['→ PRODUCTOS',     'PRODUCTOS'],
+        ];
+        $sheet->getRowDimension(3)->setRowHeight(16);
+        $sheet->getRowDimension(4)->setRowHeight(16);
+        foreach ($navLinks as $cell => [$label, $target]) {
+            $sheet->setCellValue($cell, $label);
+            $sheet->getCell($cell)->getHyperlink()->setUrl("sheet://{$target}!A1");
+            $sheet->getStyle($cell)->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true)->setSize(9);
+            $sheet->getStyle($cell)->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setARGB('FFF1F5F9');
+        }
+
+        $this->colHeaders($sheet, 5, ['A' => 'MÉTRICA', 'B' => 'VALOR', 'C' => '%']);
 
         // Helper: write a section block; returns next row
         $writeRows = function (int $startRow, array $items) use ($sheet): int {
@@ -112,6 +135,7 @@ class RadiographyWorkbookBuilder
             return $r;
         };
 
+        // Content starts at row 7 (after title=1, meta=2, nav=3-4, blank=5 col-headers, data=7+)
         // Prefer BranchRadiographyCalculator (GLOBAL = suma de sucursales) over legacy summary
         $brCalcGlobal = $snap['branch_radiography']['global'] ?? null;
 
@@ -137,7 +161,7 @@ class RadiographyWorkbookBuilder
         }
         $moraTotal = $mora0_30 + $mora31_60 + $mora61_90 + $mora91_120 + $mora120p;
 
-        $r = 4;
+        $r = 6;
 
         // ── 1. Métricas Generales ─────────────────────────────────────────────
         $this->sectionHeader($sheet, "A{$r}:C{$r}", '1. MÉTRICAS GENERALES');
@@ -374,7 +398,7 @@ class RadiographyWorkbookBuilder
         $sheet->getColumnDimension('A')->setWidth(42);
         $sheet->getColumnDimension('B')->setWidth(22);
         $sheet->getColumnDimension('C')->setWidth(10);
-        $sheet->freezePane('A4');
+        $sheet->freezePane('A6');
 
         // Hyperlinks to each sucursal tab
         $r += 2;
@@ -396,6 +420,534 @@ class RadiographyWorkbookBuilder
             $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
             $r++;
         }
+    }
+
+    // ── VALOR CARTERA ────────────────────────────────────────────────────────
+
+    private function buildValorCarteraSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet   = $ss->createSheet()->setTitle('VALOR CARTERA');
+        $brCalc  = $snap['branch_radiography'] ?? [];
+        $global  = $brCalc['global']   ?? [];
+        $branches = $brCalc['branches'] ?? [];
+        $label   = strtoupper($period->label);
+
+        $this->sheetTitle($sheet, 'A1:E1', 'VALOR CARTERA — ' . $label);
+        $sheet->setCellValue('A2', '← GLOBAL');
+        $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
+        $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
+        $sheet->setCellValue('B2', 'Periodo: ' . ($period->code ?: $period->id));
+        $this->metaStyle($sheet, 'B2:E2');
+        $sheet->mergeCells('B2:E2');
+
+        $carteraGlobal = (float)($global['valor_cartera'] ?? 0);
+
+        // Resumen global
+        $r = 4;
+        $this->sectionHeader($sheet, "A{$r}:E{$r}", 'RESUMEN GLOBAL');
+        $r++;
+        $moraTotal = (float)($global['mora_0_30'] ?? 0) + (float)($global['mora_31_60'] ?? 0)
+            + (float)($global['mora_61_90'] ?? 0) + (float)($global['mora_91_120'] ?? 0)
+            + (float)($global['mora_120_plus'] ?? 0);
+        foreach ([
+            ['Cartera total global',    $carteraGlobal, 'currency'],
+            ['Mora total',              $moraTotal,     'currency'],
+            ['% mora sobre cartera',    $carteraGlobal > 0 ? round($moraTotal / $carteraGlobal * 100, 2) : 0, 'percent'],
+            ['Colocación del periodo',  (float)($global['colocacion'] ?? 0),  'currency'],
+            ['Recuperación del periodo',(float)($global['recuperacion_total'] ?? 0), 'currency'],
+        ] as $i => [$lbl, $val, $fmt]) {
+            $sheet->setCellValue("A{$r}", $lbl);
+            $sheet->setCellValue("B{$r}", $val);
+            $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $val);
+            $r++;
+        }
+        $r++;
+
+        // Por sucursal
+        $this->sectionHeader($sheet, "A{$r}:E{$r}", 'CARTERA POR SUCURSAL');
+        $r++;
+        $this->colHeaders($sheet, $r, ['A' => 'SUCURSAL', 'B' => 'CARTERA', 'C' => '% DEL TOTAL', 'D' => 'MORA TOTAL', 'E' => 'MORA %']);
+        $r++;
+
+        usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+        foreach ($branches as $i => $b) {
+            $cart = (float)($b['valor_cartera'] ?? 0);
+            $mora = (float)($b['mora_0_30'] ?? 0) + (float)($b['mora_31_60'] ?? 0)
+                + (float)($b['mora_61_90'] ?? 0) + (float)($b['mora_91_120'] ?? 0)
+                + (float)($b['mora_120_plus'] ?? 0);
+            $pct  = $carteraGlobal > 0 ? round($cart / $carteraGlobal * 100, 2) : 0;
+            $mpct = $cart > 0 ? round($mora / $cart * 100, 2) : 0;
+            $sheet->setCellValue("A{$r}", $b['sucursal']);
+            $sheet->setCellValue("B{$r}", $cart);
+            $sheet->setCellValue("C{$r}", $pct);
+            $sheet->setCellValue("D{$r}", $mora);
+            $sheet->setCellValue("E{$r}", $mpct);
+            $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
+            $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("C{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            $sheet->getStyle("D{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("E{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            foreach (['B', 'C', 'D', 'E'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            }
+            $r++;
+        }
+        $sheet->setCellValue("A{$r}", 'TOTAL');
+        $sheet->setCellValue("B{$r}", $carteraGlobal);
+        $sheet->setCellValue("C{$r}", 100);
+        $sheet->setCellValue("D{$r}", $moraTotal);
+        $sheet->setCellValue("E{$r}", $carteraGlobal > 0 ? round($moraTotal / $carteraGlobal * 100, 2) : 0);
+        $this->totalsRow($sheet, "A{$r}:E{$r}");
+        foreach (['B', 'D'] as $col) {
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        }
+        foreach (['C', 'E'] as $col) {
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+        }
+
+        $sheet->getColumnDimension('A')->setWidth(28);
+        $sheet->getColumnDimension('B')->setWidth(20);
+        $sheet->getColumnDimension('C')->setWidth(14);
+        $sheet->getColumnDimension('D')->setWidth(20);
+        $sheet->getColumnDimension('E')->setWidth(12);
+        $sheet->freezePane('A4');
+    }
+
+    // ── MORAS ────────────────────────────────────────────────────────────────
+
+    private function buildMorasSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet   = $ss->createSheet()->setTitle('MORAS');
+        $buckets = $snap['sections']['portfolio_buckets'] ?? [];
+        $brCalc  = $snap['branch_radiography'] ?? [];
+        $branches = $brCalc['branches'] ?? [];
+        $label   = strtoupper($period->label);
+
+        $this->sheetTitle($sheet, 'A1:F1', 'MORAS — ' . $label);
+        $sheet->setCellValue('A2', '← GLOBAL');
+        $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
+        $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
+        $sheet->setCellValue('B2', 'Días vencidos — fuente: Lendus Saldos por Cliente');
+        $this->metaStyle($sheet, 'B2:F2');
+        $sheet->mergeCells('B2:F2');
+
+        $r = 4;
+        // Buckets globales (from portfolio_buckets section)
+        $this->sectionHeader($sheet, "A{$r}:F{$r}", 'DISTRIBUCIÓN GLOBAL POR DÍAS VENCIDOS');
+        $r++;
+        $this->colHeaders($sheet, $r, ['A' => 'BUCKET', 'B' => 'CONTRATOS', 'C' => 'BALANCE', 'D' => 'VENCIDO', 'E' => '% CARTERA', 'F' => 'MORA %']);
+        $r++;
+
+        if (!empty($buckets)) {
+            $totBal = (float) array_sum(array_column($buckets, 'balance'));
+            $totVen = (float) array_sum(array_column($buckets, 'vencida'));
+            foreach ($buckets as $i => $b) {
+                $pctCart = $totBal > 0 ? round((float)$b['balance'] / $totBal * 100, 1) : 0;
+                $pctMora = (float)$b['balance'] > 0 ? round((float)$b['vencida'] / (float)$b['balance'] * 100, 2) : 0;
+                $sheet->setCellValue("A{$r}", $b['label']);
+                $sheet->setCellValue("B{$r}", (int)$b['contratos']);
+                $sheet->setCellValue("C{$r}", (float)$b['balance']);
+                $sheet->setCellValue("D{$r}", (float)$b['vencida']);
+                $sheet->setCellValue("E{$r}", $pctCart);
+                $sheet->setCellValue("F{$r}", $pctMora);
+                $this->dataRow($sheet, "A{$r}:F{$r}", $i % 2 === 0);
+                $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::INTEGER);
+                foreach (['C', 'D'] as $col) {
+                    $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                }
+                foreach (['E', 'F'] as $col) {
+                    $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+                }
+                foreach (['B', 'C', 'D', 'E', 'F'] as $col) {
+                    $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+                }
+                $r++;
+            }
+            $sheet->setCellValue("A{$r}", 'TOTALES');
+            $sheet->setCellValue("B{$r}", array_sum(array_column($buckets, 'contratos')));
+            $sheet->setCellValue("C{$r}", $totBal);
+            $sheet->setCellValue("D{$r}", $totVen);
+            $sheet->setCellValue("E{$r}", 100);
+            $sheet->setCellValue("F{$r}", $totBal > 0 ? round($totVen / $totBal * 100, 2) : 0);
+            $this->totalsRow($sheet, "A{$r}:F{$r}");
+            foreach (['C', 'D'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            }
+            foreach (['E', 'F'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            }
+            $r++;
+        } else {
+            $sheet->setCellValue("A{$r}", 'Sin datos de días vencidos. Verifica que el archivo Lendus Saldos incluya columna días_vencidos.');
+            $sheet->mergeCells("A{$r}:F{$r}");
+            $r++;
+        }
+        $r++;
+
+        // Por sucursal (desde branch_radiography)
+        if (!empty($branches)) {
+            $this->sectionHeader($sheet, "A{$r}:H{$r}", 'MORA POR SUCURSAL (desde radiografía)');
+            $r++;
+            $this->colHeaders($sheet, $r, ['A' => 'SUCURSAL', 'B' => '0-30', 'C' => '31-60', 'D' => '61-90', 'E' => '91-120', 'F' => '120+', 'G' => 'MORA TOTAL', 'H' => 'MORA %']);
+            $r++;
+            $carteraGlobal = (float)($brCalc['global']['valor_cartera'] ?? 0);
+            usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+            $totCols = ['B' => 0.0, 'C' => 0.0, 'D' => 0.0, 'E' => 0.0, 'F' => 0.0, 'G' => 0.0];
+            foreach ($branches as $i => $b) {
+                $m0  = (float)($b['mora_0_30']    ?? 0);
+                $m31 = (float)($b['mora_31_60']   ?? 0);
+                $m61 = (float)($b['mora_61_90']   ?? 0);
+                $m91 = (float)($b['mora_91_120']  ?? 0);
+                $m120= (float)($b['mora_120_plus'] ?? 0);
+                $mTot = $m0 + $m31 + $m61 + $m91 + $m120;
+                $cart = (float)($b['valor_cartera'] ?? 0);
+                $mpct = $cart > 0 ? round($mTot / $cart * 100, 2) : 0;
+                $sheet->setCellValue("A{$r}", $b['sucursal']);
+                $sheet->setCellValue("B{$r}", $m0);
+                $sheet->setCellValue("C{$r}", $m31);
+                $sheet->setCellValue("D{$r}", $m61);
+                $sheet->setCellValue("E{$r}", $m91);
+                $sheet->setCellValue("F{$r}", $m120);
+                $sheet->setCellValue("G{$r}", $mTot);
+                $sheet->setCellValue("H{$r}", $mpct);
+                $this->dataRow($sheet, "A{$r}:H{$r}", $i % 2 === 0);
+                foreach (['B', 'C', 'D', 'E', 'F', 'G'] as $col) {
+                    $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                    $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+                    $totCols[$col] += match($col) {
+                        'B' => $m0, 'C' => $m31, 'D' => $m61, 'E' => $m91, 'F' => $m120, 'G' => $mTot, default => 0.0,
+                    };
+                }
+                $sheet->getStyle("H{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+                $sheet->getStyle("H{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+                if ($mpct > 25) {
+                    $sheet->getStyle("H{$r}")->getFont()->getColor()->setARGB(self::FG_RED);
+                }
+                $r++;
+            }
+            $moraGlobalTot = $totCols['G'] > 0 ? $totCols['G'] : (array_sum(array_column($branches, 'mora_0_30')) + array_sum(array_column($branches, 'mora_31_60')) + array_sum(array_column($branches, 'mora_61_90')) + array_sum(array_column($branches, 'mora_91_120')) + array_sum(array_column($branches, 'mora_120_plus')));
+            $sheet->setCellValue("A{$r}", 'TOTAL');
+            foreach (['B', 'C', 'D', 'E', 'F', 'G'] as $col) {
+                $val = match($col) {
+                    'B' => array_sum(array_column($branches, 'mora_0_30')),
+                    'C' => array_sum(array_column($branches, 'mora_31_60')),
+                    'D' => array_sum(array_column($branches, 'mora_61_90')),
+                    'E' => array_sum(array_column($branches, 'mora_91_120')),
+                    'F' => array_sum(array_column($branches, 'mora_120_plus')),
+                    'G' => $moraGlobalTot,
+                };
+                $sheet->setCellValue("{$col}{$r}", $val);
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            }
+            $sheet->setCellValue("H{$r}", $carteraGlobal > 0 ? round($moraGlobalTot / $carteraGlobal * 100, 2) : 0);
+            $sheet->getStyle("H{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            $this->totalsRow($sheet, "A{$r}:H{$r}");
+            $r++;
+        }
+
+        foreach (['A' => 22, 'B' => 18, 'C' => 18, 'D' => 18, 'E' => 18, 'F' => 18, 'G' => 18, 'H' => 10] as $col => $w) {
+            $sheet->getColumnDimension($col)->setWidth($w);
+        }
+        $sheet->freezePane('A4');
+    }
+
+    // ── INGRESOS ─────────────────────────────────────────────────────────────
+
+    private function buildIngresosSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet   = $ss->createSheet()->setTitle('INGRESOS');
+        $brCalc  = $snap['branch_radiography'] ?? [];
+        $global  = $brCalc['global']   ?? [];
+        $branches = $brCalc['branches'] ?? [];
+        $label   = strtoupper($period->label);
+
+        $this->sheetTitle($sheet, 'A1:H1', 'INGRESOS — ' . $label);
+        $sheet->setCellValue('A2', '← GLOBAL');
+        $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
+        $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
+        $sheet->setCellValue('B2', 'Desglose de recuperación por componente');
+        $this->metaStyle($sheet, 'B2:H2');
+        $sheet->mergeCells('B2:H2');
+
+        $r = 4;
+        $this->sectionHeader($sheet, "A{$r}:H{$r}", 'INGRESOS POR SUCURSAL');
+        $r++;
+        $this->colHeaders($sheet, $r, [
+            'A' => 'SUCURSAL', 'B' => 'CAPITAL', 'C' => 'INTERESES', 'D' => 'IMPUESTOS',
+            'E' => 'MULTAS', 'F' => 'CARGOS INICIO', 'G' => 'COM. APERTURA', 'H' => 'TOTAL',
+        ]);
+        $r++;
+
+        usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+        $totals = array_fill_keys(['B', 'C', 'D', 'E', 'F', 'G', 'H'], 0.0);
+        foreach ($branches as $i => $b) {
+            $cap  = (float)($b['capital_recuperado']  ?? 0);
+            $int  = (float)($b['interes_recuperado']  ?? 0);
+            $imp  = (float)($b['impuesto_recuperado'] ?? 0);
+            $mul  = (float)($b['charges']             ?? 0);
+            $car  = (float)($b['cargos_inicio']       ?? 0);
+            $com  = (float)($b['comision_apertura']   ?? 0);
+            $tot  = $cap + $int + $imp + $mul + $car + $com;
+            $vals = ['B' => $cap, 'C' => $int, 'D' => $imp, 'E' => $mul, 'F' => $car, 'G' => $com, 'H' => $tot];
+            $sheet->setCellValue("A{$r}", $b['sucursal']);
+            foreach ($vals as $col => $val) {
+                $sheet->setCellValue("{$col}{$r}", $val);
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+                $totals[$col] += $val;
+            }
+            $this->dataRow($sheet, "A{$r}:H{$r}", $i % 2 === 0);
+            $r++;
+        }
+        // Global totals row
+        $sheet->setCellValue("A{$r}", 'TOTAL GLOBAL');
+        $gCap = (float)($global['capital_recuperado']  ?? 0);
+        $gInt = (float)($global['interes_recuperado']  ?? 0);
+        $gImp = (float)($global['impuesto_recuperado'] ?? 0);
+        $gMul = (float)($global['charges']             ?? 0);
+        $gCar = (float)($global['cargos_inicio']       ?? 0);
+        $gCom = (float)($global['comision_apertura']   ?? 0);
+        $gTot = $gCap + $gInt + $gImp + $gMul + $gCar + $gCom;
+        foreach (['B' => $gCap, 'C' => $gInt, 'D' => $gImp, 'E' => $gMul, 'F' => $gCar, 'G' => $gCom, 'H' => $gTot] as $col => $val) {
+            $sheet->setCellValue("{$col}{$r}", $val);
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        }
+        $this->totalsRow($sheet, "A{$r}:H{$r}");
+
+        foreach (['A' => 26, 'B' => 18, 'C' => 18, 'D' => 16, 'E' => 16, 'F' => 16, 'G' => 16, 'H' => 18] as $col => $w) {
+            $sheet->getColumnDimension($col)->setWidth($w);
+        }
+        $sheet->freezePane('A4');
+    }
+
+    // ── GASTOS (canonical cross-tab desde branch_radiography) ────────────────
+
+    private function buildGastosSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet    = $ss->createSheet()->setTitle('GASTOS');
+        $brCalc   = $snap['branch_radiography'] ?? [];
+        $global   = $brCalc['global']   ?? [];
+        $branches = $brCalc['branches'] ?? [];
+        $label    = strtoupper($period->label);
+
+        $this->sheetTitle($sheet, 'A1:A1', 'GASTOS OPERATIVOS — ' . $label);
+        $sheet->setCellValue('A2', '← GLOBAL');
+        $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
+        $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
+
+        $conceptos = [
+            'Renta Oficina','Luz','Agua','Teléfono e Internet','Insumos de Cafetería',
+            'Insumos de Limpieza','Insumos de Papelería','Mobiliario y Equipo','Mantenimiento',
+            'Renta de Bodegas','Señora Limpieza','Eventos','Paquetería','Trámites Gubernamentales',
+            'Publicidad','Mecánicos','Servicios de Motocicletas','Software Póliza Anual','Pólizas',
+            'Recargas Telefónicas','Emergentes','Comisiones Oxxo','Multas e Infracciones',
+            'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
+            'Gastos legales',
+        ];
+
+        usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+
+        // Build column map: A=Concepto, B=GLOBAL, C..O=branches
+        $colMap = ['A' => 'CONCEPTO', 'B' => 'GLOBAL'];
+        $branchCols = [];
+        foreach ($branches as $idx => $b) {
+            $col = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($idx + 3);
+            $colMap[$col] = strtoupper($b['sucursal']);
+            $branchCols[$col] = $b;
+        }
+        $lastCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex(count($branches) + 2);
+        $sheet->mergeCells("A1:{$lastCol}1");
+
+        $r = 3;
+        $this->colHeaders($sheet, $r, $colMap);
+        $r++;
+
+        $globalDet = (array)($global['gastos_detalle'] ?? []);
+        $colTotals = array_fill_keys(array_keys($colMap), 0.0);
+
+        foreach ($conceptos as $i => $con) {
+            $gVal = (float)($globalDet[$con] ?? 0);
+            // Check if any branch has this concept
+            $anyVal = $gVal > 0;
+            foreach ($branchCols as $col => $b) {
+                if ((float)(($b['gastos_detalle'] ?? [])[$con] ?? 0) > 0) { $anyVal = true; }
+            }
+            if (!$anyVal) continue; // skip empty rows
+
+            $sheet->setCellValue("A{$r}", $con);
+            $sheet->setCellValue("B{$r}", $gVal);
+            $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("B{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            $colTotals['B'] += $gVal;
+            foreach ($branchCols as $col => $b) {
+                $val = (float)(($b['gastos_detalle'] ?? [])[$con] ?? 0);
+                $sheet->setCellValue("{$col}{$r}", $val);
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+                $colTotals[$col] += $val;
+            }
+            $this->dataRow($sheet, "A{$r}:{$lastCol}{$r}", $i % 2 === 0);
+            $r++;
+        }
+
+        // Totals row
+        $sheet->setCellValue("A{$r}", 'TOTAL GASTOS');
+        $sheet->setCellValue("B{$r}", (float)($global['gastos_operativos'] ?? $colTotals['B']));
+        $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        foreach ($branchCols as $col => $b) {
+            $sheet->setCellValue("{$col}{$r}", (float)($b['gastos_operativos'] ?? 0));
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        }
+        $this->totalsRow($sheet, "A{$r}:{$lastCol}{$r}");
+
+        $sheet->getColumnDimension('A')->setWidth(32);
+        $sheet->getColumnDimension('B')->setWidth(18);
+        foreach (array_keys($branchCols) as $col) {
+            $sheet->getColumnDimension($col)->setWidth(16);
+        }
+        $sheet->setAutoFilter("A3:{$lastCol}3");
+        $sheet->freezePane('B4');
+    }
+
+    // ── NÓMINA (canonical cross-tab desde branch_radiography) ────────────────
+
+    private function buildNominaSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet     = $ss->createSheet()->setTitle('NÓMINA');
+        $brCalc    = $snap['branch_radiography'] ?? [];
+        $global    = $brCalc['global']      ?? [];
+        $branches  = $brCalc['branches']    ?? [];
+        $unassigned= $brCalc['unassigned']  ?? [];
+        $label     = strtoupper($period->label);
+
+        $this->sheetTitle($sheet, 'A1:A1', 'NÓMINA Y CAPITAL HUMANO — ' . $label);
+        $sheet->setCellValue('A2', '← GLOBAL');
+        $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
+        $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
+
+        $conceptos = [
+            'Nómina'                       => 'nomina_total',
+            'Comisiones'                   => 'comisiones',
+            'Vacaciones'                   => 'vacaciones',
+            'Prima vacacional'             => 'prima_vacacional',
+            'Bonos'                        => 'bonos',
+        ];
+        $detOrder = [
+            'IMSS','Descuentos Infonavit','Finiquito','Gastos médicos',
+            'Gasolina','Financiamiento de Motos','Financiamiento de Motos (desc.)',
+            'Descuento Servicios Moto','Financiamiento Celular','Cascos',
+            'Descuento de uniformes','Pensión Alimenticia','Préstamo Personal',
+            'Anticipo de nómina','Otros conceptos nómina','Otros descuentos NOI',
+        ];
+
+        usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+
+        // Build column map: A=Concepto, B=GLOBAL, C..O=branches, last=SIN ASIGNAR
+        $colMap = ['A' => 'CONCEPTO', 'B' => 'GLOBAL'];
+        $branchCols = [];
+        foreach ($branches as $idx => $b) {
+            $col = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($idx + 3);
+            $colMap[$col] = strtoupper($b['sucursal']);
+            $branchCols[$col] = $b;
+        }
+        $sinAsignarCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex(count($branches) + 3);
+        $colMap[$sinAsignarCol] = 'SIN ASIGNAR';
+        $lastCol = $sinAsignarCol;
+        $sheet->mergeCells("A1:{$lastCol}1");
+
+        $r = 3;
+        $this->colHeaders($sheet, $r, $colMap);
+        $r++;
+
+        $globalDet = (array)($global['nomina_detalle'] ?? []);
+        $unassignedDet = (array)($unassigned['nomina_detalle'] ?? []);
+        $rowIdx = 0;
+
+        // Scalar concepts
+        foreach ($conceptos as $label2 => $field) {
+            $gVal = (float)($global[$field] ?? 0);
+            $uVal = (float)($unassigned[$field] ?? 0);
+            $anyVal = $gVal > 0 || $uVal > 0;
+            foreach ($branchCols as $col => $b) {
+                if ((float)($b[$field] ?? 0) > 0) { $anyVal = true; }
+            }
+            if (!$anyVal) continue;
+            $sheet->setCellValue("A{$r}", $label2);
+            $sheet->setCellValue("B{$r}", $gVal);
+            $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("B{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            foreach ($branchCols as $col => $b) {
+                $val = (float)($b[$field] ?? 0);
+                $sheet->setCellValue("{$col}{$r}", $val);
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            }
+            $sheet->setCellValue("{$sinAsignarCol}{$r}", $uVal);
+            $sheet->getStyle("{$sinAsignarCol}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("{$sinAsignarCol}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            $this->dataRow($sheet, "A{$r}:{$lastCol}{$r}", $rowIdx % 2 === 0);
+            $rowIdx++;
+            $r++;
+        }
+
+        // nomina_detalle items
+        $allDetKeys = array_unique(array_merge($detOrder, array_keys($globalDet), array_keys($unassignedDet)));
+        foreach ($allDetKeys as $key) {
+            $gVal = (float)($globalDet[$key] ?? 0);
+            $uVal = (float)($unassignedDet[$key] ?? 0);
+            $anyVal = $gVal > 0 || $uVal > 0;
+            foreach ($branchCols as $col => $b) {
+                if ((float)(($b['nomina_detalle'] ?? [])[$key] ?? 0) > 0) { $anyVal = true; }
+            }
+            if (!$anyVal) continue;
+            $sheet->setCellValue("A{$r}", $key);
+            $sheet->setCellValue("B{$r}", $gVal);
+            $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("B{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            foreach ($branchCols as $col => $b) {
+                $val = (float)(($b['nomina_detalle'] ?? [])[$key] ?? 0);
+                $sheet->setCellValue("{$col}{$r}", $val);
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            }
+            $sheet->setCellValue("{$sinAsignarCol}{$r}", $uVal);
+            $sheet->getStyle("{$sinAsignarCol}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("{$sinAsignarCol}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            $this->dataRow($sheet, "A{$r}:{$lastCol}{$r}", $rowIdx % 2 === 0);
+            $rowIdx++;
+            $r++;
+        }
+
+        // Totals row
+        $sheet->setCellValue("A{$r}", 'TOTAL NÓMINA');
+        $gNomTot = (float)($global['nomina_total'] ?? 0) + (float)($global['comisiones'] ?? 0)
+            + (float)($global['bonos'] ?? 0) + (float)($global['vacaciones'] ?? 0)
+            + (float)($global['prima_vacacional'] ?? 0) + array_sum(array_values($globalDet));
+        $sheet->setCellValue("B{$r}", $gNomTot);
+        $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        foreach ($branchCols as $col => $b) {
+            $bNom = (float)($b['nomina_total'] ?? 0) + (float)($b['comisiones'] ?? 0)
+                + (float)($b['bonos'] ?? 0) + (float)($b['vacaciones'] ?? 0)
+                + (float)($b['prima_vacacional'] ?? 0) + array_sum(array_values((array)($b['nomina_detalle'] ?? [])));
+            $sheet->setCellValue("{$col}{$r}", $bNom);
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        }
+        $uNomTot = (float)($unassigned['nomina_total'] ?? 0) + (float)($unassigned['comisiones'] ?? 0)
+            + (float)($unassigned['bonos'] ?? 0) + (float)($unassigned['vacaciones'] ?? 0)
+            + (float)($unassigned['prima_vacacional'] ?? 0) + array_sum(array_values($unassignedDet));
+        $sheet->setCellValue("{$sinAsignarCol}{$r}", $uNomTot);
+        $sheet->getStyle("{$sinAsignarCol}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        $this->totalsRow($sheet, "A{$r}:{$lastCol}{$r}");
+
+        $sheet->getColumnDimension('A')->setWidth(34);
+        $sheet->getColumnDimension('B')->setWidth(18);
+        foreach (array_keys($branchCols) as $col) {
+            $sheet->getColumnDimension($col)->setWidth(14);
+        }
+        $sheet->getColumnDimension($sinAsignarCol)->setWidth(16);
+        $sheet->setAutoFilter("A3:{$lastCol}3");
+        $sheet->freezePane('B4');
     }
 
     // ── PER-BRANCH SHEETS ────────────────────────────────────────────────────

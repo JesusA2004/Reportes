@@ -28,6 +28,13 @@ use Inertia\Response;
 
 class ReportUploadController extends Controller {
 
+    /** Las 13 sucursales operativas — fuente de verdad para el selector UI. */
+    private const OPERATIVE_BRANCH_NAMES = [
+        'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
+        'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN JUAN DEL RÍO',
+        'SAN LUIS POTOSI', 'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
+    ];
+
     public function index(): Response {
         // Fuentes activas con sus flags de requerimiento
         $sources = DataSource::query()
@@ -191,7 +198,10 @@ class ReportUploadController extends Controller {
         $currentPeriodId = ($periods->firstWhere('can_receive_uploads', true)['id'] ?? null)
             ?: ($periods->first()['id'] ?? null);
 
-        $branches  = Branch::query()->where('is_active', true)->orderBy('name')->get(['id', 'name']);
+        $branches  = Branch::query()
+            ->whereIn('name', self::OPERATIVE_BRANCH_NAMES)
+            ->orderBy('name')
+            ->get(['id', 'name']);
         $employees = Employee::query()->where('is_active', true)->orderBy('full_name')
             ->with(['employeeBranchAssignments' => fn ($q) => $q->with('branch:id,name')->latest()])
             ->get(['id', 'full_name', 'normalized_name'])

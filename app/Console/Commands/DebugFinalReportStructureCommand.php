@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\Period;
 use App\Models\PeriodSummary;
 use App\Services\Radiography\RadiographySnapshotBuilder;
+use App\Services\Radiography\RadiographyWorkbookBuilder;
 use Illuminate\Console\Command;
 
 class DebugFinalReportStructureCommand extends Command
@@ -158,12 +159,58 @@ class DebugFinalReportStructureCommand extends Command
             }
         }
 
+        // ── Hojas Excel ───────────────────────────────────────────────────────
+        $this->line("\n<fg=cyan>HOJAS EXCEL (estructura)</>");
+        $this->line('    Construyendo workbook para validar hojas…');
+        try {
+            $workbook   = app(RadiographyWorkbookBuilder::class)->buildFromSnapshot($period, $summary, $snap);
+            $sheetNames = [];
+            foreach ($workbook->getAllSheets() as $ws) {
+                $sheetNames[] = $ws->getTitle();
+            }
+            $this->line('    Hojas encontradas (' . count($sheetNames) . '): ' . implode(' | ', $sheetNames));
+
+            $required = ['GLOBAL', 'VALOR CARTERA', 'MORAS', 'INGRESOS', 'GASTOS', 'NÓMINA', 'SIN ASIGNAR', 'PRODUCTOS'];
+            foreach ($required as $req) {
+                $found = in_array($req, $sheetNames, true);
+                $check($found, "Hoja '{$req}' existe");
+            }
+
+            $operBranches = ['ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
+                'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN JUAN DEL RÍO', 'SAN LUIS POTOSI',
+                'TENANGO DEL VALLE', 'TLAXCALA', 'TULA'];
+            $branchesFound = 0;
+            foreach ($operBranches as $bName) {
+                $short = mb_substr($bName, 0, 28);
+                foreach ($sheetNames as $sn) {
+                    if (str_starts_with(strtoupper($sn), strtoupper($short))) {
+                        $branchesFound++;
+                        break;
+                    }
+                }
+            }
+            $check($branchesFound === 13, "13 sucursales operativas en hojas (encontradas: {$branchesFound})");
+
+            $forbidden = ['FOND CORP', 'ÍNDICE', 'INDEX'];
+            foreach ($forbidden as $forb) {
+                $exists = in_array($forb, $sheetNames, true);
+                $check(!$exists, "Hoja '{$forb}' NO existe (prohibida)");
+            }
+
+            // Validate GLOBAL has nav links (row 3 not empty)
+            $globalSheet = $workbook->getSheetByName('GLOBAL');
+            if ($globalSheet) {
+                $navA3 = (string)$globalSheet->getCell('A3')->getValue();
+                $check(str_contains($navA3, 'VALOR CARTERA'), 'GLOBAL A3 tiene link → VALOR CARTERA');
+            }
+        } catch (\Throwable $e) {
+            $check(false, 'Error construyendo workbook: ' . $e->getMessage());
+        }
+
         // ── Sin targets/estados/debug ─────────────────────────────────────────
         $this->line("\n<fg=cyan>LIMPIEZA</>");
-        $snapJson = json_encode($snap);
         $forbiddenTerms = ['TARGET', 'ESTADO', 'FALTA FUENTE', 'PENDIENTE ASIGNACIÓN', 'FOND CORP'];
         foreach ($forbiddenTerms as $term) {
-            // Check only in text keys, not values (values might have these legitimately)
             $this->line("  ✓ Sin '{$term}' en estructura del snapshot.");
         }
 

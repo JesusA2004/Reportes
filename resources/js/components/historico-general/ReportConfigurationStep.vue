@@ -35,8 +35,27 @@ const comparablePeriods = computed(() =>
     props.periods.filter((p) => p.id !== props.period?.id && p.type === props.period?.type)
 )
 
-const branchItems = computed(() =>
-    props.branches.map((b) => ({ id: b.id, label: b.name }))
+// Fuente de verdad: las 13 sucursales operativas exactas.
+// Doble defensa: backend ya filtra, este computed rechaza cualquier extra que llegue.
+const OPERATIVE_BRANCH_NAMES = new Set([
+    'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
+    'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN JUAN DEL RÍO',
+    'SAN LUIS POTOSI', 'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
+])
+
+const FORBIDDEN_BRANCH_LIKE_ROUTES = new Set([
+    '20 DE NOVIEMBRE', 'ACAJ', 'AGUASCALIENTES', 'ALMOLOYA DE JUAREZ',
+    'APIX-SUR', 'APIZ-CEN', 'CHIHUAHUA', 'DURANGO', 'CORPORATIVO',
+    'FALSO', 'NORTE',
+])
+
+const operativeBranchItems = computed(() =>
+    props.branches
+        .filter((b) => {
+            const name = b.name.trim().toUpperCase()
+            return !FORBIDDEN_BRANCH_LIKE_ROUTES.has(name) && OPERATIVE_BRANCH_NAMES.has(name)
+        })
+        .map((b) => ({ id: b.id, label: b.name }))
 )
 const employeeItems = computed(() =>
     props.employees.map((e) => ({ id: e.id, label: e.full_name, sublabel: e.branch_name ?? undefined }))
@@ -117,7 +136,7 @@ const SCOPES = [
                             <span class="text-xs font-bold text-slate-600">Sucursal</span>
                             <div class="mt-1">
                                 <SearchableSelect
-                                    :items="branchItems"
+                                    :items="operativeBranchItems"
                                     :model-value="modelValue.branch_id"
                                     placeholder="Buscar sucursal..."
                                     @update:model-value="update({ branch_id: $event })"

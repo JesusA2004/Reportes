@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ArrowLeft, AlertTriangle, FileSpreadsheet, FileText, Search, ChevronDown, ChevronUp, Download } from 'lucide-vue-next'
 import AppLayout from '@/layouts/AppLayout.vue'
 
@@ -18,6 +18,7 @@ const props = defineProps<{
     allPeriods: { id: number; label: string; code: string; type: string; has_snapshot: boolean }[]
     filteredExcelBaseUrl: string
     filteredPdfBaseUrl: string
+    filteredDataUrl: string
 }>()
 
 // ── Filtered export config ───────────────────────────────────────────────────
@@ -84,6 +85,76 @@ const canDownloadFiltered = computed(() => {
     if (!isComparative.value && filteredScope.value === 'branch' && !filteredBranchId.value) return false
     if (!isComparative.value && filteredScope.value === 'employee' && !filteredEmployeeId.value) return false
     return true
+})
+
+// ── Filtered preview data (AJAX) ─────────────────────────────────────────────
+const filteredPreview   = ref<any>(null)
+const filteredLoading   = ref(false)
+const filteredFetchError = ref<string | null>(null)
+
+async function fetchFilteredPreview() {
+    if (filteredScope.value === 'general' || isComparative.value) {
+        filteredPreview.value = null
+        filteredFetchError.value = null
+        return
+    }
+    if (filteredScope.value === 'branch' && !filteredBranchId.value) {
+        filteredPreview.value = null
+        return
+    }
+    if (filteredScope.value === 'employee' && !filteredEmployeeId.value) {
+        filteredPreview.value = null
+        return
+    }
+
+    filteredLoading.value = true
+    filteredFetchError.value = null
+    filteredPreview.value = null
+
+    try {
+        const params = new URLSearchParams({ scope: filteredScope.value })
+        if (filteredScope.value === 'branch' && filteredBranchId.value)
+            params.set('branch_id', String(filteredBranchId.value))
+        if (filteredScope.value === 'employee' && filteredEmployeeId.value)
+            params.set('employee_id', String(filteredEmployeeId.value))
+
+        const resp = await fetch(`${props.filteredDataUrl}?${params}`, {
+            headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        })
+        const json = await resp.json()
+        if (!resp.ok || json.error) {
+            filteredFetchError.value = json.error ?? `Error ${resp.status}`
+        } else {
+            filteredPreview.value = json
+        }
+    } catch (e: any) {
+        filteredFetchError.value = e?.message ?? 'Error de red al cargar datos filtrados'
+    } finally {
+        filteredLoading.value = false
+    }
+}
+
+watch([filteredScope, filteredBranchId, filteredEmployeeId], fetchFilteredPreview)
+
+// Pre-populate filter from URL query params (e.g. from "Ver reporte completo" with scope)
+onMounted(() => {
+    const params = new URLSearchParams(window.location.search)
+    const scope  = params.get('scope')
+    if (scope === 'branch') {
+        const branchId = Number(params.get('branch_id')) || null
+        if (branchId) {
+            showFilteredPanel.value = true
+            filteredScope.value     = 'branch'
+            filteredBranchId.value  = branchId
+        }
+    } else if (scope === 'employee') {
+        const employeeId = Number(params.get('employee_id')) || null
+        if (employeeId) {
+            showFilteredPanel.value  = true
+            filteredScope.value      = 'employee'
+            filteredEmployeeId.value = employeeId
+        }
+    }
 })
 
 type TabKey = 'resumen' | 'radiografia' | 'productos' | 'sucursales' | 'empleados' | 'cartera' | 'gastos' | 'incidencias'
@@ -214,11 +285,7 @@ const empGest = computed(() => snap.value?.sections?.employees_gestores ?? [])
 // Filtros empleados
 const searchEmp     = ref('')
 const filterBranch  = ref('')
-const branchOptions = computed(() => {
-    const set = new Set<string>()
-    empGest.value.forEach((r: any) => { if (r.branch) set.add(r.branch) })
-    return Array.from(set).sort()
-})
+const branchOptions = computed(() => props.branches.map(b => b.name).sort())
 const filteredEmp = computed(() => {
     let rows = empGest.value
     if (searchEmp.value.trim()) {
@@ -448,6 +515,45 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                 <span v-else-if="filteredScope === 'branch'">Selecciona una sucursal.</span>
                                 <span v-else-if="filteredScope === 'employee'">Selecciona un gestor.</span>
                             </p>
+                        </div>
+
+                        <!-- Filtered preview panel -->
+                        <div v-if="filteredLoading" class="mt-3 text-xs text-slate-500 italic">Cargando datos…</div>
+                        <div v-else-if="filteredFetchError" class="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                            {{ filteredFetchError }}
+                        </div>
+                        <div v-else-if="filteredPreview?.data" class="mt-3 rounded-xl border bg-slate-50 px-4 py-3">
+                            <p class="mb-2 text-xs font-black uppercase tracking-wider text-slate-500">
+                                {{ filteredPreview.scope === 'employee' ? 'Gestor' : 'Sucursal' }}:
+                                {{ filteredPreview.label }}
+                                <span v-if="filteredPreview.data.branch" class="font-normal text-slate-400"> · {{ filteredPreview.data.branch }}</span>
+                                <span v-if="filteredPreview.data.route" class="font-normal text-slate-400"> · {{ filteredPreview.data.route }}</span>
+                            </p>
+                            <div class="grid grid-cols-2 gap-x-8 gap-y-1 text-sm sm:grid-cols-3 lg:grid-cols-6">
+                                <div v-for="(row, i) in (filteredPreview.scope === 'employee' ? [
+                                    ['Recuperación',   money(filteredPreview.data.recuperacion)],
+                                    ['Colocación',     money(filteredPreview.data.colocacion)],
+                                    ['Operaciones',    num(filteredPreview.data.operaciones ?? 0)],
+                                    ['Cartera',        money(filteredPreview.data.cartera)],
+                                    ['Mora total',     money(filteredPreview.data.mora_total)],
+                                    ['Mora %',         pct(filteredPreview.data.mora_pct)],
+                                    ['Nómina (pagos)', money(filteredPreview.data.pagos)],
+                                    ['Bonos',          money(filteredPreview.data.bonos)],
+                                    ['Descuentos',     money(filteredPreview.data.descuentos)],
+                                    ['Neto nómina',    money(filteredPreview.data.neto)],
+                                ] : [
+                                    ['Recuperación',   money(filteredPreview.data.recuperacion)],
+                                    ['Colocación',     money(filteredPreview.data.colocacion)],
+                                    ['Cartera',        money(filteredPreview.data.cartera)],
+                                    ['Mora total',     money(filteredPreview.data.mora_total)],
+                                    ['Mora %',         pct(filteredPreview.data.mora_pct)],
+                                    ['Gastos Op.',     money(filteredPreview.data.gastos)],
+                                    ['Nómina',         money(filteredPreview.data.nomina)],
+                                ])" :key="i">
+                                    <div class="text-xs text-slate-500">{{ row[0] }}</div>
+                                    <div class="font-black text-slate-900">{{ row[1] }}</div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>

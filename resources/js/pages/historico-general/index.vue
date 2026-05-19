@@ -392,7 +392,7 @@ const generateReport = () => {
                         :preview="preview"
                         :config="reportConfig"
                     />
-                    <GeneratedReportActions v-else :period="period" />
+                    <GeneratedReportActions v-else :period="period" :config="reportConfig" />
                 </transition>
 
             </template>
