@@ -13,12 +13,10 @@ export function useHistoricWorkflow(period: any, incidents: any) {
         const critical      = (incidents.value ?? []).filter((item: any) => item.severity === 'high').length
         const canConfig     = dbDone && critical === 0
         const radioRunning  = !!selected?.radiography_running
-        // Preview step: only "completed" when there's a real generated summary (preview_summary exists)
         const hasRealPreview = !!selected?.preview_summary
-        // Exports step: only "completed" when can_export is true (files really exist)
         const canExport     = !!selected?.can_export_radiography
 
-        const bdStatus = dbDone
+        const loadStatus = dbDone
             ? 'completed'
             : dbRunning
                 ? 'running'
@@ -36,51 +34,61 @@ export function useHistoricWorkflow(period: any, incidents: any) {
 
         const configStatus = !canConfig
             ? 'blocked'
+            : hasRealPreview
+                ? 'completed'
+                : 'ready'
+
+        const generateStatus = !canConfig
+            ? 'blocked'
             : radioRunning
                 ? 'running'
                 : hasRealPreview
-                    ? 'completed'
+                    ? 'generated'
                     : 'ready'
 
         return [
             {
                 key: 'files',
-                label: 'Periodo y archivos',
-                description: 'Selecciona periodo y carga las 5 fuentes.',
+                label: 'Archivos y periodo',
+                description: 'Selecciona el periodo operativo y carga los archivos requeridos.',
                 status: selected
                     ? (selected.missing_radiography_sources?.length ? 'ready' : 'completed')
                     : 'pending',
             },
             {
-                key: 'bd',
-                label: 'Actualización BD',
-                description: 'Actualiza empleados y sucursales con NOI y Cobranza.',
-                status: bdStatus,
+                key: 'load',
+                label: 'Cargar registros',
+                description: 'Lee los archivos y guarda los registros base necesarios para el reporte.',
+                status: loadStatus,
             },
             {
                 key: 'incidents',
                 label: 'Incidencias',
-                description: 'Resuelve incidencias críticas antes de generar.',
+                description: 'Resuelve incidencias críticas antes de generar el reporte.',
                 status: incidentsStatus,
             },
             {
                 key: 'config',
                 label: 'Configurar reporte',
-                description: 'Tipo, alcance y filtros del reporte.',
+                description: 'Define si el reporte será general, por sucursal, por gestor o comparativo.',
                 status: configStatus,
+            },
+            {
+                key: 'generate',
+                label: 'Generar reporte',
+                description: 'Calcula las métricas del reporte según la configuración seleccionada.',
+                status: generateStatus,
             },
             {
                 key: 'preview',
                 label: 'Vista previa',
-                description: 'Resumen del reporte generado.',
-                // Only "completed" when a real summary exists, not just because run was queued
+                description: 'Revisa KPIs, tablas y gráficas antes de exportar.',
                 status: hasRealPreview ? 'completed' : radioRunning ? 'running' : 'blocked',
             },
             {
                 key: 'exports',
-                label: 'Exportación / archivos',
-                description: 'Excel, PDF y vista completa del reporte.',
-                // Only "completed" when files actually exist
+                label: 'Exportación',
+                description: 'Descarga Excel y PDF generados desde el mismo resultado.',
                 status: canExport ? 'completed' : radioRunning ? 'running' : 'blocked',
             },
         ] as any[]

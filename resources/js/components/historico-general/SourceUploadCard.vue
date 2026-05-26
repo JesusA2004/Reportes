@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { FileCheck2, FileSpreadsheet, FileText, RefreshCw, Trash2, UploadCloud, X } from 'lucide-vue-next'
+import { FileCheck2, FileSpreadsheet, FileText, Trash2, UploadCloud, X } from 'lucide-vue-next'
 import Swal from 'sweetalert2'
 import StatusBadge from './StatusBadge.vue'
 
@@ -8,7 +8,6 @@ const props = defineProps<{ source: any; upload?: any; disabled?: boolean; selec
 const emit = defineEmits<{
     (event: 'upload', payload: { sourceId: number; file: File }): void
     (event: 'delete', id: number): void
-    (event: 'reprocess', id: number): void
 }>()
 
 const file = ref<File | null>(null)
@@ -64,7 +63,7 @@ const doUpload = () => {
                 <div>
                     <div class="flex flex-wrap items-center gap-2">
                         <h3 class="font-black text-slate-950">{{ source.name }}</h3>
-                        <span v-if="isRequiredForDb" class="rounded-full bg-indigo-50 px-2 py-1 text-[11px] font-black text-indigo-700">Req. BD</span>
+                        <span v-if="isRequiredForDb" class="rounded-full bg-indigo-50 px-2 py-1 text-[11px] font-black text-indigo-700">Req. Carga</span>
                         <span v-if="isRequiredForReport" class="rounded-full bg-violet-50 px-2 py-1 text-[11px] font-black text-violet-700">Req. Radiografía</span>
                         <span v-if="!isRequiredForDb && !isRequiredForReport" class="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-black text-slate-500">Opcional</span>
                     </div>
@@ -108,9 +107,8 @@ const doUpload = () => {
 
         <div class="mt-4 flex flex-wrap gap-2">
             <button type="button" class="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-black text-white shadow-lg shadow-indigo-100 transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50" :disabled="disabled || !file" @click="doUpload">
-                {{ upload ? 'Reemplazar' : 'Subir' }}
+                {{ upload ? 'Reemplazar archivo' : 'Subir archivo' }}
             </button>
-            <button v-if="upload" type="button" class="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50" @click="emit('reprocess', upload.id)"><RefreshCw class="mr-1 inline size-4" /> Reprocesar</button>
             <button v-if="upload" type="button" class="rounded-xl border border-rose-200 px-4 py-2 text-sm font-bold text-rose-700 transition hover:bg-rose-50" @click="emit('delete', upload.id)"><Trash2 class="mr-1 inline size-4" /> Eliminar</button>
         </div>
     </article>

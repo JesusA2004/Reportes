@@ -26,7 +26,7 @@ const filtered = computed(() => props.incidents.filter((item) => {
 
 <template>
     <section class="rounded-[2rem] border border-white/70 bg-white p-6 shadow-xl shadow-slate-200/70">
-        <SectionHeader eyebrow="Etapa 3" title="Incidencias integradas" description="Revisa y resuelve hallazgos críticos antes de configurar la generación del reporte." >
+        <SectionHeader eyebrow="Etapa 3" title="Incidencias" description="Resuelve incidencias críticas antes de generar el reporte. Las incidencias críticas bloquean la generación." >
             <button type="button" class="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50" @click="emit('refresh')">Refrescar</button>
         </SectionHeader>
 

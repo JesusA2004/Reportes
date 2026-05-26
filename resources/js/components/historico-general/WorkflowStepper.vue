@@ -10,7 +10,7 @@ const emit = defineEmits<{ (event: 'select', key: string): void }>()
 
 <template>
     <section class="rounded-[2rem] border border-white/70 bg-white/90 p-4 shadow-xl shadow-slate-200/70 backdrop-blur sm:p-5">
-        <div class="grid gap-3 lg:grid-cols-6">
+        <div class="grid gap-3 lg:grid-cols-7">
             <button
                 v-for="(step, index) in steps"
                 :key="step.key"

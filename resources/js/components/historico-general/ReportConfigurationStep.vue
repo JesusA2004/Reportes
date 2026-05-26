@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { SlidersHorizontal, TriangleAlert } from 'lucide-vue-next'
+import { SlidersHorizontal } from 'lucide-vue-next'
 import SectionHeader from './SectionHeader.vue'
 import SearchableSelect from './SearchableSelect.vue'
 
@@ -22,7 +22,7 @@ const props = defineProps<{
     employees: Array<{ id: number; full_name: string; branch_name?: string }>
     canGenerate: boolean
 }>()
-const emit = defineEmits<{ (event: 'update:modelValue', value: ReportConfig): void; (event: 'generate'): void }>()
+const emit = defineEmits<{ (event: 'update:modelValue', value: ReportConfig): void; (event: 'next'): void }>()
 
 const update = (patch: Partial<ReportConfig>) => emit('update:modelValue', { ...props.modelValue, ...patch })
 
@@ -35,12 +35,13 @@ const comparablePeriods = computed(() =>
     props.periods.filter((p) => p.id !== props.period?.id && p.type === props.period?.type)
 )
 
-// Fuente de verdad: las 13 sucursales operativas exactas.
+// Fuente de verdad: las 12 sucursales operativas exactas.
+// SAN JUAN DEL RÍO fue eliminada (sucursal cerrada).
 // Doble defensa: backend ya filtra, este computed rechaza cualquier extra que llegue.
 const OPERATIVE_BRANCH_NAMES = new Set([
     'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
-    'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN JUAN DEL RÍO',
-    'SAN LUIS POTOSI', 'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
+    'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN LUIS POTOSI',
+    'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
 ])
 
 const FORBIDDEN_BRANCH_LIKE_ROUTES = new Set([
@@ -85,7 +86,7 @@ const SCOPES = [
 
 <template>
     <section class="rounded-[2rem] border border-white/70 bg-white p-6 shadow-xl shadow-slate-200/70">
-        <SectionHeader eyebrow="Etapa 4" title="Configurar reporte" description="Elige si será Radiografía simple o comparativo. La Radiografía simple solo usa el periodo seleccionado: sin meses inventados, sin flechas, sin comparaciones." />
+        <SectionHeader eyebrow="Etapa 4" title="Configurar reporte" description="Define el tipo, alcance y filtros del reporte. Una vez guardada la configuración podrás proceder a generar el reporte." />
 
         <div class="mt-6 grid gap-5 xl:grid-cols-[1fr_0.85fr]">
             <!-- Columna izquierda: tipo + alcance + filtros condicionales -->
@@ -220,32 +221,21 @@ const SCOPES = [
                     </div>
                 </div>
 
-                <!-- Botón generar -->
+                <!-- Botón guardar configuración -->
                 <div class="space-y-3">
                     <button
                         type="button"
                         class="h-12 w-full rounded-2xl bg-slate-950 px-5 text-sm font-black text-white shadow-xl shadow-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                         :disabled="!canSubmit"
-                        @click="emit('generate')"
+                        @click="emit('next')"
                     >
-                        Generar reporte
+                        Guardar configuración y continuar
                     </button>
 
-                    <!-- Razones de bloqueo -->
-                    <div v-if="period?.blocking_reasons?.length" class="rounded-2xl border border-amber-200 bg-amber-50 p-4">
-                        <div class="flex items-center gap-2">
-                            <TriangleAlert class="size-4 shrink-0 text-amber-600" />
-                            <p class="text-sm font-black text-amber-800">Aún no puedes generar</p>
-                        </div>
-                        <ul class="mt-2 list-disc pl-5 text-sm text-amber-700">
-                            <li v-for="reason in period.blocking_reasons" :key="reason">{{ reason }}</li>
-                        </ul>
-                    </div>
-
                     <!-- Validaciones locales de configuración -->
-                    <div v-else-if="!canSubmit && canGenerate" class="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-                        <p v-if="isBranchScope && !modelValue.branch_id">Selecciona una sucursal para generar el reporte.</p>
-                        <p v-else-if="isEmployeeScope && !modelValue.employee_id">Selecciona un empleado o gestor para generar el reporte.</p>
+                    <div v-if="!canSubmit && canGenerate" class="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                        <p v-if="isBranchScope && !modelValue.branch_id">Selecciona una sucursal para continuar.</p>
+                        <p v-else-if="isEmployeeScope && !modelValue.employee_id">Selecciona un empleado o gestor para continuar.</p>
                         <p v-else-if="isComparative && !modelValue.compare_period_id">Selecciona el periodo a comparar.</p>
                     </div>
                 </div>

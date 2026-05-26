@@ -22,22 +22,39 @@ class Portfolio extends Model {
         'num_payments',
         'periodicity',
         'route_name',
+        // D) valor cartera
         'balance',
         'past_due_balance',
+        // C) préstamo activo — DISTINCT from balance (saldo_actual)
+        'capital_activo',
+        // B) mora components
         'capital_due',
+        'interes_atrasado',
+        'impuesto_atrasado',
+        'saldo_interes_moratorio',
+        'saldo_impuesto_interes_moratorio',
+        'cargos_calendario_atrasado',
+        'impuesto_cargos_calendario_atrasado',
         'days_past_due',
         'portfolio_date',
         'raw_payload',
     ];
 
     protected $casts = [
-        'balance' => 'decimal:2',
-        'past_due_balance' => 'decimal:2',
-        'capital_due' => 'decimal:2',
-        'days_past_due' => 'integer',
-        'num_payments' => 'integer',
-        'portfolio_date' => 'date',
-        'raw_payload' => 'array',
+        'balance'                            => 'decimal:2',
+        'past_due_balance'                   => 'decimal:2',
+        'capital_activo'                     => 'decimal:2',
+        'capital_due'                        => 'decimal:2',
+        'interes_atrasado'                   => 'decimal:2',
+        'impuesto_atrasado'                  => 'decimal:2',
+        'saldo_interes_moratorio'            => 'decimal:2',
+        'saldo_impuesto_interes_moratorio'   => 'decimal:2',
+        'cargos_calendario_atrasado'         => 'decimal:2',
+        'impuesto_cargos_calendario_atrasado' => 'decimal:2',
+        'days_past_due'                      => 'integer',
+        'num_payments'                       => 'integer',
+        'portfolio_date'                     => 'date',
+        'raw_payload'                        => 'array',
     ];
 
     public function period(): BelongsTo {

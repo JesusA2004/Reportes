@@ -58,9 +58,9 @@ const pdfSubtitle = computed(() => {
 <template>
     <section class="rounded-[2rem] border border-white/70 bg-white p-6 shadow-xl shadow-slate-200/70">
         <SectionHeader
-            eyebrow="Etapa 6"
-            title="Exportación / archivos generados"
-            description="Descarga el Excel y PDF generados desde cero, o abre la vista previa completa del reporte."
+            eyebrow="Etapa 7"
+            title="Exportación"
+            description="Descarga Excel y PDF generados desde el mismo resultado del reporte. Ambos archivos reflejan exactamente lo que ves en la vista previa."
         />
 
         <div class="mt-6 grid gap-4 md:grid-cols-3">

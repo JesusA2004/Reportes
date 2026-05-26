@@ -140,7 +140,7 @@ class DebugBranchBreakdownCommand extends Command
         }
 
         // ── GLOBAL ──────────────────────────────────────────────────────────
-        $this->info('── GLOBAL (suma 13 sucursales) ─────────────────────────────');
+        $this->info('── GLOBAL (suma 12 sucursales) ─────────────────────────────');
         $this->line(sprintf('  Cartera       %s', $this->fmt((float)$global['valor_cartera'])));
         $this->line(sprintf('  Colocación    %s', $this->fmt((float)$global['colocacion'])));
         $this->line(sprintf('  Recuperación  %s', $this->fmt((float)$global['recuperacion_total'])));

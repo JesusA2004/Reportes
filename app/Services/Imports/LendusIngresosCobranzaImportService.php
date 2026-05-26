@@ -9,6 +9,8 @@ use App\Models\PeriodDatabaseUpdateRun;
 use App\Models\Recovery;
 use App\Models\ReportUpload;
 use App\Services\BranchResolverService;
+use App\Services\ColumnMapService;
+use App\Services\SaveheartsRuleService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -21,7 +23,11 @@ class LendusIngresosCobranzaImportService {
 
     private array $branchCache = [];
 
-    public function __construct(private readonly BranchResolverService $branchResolver) {}
+    public function __construct(
+        private readonly BranchResolverService $branchResolver,
+        private readonly ColumnMapService $columnMap,
+        private readonly SaveheartsRuleService $savehearts,
+    ) {}
 
     public function handle(ReportUpload $upload, ?callable $progress = null): array
     {
@@ -80,7 +86,7 @@ class LendusIngresosCobranzaImportService {
 
         $headerMap = $this->buildHeaderMap($headerRow);
 
-        $requiredColumns = ['branch_name', 'promoter_name'];
+        $requiredColumns = ['promoter_name'];
 
         $missingRequired = collect($requiredColumns)
             ->filter(fn (string $field) => !array_key_exists($field, $headerMap))
@@ -147,46 +153,65 @@ class LendusIngresosCobranzaImportService {
                         continue;
                     }
 
-                    $branch = $this->resolveBranchSmart($mapped['promoter_name'], $mapped['branch_name']);
+                    // ── Savehearts rule ────────────────────────────────────────
+                    $isSavehearts = $this->savehearts->isSaveheartsRow($mapped);
+                    $saveheartsShare = $isSavehearts
+                        ? $this->savehearts->saveheartsCompanyShare($mapped)
+                        : 0.0;
+
+                    // Non-CRECE Savehearts: zero out all metric amounts (auditing only)
+                    if ($isSavehearts && $saveheartsShare === 0.0) {
+                        $mapped['capital']      = 0;
+                        $mapped['interest']     = 0;
+                        $mapped['tax']          = 0;
+                        $mapped['charges']      = 0;
+                        $mapped['charges_due']  = 0;
+                        $mapped['excedente']    = 0;
+                        $mapped['total_amount'] = 0;
+                    }
+
+                    $branch = $this->resolveBranchFromCobranza(
+                        $mapped['contract'],
+                        $mapped['promoter_name'],
+                        $mapped['branch_name_raw'],
+                    );
 
                     $batch[] = [
-                        'period_id' => $upload->period_id,
-                        'report_upload_id' => $upload->id,
-                        'branch_id' => $branch?->id,
-                        // esto sí existe en tu BD; si no lo quieres usar, déjalo null
-                        'contract' => null,
-                        'client_name' => $mapped['client_name'],
-                        'normalized_client_name' => $mapped['client_name']
+                        'period_id'               => $upload->period_id,
+                        'report_upload_id'        => $upload->id,
+                        'branch_id'               => $branch?->id,
+                        'contract'                => $mapped['contract'],
+                        'client_name'             => $mapped['client_name'],
+                        'normalized_client_name'  => $mapped['client_name']
                             ? $this->normalizeHumanName($mapped['client_name'])
                             : null,
-                        'promoter_name' => $mapped['promoter_name'],
-                        'product_name' => $mapped['product_name'],
-                        'capital' => $mapped['capital'],
-                        'interest' => $mapped['interest'],
-                        'tax' => $mapped['tax'],
-                        'charges' => $mapped['charges'],
-                        'total_amount' => $mapped['total_amount'],
-                        'payment_date' => $mapped['payment_date'],
-                        // payload mínimo, no todo el renglón
-                        'raw_payload' => json_encode([
-                            'office_name' => $mapped['branch_name'],
-                            'office_normalized' => $mapped['branch_name']
-                                ? $this->normalizeHumanName($mapped['branch_name'])
-                                : null,
-                            'route_name' => $mapped['route_name'],
-                            'zone_name' => $mapped['zone_name'],
-                            'promoter_name' => $mapped['promoter_name'],
-                            'promoter_normalized' => $mapped['promoter_name']
-                                ? $this->normalizeHumanName($mapped['promoter_name'])
-                                : null,
-                            'client_name' => $mapped['client_name'],
-                            'accredited_name' => $mapped['accredited_name'],
-                            'product_name' => $mapped['product_name'],
-                            'concept' => $mapped['concept'],
-                            'transaction' => $mapped['transaction'],
+                        'promoter_name'           => $mapped['promoter_name'],
+                        'product_name'            => $mapped['product_name'],
+                        'operation'               => $mapped['operation'],
+                        'concept'                 => $mapped['concept'],
+                        'transaction'             => $mapped['transaction'],
+                        'capital'                 => $mapped['capital'],
+                        'interest'                => $mapped['interest'],
+                        'tax'                     => $mapped['tax'],
+                        'charges'                 => $mapped['charges'],
+                        'charges_due'             => $mapped['charges_due'],
+                        'excedente'               => $mapped['excedente'],
+                        'total_amount'            => $mapped['total_amount'],
+                        'days_past_due'           => $mapped['days_past_due'],
+                        'payment_date'            => $mapped['payment_date'],
+                        'is_savehearts'           => $isSavehearts,
+                        'savehearts_crece_share'  => $saveheartsShare,
+                        'raw_payload'             => json_encode([
+                            'branch_name_raw'    => $mapped['branch_name_raw'],
+                            'promoter_name'      => $mapped['promoter_name'],
+                            'client_name'        => $mapped['client_name'],
+                            'product_name'       => $mapped['product_name'],
+                            'operation'          => $mapped['operation'],
+                            'concept'            => $mapped['concept'],
+                            'transaction'        => $mapped['transaction'],
                         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                        'created_at' => now(),
-                        'updated_at' => now(),
+                        'created_at'              => now(),
+                        'updated_at'              => now(),
                     ];
                 } catch (\Throwable $e) {
                     $rowsWithErrors++;
@@ -194,7 +219,6 @@ class LendusIngresosCobranzaImportService {
                     throw new \RuntimeException(
                         'Error al preparar fila de cobranza. '
                         . 'Promotor: ' . ($mapped['promoter_name'] ?? 'N/D')
-                        . ' | Oficina: ' . ($mapped['branch_name'] ?? 'N/D')
                         . ' | Cliente: ' . ($mapped['client_name'] ?? 'N/D')
                         . ' | Detalle: ' . $e->getMessage()
                     );
@@ -603,7 +627,7 @@ class LendusIngresosCobranzaImportService {
         $headerRow        = $rows[$headerRowIndex] ?? [];
         $headerMap        = $this->buildHeaderMap($headerRow);
         $promoterColIndex = $headerMap['promoter_name'] ?? null;
-        $branchColIndex   = $headerMap['branch_name'] ?? null;
+        $branchColIndex   = $headerMap['branch_name_raw'] ?? null;
 
         if ($promoterColIndex === null) {
             $detected = implode(', ', array_filter(array_map(fn($v) => $this->cellToString($v), $headerRow), fn($v) => $v !== ''));
@@ -695,19 +719,22 @@ class LendusIngresosCobranzaImportService {
             foreach ($normalized as $value) {
                 if (
                     in_array($value, [
-                        'oficina',
-                        'ruta',
-                        'sucursal',
-                        'zona',
                         'promotor',
-                        'cliente',
-                        'nombre_del_cliente',
-                        'acreditado',
-                        'nombre_acreditado',
+                        'contrato',
                         'producto_de_credito',
                         'operacion',
                         'concepto',
                         'transaccion',
+                        'capital',
+                        'interes',
+                        'impuesto',
+                        'cargos_calendario',
+                        'cargos_vencimiento',
+                        'excedente',
+                        'total',
+                        'dias_vencidos_pago',
+                        'oficina',
+                        'ruta',
                         'fecha_transaccion',
                     ], true)
                 ) {
@@ -727,38 +754,26 @@ class LendusIngresosCobranzaImportService {
     private function buildHeaderMap(array $headerRow): array
     {
         $normalizedHeaders = [];
-
         foreach ($headerRow as $index => $header) {
-            $normalizedHeaders[(int) $index] = $this->normalizeHeader($this->cellToString($header));
+            $normalized = $this->normalizeHeader($this->cellToString($header));
+            if ($normalized !== '') {
+                $normalizedHeaders[(int) $index] = $normalized;
+            }
         }
 
-        $aliases = [
-            'branch_name' => ['oficina', 'ruta', 'sucursal', 'oficina_ruta'],
-            'route_name' => ['ruta', 'oficina', 'sucursal'],
-            'zone_name' => ['zona', 'region'],
-            'promoter_name' => ['promotor', 'asesor', 'ejecutivo', 'colaborador'],
-            'client_name' => ['nombre_del_cliente', 'cliente', 'nombre_cliente'],
-            'accredited_name' => ['nombre_acreditado', 'acreditado'],
-            'product_name' => ['producto_de_credito', 'producto', 'tipo_credito', 'tipo_de_credito'],
-            'num_payments' => ['pagos', 'numero_de_pagos', 'num_pagos', 'no_pagos', 'plazo', 'numero_pagos'],
-            'periodicity' => ['periodicidad', 'frecuencia', 'frecuencia_pago'],
-            'concept' => ['concepto', 'operacion', 'movimiento'],
-            'transaction' => ['transaccion', 'tipo_transaccion'],
-            'payment_date' => ['fecha_transaccion', 'fecha_cuota', 'fecha_pago'],
-            'capital' => ['capital', 'capital_pagado', 'abono_capital'],
-            'interest' => ['interes', 'intereses', 'interes_pagado'],
-            'tax' => ['iva', 'impuesto', 'tax'],
-            'charges' => ['mora', 'cargos', 'cargo', 'comision', 'comisiones'],
-            'total_amount' => ['importe', 'monto', 'total', 'importe_total', 'monto_total', 'ingreso', 'recuperacion'],
-        ];
+        // Use ColumnMapService as the single source of truth for authorized columns.
+        $defs = $this->columnMap->getFieldDefinitions('lendus_ingresos_cobranza');
+        $map  = [];
+        $matched = [];
 
-        $map = [];
-
-        foreach ($aliases as $field => $possibleHeaders) {
-            foreach ($normalizedHeaders as $index => $normalizedHeader) {
-                if (in_array($normalizedHeader, $possibleHeaders, true)) {
-                    $map[$field] = $index;
-                    break;
+        foreach ($defs as $field => $def) {
+            foreach ($def['aliases'] as $alias) {
+                foreach ($normalizedHeaders as $index => $normalizedHeader) {
+                    if ($normalizedHeader === $alias && !in_array($index, $matched, true)) {
+                        $map[$field] = $index;
+                        $matched[]   = $index;
+                        break 2;
+                    }
                 }
             }
         }
@@ -768,60 +783,80 @@ class LendusIngresosCobranzaImportService {
 
     private function mapRow(array $row, array $headerMap): array
     {
-        $branchName = $this->cleanString($this->valueFromRow($row, $headerMap, 'branch_name'));
-        $routeName = $this->cleanString($this->valueFromRow($row, $headerMap, 'route_name'));
-        $zoneName = $this->cleanString($this->valueFromRow($row, $headerMap, 'zone_name'));
-        $promoterName = $this->cleanString($this->valueFromRow($row, $headerMap, 'promoter_name'));
-        $clientName = $this->cleanString($this->valueFromRow($row, $headerMap, 'client_name'));
-        $accreditedName = $this->cleanString($this->valueFromRow($row, $headerMap, 'accredited_name'));
+        $promoterName   = $this->cleanString($this->valueFromRow($row, $headerMap, 'promoter_name'));
+        $contract       = $this->cleanString($this->valueFromRow($row, $headerMap, 'contract'));
+        $clientName     = $this->cleanString($this->valueFromRow($row, $headerMap, 'client_name'));
+        $branchNameRaw  = $this->cleanString($this->valueFromRow($row, $headerMap, 'branch_name_raw'));
         $rawProductName = $this->cleanString($this->valueFromRow($row, $headerMap, 'product_name'));
-        $numPayments = (int)($this->toDecimal($this->valueFromRow($row, $headerMap, 'num_payments')) ?? 0) ?: null;
-        $periodicity = $this->cleanString($this->valueFromRow($row, $headerMap, 'periodicity'));
-        $productName = $rawProductName
-            ? $this->branchResolver->normalizeProduct($rawProductName, $numPayments, $periodicity)
+        $productName    = $rawProductName
+            ? $this->branchResolver->normalizeProduct($rawProductName, null, null)
             : null;
-        $concept = $this->cleanString($this->valueFromRow($row, $headerMap, 'concept'));
+
+        $operation   = $this->cleanString($this->valueFromRow($row, $headerMap, 'operation'));
+        $concept     = $this->cleanString($this->valueFromRow($row, $headerMap, 'concept'));
         $transaction = $this->cleanString($this->valueFromRow($row, $headerMap, 'transaction'));
         $paymentDate = $this->toDateValue($this->valueFromRow($row, $headerMap, 'payment_date'));
 
-        $capital = $this->toDecimal($this->valueFromRow($row, $headerMap, 'capital')) ?? 0;
-        $interest = $this->toDecimal($this->valueFromRow($row, $headerMap, 'interest')) ?? 0;
-        $tax = $this->toDecimal($this->valueFromRow($row, $headerMap, 'tax')) ?? 0;
-        $charges = $this->toDecimal($this->valueFromRow($row, $headerMap, 'charges')) ?? 0;
+        $capital     = $this->toDecimal($this->valueFromRow($row, $headerMap, 'capital'))      ?? 0;
+        $interest    = $this->toDecimal($this->valueFromRow($row, $headerMap, 'interest'))     ?? 0;
+        $tax         = $this->toDecimal($this->valueFromRow($row, $headerMap, 'tax'))          ?? 0;
+        $charges     = $this->toDecimal($this->valueFromRow($row, $headerMap, 'charges'))      ?? 0;
+        $chargesDue  = $this->toDecimal($this->valueFromRow($row, $headerMap, 'charges_due'))  ?? 0;
+        $excedente   = $this->toDecimal($this->valueFromRow($row, $headerMap, 'excedente'))    ?? 0;
+        $daysPastDue = (int) ($this->toDecimal($this->valueFromRow($row, $headerMap, 'days_past_due')) ?? 0) ?: null;
 
-        $explicitTotal = $this->toDecimal($this->valueFromRow($row, $headerMap, 'total_amount'));
-        $totalAmount = $explicitTotal ?? ($capital + $interest + $tax + $charges);
+        $explicitTotal = $this->toDecimal($this->valueFromRow($row, $headerMap, 'total'));
+        $totalAmount   = $explicitTotal ?? ($capital + $interest + $tax + $charges + $chargesDue);
 
         return [
-            'branch_name' => $branchName ?: $routeName,
-            'route_name' => $routeName,
-            'zone_name' => $zoneName,
-            'promoter_name' => $promoterName,
-            'client_name' => $clientName ?: $accreditedName,
-            'accredited_name' => $accreditedName,
-            'product_name' => $productName,
-            'concept' => $concept,
-            'transaction' => $transaction,
-            'payment_date' => $paymentDate,
-            'capital' => $capital,
-            'interest' => $interest,
-            'tax' => $tax,
-            'charges' => $charges,
-            'total_amount' => $totalAmount,
+            'promoter_name'   => $promoterName,
+            'contract'        => $contract,
+            'client_name'     => $clientName,
+            'branch_name_raw' => $branchNameRaw,
+            'product_name'    => $productName,
+            'operation'       => $operation,
+            'concept'         => $concept,
+            'transaction'     => $transaction,
+            'payment_date'    => $paymentDate,
+            'capital'         => $capital,
+            'interest'        => $interest,
+            'tax'             => $tax,
+            'charges'         => $charges,
+            'charges_due'     => $chargesDue,
+            'excedente'       => $excedente,
+            'total_amount'    => $totalAmount,
+            'days_past_due'   => $daysPastDue,
         ];
     }
 
     private function shouldInsertRow(array $mapped): bool
     {
-        if (!$mapped['branch_name'] && !$mapped['promoter_name']) {
-            return false;
+        return filled($mapped['promoter_name']);
+    }
+
+    /**
+     * Resolves the operative branch using:
+     * 1. Contract code prefix (e.g. "24ORI032294" → ORI → ORIZABA)
+     * 2. Promoter name if it starts with a recognizable code prefix
+     * 3. Raw branch/office column (internal — never shown as a metric)
+     */
+    private function resolveBranchFromCobranza(?string $contract, ?string $promoterName, ?string $branchNameRaw): ?Branch
+    {
+        if ($contract) {
+            $branch = $this->branchResolver->findOrCreateBranchByCode($contract);
+            if ($branch) {
+                return $branch;
+            }
         }
 
-        if (!$mapped['client_name'] && !$mapped['accredited_name']) {
-            return false;
+        if ($promoterName && preg_match('/^[A-Z]{2,4}\d{4,}/i', $promoterName)) {
+            $branch = $this->branchResolver->findOrCreateBranchByCode($promoterName);
+            if ($branch) {
+                return $branch;
+            }
         }
 
-        return true;
+        return $this->resolveBranch($branchNameRaw);
     }
 
     private function resolveBranch(?string $branchName): ?Branch
@@ -862,22 +897,6 @@ class LendusIngresosCobranzaImportService {
         return $this->branchCache[$normalized] = $branch;
     }
 
-    /**
-     * Resolves the REAL branch from a promoter code prefix (e.g., "ORI09247" → ORIZABA).
-     * If the code prefix is not recognized, falls back to the office/route column value.
-     */
-    private function resolveBranchSmart(?string $promoterName, ?string $officeName): ?Branch
-    {
-        // If promoter name looks like a code, try to resolve real branch from prefix
-        if ($promoterName && preg_match('/^[A-Z]{2,4}\d{4,}/i', $promoterName)) {
-            $branch = $this->branchResolver->findOrCreateBranchByCode($promoterName);
-            if ($branch) {
-                return $branch;
-            }
-        }
-
-        return $this->resolveBranch($officeName);
-    }
 
     private function valueFromRow(array $row, array $headerMap, string $field): mixed
     {

@@ -59,11 +59,11 @@ const currentStep = computed(() => runMeta.value?.current_step ?? null)
 const stats       = computed(() => runMeta.value?.stats ?? null)
 
 const statusConfig = computed(() => {
-    if (dbDone.value)    return { color: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700', label: 'Completada',          icon: CheckCircle,  iconClass: 'text-emerald-600' }
+    if (dbDone.value)    return { color: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700', label: 'Registros cargados',  icon: CheckCircle,  iconClass: 'text-emerald-600' }
     if (isQueued.value)  return { color: 'bg-violet-50 border-violet-200',   text: 'text-violet-700',  label: 'En cola…',            icon: LoaderCircle, iconClass: 'text-violet-600 animate-spin' }
-    if (isRunning.value) return { color: 'bg-indigo-50 border-indigo-200',   text: 'text-indigo-700',  label: 'Procesando…',         icon: LoaderCircle, iconClass: 'text-indigo-600 animate-spin' }
+    if (isRunning.value) return { color: 'bg-indigo-50 border-indigo-200',   text: 'text-indigo-700',  label: 'Cargando…',           icon: LoaderCircle, iconClass: 'text-indigo-600 animate-spin' }
     if (isFailed.value)  return { color: 'bg-rose-50 border-rose-200',       text: 'text-rose-700',    label: 'Falló',               icon: XCircle,      iconClass: 'text-rose-600' }
-    if (props.canUpdate) return { color: 'bg-slate-50 border-slate-200',     text: 'text-slate-600',   label: 'Lista para ejecutar', icon: ShieldCheck,  iconClass: 'text-slate-500' }
+    if (props.canUpdate) return { color: 'bg-slate-50 border-slate-200',     text: 'text-slate-600',   label: 'Lista para cargar',   icon: ShieldCheck,  iconClass: 'text-slate-500' }
     return               { color: 'bg-amber-50 border-amber-200',            text: 'text-amber-700',   label: 'Faltan fuentes',      icon: TriangleAlert, iconClass: 'text-amber-600' }
 })
 </script>
@@ -72,8 +72,8 @@ const statusConfig = computed(() => {
     <section class="rounded-[2rem] border border-white/70 bg-white p-6 shadow-xl shadow-slate-200/70">
         <SectionHeader
             eyebrow="Etapa 2"
-            title="Actualización de base de datos"
-            description="Actualiza la base operativa usando NOI Nómina y Cobranza. El proceso corre en segundo plano; recibirás un correo cuando termine."
+            title="Cargar registros"
+            description="Lee las fuentes cargadas y guarda los registros base en las tablas de hechos. El proceso corre en segundo plano; recibirás un correo cuando termine."
         />
 
         <div class="mt-6 grid gap-4 lg:grid-cols-[1fr_0.9fr]">
@@ -84,7 +84,7 @@ const statusConfig = computed(() => {
                     <div class="flex items-center gap-3">
                         <DatabaseZap class="size-6 shrink-0 text-indigo-600" />
                         <div>
-                            <p class="font-black text-slate-950">Fuentes obligatorias</p>
+                            <p class="font-black text-slate-950">Fuentes requeridas</p>
                             <p class="text-sm text-slate-500">NOI Nómina + Lendus Ingresos Cobranza</p>
                         </div>
                     </div>
@@ -92,28 +92,35 @@ const statusConfig = computed(() => {
                         <StatusBadge :status="period?.missing_database_sources?.includes('noi_nomina') ? 'blocked' : 'completed'" label="NOI Nómina" />
                         <StatusBadge :status="period?.missing_database_sources?.includes('lendus_ingresos_cobranza') ? 'blocked' : 'completed'" label="Cobranza" />
                     </div>
-                    <ul v-if="period?.blocking_reasons?.filter((r: string) => r.includes('BD') || r.includes('NOI') || r.includes('Cobranza') || r.includes('actualiza')).length"
-                        class="mt-4 list-disc space-y-1 pl-5 text-sm text-slate-600">
-                        <li v-for="reason in period.blocking_reasons.filter((r: string) => r.includes('BD') || r.includes('NOI') || r.includes('Cobranza') || r.includes('actualiza'))" :key="reason">{{ reason }}</li>
+                    <ul v-if="period?.blocking_reasons?.length" class="mt-4 list-disc space-y-1 pl-5 text-sm text-slate-600">
+                        <li v-for="reason in period.blocking_reasons" :key="reason">{{ reason }}</li>
                     </ul>
                 </div>
 
                 <!-- Stats post-procesamiento -->
-                <div v-if="stats" class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div v-if="stats" class="grid grid-cols-2 gap-3 sm:grid-cols-3">
                     <div v-if="stats.employees_detected !== undefined" class="rounded-2xl border border-indigo-100 bg-indigo-50 p-4 text-center">
-                        <p class="text-xs font-bold text-indigo-600">Empleados</p>
+                        <p class="text-xs font-bold text-indigo-600">Personas detectadas</p>
                         <p class="mt-1 text-2xl font-black text-indigo-800">{{ stats.employees_detected }}</p>
                     </div>
-                    <div v-if="stats.branches_detected !== undefined" class="rounded-2xl border border-sky-100 bg-sky-50 p-4 text-center">
-                        <p class="text-xs font-bold text-sky-600">Sucursales</p>
-                        <p class="mt-1 text-2xl font-black text-sky-800">{{ stats.branches_detected }}</p>
-                    </div>
                     <div v-if="stats.promoters_detected !== undefined" class="rounded-2xl border border-violet-100 bg-violet-50 p-4 text-center">
-                        <p class="text-xs font-bold text-violet-600">Promotores</p>
+                        <p class="text-xs font-bold text-violet-600">Gestores/promotores</p>
                         <p class="mt-1 text-2xl font-black text-violet-800">{{ stats.promoters_detected }}</p>
                     </div>
+                    <div v-if="stats.branches_included !== undefined" class="rounded-2xl border border-emerald-100 bg-emerald-50 p-4 text-center">
+                        <p class="text-xs font-bold text-emerald-600">Sucursales incluidas</p>
+                        <p class="mt-1 text-2xl font-black text-emerald-800">{{ stats.branches_included ?? 12 }}</p>
+                    </div>
+                    <div v-else-if="stats.employees_detected !== undefined" class="rounded-2xl border border-emerald-100 bg-emerald-50 p-4 text-center">
+                        <p class="text-xs font-bold text-emerald-600">Sucursales incluidas</p>
+                        <p class="mt-1 text-2xl font-black text-emerald-800">12</p>
+                    </div>
+                    <div v-if="stats.branches_excluded !== undefined" class="rounded-2xl border border-rose-100 bg-rose-50 p-4 text-center">
+                        <p class="text-xs font-bold text-rose-600">Sucursales excluidas</p>
+                        <p class="mt-1 text-2xl font-black text-rose-800">{{ stats.branches_excluded }}</p>
+                    </div>
                     <div v-if="stats.incidents_created !== undefined" class="rounded-2xl border border-amber-100 bg-amber-50 p-4 text-center">
-                        <p class="text-xs font-bold text-amber-600">Incidencias</p>
+                        <p class="text-xs font-bold text-amber-600">Incidencias de carga</p>
                         <p class="mt-1 text-2xl font-black text-amber-800">{{ stats.incidents_created }}</p>
                     </div>
                 </div>
@@ -184,7 +191,7 @@ const statusConfig = computed(() => {
                 <!-- Aviso corriendo (sin stuck) -->
                 <div v-if="isRunning && !stuckWarning" class="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
                     <p class="text-sm font-bold text-indigo-800">
-                        {{ isQueued ? 'El proceso está en cola esperando worker.' : 'El proceso corre en segundo plano.' }}
+                        {{ isQueued ? 'La carga está en cola esperando worker.' : 'La carga corre en segundo plano.' }}
                     </p>
                     <p class="mt-1 text-xs text-indigo-600">Puedes cerrar esta ventana. Te avisaremos por correo cuando termine.</p>
                     <div class="mt-3 flex flex-wrap gap-2">
@@ -200,14 +207,14 @@ const statusConfig = computed(() => {
                 <!-- Botón acción principal -->
                 <button v-if="!isRunning" type="button"
                     class="inline-flex h-12 w-full items-center justify-center rounded-2xl px-5 text-sm font-black transition focus:outline-none focus:ring-4 disabled:cursor-not-allowed disabled:opacity-50"
-                    :class="isFailed ? 'bg-rose-600 text-white shadow-lg shadow-rose-200 hover:bg-rose-700 focus:ring-rose-100' : 'bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 focus:ring-indigo-100'"
+                    :class="isFailed ? 'bg-rose-600 text-white shadow-lg shadow-rose-200 hover:bg-rose-700 focus:ring-rose-100' : dbDone ? 'bg-slate-700 text-white shadow-lg shadow-slate-200 hover:bg-slate-800 focus:ring-slate-100' : 'bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 focus:ring-indigo-100'"
                     :disabled="!canUpdate && !isFailed"
                     @click="emit('update')"
                 >
                     <ShieldCheck class="mr-2 size-5" />
-                    <span v-if="isFailed">Reintentar actualización</span>
-                    <span v-else-if="dbDone">Re-ejecutar actualización</span>
-                    <span v-else>Actualizar base de datos</span>
+                    <span v-if="isFailed">Reintentar carga de registros</span>
+                    <span v-else-if="dbDone">Volver a cargar desde archivos actuales</span>
+                    <span v-else>Cargar registros</span>
                 </button>
 
             </div>

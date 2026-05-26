@@ -57,7 +57,8 @@
       "Bash(Format-Table)",
       "Bash(2>&1)",
       "Bash(Start-Sleep -Seconds 30)",
-      "Bash(grep *)"
+      "Bash(grep *)",
+      "Bash(Sort-Object)"
     ]
   }
 }

@@ -8,7 +8,7 @@ use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Builds per-branch financial summaries for the 13 operative sucursales.
+ * Builds per-branch financial summaries for the 12 operative sucursales.
  * GLOBAL is always derived as the sum of those branch summaries,
  * never recalculated independently from all fact_* rows.
  */
@@ -37,7 +37,7 @@ class BranchRadiographyCalculator
      * Resolves all DB branches to their real operative sucursal.
      *
      * Returns:
-     *   'operative'   => [branch_id => real_sucursal_name]  (only the 13 sheet branches)
+     *   'operative'   => [branch_id => real_sucursal_name]  (only the 12 operative branches)
      *   'corporativo' => [branch_id, ...]
      */
     public function buildBranchMap(): array
@@ -61,9 +61,9 @@ class BranchRadiographyCalculator
     }
 
     /**
-     * Builds per-branch summaries for the 13 operative branches plus an unassigned bucket.
+     * Builds per-branch summaries for the 12 operative branches plus an unassigned bucket.
      *
-     * Returns ['branches' => [...13 summaries...], 'unassigned' => [nómina/comisiones/bonos/gastos sin sucursal]]
+     * Returns ['branches' => [...12 summaries...], 'unassigned' => [nómina/comisiones/bonos/gastos sin sucursal]]
      * GLOBAL must be computed via sumGlobal($branches, $unassigned) to include unassigned amounts.
      */
     public function buildBranches(Period $period, array $dataIds): array

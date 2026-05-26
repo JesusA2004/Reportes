@@ -582,7 +582,8 @@ class BranchResolverService
         return $this->normalizeRouteKey($name) === 'CORPORATIVO';
     }
 
-    // The 13 operative branches that receive their own Excel sheet.
+    // The 12 operative branches included in the financial report.
+    // SAN JUAN DEL RÍO was removed (branch closed).
     private const OPERATIVE_SHEET_BRANCHES = [
         'ATLACOMULCO',
         'ATLIXCO',
@@ -592,7 +593,6 @@ class BranchResolverService
         'IXTLAHUACA',
         'MIACATLAN',
         'ORIZABA',
-        'SAN JUAN DEL RÍO',
         'SAN LUIS POTOSI',
         'TENANGO DEL VALLE',
         'TLAXCALA',
@@ -600,9 +600,10 @@ class BranchResolverService
     ];
 
     /**
-     * Returns the 13 operative financial branches.
-     * Excludes AGUASCALIENTES, CHIHUAHUA, DURANGO, CORPORATIVO — none of these
-     * count for cartera, colocación, recuperación or mora calculations.
+     * Returns the 12 operative financial branches.
+     * Excludes SAN JUAN DEL RÍO (closed), AGUASCALIENTES, CHIHUAHUA, DURANGO,
+     * CORPORATIVO — none of these count for cartera, colocación, recuperación
+     * or mora calculations.
      */
     public function operativeFinancialBranches(): array
     {

@@ -10,10 +10,11 @@ const normalized = computed(() => props.status ?? 'pending')
 
 const label = computed(() => props.label ?? ({
     pending: 'Pendiente',
-    ready: 'Listo',
+    ready: 'Listo para generar',
     blocked: 'Bloqueado',
     running: 'En proceso',
     completed: 'Completo',
+    generated: 'Generado',
     success: 'Terminado',
     error: 'Con error',
     processed: 'Procesado',
@@ -30,6 +31,7 @@ const badgeClass = computed(() => ({
     blocked: 'border-amber-200 bg-amber-50 text-amber-700',
     running: 'border-indigo-200 bg-indigo-50 text-indigo-700',
     completed: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+    generated: 'border-emerald-200 bg-emerald-50 text-emerald-700',
     success: 'border-emerald-200 bg-emerald-50 text-emerald-700',
     processed: 'border-emerald-200 bg-emerald-50 text-emerald-700',
     error: 'border-rose-200 bg-rose-50 text-rose-700',

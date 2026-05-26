@@ -13,6 +13,7 @@ import ReportConfigurationStep from '@/components/historico-general/ReportConfig
 import ReportGenerationStatus from '@/components/historico-general/ReportGenerationStatus.vue'
 import ReportPreview from '@/components/historico-general/ReportPreview.vue'
 import GeneratedReportActions from '@/components/historico-general/GeneratedReportActions.vue'
+import SectionHeader from '@/components/historico-general/SectionHeader.vue'
 import { useHistoricWorkflow } from '@/composables/useHistoricWorkflow'
 
 defineOptions({ layout: AppLayout })
@@ -61,14 +62,13 @@ async function loadIncidents() {
 watch(selectedPeriodId, () => {
     incidents.value    = []
     currentStep.value  = 'files'
-    // Solo cargar incidencias si la BD ya está actualizada
+    // Solo cargar incidencias si los registros ya fueron cargados
     if (period.value?.database_updated) loadIncidents()
 }, { immediate: true })
 
 // ── Polling ──────────────────────────────────────────────────────────
 const isDbUpdating      = computed(() => ['queued', 'running'].includes(period.value?.database_update_run_status))
 const isRadioGenerating = computed(() => ['queued', 'running'].includes(period.value?.radiography_run_status))
-const isReprocessing    = computed(() => ['queued', 'running'].includes(period.value?.reprocess_run_status))
 
 let pollInterval: ReturnType<typeof setInterval> | null = null
 
@@ -83,8 +83,8 @@ function stopPolling() {
     if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
 }
 
-watch([isDbUpdating, isRadioGenerating, isReprocessing], ([db, radio, reprocess]) => {
-    if (db || radio || reprocess) startPolling()
+watch([isDbUpdating, isRadioGenerating], ([db, radio]) => {
+    if (db || radio) startPolling()
     else stopPolling()
 }, { immediate: true })
 
@@ -96,8 +96,8 @@ watch(() => period.value?.database_update_run_status, (newStatus, oldStatus) => 
     if (newStatus === 'success') {
         loadIncidents().then(() => {
             Swal.fire({
-                title: 'Base de datos actualizada',
-                html: `La BD del periodo <strong>${period.value?.label ?? ''}</strong> se actualizó correctamente.<br><br>Puedes revisar las incidencias y continuar.`,
+                title: 'Registros cargados',
+                html: `Los registros del periodo <strong>${period.value?.label ?? ''}</strong> se cargaron correctamente.<br><br>Puedes revisar las incidencias y continuar.`,
                 icon: 'success',
                 confirmButtonText: 'Revisar incidencias',
                 showCancelButton: true,
@@ -109,40 +109,14 @@ watch(() => period.value?.database_update_run_status, (newStatus, oldStatus) => 
         })
     } else if (newStatus === 'failed') {
         Swal.fire({
-            title: 'La actualización falló',
-            text: period.value?.database_update_run_error ?? 'El proceso terminó con error. Revisa el detalle en la etapa de Actualización BD.',
+            title: 'La carga de registros falló',
+            text: period.value?.database_update_run_error ?? 'El proceso terminó con error. Revisa el detalle en la etapa de Cargar registros.',
             icon: 'error',
             confirmButtonText: 'Ver detalle',
-        }).then(() => selectStep('bd'))
+        }).then(() => selectStep('load'))
     }
 })
 
-// Notificar cuando reprocesamiento termina
-watch(() => period.value?.reprocess_run_status, (newStatus, oldStatus) => {
-    const wasRunning = ['queued', 'running'].includes(String(oldStatus ?? ''))
-    if (!wasRunning) return
-
-    if (newStatus === 'success') {
-        Swal.fire({
-            title: 'Reprocesamiento completado',
-            html: `Todas las fuentes del periodo <strong>${period.value?.label ?? ''}</strong> fueron reprocesadas.<br><br>Puedes actualizar la BD y generar la Radiografía nuevamente.`,
-            icon: 'success',
-            confirmButtonText: 'Ir a actualizar BD',
-            showCancelButton: true,
-            cancelButtonText: 'Después',
-            reverseButtons: true,
-        }).then((r) => {
-            if (r.isConfirmed) selectStep('bd')
-        })
-    } else if (newStatus === 'failed') {
-        Swal.fire({
-            title: 'Reprocesamiento con errores',
-            text: period.value?.reprocess_run_log ?? 'El proceso terminó con errores. Revisa el detalle.',
-            icon: 'error',
-            confirmButtonText: 'Entendido',
-        })
-    }
-})
 
 onUnmounted(stopPolling)
 
@@ -172,51 +146,13 @@ const deleteUpload = async (id: number) => {
     router.delete(`/historico-general/${id}`, { preserveScroll: true, onSuccess: () => Swal.fire('Archivo eliminado', 'La fuente fue retirada correctamente.', 'success'), onError: () => Swal.fire('No se pudo eliminar', 'Intenta nuevamente.', 'error') })
 }
 
-const reprocessUpload = async (id: number) => {
-    const result = await Swal.fire({
-        title: '¿Reprocesar archivo?',
-        text: 'Se enviará el análisis a cola. Los datos anteriores serán reemplazados y recibirás un correo cuando termine.',
-        icon: 'warning',
-        showCancelButton: true,
-        confirmButtonText: 'Enviar a cola',
-        cancelButtonText: 'Cancelar',
-        reverseButtons: true,
-    })
-    if (!result.isConfirmed) return
-    router.post(`/historico-general/${id}/analizar`, {}, {
-        preserveScroll: true,
-        onSuccess: () => Swal.fire({ title: 'En cola', text: 'El archivo será reprocesado en segundo plano. Recibirás un correo al terminar.', icon: 'success', confirmButtonText: 'Entendido' }),
-        onError: () => Swal.fire('Error', 'No se pudo enviar a cola el reprocesamiento.', 'error'),
-    })
-}
-
-const reprocessAll = async () => {
-    if (!selectedPeriodId.value) return
-    const result = await Swal.fire({
-        title: 'Reprocesar todo el periodo',
-        html: `Se volverán a analizar <strong>todas las fuentes</strong> del periodo <strong>${period.value?.label ?? ''}</strong>.<br><br>Los datos actuales serán reemplazados y el reporte quedará invalidado. Recibirás un correo cuando termine.`,
-        icon: 'warning',
-        showCancelButton: true,
-        confirmButtonText: 'Sí, reprocesar todo',
-        cancelButtonText: 'Cancelar',
-        reverseButtons: true,
-        confirmButtonColor: '#dc2626',
-    })
-    if (!result.isConfirmed) return
-    router.post(`/historico-general/${selectedPeriodId.value}/reprocesar-todo`, {}, {
-        preserveScroll: true,
-        onSuccess: () => Swal.fire({ title: 'Reprocesamiento en cola', text: 'Todas las fuentes serán reprocesadas en segundo plano. Recibirás un correo cuando termine.', icon: 'success', confirmButtonText: 'Entendido' }),
-        onError: () => Swal.fire('No se pudo iniciar', 'Ya hay un reprocesamiento en curso o no hay fuentes disponibles.', 'error'),
-    })
-}
-
 const updateDatabase = async () => {
     if (!selectedPeriodId.value) return
-    const result = await Swal.fire({ title: 'Actualizar base de datos', text: 'Se enviará el proceso a cola. Recibirás un correo cuando termine.', icon: 'info', showCancelButton: true, confirmButtonText: 'Enviar a cola', cancelButtonText: 'Cancelar', reverseButtons: true })
+    const result = await Swal.fire({ title: 'Cargar registros', text: 'Se enviará el proceso a cola. Recibirás un correo cuando termine.', icon: 'info', showCancelButton: true, confirmButtonText: 'Enviar a cola', cancelButtonText: 'Cancelar', reverseButtons: true })
     if (!result.isConfirmed) return
     router.post(`/historico-general/${selectedPeriodId.value}/actualizar-bd`, {}, {
         preserveScroll: true,
-        onSuccess: () => Swal.fire({ title: 'Proceso en cola', text: 'Puedes cerrar esta ventana. Te avisaremos por correo cuando la BD termine de actualizarse.', icon: 'success', confirmButtonText: 'Entendido' }),
+        onSuccess: () => Swal.fire({ title: 'Proceso en cola', text: 'Puedes cerrar esta ventana. Te avisaremos por correo cuando los registros terminen de cargarse.', icon: 'success', confirmButtonText: 'Entendido' }),
         onError:   () => Swal.fire('No se pudo iniciar', 'Faltan fuentes o ya hay un proceso en ejecución.', 'error'),
     })
 }
@@ -224,8 +160,8 @@ const updateDatabase = async () => {
 const cancelDatabaseUpdate = async () => {
     if (!selectedPeriodId.value) return
     const result = await Swal.fire({
-        title: '¿Cancelar la actualización?',
-        text: 'El proceso se marcará como fallido. Podrás reintentarlo desde la etapa de Actualización BD.',
+        title: '¿Cancelar la carga de registros?',
+        text: 'El proceso se marcará como fallido. Podrás reintentarlo desde la etapa de Cargar registros.',
         icon: 'warning',
         showCancelButton: true,
         confirmButtonText: 'Sí, cancelar proceso',
@@ -254,7 +190,7 @@ const resolveIncident = async (id: number) => {
 const generateReport = () => {
     if (!period.value?.can_generate_radiography) return toastError('Generación bloqueada', period.value?.blocking_reasons?.join(' ') || 'Completa las etapas previas.')
     if (reportConfig.value.report_type !== 'simple' && !reportConfig.value.compare_period_id) return toastError('Falta periodo comparable', 'Selecciona explícitamente el periodo a comparar.')
-    Swal.fire({ title: 'Reporte enviado a procesamiento', text: 'El reporte se genera en segundo plano. Puedes cerrar esta ventana; te avisaremos por correo cuando el Excel y PDF estén listos.', icon: 'info', confirmButtonText: 'Entendido' })
+    Swal.fire({ title: 'Reporte en procesamiento', text: 'El reporte se genera en segundo plano. Puedes cerrar esta ventana; te avisaremos por correo cuando Excel y PDF estén listos.', icon: 'info', confirmButtonText: 'Entendido' })
     router.post(`/historico-general/${selectedPeriodId.value}/generar-radiografia`, { config: reportConfig.value }, { preserveScroll: true })
 }
 </script>
@@ -270,12 +206,12 @@ const generateReport = () => {
                     <div>
                         <p class="text-xs font-black uppercase tracking-[0.28em] text-indigo-300">Histórico general</p>
                         <h1 class="mt-1 text-2xl font-black tracking-tight sm:text-3xl">
-                            Flujo guiado · Carga, análisis y Radiografía
+                            Flujo guiado · Carga, normalización y Radiografía Financiera
                         </h1>
                     </div>
                     <p class="max-w-sm text-xs leading-5 text-slate-400 sm:text-right">
-                        Selecciona el periodo, carga las {{ sources.length }} fuentes activas, actualiza la BD,<br class="hidden sm:block" />
-                        revisa incidencias y genera reportes Excel y PDF.
+                        Selecciona el periodo, carga las {{ sources.length }} fuentes requeridas,<br class="hidden sm:block" />
+                        resuelve incidencias y genera tu reporte Excel y PDF.
                     </p>
                 </div>
             </section>
@@ -314,53 +250,32 @@ const generateReport = () => {
                             :selected-period-id="selectedPeriodId"
                             @upload="uploadFile"
                             @delete="deleteUpload"
-                            @reprocess="reprocessUpload"
                         />
 
-                        <!-- Reprocesar todo el periodo -->
-                        <div v-if="grouped?.uploads?.length && !period?.is_derived" class="overflow-hidden rounded-[2rem] border border-white/70 bg-white shadow-xl shadow-slate-200/70">
-                            <div class="flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
-                                <div>
-                                    <p class="text-xs font-black uppercase tracking-[0.22em] text-slate-500">Acción global del periodo</p>
-                                    <h3 class="mt-1 text-base font-black text-slate-950">Reprocesar todo el periodo</h3>
-                                    <p class="mt-1 text-sm leading-6 text-slate-500">
-                                        Vuelve a analizar todas las fuentes cargadas en este periodo. Los datos actuales serán
-                                        reemplazados y el reporte quedará invalidado. Útil cuando cambian los archivos fuente.
-                                    </p>
-                                </div>
-                                <div class="shrink-0">
-                                    <button
-                                        v-if="!isReprocessing"
-                                        type="button"
-                                        class="inline-flex h-10 items-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-5 text-sm font-black text-rose-700 transition hover:bg-rose-100 hover:border-rose-300"
-                                        @click="reprocessAll"
-                                    >
-                                        <svg class="size-4" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
-                                        Reprocesar todo
-                                    </button>
-                                    <div v-else class="inline-flex h-10 items-center gap-2 rounded-2xl border border-violet-200 bg-violet-50 px-5 text-sm font-semibold text-violet-700">
-                                        <svg class="size-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                                        {{ period?.reprocess_run_status === 'queued' ? 'En cola…' : `Reprocesando… ${period?.reprocess_run_progress ?? 0}%` }}
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Progress bar when running -->
-                            <div v-if="isReprocessing && period?.reprocess_run_progress != null" class="h-1 bg-slate-100">
-                                <div
-                                    class="h-full bg-violet-500 transition-all duration-700"
-                                    :style="{ width: `${period.reprocess_run_progress}%` }"
-                                />
-                            </div>
-
-                            <!-- Log message when running -->
-                            <div v-if="isReprocessing && period?.reprocess_run_log" class="border-t border-slate-100 bg-slate-50 px-6 py-3">
-                                <p class="text-xs text-slate-500">{{ period.reprocess_run_log }}</p>
-                            </div>
+                        <!-- Avance a Etapa 2 -->
+                        <div class="flex items-center justify-between rounded-[2rem] border border-white/70 bg-white px-6 py-4 shadow-xl shadow-slate-200/70">
+                            <p v-if="!period?.can_update_database" class="text-sm text-slate-500">
+                                Carga las fuentes requeridas para continuar a la siguiente etapa.
+                            </p>
+                            <p v-else class="text-sm text-slate-600">
+                                Todas las fuentes requeridas están cargadas.
+                            </p>
+                            <button
+                                type="button"
+                                class="ml-4 inline-flex h-10 shrink-0 items-center gap-2 rounded-2xl px-5 text-sm font-black transition focus:outline-none focus:ring-4 disabled:cursor-not-allowed disabled:opacity-40"
+                                :class="period?.can_update_database
+                                    ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100 hover:bg-indigo-700 focus:ring-indigo-100'
+                                    : 'bg-slate-200 text-slate-400'"
+                                :disabled="!period?.can_update_database"
+                                @click="selectStep('load')"
+                            >
+                                Siguiente etapa
+                                <svg class="size-4" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" /></svg>
+                            </button>
                         </div>
                     </div>
                     <DatabaseUpdateStep
-                        v-else-if="currentStep === 'bd'"
+                        v-else-if="currentStep === 'load'"
                         :period="period"
                         :can-update="Boolean(period?.can_update_database)"
                         @update="updateDatabase"
@@ -382,8 +297,52 @@ const generateReport = () => {
                             :branches="branches"
                             :employees="employees"
                             :can-generate="Boolean(period?.can_generate_radiography)"
-                            @generate="generateReport"
+                            @next="selectStep('generate')"
                         />
+                    </div>
+                    <div v-else-if="currentStep === 'generate'" class="space-y-5">
+                        <section class="rounded-[2rem] border border-white/70 bg-white p-6 shadow-xl shadow-slate-200/70">
+                            <SectionHeader
+                                eyebrow="Etapa 5"
+                                title="Generar reporte"
+                                description="Calcula las métricas del reporte según la configuración seleccionada. El proceso corre en segundo plano."
+                            />
+                            <div class="mt-6 flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
+                                <div class="space-y-1.5 text-sm text-slate-600">
+                                    <p>
+                                        <span class="font-bold text-slate-800">Tipo:</span>
+                                        {{
+                                            reportConfig.report_type === 'simple' ? 'Radiografía simple' :
+                                            reportConfig.report_type === 'month_vs_month' ? 'Comparativo mes vs mes' :
+                                            reportConfig.report_type === 'bimester_vs_bimester' ? 'Comparativo bimestre vs bimestre' :
+                                            'Comparativo trimestre vs trimestre'
+                                        }}
+                                    </p>
+                                    <p>
+                                        <span class="font-bold text-slate-800">Alcance:</span>
+                                        {{
+                                            reportConfig.scope === 'general' ? 'General' :
+                                            reportConfig.scope === 'branch' ? 'Por sucursal' :
+                                            'Por empleado / gestor'
+                                        }}
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    class="inline-flex h-12 shrink-0 items-center gap-2 rounded-2xl bg-slate-950 px-6 text-sm font-black text-white shadow-xl shadow-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                    :disabled="!period?.can_generate_radiography"
+                                    @click="generateReport"
+                                >
+                                    Generar reporte
+                                </button>
+                            </div>
+                            <div v-if="period?.blocking_reasons?.length" class="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                                <p class="text-sm font-black text-amber-800">No se puede generar todavía</p>
+                                <ul class="mt-2 list-disc pl-5 text-sm text-amber-700">
+                                    <li v-for="reason in period.blocking_reasons" :key="reason">{{ reason }}</li>
+                                </ul>
+                            </div>
+                        </section>
                         <ReportGenerationStatus :period="period" @retry="generateReport" />
                     </div>
                     <ReportPreview

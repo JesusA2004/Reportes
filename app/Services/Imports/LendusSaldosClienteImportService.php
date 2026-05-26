@@ -6,13 +6,17 @@ use App\Models\Branch;
 use App\Models\Portfolio;
 use App\Models\ReportUpload;
 use App\Services\BranchResolverService;
+use App\Services\ColumnMapService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Maatwebsite\Excel\Facades\Excel;
 
 class LendusSaldosClienteImportService
 {
-    public function __construct(private readonly BranchResolverService $branchResolver) {}
+    public function __construct(
+        private readonly BranchResolverService $branchResolver,
+        private readonly ColumnMapService $columnMap,
+    ) {}
 
     public function handle(ReportUpload $upload, ?callable $progress = null): array
     {
@@ -40,9 +44,9 @@ class LendusSaldosClienteImportService
         $header = $rows[$headerIndex] ?? [];
         $map = $this->buildHeaderMap($header);
 
-        if (!array_key_exists('balance', $map) && !array_key_exists('past_due_balance', $map)) {
+        if (!array_key_exists('balance', $map) && !array_key_exists('capital_due', $map) && !array_key_exists('capital_activo', $map)) {
             throw new \RuntimeException(
-                'El archivo de saldos no contiene columnas reconocibles de saldo/cartera. Encabezados detectados: '
+                'El archivo de saldos no contiene columnas reconocibles de saldo/cartera/mora. Encabezados detectados: '
                 . implode(', ', array_values(array_filter(array_map(fn ($v) => trim((string) $v), $header))))
             );
         }
@@ -69,13 +73,9 @@ class LendusSaldosClienteImportService
             $stats['rows_read']++;
 
             try {
-                $balance = $this->toDecimal($this->value($row, $map, 'balance')) ?? 0;
-                $pastDue = $this->toDecimal($this->value($row, $map, 'past_due_balance')) ?? 0;
-
-                if ($balance <= 0 && $pastDue <= 0) {
-                    $stats['rows_skipped']++;
-                    continue;
-                }
+                $balance       = $this->toDecimal($this->value($row, $map, 'balance')) ?? 0;
+                $capitalActivo = $this->toDecimal($this->value($row, $map, 'capital_activo'));
+                $pastDue       = 0.0; // computed from mora components below
 
                 // Contract/client code — used for real branch resolution
                 $contract = $this->clean($this->value($row, $map, 'contract'));
@@ -108,19 +108,23 @@ class LendusSaldosClienteImportService
                     continue;
                 }
 
-                // Capital atrasado (more precise overdue amount)
-                $capitalDue = $this->toDecimal($this->value($row, $map, 'capital_due'));
-
-                // Individual mora components — sum them to get the real past_due total
+                // Mora components (authorized columns B)
+                $capitalDue           = $this->toDecimal($this->value($row, $map, 'capital_due'));
                 $interesAtrasado      = $this->toDecimal($this->value($row, $map, 'interes_atrasado')) ?? 0.0;
                 $impuestoAtrasado     = $this->toDecimal($this->value($row, $map, 'impuesto_atrasado')) ?? 0.0;
                 $saldoInteresMor      = $this->toDecimal($this->value($row, $map, 'saldo_interes_moratorio')) ?? 0.0;
                 $saldoImpuestoMor     = $this->toDecimal($this->value($row, $map, 'saldo_impuesto_interes_moratorio')) ?? 0.0;
+                $cargosCalAtrasado    = $this->toDecimal($this->value($row, $map, 'cargos_calendario_atrasado')) ?? 0.0;
+                $impuestoCargosCalAtr = $this->toDecimal($this->value($row, $map, 'impuesto_cargos_calendario_atrasado')) ?? 0.0;
 
-                // If we have individual components, compute the real mora total from all columns
-                $moraFromComponents = ($capitalDue ?? 0.0) + $interesAtrasado + $impuestoAtrasado + $saldoInteresMor + $saldoImpuestoMor;
-                if ($moraFromComponents > 0 && $moraFromComponents > $pastDue) {
-                    $pastDue = round($moraFromComponents, 2);
+                // Total mora from all authorized components
+                $moraFromComponents = ($capitalDue ?? 0.0) + $interesAtrasado + $impuestoAtrasado
+                    + $saldoInteresMor + $saldoImpuestoMor + $cargosCalAtrasado + $impuestoCargosCalAtr;
+                $pastDue = $moraFromComponents > 0 ? round($moraFromComponents, 2) : 0.0;
+
+                if ($balance <= 0 && $pastDue <= 0 && ($capitalActivo === null || $capitalActivo <= 0)) {
+                    $stats['rows_skipped']++;
+                    continue;
                 }
 
                 // Days past due — use Días Vencido column
@@ -137,24 +141,34 @@ class LendusSaldosClienteImportService
                 $clientName = $this->clean($this->value($row, $map, 'client_name'));
 
                 Portfolio::query()->create([
-                    'period_id'              => $upload->period_id,
-                    'report_upload_id'       => $upload->id,
-                    'branch_id'              => $branch?->id,
-                    'client_name'            => $clientName,
-                    'normalized_client_name' => $this->normalize($clientName),
-                    'contract'               => $contract,
-                    'promoter_name'          => $promoterName,
-                    'promoter_code'          => $promoterCode,
-                    'product_name'           => $productName,
-                    'num_payments'           => $numPayments,
-                    'periodicity'            => $periodicity,
-                    'route_name'             => $routeName,
-                    'balance'                => $balance,
-                    'past_due_balance'       => $pastDue,
-                    'capital_due'            => $capitalDue,
-                    'days_past_due'          => $daysPastDue,
-                    'portfolio_date'         => $this->toDate($this->value($row, $map, 'portfolio_date')),
-                    'raw_payload'            => null,
+                    'period_id'                          => $upload->period_id,
+                    'report_upload_id'                   => $upload->id,
+                    'branch_id'                          => $branch?->id,
+                    'client_name'                        => $clientName,
+                    'normalized_client_name'             => $this->normalize($clientName),
+                    'contract'                           => $contract,
+                    'promoter_name'                      => $promoterName,
+                    'promoter_code'                      => $promoterCode,
+                    'product_name'                       => $productName,
+                    'num_payments'                       => $numPayments,
+                    'periodicity'                        => $periodicity,
+                    'route_name'                         => $routeName,
+                    // D) Valor cartera
+                    'balance'                            => $balance,
+                    // C) Préstamo activo
+                    'capital_activo'                     => $capitalActivo,
+                    // B) Mora total + components
+                    'past_due_balance'                   => $pastDue,
+                    'capital_due'                        => $capitalDue,
+                    'interes_atrasado'                   => $interesAtrasado ?: null,
+                    'impuesto_atrasado'                  => $impuestoAtrasado ?: null,
+                    'saldo_interes_moratorio'            => $saldoInteresMor ?: null,
+                    'saldo_impuesto_interes_moratorio'   => $saldoImpuestoMor ?: null,
+                    'cargos_calendario_atrasado'         => $cargosCalAtrasado ?: null,
+                    'impuesto_cargos_calendario_atrasado' => $impuestoCargosCalAtr ?: null,
+                    'days_past_due'                      => $daysPastDue,
+                    'portfolio_date'                     => $this->toDate($this->value($row, $map, 'portfolio_date')),
+                    'raw_payload'                        => null,
                 ]);
 
                 $stats['rows_inserted']++;
@@ -253,6 +267,7 @@ class LendusSaldosClienteImportService
                     'gestor_de_cobranza',
                     'saldo_actual',
                     'saldo_capital',
+                    'capital',
                     'total_a_pagar',
                     'total_pagado',
                     'total_atrasado',
@@ -265,6 +280,12 @@ class LendusSaldosClienteImportService
                     'dias_vencidos',
                     'dias_mora',
                     'capital_atrasado',
+                    'interes_atrasado',
+                    'impuesto_atrasado',
+                    'saldo_interes_moratorio',
+                    'saldo_impuesto_interes_moratorio',
+                    'cargos_calendario_atrasado',
+                    'impuesto_cargos_calendario_atrasado',
                     'producto_de_credito',
                     'numero_de_pagos',
                     'pagos',
@@ -289,182 +310,27 @@ class LendusSaldosClienteImportService
 
     private function buildHeaderMap(array $header): array
     {
-        $aliases = [
-            // In Lendus Saldos, "Cliente" column = the client/contract CODE (e.g., "HUAM001663")
-            // "Contrato" column = full contract number (e.g., "24HUAM032294")
-            'contract' => [
-                'cliente',
-                'contrato',
-                'no_contrato',
-                'num_contrato',
-                'numero_contrato',
-                'numero_de_contrato',
-                'no_de_contrato',
-                'clave_cliente',
-                'codigo_cliente',
-                'cliente_id',
-                'id_cliente',
-                'clave',
-            ],
-            // The actual human name comes from "Nombre del cliente" / "Acreditado"
-            'client_name' => [
-                'nombre_del_cliente',
-                'nombre_cliente',
-                'acreditado',
-                'nombre_acreditado',
-                'socio',
-                'nombre_completo',
-            ],
-            'route_name' => [
-                'oficina',
-                'ruta',
-                'ruta_u_oficina',
-                'zona',
-                'oficina_zona',
-                'centro',
-                'sucursal',
-                'nombre_sucursal',
-            ],
-            // Promoter code column in Lendus: "Promotor" or "Gestor de cobranza" (codes)
-            'promoter_code' => [
-                'promotor',
-                'gestor_de_cobranza',
-                'cobrador',
-                'clave_promotor',
-                'codigo_promotor',
-                'no_promotor',
-                'id_promotor',
-            ],
-            // Promoter name comes from "Nombre promotor" / "Nombre gestor de cobranza"
-            'promoter_name' => [
-                'nombre_promotor2',
-                'nombre_promotor',
-                'nombre_cobrador',
-                'nombre_gestor',
-                'nombre_gestor_de_cobranza',
-            ],
-            'balance' => [
-                'saldo_actual',
-                'saldo_capital',
-                'saldo',
-                'saldo_insoluto',
-                'capital',
-                'cartera',
-                'valor_cartera',
-                'total_saldo',
-                'saldo_total',
-                'saldo_de_capital',
-                'total_a_pagar',
-            ],
-            'past_due_balance' => [
-                'total_atrasado',          // highest priority — includes all overdue components
-                'saldo_capital_atrasado',
-                'saldo_vencido',
-                'cartera_vencida',
-                'monto_vencido',
-                'importe_vencido',
-                'capital_vencido',
-                'capital_atrasado',        // lower priority — capital only, may miss interest
-                'saldo_mora',
-                'mora',
-            ],
-            'capital_due' => [
-                'capital_atrasado',
-                'capital_mora',
-                'importe_atrasado',
-                'importe_vencido',
-                'saldo_atrasado',
-            ],
-            'interes_atrasado' => [
-                'interes_atrasado',
-                'interes_vencido',
-                'intereses_atrasados',
-                'interes_mora',
-            ],
-            'impuesto_atrasado' => [
-                'impuesto_atrasado',
-                'iva_atrasado',
-                'impuesto_vencido',
-                'impuesto_mora',
-            ],
-            'saldo_interes_moratorio' => [
-                'saldo_interes_moratorio',
-                'interes_moratorio',
-                'moratorio_interes',
-                'saldo_moratorio_interes',
-            ],
-            'saldo_impuesto_interes_moratorio' => [
-                'saldo_impuesto_interes_moratorio',
-                'impuesto_interes_moratorio',
-                'saldo_impuesto_moratorio',
-                'moratorio_impuesto',
-            ],
-            'days_past_due' => [
-                'dias_vencido',
-                'dias_vencidos',
-                'dias_mora',
-                'dias_atraso',
-                'dias_de_mora',
-                'dias_de_atraso',
-            ],
-            'product_name' => [
-                'producto_de_credito',
-                'producto',
-                'tipo_credito',
-                'tipo_de_credito',
-                'nombre_producto',
-            ],
-            'num_payments' => [
-                'pagos',
-                'numero_de_pagos',
-                'num_pagos',
-                'no_pagos',
-                'no_pagos_1',
-                'plazo',
-                'numero_pagos',
-            ],
-            'periodicity' => [
-                'periodicidad',
-                'frecuencia',
-                'frecuencia_pago',
-                'tipo_pago',
-            ],
-            'portfolio_date' => [
-                'fecha',
-                'fecha_corte',
-                'fecha_de_corte',
-                'fecha_saldo',
-                'fecha_desembolso',
-                'fecha_apertura',
-            ],
-        ];
-
         $normalizedHeaders = [];
         foreach ($header as $index => $value) {
-            $normalizedHeaders[$index] = $this->normalizeHeader((string) $value);
+            $normalized = $this->columnMap->normalizeHeader((string) $value);
+            if ($normalized !== '') {
+                $normalizedHeaders[$index] = $normalized;
+            }
         }
 
-        // Alias-priority scan: try each alias in declared order, pick first column that matches.
-        // This ensures e.g. 'dias_vencido' is preferred over 'dias_mora' even if the latter
-        // appears earlier in the spreadsheet.
-        $map = [];
-        foreach ($aliases as $field => $possibleHeaders) {
-            foreach ($possibleHeaders as $alias) {
-                $found = false;
+        // Use ColumnMapService as the single source of truth for authorized columns.
+        $defs    = $this->columnMap->getFieldDefinitions('lendus_saldos_cliente');
+        $map     = [];
+        $matched = [];
+
+        foreach ($defs as $field => $def) {
+            foreach ($def['aliases'] as $alias) {
                 foreach ($normalizedHeaders as $index => $normalizedHeader) {
-                    if ($normalizedHeader !== $alias) {
-                        continue;
+                    if ($normalizedHeader === $alias && !in_array($index, $matched, true)) {
+                        $map[$field] = $index;
+                        $matched[]   = $index;
+                        break 2;
                     }
-                    // capital_due must not reuse the same column already assigned to past_due_balance
-                    if ($field === 'capital_due' && isset($map['past_due_balance']) && $map['past_due_balance'] === $index) {
-                        continue;
-                    }
-                    $map[$field] = $index;
-                    $found = true;
-                    break;
-                }
-                if ($found) {
-                    break;
                 }
             }
         }
