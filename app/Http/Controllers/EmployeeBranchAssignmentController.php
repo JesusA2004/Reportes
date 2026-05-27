@@ -317,6 +317,14 @@ class EmployeeBranchAssignmentController extends Controller
         return back()->with('success', 'Asignación actualizada correctamente.');
     }
 
+    // Only display operative branches — routes/offices are treated as "sin sucursal" in the UI.
+    private const OPERATIVE_BRANCH_DISPLAY = [
+        'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
+        'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN LUIS POTOSI',
+        'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
+        'CORPORATIVO', 'SAN JUAN DEL RÍO', 'SAN JUAN DEL RIO',
+    ];
+
     private function transformAssignment(EmployeeBranchAssignment $assignment, string $context = 'actual'): array
     {
         $employee = $assignment->employee;
@@ -326,13 +334,25 @@ class EmployeeBranchAssignmentController extends Controller
         $sourceType = $assignment->source_type?->value ?? null;
         $uiStatus = $this->resolveUiStatus($assignment);
 
+        // Only show the branch name if it is an operative branch.
+        // If it's a route/office (non-operative), treat as "sin sucursal" in the UI.
+        $branchNameDisplay = null;
+        $branchIdDisplay   = null;
+        if ($branch) {
+            $upperName = strtoupper(trim($branch->name));
+            if (in_array($upperName, self::OPERATIVE_BRANCH_DISPLAY, true)) {
+                $branchNameDisplay = $branch->name;
+                $branchIdDisplay   = $assignment->branch_id;
+            }
+        }
+
         return [
             'id' => $assignment->id,
             'employee_id' => $assignment->employee_id,
-            'branch_id' => $assignment->branch_id,
+            'branch_id' => $branchIdDisplay,
             'employee_name' => $employee?->full_name ?? 'Sin empleado',
             'normalized_name' => $employee?->normalized_name,
-            'branch_name' => $branch?->name,
+            'branch_name' => $branchNameDisplay,
             'source_name' => $this->formatSourceType($sourceType),
             'source_reference' => $assignment->source_reference,
             'match_type' => $matchType,

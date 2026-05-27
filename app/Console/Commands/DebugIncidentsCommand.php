@@ -181,6 +181,74 @@ class DebugIncidentsCommand extends Command
             );
         }
 
+        // Coincidencias deduplication breakdown (live)
+        $this->line('');
+        $this->info('── Coincidencias — desglose de deduplicación (en vivo) ──────────────');
+
+        $allEmployees = DB::table('employees')
+            ->select('id', 'normalized_name')
+            ->whereNotNull('normalized_name')
+            ->orderBy('id')
+            ->get();
+
+        $rejectedKeys = DB::table('employee_match_rejections')
+            ->pluck('pair_key')->flip()->all();
+
+        $aliasRows = DB::table('employee_aliases as ea')
+            ->join('employees as e', 'ea.employee_id', '=', 'e.id')
+            ->select('e.normalized_name as owner_norm', 'ea.normalized_alias')
+            ->get();
+        $aliasedWith = [];
+        foreach ($aliasRows as $row) {
+            $aliasedWith[(string) $row->owner_norm][(string) $row->normalized_alias] = true;
+            $aliasedWith[(string) $row->normalized_alias][(string) $row->owner_norm] = true;
+        }
+
+        $cntRaw = $cntAfterExact = $cntAfterAlias = $cntAfterRejection = 0;
+        $checked = [];
+
+        foreach ($allEmployees as $a) {
+            foreach ($allEmployees as $b) {
+                if ($a->id >= $b->id) continue;
+                $pairKey = min($a->id, $b->id) . '-' . max($a->id, $b->id);
+                if (isset($checked[$pairKey])) continue;
+                $checked[$pairKey] = true;
+
+                $tokensA = array_values(array_filter(explode(' ', (string) $a->normalized_name)));
+                $tokensB = array_values(array_filter(explode(' ', (string) $b->normalized_name)));
+                if (count($tokensA) < 2 || count($tokensB) < 2) continue;
+
+                $intersection = count(array_intersect($tokensA, $tokensB));
+                $minLen       = min(count($tokensA), count($tokensB));
+                if ($minLen === 0 || ($intersection / $minLen) < 0.75) continue;
+
+                $cntRaw++;
+
+                // Filter 1: exact same normalized_name (same person, handled by grouping)
+                if ((string) $a->normalized_name === (string) $b->normalized_name) continue;
+                $cntAfterExact++;
+
+                // Filter 2: already confirmed as alias (same person, already unified)
+                if (isset($aliasedWith[(string) $a->normalized_name][(string) $b->normalized_name])) continue;
+                $cntAfterAlias++;
+
+                // Filter 3: already rejected (user said "son diferentes")
+                if (array_key_exists($pairKey, $rejectedKeys)) continue;
+                $cntAfterRejection++;
+            }
+        }
+
+        $rejectionCount = count($rejectedKeys);
+        $aliasCount     = count($aliasRows);
+
+        $this->line(sprintf('  Empleados con nombre normalizado:  %d', $allEmployees->count()));
+        $this->line(sprintf('  Pares crudos (token overlap ≥75%%): %d', $cntRaw));
+        $this->line(sprintf('  Tras excluir nombre exacto igual:  %d  (misma persona ya agrupada)', $cntAfterExact));
+        $this->line(sprintf('  Tras excluir aliases confirmados:  %d  (%d registros en employee_aliases)', $cntAfterAlias, $aliasCount));
+        $this->line(sprintf('  Tras excluir rechazos guardados:   %d  (%d registros en employee_match_rejections)', $cntAfterRejection, $rejectionCount));
+        $this->line(sprintf('  <fg=yellow>Total pares únicos finales:        %d</>', $cntAfterRejection));
+        $this->line('');
+
         // Pending locations summary
         $this->line('');
         $this->info('── Resumen ejecutivo ─────────────────────────────────────────────────');
@@ -197,6 +265,8 @@ class DebugIncidentsCommand extends Command
         }
         $this->line('');
 
-        return $critCount > 0 ? self::FAILURE : self::SUCCESS;
+        // Exit 0 always — incidents are informational output, not command errors.
+        // Only self::FAILURE for real errors (period not found, DB unavailable, etc.)
+        return self::SUCCESS;
     }
 }

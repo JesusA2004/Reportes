@@ -61,7 +61,17 @@
       "Bash(Sort-Object)",
       "Bash(xargs -I {} grep -l \"EBITDA\\\\|ebitda\\\\|ingreso_savehearts\" \"{}\")",
       "Bash(Find \"C:\\\\wamp64\\\\www\\\\Reportes\\\\app\\\\Http\\\\Controllers\" -name \"*.php\")",
-      "PowerShell(Set-Location \"C:\\\\wamp64\\\\www\\\\Reportes\"; $env:PHP_CLI_SERVER_WORKERS = '1'; $output = php artisan tinker --execute=\"echo 'starting';`$s=app\\(App\\\\Services\\\\EmployeeBranchAutoMatchService::class\\);`$r=`$s->handle\\(5\\);echo 'done:'.`$r['matched'].'/'.\\(\\(`$r['matched']+`$r['unmatched']\\)\\);\"; echo $output)"
+      "PowerShell(Set-Location \"C:\\\\wamp64\\\\www\\\\Reportes\"; $env:PHP_CLI_SERVER_WORKERS = '1'; $output = php artisan tinker --execute=\"echo 'starting';`$s=app\\(App\\\\Services\\\\EmployeeBranchAutoMatchService::class\\);`$r=`$s->handle\\(5\\);echo 'done:'.`$r['matched'].'/'.\\(\\(`$r['matched']+`$r['unmatched']\\)\\);\"; echo $output)",
+      "PowerShell(cd C:\\\\wamp64\\\\www\\\\Reportes; php artisan reportes:debug-incidents 5; echo \"EXIT CODE: $LASTEXITCODE\")",
+      "PowerShell(cd C:\\\\wamp64\\\\www\\\\Reportes; Write-Host \"=== 3\\) INCIDENTS + EXIT CODE ===\" -ForegroundColor Cyan; php artisan reportes:debug-incidents 5 2>&1 | Select-String \"Críticas:|posibles_coincidencias|ALBINO|Sin sucursal|Resumen ejecutivo|bloquean\"; echo \"Exit: $LASTEXITCODE\")",
+      "PowerShell(cd C:\\\\wamp64\\\\www\\\\Reportes; php artisan reportes:debug-incidents 5; echo \"Exit: $LASTEXITCODE\")",
+      "PowerShell(cd C:\\\\wamp64\\\\www\\\\Reportes; php artisan reportes:debug-incidents 5 2>&1; echo \"Exit: $LASTEXITCODE\")",
+      "PowerShell(cd C:\\\\wamp64\\\\www\\\\Reportes; php artisan optimize:clear 2>&1; echo \"---\"; php artisan reportes:debug-incidents 5 2>&1; echo \"Exit: $LASTEXITCODE\")",
+      "PowerShell(cd C:\\\\wamp64\\\\www\\\\Reportes; php artisan optimize:clear 2>&1 | Select-String \"DONE|INFO\"; php artisan reportes:debug-incidents 5 2>&1; echo \"Exit: $LASTEXITCODE\")",
+      "PowerShell(cd C:\\\\wamp64\\\\www\\\\Reportes; php artisan reportes:debug-person-resolution 5 2>&1 | Select-String \"Total:|Sin sucursal:|Exit\" ; echo \"Person-resolution exit: $LASTEXITCODE\")",
+      "PowerShell(cd C:\\\\wamp64\\\\www\\\\Reportes; php artisan reportes:debug-employee-branch-assignments 5 2>&1 | Select-String \"Total|Sin asignación|asignados\" | Select-Object -First 5; echo \"Assignments exit: $LASTEXITCODE\")",
+      "Bash(npx tsc *)",
+      "Bash(node *)"
     ]
   }
 }

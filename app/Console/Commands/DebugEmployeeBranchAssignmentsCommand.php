@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\Period;
+use App\Services\BranchResolverService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
@@ -10,6 +11,15 @@ class DebugEmployeeBranchAssignmentsCommand extends Command
 {
     protected $signature   = 'reportes:debug-employee-branch-assignments {period_id : ID del periodo}';
     protected $description = 'Muestra asignaciones de sucursal por empleado: nombre, fuente, sucursal final, movimientos NOI, monto, auto/manual.';
+
+    private const OPERATIVE_BRANCHES = [
+        'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
+        'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN LUIS POTOSI',
+        'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
+    ];
+
+    // Allowed non-operative branches
+    private const ALLOWED_EXTRAS = ['CORPORATIVO', 'SAN JUAN DEL RÍO', 'SAN JUAN DEL RIO'];
 
     public function handle(): int
     {
@@ -110,6 +120,28 @@ class DebugEmployeeBranchAssignmentsCommand extends Command
         $this->line("  Manuales: {$manual}  |  Monto sin sucursal: $" . number_format((float) $montoSin, 2));
         $this->line('');
 
-        return self::SUCCESS;
+        // ── Verificar sucursales no operativas ────────────────────────────
+        $this->info('── Verificación sucursales no operativas ─────────────────────────────');
+        $allowedNames = array_map('strtoupper', array_merge(self::OPERATIVE_BRANCHES, self::ALLOWED_EXTRAS));
+
+        $nonOperative = $rows->filter(function ($r) use ($allowedNames) {
+            if ($r->branch_name === '<sin sucursal>') return false;
+            return !in_array(strtoupper(trim($r->branch_name)), $allowedNames, true);
+        });
+
+        $noCount = $nonOperative->count();
+        if ($noCount === 0) {
+            $this->line('  <fg=green>NON OPERATIVE ASSIGNMENTS: 0 ✓</>');
+        } else {
+            $this->error("NON OPERATIVE ASSIGNMENTS: {$noCount} — ERROR");
+            $this->line('  Asignaciones con ruta/oficina no operativa:');
+            foreach ($nonOperative as $r) {
+                $this->line("    <fg=red>✗</> {$r->full_name} → {$r->branch_name}");
+            }
+            $this->line('  Ejecuta: php artisan reportes:clean-non-operative-employee-branches ' . $this->argument('period_id'));
+        }
+        $this->line('');
+
+        return $noCount > 0 ? self::FAILURE : self::SUCCESS;
     }
 }

@@ -10,10 +10,9 @@ import UploadSourcesStep from '@/components/historico-general/UploadSourcesStep.
 import DatabaseUpdateStep from '@/components/historico-general/DatabaseUpdateStep.vue'
 import IncidentsStep from '@/components/historico-general/IncidentsStep.vue'
 import ReportConfigurationStep from '@/components/historico-general/ReportConfigurationStep.vue'
-import ReportGenerationStatus from '@/components/historico-general/ReportGenerationStatus.vue'
+import GenerateReportStep from '@/components/historico-general/GenerateReportStep.vue'
 import ReportPreview from '@/components/historico-general/ReportPreview.vue'
 import GeneratedReportActions from '@/components/historico-general/GeneratedReportActions.vue'
-import SectionHeader from '@/components/historico-general/SectionHeader.vue'
 import { useHistoricWorkflow } from '@/composables/useHistoricWorkflow'
 
 defineOptions({ layout: AppLayout })
@@ -37,6 +36,7 @@ const OPERATIVE_BRANCH_NAMES_INIT = new Set([
 const selectedPeriodId    = ref<number | null>(props.currentPeriodId ?? null)
 const incidents           = ref<any[]>([])
 const incidentsReloadKey  = ref(0)
+const incidentsStepRef    = ref<any>(null)
 const reportConfig     = ref({
     report_type: 'simple',
     scope: 'general',
@@ -134,6 +134,34 @@ watch(() => period.value?.database_update_run_status, (newStatus, oldStatus) => 
     }
 })
 
+// Notificar cuando la generación de reporte termina (queued/running → success/failed)
+watch(() => period.value?.radiography_run_status, (newStatus, oldStatus) => {
+    const wasRunning = ['queued', 'running'].includes(String(oldStatus ?? ''))
+    if (!wasRunning) return
+
+    if (newStatus === 'success') {
+        Swal.fire({
+            title: '¡Reporte generado!',
+            html: `El reporte del periodo <strong>${period.value?.label ?? ''}</strong> ya está listo.<br><br>Descarga Excel y PDF desde el paso de reporte o en Reportes mensuales.`,
+            icon: 'success',
+            confirmButtonText: 'Ver resultado',
+        }).then(() => selectStep('generate'))
+    } else if (newStatus === 'failed') {
+        Swal.fire({
+            title: 'La generación falló',
+            text: period.value?.radiography_run_error ?? 'El proceso terminó con error. Revisa el detalle en la etapa de generar reporte.',
+            icon: 'error',
+            confirmButtonText: 'Ver detalle',
+        }).then(() => selectStep('generate'))
+    } else if (newStatus === 'cancelled') {
+        Swal.fire({
+            title: 'Generación cancelada',
+            text: 'El proceso fue cancelado. Puedes reiniciarlo cuando estés listo.',
+            icon: 'info',
+            confirmButtonText: 'Entendido',
+        })
+    }
+})
 
 onUnmounted(stopPolling)
 
@@ -268,29 +296,33 @@ const assignBranchFromIncident = async ({ employee_ids, employee_id, branch_id, 
             body:    JSON.stringify({ employee_ids: ids, branch_id, period_id, notes: 'Asignado desde incidencias.' }),
         })
         if (!res.ok) throw new Error()
-        try {
-            await fetch(`/historico-general/${selectedPeriodId.value}/incidencias/refrescar`, {
-                method: 'POST', headers: { 'X-CSRF-TOKEN': csrf, 'X-Requested-With': 'XMLHttpRequest' },
-            })
-        } catch { /* non-fatal */ }
+        // loadIncidents already calls lightweight refreshes (sin-sucursal + coincidencias)
         await loadIncidents()
         incidentsReloadKey.value++
+        // Refresh period props so can_generate_radiography reflects resolved state
+        router.reload({ only: ['periods'] })
         Swal.fire({ title: 'Sucursal asignada', text: 'La persona fue asignada correctamente.', icon: 'success', timer: 2000, showConfirmButton: false })
     } catch {
         Swal.fire('No se pudo asignar', 'Intenta nuevamente.', 'error')
     }
 }
 
-const confirmMatchFromIncident = async ({ employee_id, target_employee_id, branch_id }: { employee_id: number; target_employee_id: number; branch_id?: number }) => {
+const confirmMatchFromIncident = async ({ employee_id, target_employee_id, branch_id, canonical_name }: { employee_id: number; target_employee_id: number; branch_id?: number; canonical_name?: string }) => {
     if (!selectedPeriodId.value) return
     try {
         const csrf = (document.querySelector('meta[name="csrf-token"]') as HTMLMetaElement)?.content ?? ''
+        const body: Record<string, any> = { employee_id, target_employee_id }
+        if (branch_id != null) body.branch_id = branch_id
+        if (canonical_name?.trim()) body.canonical_name = canonical_name.trim()
         const res = await fetch(`/historico-general/${selectedPeriodId.value}/personas-sin-sucursal/confirmar-coincidencia`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf, 'X-Requested-With': 'XMLHttpRequest' },
-            body: JSON.stringify({ employee_id, target_employee_id, branch_id }),
+            body: JSON.stringify(body),
         })
-        if (!res.ok) throw new Error()
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}))
+            throw new Error((body as any).message || `Error ${res.status}`)
+        }
         const data = await res.json()
         await loadIncidents()
         incidentsReloadKey.value++
@@ -298,8 +330,148 @@ const confirmMatchFromIncident = async ({ employee_id, target_employee_id, branc
             ? 'La persona fue unificada y se heredó la sucursal correspondiente.'
             : 'La persona fue unificada. Aún requiere asignar sucursal.'
         Swal.fire({ title: 'Coincidencia confirmada', text, icon: 'success', timer: 3000, showConfirmButton: false })
-    } catch {
-        Swal.fire('No se pudo confirmar', 'Intenta nuevamente.', 'error')
+    } catch (e: any) {
+        Swal.fire('No se pudo confirmar', e?.message || 'Intenta nuevamente.', 'error')
+    }
+}
+
+// ── Coincidencias desde panel de posibles duplicados ─────────────────
+const confirmCoincidenciaFromDuplicates = async ({ a_id, b_id, a_name, b_name, pair_key }: { a_id: number; b_id: number; a_name: string; b_name: string; pair_key: string }) => {
+    // Step 1: Choose canonical name
+    const step1 = await Swal.fire({
+        title: 'Confirmar coincidencia de persona',
+        html: `
+            <p class="text-sm text-gray-600 mb-4">Estas dos entradas serán unificadas como <strong>una sola persona</strong>. Elige qué nombre queda como definitivo:</p>
+            <div class="flex flex-col gap-3 text-left">
+                <label class="flex items-start gap-3 cursor-pointer rounded-xl border border-slate-200 px-4 py-3 hover:bg-slate-50 transition">
+                    <input type="radio" name="swal_canon" value="a" class="mt-0.5 accent-indigo-600">
+                    <span class="text-sm font-bold text-slate-900">${a_name}</span>
+                </label>
+                <label class="flex items-start gap-3 cursor-pointer rounded-xl border border-slate-200 px-4 py-3 hover:bg-slate-50 transition">
+                    <input type="radio" name="swal_canon" value="b" class="mt-0.5 accent-indigo-600">
+                    <span class="text-sm font-bold text-slate-900">${b_name}</span>
+                </label>
+                <label class="flex items-start gap-3 cursor-pointer rounded-xl border border-slate-200 px-4 py-3 hover:bg-slate-50 transition">
+                    <input type="radio" name="swal_canon" value="custom" class="mt-0.5 accent-indigo-600">
+                    <span class="text-sm text-slate-600">Escribir nombre personalizado…</span>
+                </label>
+            </div>
+        `,
+        preConfirm: () => {
+            const checked = document.querySelector<HTMLInputElement>('input[name="swal_canon"]:checked')
+            if (!checked) {
+                Swal.showValidationMessage('Selecciona una opción para el nombre definitivo.')
+                return false
+            }
+            return checked.value
+        },
+        showCancelButton: true,
+        confirmButtonText: 'Confirmar unificación',
+        cancelButtonText: 'Cancelar',
+        reverseButtons: true,
+        focusConfirm: false,
+    })
+
+    if (!step1.isConfirmed) {
+        incidentsStepRef.value?.clearPairLoading(pair_key)
+        return
+    }
+
+    let canonicalName = ''
+    if (step1.value === 'a') {
+        canonicalName = a_name
+    } else if (step1.value === 'b') {
+        canonicalName = b_name
+    } else {
+        // Step 2: Custom name input
+        const step2 = await Swal.fire({
+            title: 'Nombre canónico personalizado',
+            input: 'text',
+            inputLabel: 'Escribe el nombre definitivo para esta persona',
+            inputPlaceholder: 'Ej: GARCIA LOPEZ JUAN PABLO',
+            inputAttributes: { autocomplete: 'off', style: 'text-transform: uppercase' },
+            showCancelButton: true,
+            confirmButtonText: 'Guardar',
+            cancelButtonText: 'Volver',
+            reverseButtons: true,
+            inputValidator: (value) => !value?.trim() ? 'Ingresa el nombre definitivo.' : undefined,
+        })
+        if (!step2.isConfirmed) {
+            incidentsStepRef.value?.clearPairLoading(pair_key)
+            return
+        }
+        canonicalName = (step2.value as string).trim()
+    }
+
+    // Guard: IDs must be present (stale incidents won't have them)
+    if (!a_id || !b_id) {
+        incidentsStepRef.value?.clearPairLoading(pair_key)
+        Swal.fire('Sin IDs válidos', 'Esta coincidencia no tiene IDs. Pulsa Refrescar en la cabecera y vuelve a intentarlo.', 'warning')
+        return
+    }
+
+    // Perform unification directly (so we can manage pair_key state on success/error)
+    if (!selectedPeriodId.value) return
+    try {
+        const csrf = (document.querySelector('meta[name="csrf-token"]') as HTMLMetaElement)?.content ?? ''
+        const res = await fetch(`/historico-general/${selectedPeriodId.value}/personas-sin-sucursal/confirmar-coincidencia`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf, 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ employee_id: a_id, target_employee_id: b_id, canonical_name: canonicalName }),
+        })
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}))
+            throw new Error((body as any).message || `Error ${res.status}`)
+        }
+        const data = await res.json()
+        // loadIncidents triggers lightweight refreshes for both counters
+        await loadIncidents()
+        incidentsReloadKey.value++
+        incidentsStepRef.value?.onPairConfirmed(pair_key)
+        const text = data.branch_assigned
+            ? 'La persona fue unificada y se heredó la sucursal correspondiente.'
+            : 'La persona fue unificada. Aún requiere asignar sucursal.'
+        Swal.fire({ title: 'Coincidencia confirmada', text, icon: 'success', timer: 3000, showConfirmButton: false })
+    } catch (e: any) {
+        incidentsStepRef.value?.clearPairLoading(pair_key)
+        Swal.fire('No se pudo confirmar', e?.message || 'Intenta nuevamente.', 'error')
+    }
+}
+
+const discardCoincidenciaFromDuplicates = async ({ a_id, b_id, pair_key }: { a_id: number; b_id: number; pair_key: string }) => {
+    if (!selectedPeriodId.value) return
+
+    // Confirm before persisting the rejection
+    const confirm = await Swal.fire({
+        title: '¿Son personas diferentes?',
+        text: 'No se eliminará nada. Solo se guardará que este par no debe volver a sugerirse como posible coincidencia.',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, son diferentes',
+        cancelButtonText: 'Cancelar',
+        reverseButtons: true,
+    })
+    if (!confirm.isConfirmed) {
+        incidentsStepRef.value?.clearPairLoading(pair_key)
+        return
+    }
+
+    try {
+        const csrf = (document.querySelector('meta[name="csrf-token"]') as HTMLMetaElement)?.content ?? ''
+        const res = await fetch(`/historico-general/${selectedPeriodId.value}/coincidencias/descartar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf, 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ employee_id_a: a_id, employee_id_b: b_id }),
+        })
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}))
+            throw new Error((body as any).message || `Error ${res.status}`)
+        }
+        await loadIncidents()
+        incidentsStepRef.value?.onPairRejected(pair_key)
+    } catch (e: any) {
+        incidentsStepRef.value?.clearPairLoading(pair_key)
+        Swal.fire('No se pudo descartar', e?.message || 'Intenta nuevamente.', 'error')
     }
 }
 
@@ -315,8 +487,51 @@ const resolveLocationFromIncident = ({ incident_id, action, branch_id }: { incid
 const generateReport = () => {
     if (!period.value?.can_generate_radiography) return toastError('Generación bloqueada', period.value?.blocking_reasons?.join(' ') || 'Completa las etapas previas.')
     if (reportConfig.value.report_type !== 'simple' && !reportConfig.value.compare_period_id) return toastError('Falta periodo comparable', 'Selecciona explícitamente el periodo a comparar.')
-    Swal.fire({ title: 'Reporte en procesamiento', text: 'El reporte se genera en segundo plano. Puedes cerrar esta ventana; te avisaremos por correo cuando Excel y PDF estén listos.', icon: 'info', confirmButtonText: 'Entendido' })
-    router.post(`/historico-general/${selectedPeriodId.value}/generar-radiografia`, { config: reportConfig.value }, { preserveScroll: true })
+    router.post(`/historico-general/${selectedPeriodId.value}/generar-radiografia`, { config: reportConfig.value }, {
+        preserveScroll: true,
+        onSuccess: () => Swal.fire({ title: 'Generación en cola', text: 'El reporte se genera en segundo plano. Puedes cerrar esta ventana; te avisaremos por correo cuando Excel y PDF estén listos.', icon: 'info', confirmButtonText: 'Entendido' }),
+        onError:   () => Swal.fire('No se pudo iniciar', 'Ya hay una generación en proceso o faltan pasos previos.', 'error'),
+    })
+}
+
+const cancelGeneration = async () => {
+    if (!selectedPeriodId.value) return
+    const result = await Swal.fire({
+        title: '¿Cancelar la generación?',
+        text: 'El proceso se marcará como cancelado. Podrás reiniciarlo desde esta misma etapa.',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, cancelar',
+        cancelButtonText: 'No, dejar corriendo',
+        reverseButtons: true,
+        confirmButtonColor: '#ef4444',
+    })
+    if (!result.isConfirmed) return
+    router.post(`/historico-general/${selectedPeriodId.value}/generar-reporte/cancelar`, {}, {
+        preserveScroll: true,
+        onSuccess: () => Swal.fire({ title: 'Generación cancelada', text: 'Puedes reiniciarla cuando estés listo.', icon: 'info', confirmButtonText: 'Entendido' }),
+        onError:   () => Swal.fire('No se pudo cancelar', 'El proceso ya terminó o no existe.', 'error'),
+    })
+}
+
+const processGenerationNow = async () => {
+    if (!selectedPeriodId.value) return
+    const result = await Swal.fire({
+        title: 'Procesar ahora (local)',
+        text: 'Ejecuta el job directamente sin worker. La página esperará hasta que termine (puede tardar varios minutos).',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonText: 'Procesar ahora',
+        cancelButtonText: 'Cancelar',
+        reverseButtons: true,
+    })
+    if (!result.isConfirmed) return
+    Swal.fire({ title: 'Generando reporte…', text: 'Ejecutando directamente. No cierres esta ventana.', allowOutsideClick: false, showConfirmButton: false, didOpen: () => Swal.showLoading() })
+    router.post(`/historico-general/${selectedPeriodId.value}/generar-reporte/procesar-ahora`, {}, {
+        preserveScroll: true,
+        onSuccess: () => Swal.fire({ title: 'Listo', text: 'El reporte fue generado. Descarga Excel y PDF.', icon: 'success', confirmButtonText: 'Ver resultado' }),
+        onError:   () => Swal.fire({ title: 'Terminó con error', text: 'Revisa el detalle en la etapa de generar reporte.', icon: 'error', confirmButtonText: 'Ver detalle' }),
+    })
 }
 </script>
 
@@ -412,6 +627,7 @@ const generateReport = () => {
                     />
                     <IncidentsStep
                         v-else-if="currentStep === 'incidents'"
+                        ref="incidentsStepRef"
                         :period="period"
                         :incidents="incidents"
                         :branches="branches"
@@ -421,6 +637,8 @@ const generateReport = () => {
                         @assign-branch="assignBranchFromIncident"
                         @confirm-match="confirmMatchFromIncident"
                         @resolve-location="resolveLocationFromIncident"
+                        @confirm-coincidencia-from-duplicates="confirmCoincidenciaFromDuplicates"
+                        @discard-coincidencia="discardCoincidenciaFromDuplicates"
                     />
                     <div v-else-if="currentStep === 'config'" class="space-y-5">
                         <!-- Bloqueo por incidencias críticas -->
@@ -448,51 +666,16 @@ const generateReport = () => {
                             @next="selectStep('generate')"
                         />
                     </div>
-                    <div v-else-if="currentStep === 'generate'" class="space-y-5">
-                        <section class="rounded-[2rem] border border-white/70 bg-white p-6 shadow-xl shadow-slate-200/70">
-                            <SectionHeader
-                                eyebrow="Etapa 5"
-                                title="Generar reporte"
-                                description="Calcula las métricas del reporte según la configuración seleccionada. El proceso corre en segundo plano."
-                            />
-                            <div class="mt-6 flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
-                                <div class="space-y-1.5 text-sm text-slate-600">
-                                    <p>
-                                        <span class="font-bold text-slate-800">Tipo:</span>
-                                        {{
-                                            reportConfig.report_type === 'simple' ? 'Radiografía simple' :
-                                            reportConfig.report_type === 'month_vs_month' ? 'Comparativo mes vs mes' :
-                                            reportConfig.report_type === 'bimester_vs_bimester' ? 'Comparativo bimestre vs bimestre' :
-                                            'Comparativo trimestre vs trimestre'
-                                        }}
-                                    </p>
-                                    <p>
-                                        <span class="font-bold text-slate-800">Alcance:</span>
-                                        {{
-                                            reportConfig.scope === 'general' ? 'General' :
-                                            reportConfig.scope === 'branch' ? 'Por sucursal' :
-                                            'Por empleado / gestor'
-                                        }}
-                                    </p>
-                                </div>
-                                <button
-                                    type="button"
-                                    class="inline-flex h-12 shrink-0 items-center gap-2 rounded-2xl bg-slate-950 px-6 text-sm font-black text-white shadow-xl shadow-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                                    :disabled="!period?.can_generate_radiography"
-                                    @click="generateReport"
-                                >
-                                    Generar reporte
-                                </button>
-                            </div>
-                            <div v-if="period?.blocking_reasons?.length" class="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4">
-                                <p class="text-sm font-black text-amber-800">No se puede generar todavía</p>
-                                <ul class="mt-2 list-disc pl-5 text-sm text-amber-700">
-                                    <li v-for="reason in period.blocking_reasons" :key="reason">{{ reason }}</li>
-                                </ul>
-                            </div>
-                        </section>
-                        <ReportGenerationStatus :period="period" @retry="generateReport" />
-                    </div>
+                    <GenerateReportStep
+                        v-else-if="currentStep === 'generate'"
+                        :period="period"
+                        :report-config="reportConfig"
+                        :can-generate="Boolean(period?.can_generate_radiography)"
+                        @generate="generateReport"
+                        @cancel="cancelGeneration"
+                        @refresh="() => router.reload({ only: ['periods', 'groupedUploads'] })"
+                        @process-now="processGenerationNow"
+                    />
                     <ReportPreview
                         v-else-if="currentStep === 'preview'"
                         :period="period"

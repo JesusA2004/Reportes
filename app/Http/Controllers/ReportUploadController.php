@@ -307,6 +307,16 @@ class ReportUploadController extends Controller {
 
     public function incidents(Period $period)
     {
+        $allPeriods = Period::all();
+        $weeklyIds  = $period->resolveBaseWeeklyIds($allPeriods);
+        $dataIds    = array_values(array_unique(array_merge(
+            empty($weeklyIds) ? [] : $weeklyIds,
+            [$period->id]
+        )));
+        // Lightweight refreshes: keep both counters in sync without full radiography
+        $this->refreshEmpleadosSinSucursalIncident($period, $dataIds);
+        $this->refreshCoincidenciasIncident($period, $dataIds);
+
         $summary = PeriodSummary::query()->where('period_id', $period->id)->with('incidents')->first();
 
         $items = $summary?->incidents
@@ -480,6 +490,7 @@ class ReportUploadController extends Controller {
     /**
      * Confirm that two employee records are the same person.
      * Creates alias records and inherits branch from the target if available.
+     * Optionally accepts a canonical_name to update both employees' display name.
      */
     public function confirmarCoincidencia(Period $period, \Illuminate\Http\Request $request): \Illuminate\Http\JsonResponse
     {
@@ -487,57 +498,90 @@ class ReportUploadController extends Controller {
             'employee_id'        => ['required', 'integer', 'exists:employees,id'],
             'target_employee_id' => ['required', 'integer', 'exists:employees,id', 'different:employee_id'],
             'branch_id'          => ['nullable', 'integer', 'exists:branches,id'],
+            'canonical_name'     => ['nullable', 'string', 'max:255'],
         ]);
 
-        $allPeriods = \App\Models\Period::all();
-        $weeklyIds  = $period->resolveBaseWeeklyIds($allPeriods);
-        $dataIds    = array_values(array_unique(array_merge(
-            empty($weeklyIds) ? [] : $weeklyIds,
-            [$period->id]
-        )));
+        try {
+            $allPeriods = \App\Models\Period::all();
+            $weeklyIds  = $period->resolveBaseWeeklyIds($allPeriods);
+            $dataIds    = array_values(array_unique(array_merge(
+                empty($weeklyIds) ? [] : $weeklyIds,
+                [$period->id]
+            )));
 
-        $emp    = \App\Models\Employee::findOrFail($validated['employee_id']);
-        $target = \App\Models\Employee::findOrFail($validated['target_employee_id']);
+            $emp    = \App\Models\Employee::findOrFail($validated['employee_id']);
+            $target = \App\Models\Employee::findOrFail($validated['target_employee_id']);
 
-        /** @var \App\Services\PersonIdentityResolverService $resolver */
-        $resolver = app(\App\Services\PersonIdentityResolverService::class);
+            /** @var \App\Services\PersonIdentityResolverService $resolver */
+            $resolver = app(\App\Services\PersonIdentityResolverService::class);
 
-        // Save alias in both directions (if names differ)
-        if ($resolver->normalizePersonName($emp->full_name) !== $resolver->normalizePersonName($target->full_name)) {
-            \App\Models\EmployeeAlias::query()->updateOrCreate(
-                ['employee_id' => $target->id, 'normalized_alias' => $resolver->normalizePersonName($emp->full_name)],
-                ['alias_name' => $emp->full_name, 'source' => 'confirmed_match', 'confidence' => 1.00, 'created_by' => auth()->id()]
-            );
-            \App\Models\EmployeeAlias::query()->updateOrCreate(
-                ['employee_id' => $emp->id, 'normalized_alias' => $resolver->normalizePersonName($target->full_name)],
-                ['alias_name' => $target->full_name, 'source' => 'confirmed_match', 'confidence' => 1.00, 'created_by' => auth()->id()]
-            );
+            // Apply canonical name if provided — update both employees
+            $canonicalName = trim($validated['canonical_name'] ?? '');
+            if ($canonicalName !== '') {
+                $canonicalNorm = $resolver->normalizePersonName($canonicalName);
+                if ($resolver->normalizePersonName($emp->full_name) !== $canonicalNorm) {
+                    $emp->update(['full_name' => $canonicalName, 'normalized_name' => $canonicalNorm]);
+                }
+                if ($resolver->normalizePersonName($target->full_name) !== $canonicalNorm) {
+                    $target->update(['full_name' => $canonicalName, 'normalized_name' => $canonicalNorm]);
+                }
+                $emp->refresh();
+                $target->refresh();
+            }
+
+            // Save alias in both directions (if names differ after canonical update)
+            $normEmp    = $resolver->normalizePersonName($emp->full_name);
+            $normTarget = $resolver->normalizePersonName($target->full_name);
+            if ($normEmp !== $normTarget) {
+                \App\Models\EmployeeAlias::query()->updateOrCreate(
+                    ['employee_id' => $target->id, 'normalized_alias' => $normEmp],
+                    ['alias_name' => $emp->full_name, 'source' => 'confirmed_match', 'confidence' => 1.00, 'created_by' => auth()->id()]
+                );
+                \App\Models\EmployeeAlias::query()->updateOrCreate(
+                    ['employee_id' => $emp->id, 'normalized_alias' => $normTarget],
+                    ['alias_name' => $target->full_name, 'source' => 'confirmed_match', 'confidence' => 1.00, 'created_by' => auth()->id()]
+                );
+            }
+
+            // Resolve which branch to use
+            $branchId = $validated['branch_id']
+                ?? $resolver->resolveBranchFromExistingAssignments($target->id)
+                ?? $resolver->resolveBranchFromCanonicalEmployee($emp);
+
+            if ($branchId) {
+                \App\Models\EmployeeBranchAssignment::query()->updateOrCreate(
+                    ['period_id' => $period->id, 'employee_id' => $emp->id],
+                    [
+                        'branch_id'           => $branchId,
+                        'source_type'         => 'manual',
+                        'source_reference'    => "Confirmado como misma persona que #{$target->id} — {$target->full_name}",
+                        'match_type'          => 'manual',
+                        'confidence'          => 1.00,
+                        'was_manual_reviewed' => true,
+                        'notes'               => "Unificado manualmente. Alias confirmado con \"{$target->full_name}\".",
+                    ]
+                );
+            }
+
+            // Lightweight refreshes — no full radiography needed
+            $this->refreshEmpleadosSinSucursalIncident($period, $dataIds);
+            $this->refreshCoincidenciasIncident($period, $dataIds);
+
+            return response()->json(['ok' => true, 'branch_assigned' => (bool) $branchId]);
+
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('confirmarCoincidencia error', [
+                'period_id'   => $period->id,
+                'payload'     => $request->all(),
+                'error'       => $e->getMessage(),
+                'file'        => $e->getFile() . ':' . $e->getLine(),
+            ]);
+            return response()->json([
+                'ok'      => false,
+                'message' => 'No se pudo confirmar la coincidencia: ' . $e->getMessage(),
+                'error'   => app()->isLocal() ? $e->getMessage() : null,
+            ], 500);
         }
-
-        // Resolve which branch to use
-        $branchId = $validated['branch_id']
-            ?? $resolver->resolveBranchFromExistingAssignments($target->id)
-            ?? $resolver->resolveBranchFromCanonicalEmployee($emp);
-
-        if ($branchId) {
-            \App\Models\EmployeeBranchAssignment::query()->updateOrCreate(
-                ['period_id' => $period->id, 'employee_id' => $emp->id],
-                [
-                    'branch_id'           => $branchId,
-                    'source_type'         => 'lendus',
-                    'source_reference'    => "Confirmado como misma persona que #{$target->id} — {$target->full_name}",
-                    'match_type'          => 'confirmed_match',
-                    'confidence'          => 1.00,
-                    'was_manual_reviewed' => true,
-                    'notes'               => "Unificado manualmente. Alias confirmado con \"{$target->full_name}\".",
-                ]
-            );
-        }
-
-        // Lightweight: refresh only the empleados_sin_sucursal incident without full radiography
-        $this->refreshEmpleadosSinSucursalIncident($period, $dataIds);
-
-        return response()->json(['ok' => true, 'branch_assigned' => (bool) $branchId]);
     }
 
     private function refreshEmpleadosSinSucursalIncident(Period $period, array $dataIds): void
@@ -545,6 +589,7 @@ class ReportUploadController extends Controller {
         $summary = PeriodSummary::query()->where('period_id', $period->id)->first();
         if (!$summary) return;
 
+        // Count raw employee_id records without branch
         $sinSucursal = DB::table('fact_noi_movements as n')
             ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period, $dataIds) {
                 $j->on('eba.employee_id', '=', 'n.employee_id')
@@ -563,26 +608,150 @@ class ReportUploadController extends Controller {
 
         if ($sinSucursal === 0) {
             $existing?->delete();
-        } elseif ($existing) {
-            $sinSucursalMonto = (float) DB::table('fact_noi_movements as n')
-                ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period, $dataIds) {
-                    $j->on('eba.employee_id', '=', 'n.employee_id')
-                      ->whereIn('eba.period_id', array_merge([$period->id], $dataIds));
-                })
-                ->whereIn('n.period_id', $dataIds)
-                ->whereNotNull('n.employee_id')
-                ->whereNull('eba.branch_id')
-                ->sum('n.amount');
+            return;
+        }
 
-            $severity = abs($sinSucursalMonto) > 0 ? 'high' : 'warning';
+        $sinSucursalMonto = (float) DB::table('fact_noi_movements as n')
+            ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period, $dataIds) {
+                $j->on('eba.employee_id', '=', 'n.employee_id')
+                  ->whereIn('eba.period_id', array_merge([$period->id], $dataIds));
+            })
+            ->whereIn('n.period_id', $dataIds)
+            ->whereNotNull('n.employee_id')
+            ->whereNull('eba.branch_id')
+            ->sum('n.amount');
 
+        // Count unique persons (grouped by normalized_name) — for UI display
+        $uniquePersons = (int) DB::table('fact_noi_movements as n')
+            ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period, $dataIds) {
+                $j->on('eba.employee_id', '=', 'n.employee_id')
+                  ->whereIn('eba.period_id', array_merge([$period->id], $dataIds));
+            })
+            ->leftJoin('employees as emp', 'n.employee_id', '=', 'emp.id')
+            ->whereIn('n.period_id', $dataIds)
+            ->whereNotNull('n.employee_id')
+            ->whereNull('eba.branch_id')
+            ->whereNotNull('emp.normalized_name')
+            ->distinct('emp.normalized_name')
+            ->count('emp.normalized_name');
+
+        // If some employees have no normalized_name, fall back to raw count
+        if ($uniquePersons === 0) $uniquePersons = $sinSucursal;
+
+        $severity = abs($sinSucursalMonto) > 0 ? 'high' : 'warning';
+        $ctx = [
+            'count'               => $sinSucursal,
+            'unique_persons_count'=> $uniquePersons,
+            'monto'               => $sinSucursalMonto,
+        ];
+
+        if ($existing) {
             $existing->update([
                 'severity' => $severity,
                 'message'  => "{$sinSucursal} empleado(s) del NOI no tienen sucursal asignada. Sus datos no aparecen en reportes por sucursal."
                     . ($severity === 'high' ? ' Impacto monetario: $' . number_format(abs($sinSucursalMonto), 2) : ''),
-                'context'  => array_merge($existing->context ?? [], ['count' => $sinSucursal, 'monto' => $sinSucursalMonto]),
+                'context'  => $ctx,
+            ]);
+        } else {
+            PeriodIncident::query()->create([
+                'period_summary_id' => $summary->id,
+                'type'     => 'empleados_sin_sucursal',
+                'severity' => $severity,
+                'message'  => "{$sinSucursal} empleado(s) del NOI no tienen sucursal asignada. Sus datos no aparecen en reportes por sucursal."
+                    . ($severity === 'high' ? ' Impacto monetario: $' . number_format(abs($sinSucursalMonto), 2) : ''),
+                'context'  => $ctx,
             ]);
         }
+    }
+
+    /**
+     * Lightweight refresh of the posibles_coincidencias_persona incident.
+     * Re-runs detection (excludes rejected/aliased pairs) and updates or creates/deletes the incident.
+     */
+    private function refreshCoincidenciasIncident(Period $period, array $dataIds): void
+    {
+        $summary = PeriodSummary::query()->where('period_id', $period->id)->first();
+        if (!$summary) return;
+
+        /** @var \App\Services\PeriodRadiographyService $svc */
+        $svc           = app(\App\Services\PeriodRadiographyService::class);
+        $coincidencias = $svc->detectCoincidencias($dataIds);
+
+        $existing = PeriodIncident::query()
+            ->where('period_summary_id', $summary->id)
+            ->where('type', 'posibles_coincidencias_persona')
+            ->first();
+
+        if (empty($coincidencias)) {
+            $existing?->delete();
+            return;
+        }
+
+        $coincidenciaIds = array_unique(array_merge(
+            array_column($coincidencias, 'a_id'),
+            array_column($coincidencias, 'b_id'),
+        ));
+        $monetaryAmount = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('employee_id', $coincidenciaIds)
+            ->sum('amount');
+        $hasMoney = abs($monetaryAmount) > 0;
+
+        $data = [
+            'type'     => 'posibles_coincidencias_persona',
+            'severity' => $hasMoney ? 'high' : 'warning',
+            'message'  => count($coincidencias) . ' posible(s) coincidencia(s) de persona detectada(s). Verifica si se trata de la misma persona escrita de forma diferente.'
+                . ($hasMoney ? ' Tienen impacto monetario: $' . number_format(abs($monetaryAmount), 2) . '.' : ''),
+            'context'  => [
+                'count'   => count($coincidencias),
+                'monto'   => $monetaryAmount,
+                'samples' => array_slice($coincidencias, 0, 10),
+            ],
+        ];
+
+        if ($existing) {
+            $existing->update($data);
+        } else {
+            PeriodIncident::query()->create(['period_summary_id' => $summary->id, ...$data]);
+        }
+    }
+
+    /**
+     * Permanently discard a coincidencia pair so it won't reappear in future checks.
+     * Saves an employee_match_rejections record and refreshes the incident.
+     */
+    public function descartarCoincidencia(Period $period, \Illuminate\Http\Request $request): \Illuminate\Http\JsonResponse
+    {
+        $validated = $request->validate([
+            'employee_id_a' => ['required', 'integer', 'exists:employees,id'],
+            'employee_id_b' => ['required', 'integer', 'exists:employees,id', 'different:employee_id_a'],
+        ]);
+
+        $pairKey = \App\Models\EmployeeMatchRejection::pairKey(
+            (int) $validated['employee_id_a'],
+            (int) $validated['employee_id_b']
+        );
+
+        \App\Models\EmployeeMatchRejection::query()->updateOrCreate(
+            ['pair_key' => $pairKey],
+            [
+                'employee_id_a' => min((int) $validated['employee_id_a'], (int) $validated['employee_id_b']),
+                'employee_id_b' => max((int) $validated['employee_id_a'], (int) $validated['employee_id_b']),
+                'period_id'     => $period->id,
+                'reason'        => 'Descartado manualmente — no son la misma persona.',
+                'created_by'    => auth()->id(),
+            ]
+        );
+
+        $allPeriods = Period::all();
+        $weeklyIds  = $period->resolveBaseWeeklyIds($allPeriods);
+        $dataIds    = array_values(array_unique(array_merge(
+            empty($weeklyIds) ? [] : $weeklyIds,
+            [$period->id]
+        )));
+        $this->refreshCoincidenciasIncident($period, $dataIds);
+
+        return response()->json(['ok' => true]);
     }
 
     public function resolvePendingLocation(Period $period, \Illuminate\Http\Request $request): \Illuminate\Http\RedirectResponse
@@ -654,22 +823,142 @@ class ReportUploadController extends Controller {
             return back()->with('error', implode(' ', $workflow['blocking_reasons']) ?: 'No se puede generar la Radiografía todavía.');
         }
 
-        $run = PeriodRadiographyRun::query()->create([
-            'period_id'  => $period->id,
-            'status'     => 'queued',
-            'started_at' => now(),
-            'created_by' => auth()->id(),
-            'log'        => 'Radiografía en cola. Puedes cerrar esta ventana.',
-        ]);
-
         $config = $request->input('config', []);
         $scope  = $config['scope'] ?? 'general';
         $type   = ($config['report_type'] ?? 'simple') === 'simple' ? 'Radiografía simple' : 'Reporte comparativo';
-        $run->forceFill(['log' => "Radiografía en cola. Se generará un {$type} con alcance {$scope}."])->save();
+
+        $run = PeriodRadiographyRun::query()->create([
+            'period_id'  => $period->id,
+            'status'     => 'queued',
+            'queued_at'  => now(),
+            'created_by' => auth()->id(),
+            'log'        => "Radiografía en cola. Se generará un {$type} con alcance {$scope}.",
+            'metadata'   => ['config' => $config, 'progress_percent' => 0, 'current_step' => 'En cola'],
+        ]);
 
         GenerateRadiographyJob::dispatch($period->id, auth()->id(), $run->id, $config);
 
         return back()->with('success', 'La Radiografía se está generando en segundo plano. Recibirás un correo cuando esté lista.');
+    }
+
+    /**
+     * JSON endpoint: current progress of the most recent radiography generation run.
+     * Polled every 3 s by the GenerateReportStep Vue component.
+     */
+    public function generationProgress(Period $period): \Illuminate\Http\JsonResponse
+    {
+        $run = PeriodRadiographyRun::query()
+            ->where('period_id', $period->id)
+            ->latest('id')
+            ->first();
+
+        if (!$run) {
+            return response()->json(['status' => null]);
+        }
+
+        $status   = $run->status;
+        $isQueued = $status === 'queued';
+        $running  = in_array($status, ['queued', 'running'], true);
+
+        $elapsedSeconds = null;
+        $stuckWarning   = false;
+
+        if ($running) {
+            $ref = $isQueued
+                ? ($run->queued_at ?? $run->created_at)
+                : ($run->started_at ?? $run->queued_at ?? $run->created_at);
+            $elapsedSeconds = $ref ? max(0, (int) now()->diffInSeconds($ref)) : null;
+            $stuckWarning   = $elapsedSeconds !== null && (
+                ($isQueued && $elapsedSeconds >= 300) ||
+                (!$isQueued && $elapsedSeconds >= 1800)
+            );
+        } elseif ($run->started_at && $run->finished_at) {
+            $elapsedSeconds = max(0, (int) $run->started_at->diffInSeconds($run->finished_at));
+        }
+
+        $excelUrl = $run->output_excel_path
+            ? route('reportes-mensuales.export-radiography', $period->id)
+            : null;
+        $pdfUrl = $run->output_pdf_path
+            ? route('reportes-mensuales.export-radiography-pdf', $period->id)
+            : null;
+
+        return response()->json([
+            'status'          => $status,
+            'run_id'          => $run->id,
+            'log'             => $run->log ? mb_strimwidth($run->log, 0, 300) : null,
+            'error_message'   => $run->error_message ? mb_strimwidth($run->error_message, 0, 300) : null,
+            'queued_at'       => optional($run->queued_at ?? $run->created_at)->format('d/m/Y H:i'),
+            'started_at'      => $isQueued ? null : optional($run->started_at)->format('d/m/Y H:i'),
+            'finished_at'     => optional($run->finished_at)->format('d/m/Y H:i'),
+            'elapsed_seconds' => $elapsedSeconds,
+            'stuck_warning'   => $stuckWarning,
+            'metadata'        => $run->metadata,
+            'excel_url'       => $excelUrl,
+            'pdf_url'         => $pdfUrl,
+            'can_process_now' => !app()->isProduction() && $isQueued,
+        ]);
+    }
+
+    /**
+     * Cancel an active (queued or running) radiography generation.
+     */
+    public function cancelGeneration(Period $period): RedirectResponse
+    {
+        $run = PeriodRadiographyRun::query()
+            ->where('period_id', $period->id)
+            ->whereIn('status', ['queued', 'running'])
+            ->latest('id')
+            ->first();
+
+        if (!$run) {
+            return back()->with('error', 'No hay una generación activa para cancelar en este periodo.');
+        }
+
+        $cancelledBy = auth()->user()?->name ?? 'usuario';
+        $run->update([
+            'status'        => 'cancelled',
+            'finished_at'   => now(),
+            'cancelled_at'  => now(),
+            'cancelled_by'  => auth()->id(),
+            'log'           => "Generación cancelada por {$cancelledBy}.",
+            'error_message' => 'Cancelado manualmente.',
+            'metadata'      => array_merge(is_array($run->metadata) ? $run->metadata : [], [
+                'current_step' => 'Cancelado',
+            ]),
+        ]);
+
+        return back()->with('success', 'La generación fue cancelada. Puedes reintentarla cuando estés listo.');
+    }
+
+    /**
+     * Run the generation job synchronously (local/debug only).
+     */
+    public function processGenerationNow(Period $period): RedirectResponse
+    {
+        abort_if(app()->isProduction(), 403, 'Solo disponible en entorno local/debug.');
+
+        $run = PeriodRadiographyRun::query()
+            ->where('period_id', $period->id)
+            ->where('status', 'queued')
+            ->latest('id')
+            ->first();
+
+        if (!$run) {
+            return back()->with('error', 'No hay una generación en cola para procesar.');
+        }
+
+        @set_time_limit(0);
+        @ini_set('memory_limit', '1024M');
+
+        try {
+            $config = is_array($run->metadata) ? ($run->metadata['config'] ?? []) : [];
+            $job = new GenerateRadiographyJob($period->id, auth()->id(), $run->id, $config);
+            app()->call([$job, 'handle']);
+            return back()->with('success', 'Generación completada. Descarga Excel y PDF desde el paso de reporte.');
+        } catch (\Throwable $e) {
+            return back()->with('info', 'La generación terminó con error. Revisa el detalle en la etapa de generar reporte.');
+        }
     }
 
     public function analyze(ReportUpload $reportUpload): RedirectResponse
@@ -1181,6 +1470,11 @@ class ReportUploadController extends Controller {
             'radiography_ready'               => $radiographyReady,
             'radiography_invalidated'         => (bool) $summary?->invalidated_at,
             'radiography_running'             => $running,
+            'radiography_run_queued_at'       => optional($run?->queued_at ?? $run?->created_at)->format('d/m/Y H:i'),
+            'radiography_run_started_at'      => ($runStatus !== 'queued') ? optional($run?->started_at)->format('d/m/Y H:i') : null,
+            'radiography_run_metadata'        => $run?->metadata,
+            'radiography_run_error'           => $run?->error_message ? mb_strimwidth($run->error_message, 0, 300) : null,
+            'radiography_can_process_now'     => !app()->isProduction() && $runStatus === 'queued',
             'can_update_database'             => empty($missingDb) && empty($failedDb) && !$dbRunning,
             'can_resolve_incidents'           => $databaseUpdated,
             'can_generate_radiography'        => $databaseUpdated && $pendingCritical === 0 && empty($missingRadiography) && empty($unprocessedRadiography) && !$running,

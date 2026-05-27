@@ -492,47 +492,142 @@ class PeriodRadiographyService
             ];
         }
 
-        // Detect possible coincidences: employees with similar but NOT identical normalized names.
-        // Exact normalized_name matches are intentionally excluded — they are the same person
-        // split across multiple source systems and handled via canonical_same_name resolution.
-        $employeeNames = DB::table('employees')
-            ->select('id', 'full_name', 'normalized_name')
+        // Delegate to extracted public method so controller can refresh independently
+        $coincidencias = $this->detectCoincidencias($dataIds);
+
+        if (!empty($coincidencias)) {
+            $coincidenciaIds = array_unique(array_merge(
+                array_column($coincidencias, 'a_id'),
+                array_column($coincidencias, 'b_id'),
+            ));
+            $monetaryAmount = (float) DB::table('fact_noi_movements')
+                ->whereIn('period_id', $dataIds)
+                ->whereIn('employee_id', $coincidenciaIds)
+                ->sum('amount');
+            $hasMoney = abs($monetaryAmount) > 0;
+
+            $items[] = [
+                'type'     => 'posibles_coincidencias_persona',
+                'severity' => $hasMoney ? 'high' : 'warning',
+                'message'  => count($coincidencias) . ' posible(s) coincidencia(s) de persona detectada(s). Verifica si se trata de la misma persona escrita de forma diferente.'
+                    . ($hasMoney ? ' Tienen impacto monetario: $' . number_format(abs($monetaryAmount), 2) . '.' : ''),
+                'context'  => [
+                    'count'   => count($coincidencias),
+                    'monto'   => $monetaryAmount,
+                    'samples' => array_slice($coincidencias, 0, 10),
+                ],
+            ];
+        }
+
+        return $items;
+    }
+
+    /**
+     * Detect employee name coincidences.
+     *
+     * Returns up to $limit unique pairs (pair_key = "minId-maxId") that have ≥75% token overlap
+     * on their normalized names. Excludes:
+     *   - Same normalized_name (same person, different sources)
+     *   - Pairs already rejected via employee_match_rejections
+     *   - Pairs where one employee is already an alias of the other
+     *
+     * Each entry includes: a, b, a_id, b_id, pair_key, score (0-100), a_source, b_source,
+     *                       monto_relacionado, reason.
+     */
+    public function detectCoincidencias(array $dataIds, int $limit = 20): array
+    {
+        // Pre-load rejected pair keys for fast lookup
+        $rejectedKeys = DB::table('employee_match_rejections')
+            ->pluck('pair_key')
+            ->flip()
+            ->all();
+
+        // Pre-load aliased normalized_name pairs (confirmed same person → skip)
+        $aliasRows = DB::table('employee_aliases as ea')
+            ->join('employees as e', 'ea.employee_id', '=', 'e.id')
+            ->select('e.normalized_name as owner_norm', 'ea.normalized_alias')
+            ->get();
+
+        // Build bidirectional lookup: normA → set{normB, ...}
+        $aliasedWith = [];
+        foreach ($aliasRows as $row) {
+            $aliasedWith[(string) $row->owner_norm][(string) $row->normalized_alias] = true;
+            $aliasedWith[(string) $row->normalized_alias][(string) $row->owner_norm] = true;
+        }
+
+        $employees = DB::table('employees')
+            ->select('id', 'full_name', 'normalized_name', 'source_system')
             ->whereNotNull('normalized_name')
+            ->orderBy('id')
             ->get();
 
         $coincidencias = [];
         $checked       = [];
-        foreach ($employeeNames as $a) {
-            foreach ($employeeNames as $b) {
-                if ($a->id >= $b->id) continue;
-                // Skip: same normalized_name = same person from different sources, not a typo variant
-                if ((string) $a->normalized_name === (string) $b->normalized_name) continue;
-                $key = min($a->id, $b->id) . '_' . max($a->id, $b->id);
-                if (isset($checked[$key])) continue;
-                $checked[$key] = true;
 
-                $tokensA = array_filter(explode(' ', (string) $a->normalized_name));
-                $tokensB = array_filter(explode(' ', (string) $b->normalized_name));
+        foreach ($employees as $a) {
+            foreach ($employees as $b) {
+                if ($a->id >= $b->id) continue;
+                // Same normalized name = same person split across sources, handled elsewhere
+                if ((string) $a->normalized_name === (string) $b->normalized_name) continue;
+
+                $pairKey = min($a->id, $b->id) . '-' . max($a->id, $b->id);
+                if (isset($checked[$pairKey])) continue;
+                $checked[$pairKey] = true;
+
+                // Skip permanently rejected pairs
+                if (array_key_exists($pairKey, $rejectedKeys)) continue;
+
+                // Skip pairs already confirmed as aliases
+                if (isset($aliasedWith[(string) $a->normalized_name][(string) $b->normalized_name])) continue;
+
+                $tokensA = array_values(array_filter(explode(' ', (string) $a->normalized_name)));
+                $tokensB = array_values(array_filter(explode(' ', (string) $b->normalized_name)));
                 if (count($tokensA) < 2 || count($tokensB) < 2) continue;
 
                 $intersection = count(array_intersect($tokensA, $tokensB));
                 $minLen       = min(count($tokensA), count($tokensB));
                 if ($minLen > 0 && ($intersection / $minLen) >= 0.75) {
-                    $coincidencias[] = ['a' => $a->full_name, 'b' => $b->full_name];
-                    if (count($coincidencias) >= 20) break 2;
+                    $score = (int) round(($intersection / $minLen) * 100);
+                    $coincidencias[] = [
+                        'a'               => $a->full_name,
+                        'b'               => $b->full_name,
+                        'a_id'            => (int) $a->id,
+                        'b_id'            => (int) $b->id,
+                        'pair_key'        => $pairKey,
+                        'score'           => $score,
+                        'a_source'        => $a->source_system ?? 'noi',
+                        'b_source'        => $b->source_system ?? 'noi',
+                        'monto_relacionado' => 0.0, // enriched below
+                        'reason'          => "Comparten {$intersection} de {$minLen} tokens del nombre ({$score}% similitud).",
+                    ];
+                    if (count($coincidencias) >= $limit) break 2;
                 }
             }
         }
 
+        // Enrich with monetary impact per pair
         if (!empty($coincidencias)) {
-            $items[] = [
-                'type'     => 'posibles_coincidencias_persona',
-                'severity' => 'warning',
-                'message'  => count($coincidencias) . ' posible(s) coincidencia(s) de persona detectada(s). Verifica si se trata de la misma persona escrita de forma diferente.',
-                'context'  => ['count' => count($coincidencias), 'samples' => array_slice($coincidencias, 0, 5)],
-            ];
+            $allIds = array_unique(array_merge(
+                array_column($coincidencias, 'a_id'),
+                array_column($coincidencias, 'b_id'),
+            ));
+            $montos = DB::table('fact_noi_movements')
+                ->whereIn('period_id', $dataIds)
+                ->whereIn('employee_id', $allIds)
+                ->select('employee_id', DB::raw('SUM(amount) as total'))
+                ->groupBy('employee_id')
+                ->pluck('total', 'employee_id')
+                ->all();
+
+            foreach ($coincidencias as &$c) {
+                $c['monto_relacionado'] = round(
+                    abs((float) ($montos[$c['a_id']] ?? 0)) + abs((float) ($montos[$c['b_id']] ?? 0)),
+                    2
+                );
+            }
+            unset($c);
         }
 
-        return $items;
+        return $coincidencias;
     }
 }

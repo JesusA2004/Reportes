@@ -426,11 +426,15 @@ class EmployeeBranchAutoMatchService
 
     private function resolveCandidateFromPortfolios(Period $period, Employee $employee): ?array
     {
+        // Only assign operative branches — never routes, zones or non-operative offices
+        $operativeNames = array_map('strtoupper', $this->branchResolver->operativeFinancialBranches());
+
         $rows = DB::table('fact_portfolios as p')
             ->join('branches as b', 'p.branch_id', '=', 'b.id')
             ->where('p.period_id', $period->id)
             ->whereRaw('LOWER(p.promoter_name) = ?', [$employee->normalized_name])
             ->whereNotNull('p.branch_id')
+            ->whereIn(DB::raw('UPPER(TRIM(b.name))'), $operativeNames)
             ->selectRaw('p.branch_id, b.name as branch_name, COUNT(*) as cnt, SUM(p.balance) as balance')
             ->groupBy('p.branch_id', 'b.name')
             ->orderByDesc('balance')
@@ -458,6 +462,9 @@ class EmployeeBranchAutoMatchService
 
     private function resolveCandidateFromExpenses(Period $period, Employee $employee): ?array
     {
+        // Only consider operative branches — exclude routes, zones, non-operative offices
+        $operativeNames = array_map('strtoupper', $this->branchResolver->operativeFinancialBranches());
+
         $expenses = Expense::query()
             ->with('branch:id,name,normalized_name')
             ->where('period_id', $period->id)
@@ -471,6 +478,11 @@ class EmployeeBranchAutoMatchService
 
         $grouped = $expenses
             ->filter(fn (Expense $expense) => $expense->branch !== null)
+            ->filter(fn (Expense $expense) => in_array(
+                strtoupper(trim($expense->branch->name ?? '')),
+                $operativeNames,
+                true,
+            ))
             ->groupBy('branch_id')
             ->map(function (Collection $items) use ($employee) {
                 /** @var Expense $first */

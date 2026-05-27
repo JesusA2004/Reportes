@@ -62,54 +62,52 @@ class GenerateRadiographyJob implements ShouldQueue
             $run = PeriodRadiographyRun::query()->create([
                 'period_id'  => $period->id,
                 'status'     => 'queued',
-                'started_at' => now(),
+                'queued_at'  => now(),
                 'created_by' => $this->userId,
                 'log'        => 'Radiografía en cola.',
+                'metadata'   => $this->config ? ['config' => $this->config] : null,
             ]);
         }
 
+        // Mark as running and record start time
         $run->update([
-            'status'     => 'running',
-            'started_at' => $run->started_at ?: now(),
+            'status'      => 'running',
+            'started_at'  => $run->started_at ?: now(),
             'finished_at' => null,
-            'log'        => 'Analizando fuentes y calculando métricas.',
         ]);
+        $this->updateProgress($run, 3, 'Iniciando generación', 'Preparando configuración del reporte.');
 
         try {
-            // Remove previous export files before generating new ones
+            // ── 1. Remove previous export files ──────────────────────────────────
+            $this->updateProgress($run, 8, 'Limpiando versión anterior', 'Eliminando reportes generados anteriormente.');
             $cleaner->clearGeneratedReports($period);
 
-            // ── 1. Generate summary (metrics from Expense/Recovery/Placement/Portfolio) ──
+            // ── 2. Generate summary (metrics from Expense/Recovery/Placement/Portfolio) ──
+            $this->updateProgress($run, 12, 'Calculando métricas financieras', 'Analizando cobranza, colocación, nómina y cartera del periodo. Esta etapa puede tardar varios minutos.');
             $summary = $radiographyService->generate($period, $this->userId, $this->config);
 
-            $run->update([
-                'status'            => 'running',
-                'period_summary_id' => $summary->id,
-                'log'               => 'Consolidando empleados y nómina.',
-            ]);
+            $this->updateProgress($run, 48, 'Métricas calculadas', 'Resumen del periodo registrado. Iniciando revisión de asignaciones.');
+            $run->update(['period_summary_id' => $summary->id]);
 
-            // ── 2a. Auto-assign branches to employees (uses placements, portfolios, cobranza) ──
-            $run->update(['log' => 'Asignando sucursales a empleados.']);
+            // ── 3. Verify and refine branch assignments (reads fact tables, does NOT re-import) ──
+            $this->updateProgress($run, 55, 'Revisando asignaciones de sucursales', 'Verificando y refinando asignaciones automáticas de empleados por cobranza, colocación y cartera.');
             $branchAutoMatch->handle($period->id);
 
-            // ── 2b. Consolidate employee summaries (populates fact_period_employee_summary) ──
+            // ── 4. Consolidate employee summaries (populates fact_period_employee_summary) ──
+            $this->updateProgress($run, 68, 'Consolidando resumen de empleados', 'Calculando totales de nómina, percepciones y deducciones por persona y sucursal.');
             $consolidationService->consolidate($period);
 
-            $run->update([
-                'log' => 'Generando Excel.',
-            ]);
-
-            // ── 3. Export Excel (from scratch, no template) ──
+            // ── 5. Export Excel (from scratch, no template) ──
+            $this->updateProgress($run, 75, 'Generando Excel', 'Construyendo hojas, tablas y formato del reporte.');
             $path = $exportService->export($period, $this->config);
 
-            $run->update([
-                'log' => 'Generando PDF.',
-            ]);
-
-            // ── 4. Export PDF (via Blade + dompdf) ──
+            // ── 6. Export PDF (via Blade + dompdf) ──
+            $this->updateProgress($run, 90, 'Generando PDF', 'Renderizando el reporte en formato PDF.');
             $pdfPath = $exportService->exportPdf($period, $this->config);
 
-            // ── 5. Reload summary and register exports ──
+            // ── 7. Reload summary and register exports ──
+            $this->updateProgress($run, 97, 'Registrando exportaciones', 'Guardando rutas de descarga en base de datos.');
+
             $summary = PeriodSummary::query()
                 ->where('period_id', $period->id)
                 ->first();
@@ -136,11 +134,19 @@ class GenerateRadiographyJob implements ShouldQueue
                 ]);
             }
 
+            $finalMeta = array_merge(is_array($run->metadata) ? $run->metadata : [], [
+                'progress_percent' => 100,
+                'current_step'     => 'Completado',
+            ]);
+
             $run->update([
                 'status'            => 'success',
                 'period_summary_id' => $summary?->id,
                 'finished_at'       => now(),
                 'log'               => 'Radiografía generada. Excel y PDF listos para descargar.',
+                'metadata'          => $finalMeta,
+                'output_excel_path' => $path,
+                'output_pdf_path'   => $pdfPath,
             ]);
 
             $this->notifyUser(
@@ -163,10 +169,16 @@ class GenerateRadiographyJob implements ShouldQueue
 
             $publicError = $this->publicErrorMessage($exception);
 
+            $errMeta = array_merge(is_array($run->metadata) ? $run->metadata : [], [
+                'current_step' => 'Error',
+            ]);
+
             $run->update([
-                'status'      => 'failed',
-                'finished_at' => now(),
-                'log'         => $publicError,
+                'status'        => 'failed',
+                'finished_at'   => now(),
+                'log'           => $publicError,
+                'error_message' => $publicError,
+                'metadata'      => $errMeta,
             ]);
 
             $this->notifyUser(
@@ -179,6 +191,24 @@ class GenerateRadiographyJob implements ShouldQueue
 
             throw $exception;
         }
+    }
+
+    /**
+     * Update run progress in DB and keep in-memory model in sync.
+     * Merges with existing metadata so prior fields (e.g. config) are preserved.
+     */
+    private function updateProgress(PeriodRadiographyRun $run, int $percent, string $step, string $log): void
+    {
+        $newMeta = array_merge(
+            is_array($run->metadata) ? $run->metadata : [],
+            ['progress_percent' => $percent, 'current_step' => $step]
+        );
+        if ($this->config) {
+            $newMeta['config'] = $this->config;
+        }
+        $run->update(['log' => $log, 'metadata' => $newMeta]);
+        // keep the in-memory attribute in sync for the next merge
+        $run->setAttribute('metadata', $newMeta);
     }
 
     private function notifyUser(string $subject, string $message, Period $period, bool $success, ?PeriodRadiographyRun $run = null): void

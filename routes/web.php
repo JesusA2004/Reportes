@@ -32,8 +32,12 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::post('/{period}/incidencias/refrescar', [ReportUploadController::class, 'refreshIncidents'])->name('incidents.refresh');
             Route::get('/{period}/personas-sin-sucursal', [ReportUploadController::class, 'personasSinSucursal'])->name('personas-sin-sucursal');
             Route::post('/{period}/personas-sin-sucursal/confirmar-coincidencia', [ReportUploadController::class, 'confirmarCoincidencia'])->name('personas-sin-sucursal.confirmar');
+            Route::post('/{period}/coincidencias/descartar', [ReportUploadController::class, 'descartarCoincidencia'])->name('coincidencias.descartar');
             Route::post('/{period}/incidencias/ubicacion-pendiente/resolver', [ReportUploadController::class, 'resolvePendingLocation'])->name('incidents.resolve-location');
             Route::post('/{period}/generar-radiografia', [ReportUploadController::class, 'generateRadiography'])->name('generate-radiography');
+            Route::get('/{period}/generar-reporte/progreso', [ReportUploadController::class, 'generationProgress'])->name('generation-progress');
+            Route::post('/{period}/generar-reporte/cancelar', [ReportUploadController::class, 'cancelGeneration'])->name('cancel-generation');
+            Route::post('/{period}/generar-reporte/procesar-ahora', [ReportUploadController::class, 'processGenerationNow'])->name('process-generation-now');
             Route::post('/{period}/reprocesar-todo', [ReportUploadController::class, 'reprocessAll'])->name('reprocess-all');
         });
 

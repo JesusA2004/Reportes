@@ -13,7 +13,7 @@ const props = defineProps<{
     reloadKey?: number
 }>()
 
-const emit = defineEmits(['resolve', 'refresh', 'assign-branch', 'confirm-match', 'resolve-location'])
+const emit = defineEmits(['resolve', 'refresh', 'assign-branch', 'confirm-match', 'resolve-location', 'confirm-coincidencia-from-duplicates', 'discard-coincidencia'])
 
 const OPERATIVE_BRANCH_NAMES = new Set([
     'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
@@ -58,11 +58,73 @@ const genericIncidents = computed(() =>
 
 // ── Contadores de cabecera (sin mora_alta) ─────────────────────────────
 const summary = computed(() => ({
-    critical: props.incidents.filter((i) => i.severity === 'high'  && !['mora_alta', 'db_update.mora_alta'].includes(i.type)).length,
-    warnings: props.incidents.filter((i) => i.severity === 'warning' && !['mora_alta', 'db_update.mora_alta'].includes(i.type)).length,
-    resolved: props.incidents.filter((i) => i.severity === 'resolved').length,
-    pending:  props.incidents.filter((i) => i.severity !== 'resolved' && !['mora_alta', 'db_update.mora_alta'].includes(i.type)).length,
+    critical:             props.incidents.filter((i) => i.severity === 'high'  && !['mora_alta', 'db_update.mora_alta'].includes(i.type)).length,
+    // raw employee_id count (may include same person from multiple sources)
+    personsAffected:      (employeesIncident.value?.context?.count ?? 0) as number,
+    // unique grouped persons (by normalized_name) — provided by backend since last refresh
+    uniquePersons:        (employeesIncident.value?.context?.unique_persons_count
+                           ?? employeesIncident.value?.context?.count ?? 0) as number,
+    coincidenciasPending: (duplicatesIncident.value?.context?.count ?? 0) as number,
+    warnings:             props.incidents.filter((i) => i.severity === 'warning' && !['mora_alta', 'db_update.mora_alta'].includes(i.type)).length,
+    resolved:             props.incidents.filter((i) => i.severity === 'resolved').length,
 }))
+
+// ── Posibles coincidencias ─────────────────────────────────────────────
+// All state keyed by pair_key (string) — stable across array re-renders
+const loadingKeys   = ref<Set<string>>(new Set())
+const hiddenKeys    = ref<Set<string>>(new Set())
+const confirmedKeys = ref<Set<string>>(new Set())
+
+/** Derive a stable key for a pair (prefer explicit pair_key; fall back to ID-based). */
+function getPairKey(pair: any): string {
+    if (pair.pair_key) return String(pair.pair_key)
+    if (pair.a_id && pair.b_id) return `${Math.min(pair.a_id, pair.b_id)}-${Math.max(pair.a_id, pair.b_id)}`
+    return `${pair.a}__${pair.b}`
+}
+function isPairLoading(pair: any)   { return loadingKeys.value.has(getPairKey(pair)) }
+function isPairHidden(pair: any)    { return hiddenKeys.value.has(getPairKey(pair)) }
+function isPairConfirmed(pair: any) { return confirmedKeys.value.has(getPairKey(pair)) }
+
+// ── Called by parent (via template ref) to signal result ──────────────
+function onPairConfirmed(key: string) {
+    confirmedKeys.value = new Set([...confirmedKeys.value, key])
+    hiddenKeys.value    = new Set([...hiddenKeys.value, key])
+    loadingKeys.value   = new Set([...loadingKeys.value].filter((k) => k !== key))
+}
+function onPairRejected(key: string) {
+    hiddenKeys.value  = new Set([...hiddenKeys.value, key])
+    loadingKeys.value = new Set([...loadingKeys.value].filter((k) => k !== key))
+}
+function clearPairLoading(key: string) {
+    loadingKeys.value = new Set([...loadingKeys.value].filter((k) => k !== key))
+}
+defineExpose({ onPairConfirmed, onPairRejected, clearPairLoading })
+
+function confirmDuplicatePair(pair: any) {
+    if (!pair.a_id || !pair.b_id) return
+    const key = getPairKey(pair)
+    if (loadingKeys.value.has(key)) return
+    loadingKeys.value = new Set([...loadingKeys.value, key])
+    emit('confirm-coincidencia-from-duplicates', {
+        a_id:     pair.a_id,
+        b_id:     pair.b_id,
+        a_name:   pair.a,
+        b_name:   pair.b,
+        pair_key: key,
+    })
+}
+
+function rejectDuplicatePair(pair: any) {
+    if (!pair.a_id || !pair.b_id) return
+    const key = getPairKey(pair)
+    if (loadingKeys.value.has(key)) return
+    loadingKeys.value = new Set([...loadingKeys.value, key])
+    emit('discard-coincidencia', {
+        a_id:     pair.a_id,
+        b_id:     pair.b_id,
+        pair_key: key,
+    })
+}
 
 // ── Filtros de lista genérica ──────────────────────────────────────────
 const query  = ref('')
@@ -180,11 +242,40 @@ const LOCATION_ACTIONS = [
         </SectionHeader>
 
         <!-- Contadores -->
-        <div class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div class="rounded-2xl border border-rose-100 bg-rose-50 p-4"><p class="text-xs font-bold text-rose-700">Críticas</p><p class="mt-1 text-2xl font-black text-rose-800">{{ summary.critical }}</p></div>
-            <div class="rounded-2xl border border-amber-100 bg-amber-50 p-4"><p class="text-xs font-bold text-amber-700">Advertencias</p><p class="mt-1 text-2xl font-black text-amber-800">{{ summary.warnings }}</p></div>
-            <div class="rounded-2xl border border-emerald-100 bg-emerald-50 p-4"><p class="text-xs font-bold text-emerald-700">Resueltas</p><p class="mt-1 text-2xl font-black text-emerald-800">{{ summary.resolved }}</p></div>
-            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p class="text-xs font-bold text-slate-600">Pendientes</p><p class="mt-1 text-2xl font-black text-slate-900">{{ summary.pending }}</p></div>
+        <div class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+            <!-- Incidencias críticas: count of critical incident groups -->
+            <div class="rounded-2xl border border-rose-100 bg-rose-50 p-4">
+                <p class="text-xs font-bold text-rose-700">Incidencias críticas</p>
+                <p class="mt-1 text-2xl font-black text-rose-800">{{ summary.critical }}</p>
+                <p class="mt-0.5 text-[11px] text-rose-500">grupo(s) bloqueantes</p>
+            </div>
+            <!-- Personas sin sucursal: unique grouped persons vs raw records -->
+            <div class="rounded-2xl border border-rose-100 bg-rose-50/60 p-4">
+                <p class="text-xs font-bold text-rose-600">Sin sucursal</p>
+                <p class="mt-1 text-2xl font-black text-rose-800">{{ summary.uniquePersons }}</p>
+                <p class="mt-0.5 text-[11px] text-rose-400">
+                    persona(s) agrupada(s)
+                    <template v-if="summary.personsAffected > summary.uniquePersons">
+                        · {{ summary.personsAffected }} registros
+                    </template>
+                </p>
+            </div>
+            <!-- Coincidencias: unique pairs pending resolution -->
+            <div class="rounded-2xl border border-violet-100 bg-violet-50 p-4">
+                <p class="text-xs font-bold text-violet-700">Coincidencias</p>
+                <p class="mt-1 text-2xl font-black text-violet-800">{{ summary.coincidenciasPending }}</p>
+                <p class="mt-0.5 text-[11px] text-violet-400">pares únicos pendientes</p>
+            </div>
+            <div class="rounded-2xl border border-amber-100 bg-amber-50 p-4">
+                <p class="text-xs font-bold text-amber-700">Advertencias</p>
+                <p class="mt-1 text-2xl font-black text-amber-800">{{ summary.warnings }}</p>
+                <p class="mt-0.5 text-[11px] text-amber-400">no bloquean generación</p>
+            </div>
+            <div class="rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
+                <p class="text-xs font-bold text-emerald-700">Resueltas</p>
+                <p class="mt-1 text-2xl font-black text-emerald-800">{{ summary.resolved }}</p>
+                <p class="mt-0.5 text-[11px] text-emerald-400">incidencias cerradas</p>
+            </div>
         </div>
 
         <EmptyState v-if="!incidents.length" class="mt-6" title="Sin incidencias" description="La base operativa no tiene incidencias pendientes para este periodo." />
@@ -277,9 +368,19 @@ const LOCATION_ACTIONS = [
                         :class="employeesIncident.severity === 'high' ? 'text-rose-600' : 'text-amber-600'"
                     />
                     <div class="flex-1">
-                        <p class="font-black text-slate-950">Personas / gestores sin sucursal asignada</p>
+                        <p class="font-black text-slate-950">
+                            <span v-if="employeesIncident.severity === 'high'" class="mr-1.5 inline-flex items-center rounded-lg bg-rose-600 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-white">Incidencia crítica</span>
+                            Personas / gestores sin sucursal asignada
+                        </p>
                         <p class="text-xs" :class="employeesIncident.severity === 'high' ? 'text-rose-700' : 'text-amber-700'">
-                            {{ employeesIncident.message }}
+                            <!-- unique_persons_count = grouped persons; count = raw records -->
+                            <strong>{{ employeesIncident.context?.unique_persons_count ?? employeesIncident.context?.count ?? 0 }}</strong> persona(s) agrupada(s) sin sucursal
+                            <template v-if="(employeesIncident.context?.count ?? 0) > (employeesIncident.context?.unique_persons_count ?? employeesIncident.context?.count ?? 0)">
+                                · <strong>{{ employeesIncident.context.count }}</strong> registros afectados (NOI regular + NOI fiscal)
+                            </template>
+                            <template v-if="(employeesIncident.context?.monto ?? 0) > 0">
+                                · Impacto: <strong>${{ Number(employeesIncident.context.monto).toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) }}</strong>
+                            </template>
                         </p>
                     </div>
                     <div class="flex items-center gap-2">
@@ -334,7 +435,7 @@ const LOCATION_ACTIONS = [
                                                 <ChevronRight class="size-3 transition" :class="diagnosisOpen[empKey(emp)] ? 'rotate-90' : ''" />
                                             </button>
                                         </td>
-                                        <td class="py-2.5">
+                                        <td class="py-2.5 min-w-[260px]">
                                             <!-- A) Fuzzy-name variant → ask "same person?" first -->
                                             <template v-if="needsConfirmation(emp) && personaAction[empKey(emp)] !== 'reject'">
                                                 <div class="space-y-1.5">
@@ -379,22 +480,22 @@ const LOCATION_ACTIONS = [
                                                             Misma persona (nombre exacto) — sin sucursal en el sistema.
                                                         </template>
                                                     </p>
-                                                    <div class="flex items-center gap-2">
-                                                        <div class="w-44">
+                                                    <div class="flex flex-col gap-1.5 sm:flex-row sm:items-start">
+                                                        <div class="min-w-[210px] max-w-[280px] w-full">
                                                             <SearchableSelect
                                                                 :items="branchItems"
                                                                 :model-value="personaBranch[empKey(emp)] ?? null"
-                                                                placeholder="Sucursal..."
+                                                                placeholder="Seleccionar sucursal..."
                                                                 @update:model-value="personaBranch[empKey(emp)] = $event"
                                                             />
                                                         </div>
                                                         <button
                                                             type="button"
-                                                            class="rounded-xl bg-indigo-600 px-3 py-2 text-xs font-black text-white transition hover:bg-indigo-700 disabled:opacity-40"
+                                                            class="shrink-0 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-black text-white transition hover:bg-indigo-700 disabled:opacity-40"
                                                             :disabled="!personaBranch[empKey(emp)]"
                                                             @click="asignarSucursalPersona(emp)"
                                                         >
-                                                            Asignar
+                                                            Asignar sucursal
                                                         </button>
                                                     </div>
                                                 </div>
@@ -586,30 +687,124 @@ const LOCATION_ACTIONS = [
             </div>
 
             <!-- ── Panel: Posibles coincidencias de persona ───────────────── -->
-            <div v-if="duplicatesIncident" class="overflow-hidden rounded-2xl border border-amber-200">
-                <div class="flex items-center gap-3 bg-amber-50 px-5 py-4">
-                    <Copy class="size-5 shrink-0 text-amber-600" />
+            <div
+                v-if="duplicatesIncident"
+                class="overflow-hidden rounded-2xl border"
+                :class="duplicatesIncident.severity === 'high' ? 'border-rose-300' : 'border-amber-200'"
+            >
+                <div
+                    class="flex items-center gap-3 px-5 py-4"
+                    :class="duplicatesIncident.severity === 'high' ? 'bg-rose-50' : 'bg-amber-50'"
+                >
+                    <Copy
+                        class="size-5 shrink-0"
+                        :class="duplicatesIncident.severity === 'high' ? 'text-rose-600' : 'text-amber-600'"
+                    />
                     <div class="flex-1">
-                        <p class="font-black text-slate-950">Posibles coincidencias de persona</p>
-                        <p class="text-xs text-amber-700">{{ duplicatesIncident.message }}</p>
+                        <p class="font-black text-slate-950">
+                            <span v-if="duplicatesIncident.severity === 'high'" class="mr-1.5 inline-flex items-center rounded-lg bg-rose-600 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-white">Crítico</span>
+                            Posibles coincidencias de persona
+                        </p>
+                        <p class="text-xs" :class="duplicatesIncident.severity === 'high' ? 'text-rose-700' : 'text-amber-700'">
+                            <strong>{{ duplicatesIncident.context?.count ?? 0 }}</strong> par(es) detectado(s)
+                            <template v-if="(duplicatesIncident.context?.monto ?? 0) > 0">
+                                · Impacto monetario: <strong>${{ Number(duplicatesIncident.context.monto).toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) }}</strong>
+                            </template>
+                        </p>
                     </div>
-                    <StatusBadge status="warning" label="Advertencia" />
+                    <StatusBadge
+                        :status="duplicatesIncident.severity === 'high' ? 'error' : 'warning'"
+                        :label="duplicatesIncident.severity === 'high' ? 'Crítico' : 'Advertencia'"
+                    />
                 </div>
                 <div v-if="duplicatesIncident.context?.samples?.length" class="p-5">
                     <p class="mb-1 text-xs font-bold text-slate-500">Nombres similares que podrían ser la misma persona escrita de forma diferente:</p>
-                    <p class="mb-3 text-xs text-slate-400">Nota: registros con el mismo nombre exacto ya se procesan automáticamente y no aparecen aquí.</p>
-                    <div class="space-y-2">
-                        <div
-                            v-for="(pair, i) in duplicatesIncident.context.samples"
-                            :key="i"
-                            class="flex flex-col gap-1 rounded-xl border border-amber-100 bg-white px-4 py-3 sm:flex-row sm:items-center sm:gap-4"
-                        >
-                            <span class="min-w-0 flex-1 truncate text-sm font-bold text-slate-900">{{ pair.a }}</span>
-                            <span class="shrink-0 text-xs font-black text-amber-600">≈ posible coincidencia ≈</span>
-                            <span class="min-w-0 flex-1 truncate text-sm font-bold text-slate-900">{{ pair.b }}</span>
-                        </div>
+                    <p class="mb-3 text-xs text-slate-400">Registros con nombre exacto ya se unifican automáticamente y no aparecen aquí. Resuelve cada par desde esta misma pantalla.</p>
+                    <div class="space-y-3">
+                        <template v-for="pair in duplicatesIncident.context.samples" :key="getPairKey(pair)">
+                            <!-- Hidden after action -->
+                            <div
+                                v-if="isPairHidden(pair)"
+                                class="flex items-center gap-3 rounded-2xl border px-4 py-2.5 text-xs"
+                                :class="isPairConfirmed(pair)
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                    : 'border-slate-200 bg-slate-50 text-slate-400'"
+                            >
+                                <CheckCircle2 v-if="isPairConfirmed(pair)" class="size-4 shrink-0 text-emerald-600" />
+                                <XCircle     v-else                       class="size-4 shrink-0 text-slate-400" />
+                                <span class="font-bold" :class="isPairConfirmed(pair) ? '' : 'line-through'">{{ pair.a }}</span>
+                                <span>·</span>
+                                <span class="font-bold" :class="isPairConfirmed(pair) ? '' : 'line-through'">{{ pair.b }}</span>
+                                <span class="ml-auto italic">
+                                    {{ isPairConfirmed(pair) ? 'Unificados — alias guardado.' : 'Descartado permanentemente.' }}
+                                </span>
+                            </div>
+
+                            <!-- Pending pair -->
+                            <div
+                                v-else
+                                class="rounded-2xl border bg-white px-4 py-3"
+                                :class="duplicatesIncident.severity === 'high' ? 'border-rose-100' : 'border-amber-100'"
+                            >
+                                <!-- Names + score row -->
+                                <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-4">
+                                    <div class="min-w-0 flex-1">
+                                        <span class="text-sm font-bold text-slate-900">{{ pair.a }}</span>
+                                        <span v-if="pair.a_source" class="ml-2 rounded-lg bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">{{ pair.a_source }}</span>
+                                    </div>
+                                    <div class="flex shrink-0 flex-col items-center gap-0.5">
+                                        <span class="text-xs font-black" :class="duplicatesIncident.severity === 'high' ? 'text-rose-600' : 'text-amber-600'">≈ posible coincidencia ≈</span>
+                                        <span v-if="pair.score" class="text-[10px] text-slate-400">{{ pair.score }}% similitud</span>
+                                    </div>
+                                    <div class="min-w-0 flex-1 sm:text-right">
+                                        <span class="text-sm font-bold text-slate-900">{{ pair.b }}</span>
+                                        <span v-if="pair.b_source" class="ml-2 rounded-lg bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">{{ pair.b_source }}</span>
+                                    </div>
+                                </div>
+
+                                <!-- Reason + monto -->
+                                <div v-if="pair.reason || (pair.monto_relacionado ?? 0) > 0" class="mt-1.5 text-[11px] text-slate-400">
+                                    <span v-if="pair.reason">{{ pair.reason }}</span>
+                                    <span v-if="(pair.monto_relacionado ?? 0) > 0" class="ml-2 font-bold text-amber-600">
+                                        Impacto: ${{ Number(pair.monto_relacionado).toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) }}
+                                    </span>
+                                </div>
+
+                                <!-- Warning when IDs missing (stale incident — refresh to fix) -->
+                                <div v-if="!pair.a_id || !pair.b_id" class="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                                    ⚠ Sin IDs — pulsa <strong>Refrescar</strong> en la cabecera para regenerar las coincidencias.
+                                </div>
+
+                                <!-- Action buttons -->
+                                <div v-else class="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+                                    <button
+                                        type="button"
+                                        class="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-black text-white transition hover:bg-emerald-700 disabled:opacity-40"
+                                        :disabled="isPairLoading(pair)"
+                                        @click="confirmDuplicatePair(pair)"
+                                    >
+                                        <svg v-if="isPairLoading(pair)" class="size-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                                        <template v-else>✓</template>
+                                        Es la misma persona
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-bold text-slate-600 transition hover:bg-slate-100 disabled:opacity-40"
+                                        :disabled="isPairLoading(pair)"
+                                        @click="rejectDuplicatePair(pair)"
+                                    >
+                                        <svg v-if="isPairLoading(pair)" class="size-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                                        <template v-else>✕</template>
+                                        No, son diferentes
+                                    </button>
+                                </div>
+                            </div>
+                        </template>
                     </div>
-                    <p class="mt-3 text-xs text-slate-500">Verifica si se trata de la misma persona con variante de escritura. Usa el panel de personas sin sucursal para confirmar y unificar desde ahí.</p>
+                    <div class="mt-3 space-y-1 text-xs text-slate-500">
+                        <p><span class="font-bold text-emerald-700">✓ Es la misma persona</span> — crea alias permanente, guarda nombre canónico y hereda sucursal. Se unifica en la BD.</p>
+                        <p><span class="font-bold text-slate-600">✕ No, son diferentes</span> — guarda el descarte en la BD (<code>employee_match_rejections</code>). El par no volverá a aparecer. No se elimina ningún empleado ni movimiento.</p>
+                    </div>
                 </div>
             </div>
 

@@ -136,9 +136,35 @@ class PersonIdentityResolverService
         return null;
     }
 
+    // The 12 operative branches that are valid for employee assignment.
+    private const OPERATIVE_BRANCH_NAMES = [
+        'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
+        'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN LUIS POTOSI',
+        'TENANGO DEL VALLE', 'TLAXCALA', 'TULA', 'CORPORATIVO',
+        'SAN JUAN DEL RÍO', 'SAN JUAN DEL RIO',
+    ];
+
+    /**
+     * Returns a subquery that restricts branch_id to operative branches only.
+     * Routes/offices/zones that are NOT one of the operative sucursales are excluded.
+     */
+    private function operativeBranchIds(): array
+    {
+        static $cache = null;
+        if ($cache !== null) return $cache;
+
+        $cache = DB::table('branches')
+            ->whereIn(DB::raw('UPPER(TRIM(name))'), self::OPERATIVE_BRANCH_NAMES)
+            ->pluck('id')
+            ->toArray();
+
+        return $cache;
+    }
+
     /**
      * Look for another employee record with the same normalized_name (canonical duplicate)
      * and return their branch_id if they have one. Used to unify multi-source duplicates.
+     * Only returns operative branch IDs (never routes or non-operative offices).
      */
     public function resolveBranchFromCanonicalEmployee(Employee $employee): ?int
     {
@@ -154,9 +180,13 @@ class PersonIdentityResolverService
 
         if (empty($canonicalIds)) return null;
 
+        $operativeIds = $this->operativeBranchIds();
+        if (empty($operativeIds)) return null;
+
         return DB::table('employee_branch_assignments')
             ->whereIn('employee_id', $canonicalIds)
             ->whereNotNull('branch_id')
+            ->whereIn('branch_id', $operativeIds)
             ->orderByDesc('period_id')
             ->value('branch_id');
     }
@@ -164,6 +194,7 @@ class PersonIdentityResolverService
     /**
      * Resolve branch using saved aliases: if another employee has this person's
      * normalized name stored as an alias, inherit their branch.
+     * Only returns operative branch IDs.
      */
     public function resolveBranchFromAlias(Employee $employee): ?int
     {
@@ -176,21 +207,30 @@ class PersonIdentityResolverService
 
         if (!$canonicalEmployeeId || $canonicalEmployeeId === $employee->id) return null;
 
+        $operativeIds = $this->operativeBranchIds();
+        if (empty($operativeIds)) return null;
+
         return DB::table('employee_branch_assignments')
             ->where('employee_id', $canonicalEmployeeId)
             ->whereNotNull('branch_id')
+            ->whereIn('branch_id', $operativeIds)
             ->orderByDesc('period_id')
             ->value('branch_id');
     }
 
     /**
      * Return the branch from the most recent existing assignment for an employee.
+     * Only returns operative branch IDs — never routes or non-operative offices.
      */
     public function resolveBranchFromExistingAssignments(int $employeeId): ?int
     {
+        $operativeIds = $this->operativeBranchIds();
+        if (empty($operativeIds)) return null;
+
         return DB::table('employee_branch_assignments')
             ->where('employee_id', $employeeId)
             ->whereNotNull('branch_id')
+            ->whereIn('branch_id', $operativeIds)
             ->orderByDesc('period_id')
             ->value('branch_id');
     }
