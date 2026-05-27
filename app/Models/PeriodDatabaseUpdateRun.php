@@ -14,11 +14,13 @@ class PeriodDatabaseUpdateRun extends Model
         'log',
         'error_message',
         'metadata',
+        'queued_at',
         'started_at',
         'finished_at',
     ];
 
     protected $casts = [
+        'queued_at'   => 'datetime',
         'started_at'  => 'datetime',
         'finished_at' => 'datetime',
         'metadata'    => 'array',

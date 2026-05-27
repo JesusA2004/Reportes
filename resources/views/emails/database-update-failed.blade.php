@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Error al actualizar base de datos — {{ $period->label }}</title>
+<title>Error en carga de registros — {{ $period->label }}</title>
 </head>
 <body style="margin:0;padding:0;background-color:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:40px 16px;">
@@ -14,7 +14,7 @@
       <tr>
         <td style="background:#0f172a;padding:28px 36px;">
           <p style="margin:0 0 6px;color:#64748b;font-size:11px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;">Sistema Reportes</p>
-          <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:900;line-height:1.3;">Error al actualizar base de datos</h1>
+          <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:900;line-height:1.3;">Error en carga de registros</h1>
         </td>
       </tr>
 
@@ -32,7 +32,7 @@
             Hola{{ $user?->name ? ', ' . $user->name : '' }},
           </p>
           <p style="margin:0 0 28px;color:#334155;font-size:15px;line-height:1.7;">
-            No se pudo actualizar la base de datos del periodo <strong style="color:#0f172a;">{{ $period->label }}</strong>.
+            No se pudo completar la carga de registros del periodo <strong style="color:#0f172a;">{{ $period->label }}</strong>.
             Revisa las fuentes cargadas y vuelve a intentar desde Histórico General.
           </p>
 
@@ -41,6 +41,10 @@
             <tr style="border-bottom:1px solid #e2e8f0;">
               <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;width:40%;">Periodo</td>
               <td style="padding:12px 18px;font-size:13px;color:#0f172a;font-weight:700;">{{ $period->label }}</td>
+            </tr>
+            <tr style="border-bottom:1px solid #e2e8f0;">
+              <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">En cola</td>
+              <td style="padding:12px 18px;font-size:13px;color:#0f172a;">{{ ($run->queued_at ?? $run->created_at)?->format('d/m/Y H:i') ?? '—' }}</td>
             </tr>
             <tr style="border-bottom:1px solid #e2e8f0;">
               <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">Inicio</td>

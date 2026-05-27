@@ -14,5 +14,6 @@ enum DataSourceCode: string {
     case GastosErp = 'gastos_erp';
     case GastosLendusExcel = 'gastos_lendus_excel';
     case MacroAnalisis = 'macro_analisis';
+    case LendusEmpleados = 'lendus_empleados';
 
 }

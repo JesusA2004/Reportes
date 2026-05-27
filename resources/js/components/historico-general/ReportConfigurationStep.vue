@@ -12,6 +12,7 @@ interface ReportConfig {
     compare_period_id: number | null
     extra_employee_expense_amount: number
     extra_employee_expense_notes: string
+    included_branch_ids: number[]
 }
 
 const props = defineProps<{
@@ -35,9 +36,6 @@ const comparablePeriods = computed(() =>
     props.periods.filter((p) => p.id !== props.period?.id && p.type === props.period?.type)
 )
 
-// Fuente de verdad: las 12 sucursales operativas exactas.
-// SAN JUAN DEL RÍO fue eliminada (sucursal cerrada).
-// Doble defensa: backend ya filtra, este computed rechaza cualquier extra que llegue.
 const OPERATIVE_BRANCH_NAMES = new Set([
     'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
     'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN LUIS POTOSI',
@@ -50,16 +48,44 @@ const FORBIDDEN_BRANCH_LIKE_ROUTES = new Set([
     'FALSO', 'NORTE',
 ])
 
+// The 12 operative branches with their DB IDs
+const operativeBranches = computed(() =>
+    props.branches.filter((b) => {
+        const name = b.name.trim().toUpperCase()
+        return !FORBIDDEN_BRANCH_LIKE_ROUTES.has(name) && OPERATIVE_BRANCH_NAMES.has(name)
+    })
+)
+
+// For the branch selector dropdown (scope=branch), only show included ones
 const operativeBranchItems = computed(() =>
-    props.branches
-        .filter((b) => {
-            const name = b.name.trim().toUpperCase()
-            return !FORBIDDEN_BRANCH_LIKE_ROUTES.has(name) && OPERATIVE_BRANCH_NAMES.has(name)
-        })
+    operativeBranches.value
+        .filter((b) => props.modelValue.included_branch_ids.includes(b.id))
         .map((b) => ({ id: b.id, label: b.name }))
 )
+
 const employeeItems = computed(() =>
     props.employees.map((e) => ({ id: e.id, label: e.full_name, sublabel: e.branch_name ?? undefined }))
+)
+
+function toggleBranch(branchId: number) {
+    const current = props.modelValue.included_branch_ids
+    const next = current.includes(branchId)
+        ? current.filter((id) => id !== branchId)
+        : [...current, branchId]
+    update({ included_branch_ids: next })
+}
+
+function selectAllBranches() {
+    update({ included_branch_ids: operativeBranches.value.map((b) => b.id) })
+}
+
+function deselectAllBranches() {
+    update({ included_branch_ids: [] })
+}
+
+const includedCount  = computed(() => props.modelValue.included_branch_ids.length)
+const excludedBranches = computed(() =>
+    operativeBranches.value.filter((b) => !props.modelValue.included_branch_ids.includes(b.id))
 )
 
 const canSubmit = computed(() => {
@@ -67,6 +93,7 @@ const canSubmit = computed(() => {
     if (isComparative.value && !props.modelValue.compare_period_id) return false
     if (isBranchScope.value && !props.modelValue.branch_id) return false
     if (isEmployeeScope.value && !props.modelValue.employee_id) return false
+    if (!isBranchScope.value && !isEmployeeScope.value && props.modelValue.included_branch_ids.length === 0) return false
     return true
 })
 
@@ -89,7 +116,7 @@ const SCOPES = [
         <SectionHeader eyebrow="Etapa 4" title="Configurar reporte" description="Define el tipo, alcance y filtros del reporte. Una vez guardada la configuración podrás proceder a generar el reporte." />
 
         <div class="mt-6 grid gap-5 xl:grid-cols-[1fr_0.85fr]">
-            <!-- Columna izquierda: tipo + alcance + filtros condicionales -->
+            <!-- Columna izquierda -->
             <div class="space-y-5">
 
                 <!-- Tipo de reporte -->
@@ -131,7 +158,6 @@ const SCOPES = [
                 <div v-if="hasFilters" class="rounded-2xl border border-slate-200 p-5 space-y-4">
                     <p class="text-sm font-black text-slate-950">Filtros y comparación</p>
 
-                    <!-- Sucursal (solo si alcance = branch) -->
                     <div v-if="isBranchScope">
                         <label class="block">
                             <span class="text-xs font-bold text-slate-600">Sucursal</span>
@@ -147,7 +173,6 @@ const SCOPES = [
                         <p v-if="!modelValue.branch_id" class="mt-1.5 text-xs text-amber-600">Selecciona una sucursal para continuar.</p>
                     </div>
 
-                    <!-- Empleado / gestor (solo si alcance = employee) -->
                     <div v-if="isEmployeeScope">
                         <label class="block">
                             <span class="text-xs font-bold text-slate-600">Empleado / gestor</span>
@@ -163,7 +188,6 @@ const SCOPES = [
                         <p v-if="!modelValue.employee_id" class="mt-1.5 text-xs text-amber-600">Selecciona un empleado o gestor para continuar.</p>
                     </div>
 
-                    <!-- Periodo comparable (solo si es comparativo) -->
                     <div v-if="isComparative">
                         <label class="block">
                             <span class="text-xs font-bold text-slate-600">Periodo a comparar</span>
@@ -182,10 +206,57 @@ const SCOPES = [
 
             </div>
 
-            <!-- Columna derecha: gasto por gestor (condicional) + botón generar -->
+            <!-- Columna derecha -->
             <div class="space-y-5">
 
-                <!-- Gasto general por gestor: solo visible en alcance empleado/gestor -->
+                <!-- Sucursales editables — solo cuando alcance = general -->
+                <div v-if="!isBranchScope && !isEmployeeScope" class="rounded-2xl border border-emerald-100 bg-emerald-50/60 p-5">
+                    <div class="mb-3 flex items-center justify-between">
+                        <p class="text-sm font-black text-slate-950">Sucursales que se tomarán en cuenta</p>
+                        <div class="flex items-center gap-2 text-xs">
+                            <button type="button" class="font-bold text-indigo-600 hover:underline" @click="selectAllBranches">Todas</button>
+                            <span class="text-slate-300">|</span>
+                            <button type="button" class="font-bold text-rose-600 hover:underline" @click="deselectAllBranches">Ninguna</button>
+                        </div>
+                    </div>
+
+                    <div class="space-y-1.5">
+                        <label
+                            v-for="branch in operativeBranches"
+                            :key="branch.id"
+                            class="flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2 transition hover:bg-emerald-100/60"
+                            :class="modelValue.included_branch_ids.includes(branch.id) ? 'bg-white/80' : 'opacity-50'"
+                        >
+                            <input
+                                type="checkbox"
+                                class="size-4 rounded accent-emerald-600"
+                                :checked="modelValue.included_branch_ids.includes(branch.id)"
+                                @change="toggleBranch(branch.id)"
+                            />
+                            <span class="text-sm font-bold text-slate-800">{{ branch.name }}</span>
+                        </label>
+                    </div>
+
+                    <div class="mt-3 border-t border-emerald-200 pt-3 text-xs text-slate-500 space-y-1">
+                        <p class="text-emerald-700 font-bold">{{ includedCount }} sucursal(es) incluida(s)</p>
+                        <p v-if="excludedBranches.length > 0" class="text-rose-600">
+                            Excluidas para este reporte:
+                            <span v-for="(b, i) in excludedBranches" :key="b.id">{{ b.name }}<span v-if="i < excludedBranches.length - 1">, </span></span>
+                        </p>
+                        <p>Siempre excluidas: <span class="font-bold text-rose-700">SAN JUAN DEL RÍO</span> (cerrada) · <span class="font-bold text-rose-700">CORPORATIVO</span> (no operativo)</p>
+                    </div>
+
+                    <p v-if="includedCount === 0" class="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
+                        Selecciona al menos una sucursal para continuar.
+                    </p>
+                </div>
+
+                <!-- Sucursales en modo lectura cuando alcance = sucursal -->
+                <div v-if="isBranchScope" class="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                    <p class="mb-2 text-xs font-bold text-slate-500">El reporte por sucursal solo incluye la sucursal seleccionada.</p>
+                </div>
+
+                <!-- Gasto general por gestor -->
                 <div v-if="isEmployeeScope" class="rounded-2xl border border-indigo-100 bg-indigo-50/60 p-5">
                     <div class="flex items-center gap-3">
                         <SlidersHorizontal class="size-5 text-indigo-700" />
@@ -232,11 +303,11 @@ const SCOPES = [
                         Guardar configuración y continuar
                     </button>
 
-                    <!-- Validaciones locales de configuración -->
                     <div v-if="!canSubmit && canGenerate" class="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
                         <p v-if="isBranchScope && !modelValue.branch_id">Selecciona una sucursal para continuar.</p>
                         <p v-else-if="isEmployeeScope && !modelValue.employee_id">Selecciona un empleado o gestor para continuar.</p>
                         <p v-else-if="isComparative && !modelValue.compare_period_id">Selecciona el periodo a comparar.</p>
+                        <p v-else-if="!isBranchScope && !isEmployeeScope && includedCount === 0">Selecciona al menos una sucursal para continuar.</p>
                     </div>
                 </div>
 

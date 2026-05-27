@@ -22,6 +22,7 @@ use App\Services\ReportUploadService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -267,7 +268,9 @@ class ReportUploadController extends Controller {
             ->first();
 
         if ($existingRun) {
-            return back()->with('error', 'Ya hay una actualización en proceso para este periodo. Espera a que termine.');
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'period' => 'Ya hay una carga en proceso o en cola para este periodo.',
+            ]);
         }
 
         $allPeriods   = Period::query()->get();
@@ -292,8 +295,9 @@ class ReportUploadController extends Controller {
             'period_id'  => $period->id,
             'created_by' => auth()->id(),
             'status'     => 'queued',
-            'log'        => 'Actualización de base de datos en cola.',
-            'started_at' => now(),
+            'log'        => 'Carga de registros en cola.',
+            'queued_at'  => now(),
+            'started_at' => null,
         ]);
 
         UpdatePeriodDatabaseJob::dispatch($period->id, $run->id, auth()->id());
@@ -305,16 +309,316 @@ class ReportUploadController extends Controller {
     {
         $summary = PeriodSummary::query()->where('period_id', $period->id)->with('incidents')->first();
 
-        return response()->json([
-            'items'       => $summary?->incidents?->map(fn ($incident) => [
+        $items = $summary?->incidents
+            ?->filter(fn ($i) => !in_array($i->type, ['mora_alta', 'db_update.mora_alta'], true))
+            ->map(fn ($incident) => [
                 'id'       => $incident->id,
                 'type'     => $incident->type,
                 'severity' => $incident->severity,
                 'message'  => $incident->message,
                 'context'  => $incident->context,
-            ])->values() ?? [],
-            'has_critical' => (bool) ($summary?->incidents?->contains(fn ($item) => $item->severity === 'high') ?? false),
+            ])->values() ?? collect();
+
+        return response()->json([
+            'items'        => $items,
+            'has_critical' => (bool) ($items->contains(fn ($item) => $item['severity'] === 'high') ?? false),
         ]);
+    }
+
+    /**
+     * Re-run the incidents calculation for a period and return the fresh list.
+     * Called after an employee branch assignment to reflect the updated state.
+     */
+    public function refreshIncidents(Period $period)
+    {
+        /** @var \App\Services\PeriodRadiographyService $svc */
+        $svc = app(\App\Services\PeriodRadiographyService::class);
+        $summary = $svc->generate($period);
+
+        $items = $summary->incidents
+            ->filter(fn ($i) => !in_array($i->type, ['mora_alta', 'db_update.mora_alta'], true))
+            ->map(fn ($incident) => [
+                'id'       => $incident->id,
+                'type'     => $incident->type,
+                'severity' => $incident->severity,
+                'message'  => $incident->message,
+                'context'  => $incident->context,
+            ])->values();
+
+        return response()->json([
+            'items'        => $items,
+            'has_critical' => (bool) $items->contains(fn ($item) => $item['severity'] === 'high'),
+        ]);
+    }
+
+    public function personasSinSucursal(Period $period)
+    {
+        $allPeriods = Period::all();
+        $weeklyIds  = $period->resolveBaseWeeklyIds($allPeriods);
+        $dataIds    = array_values(array_unique(array_merge(
+            empty($weeklyIds) ? [] : $weeklyIds,
+            [$period->id]
+        )));
+
+        // Raw per-employee-per-source rows (employees that have no branch assignment)
+        $rawItems = DB::table('fact_noi_movements as n')
+            ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period, $dataIds) {
+                $j->on('eba.employee_id', '=', 'n.employee_id')
+                  ->whereIn('eba.period_id', array_merge([$period->id], $dataIds));
+            })
+            ->leftJoin('employees as emp', 'n.employee_id', '=', 'emp.id')
+            ->join('report_uploads as ru', 'n.report_upload_id', '=', 'ru.id')
+            ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+            ->whereIn('n.period_id', $dataIds)
+            ->whereNotNull('n.employee_id')
+            ->whereNull('eba.branch_id')
+            ->selectRaw('
+                n.employee_id,
+                COALESCE(emp.full_name, CONCAT("Emp #", n.employee_id)) AS nombre,
+                COALESCE(emp.normalized_name, "") AS normalized_name,
+                COALESCE(emp.employee_code, NULL) AS employee_code,
+                ds.code AS fuente,
+                COUNT(DISTINCT n.id) AS movimientos,
+                SUM(n.amount) AS monto
+            ')
+            ->groupBy('n.employee_id', 'emp.full_name', 'emp.normalized_name', 'emp.employee_code', 'ds.id', 'ds.code')
+            ->orderByDesc('monto')
+            ->limit(500)
+            ->get();
+
+        // Group by normalized_name so NOI regular + NOI fiscal rows for the same person merge into one row
+        $grouped = $rawItems->groupBy(function ($row) {
+            return ($row->normalized_name !== '') ? $row->normalized_name : $row->nombre;
+        });
+
+        // Build one aggregated item per unique person
+        $items = $grouped->map(function ($group) {
+            $best        = $group->sortByDesc('monto')->first();
+            $employeeIds = $group->pluck('employee_id')->unique()->map(fn ($id) => (int) $id)->values()->all();
+            $fuentes     = $group->pluck('fuente')->unique()->sort()->values()->all();
+
+            return (object) [
+                'employee_ids'    => $employeeIds,
+                'employee_id'     => (int) $best->employee_id,
+                'nombre'          => (string) $best->nombre,
+                'normalized_name' => (string) $best->normalized_name,
+                'employee_code'   => $best->employee_code,
+                'fuentes'         => $fuentes,
+                'movimientos'     => (int) $group->sum('movimientos'),
+                'monto'           => (float) $group->sum('monto'),
+            ];
+        })->sortByDesc('monto')->values();
+
+        // ── Pre-load data for diagnosis ──────────────────────────────────
+        $allEmployeeIds = $items->flatMap(fn ($item) => $item->employee_ids)->unique()->values()->all();
+
+        $allEmployees = \App\Models\Employee::query()
+            ->whereNotNull('normalized_name')
+            ->get(['id', 'full_name', 'normalized_name']);
+
+        $rawMovements = DB::table('fact_noi_movements as n')
+            ->join('report_uploads as ru', 'n.report_upload_id', '=', 'ru.id')
+            ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+            ->whereIn('n.period_id', $dataIds)
+            ->whereIn('n.employee_id', $allEmployeeIds)
+            ->select('n.employee_id', 'n.movement_date', 'n.concept', 'n.amount', 'n.raw_payload', 'ds.code as source')
+            ->orderByDesc('n.amount')
+            ->get()
+            ->groupBy('employee_id');
+
+        $historicalBranches = DB::table('employee_branch_assignments as eba')
+            ->join('branches as b', 'eba.branch_id', '=', 'b.id')
+            ->whereIn('eba.employee_id', $allEmployeeIds)
+            ->whereNotNull('eba.branch_id')
+            ->orderByDesc('eba.period_id')
+            ->select('eba.employee_id', 'b.name as branch_name')
+            ->get()
+            ->unique('employee_id')
+            ->keyBy('employee_id');
+
+        /** @var \App\Services\PersonIdentityResolverService $resolver */
+        $resolver = app(\App\Services\PersonIdentityResolverService::class);
+
+        $items = $items->map(function ($item) use ($resolver, $allEmployees, $rawMovements, $historicalBranches, $dataIds) {
+            // Merge sample movements across all employee_ids in the group
+            $sampleMovs = collect(array_merge(
+                ...array_map(fn ($eid) => ($rawMovements[(int) $eid] ?? collect())->all(), $item->employee_ids)
+            ));
+
+            $diagnosis = $resolver->buildResolutionTrace(
+                employeeId:       (int) $item->employee_id,
+                fullName:         (string) $item->nombre,
+                allEmployees:     $allEmployees,
+                sampleMovs:       $sampleMovs,
+                employeeCode:     $item->employee_code ?? null,
+                historicalBranch: $historicalBranches[(int) $item->employee_id]->branch_name ?? null,
+                dataIds:          $dataIds,
+            );
+            $item->diagnosis = $diagnosis;
+
+            $bestMatch = $diagnosis['candidate_matches'][0] ?? null;
+            $isGrouped = count($item->employee_ids) > 1;
+            // Exact same normalized name = confirmed same person (from NOI regular + NOI fiscal or duplicates).
+            // Always go directly to branch selector — never ask "¿Es la misma persona?".
+            if ($bestMatch && $bestMatch['score'] >= 100.0) {
+                $item->resolution_type = $bestMatch['branch'] ? 'exact_name_has_branch' : 'exact_name_no_branch';
+            } elseif ($bestMatch && $bestMatch['score'] >= 80.0) {
+                $item->resolution_type = $bestMatch['branch'] ? 'fuzzy_match_has_branch' : 'fuzzy_match_no_branch';
+            } elseif ($bestMatch && $bestMatch['score'] >= 60.0) {
+                $item->resolution_type = 'possible_match';
+            } else {
+                $item->resolution_type = 'needs_branch';
+            }
+            $item->best_match = $bestMatch;
+
+            return $item;
+        });
+
+        return response()->json(['items' => $items->values()]);
+    }
+
+    /**
+     * Confirm that two employee records are the same person.
+     * Creates alias records and inherits branch from the target if available.
+     */
+    public function confirmarCoincidencia(Period $period, \Illuminate\Http\Request $request): \Illuminate\Http\JsonResponse
+    {
+        $validated = $request->validate([
+            'employee_id'        => ['required', 'integer', 'exists:employees,id'],
+            'target_employee_id' => ['required', 'integer', 'exists:employees,id', 'different:employee_id'],
+            'branch_id'          => ['nullable', 'integer', 'exists:branches,id'],
+        ]);
+
+        $allPeriods = \App\Models\Period::all();
+        $weeklyIds  = $period->resolveBaseWeeklyIds($allPeriods);
+        $dataIds    = array_values(array_unique(array_merge(
+            empty($weeklyIds) ? [] : $weeklyIds,
+            [$period->id]
+        )));
+
+        $emp    = \App\Models\Employee::findOrFail($validated['employee_id']);
+        $target = \App\Models\Employee::findOrFail($validated['target_employee_id']);
+
+        /** @var \App\Services\PersonIdentityResolverService $resolver */
+        $resolver = app(\App\Services\PersonIdentityResolverService::class);
+
+        // Save alias in both directions (if names differ)
+        if ($resolver->normalizePersonName($emp->full_name) !== $resolver->normalizePersonName($target->full_name)) {
+            \App\Models\EmployeeAlias::query()->updateOrCreate(
+                ['employee_id' => $target->id, 'normalized_alias' => $resolver->normalizePersonName($emp->full_name)],
+                ['alias_name' => $emp->full_name, 'source' => 'confirmed_match', 'confidence' => 1.00, 'created_by' => auth()->id()]
+            );
+            \App\Models\EmployeeAlias::query()->updateOrCreate(
+                ['employee_id' => $emp->id, 'normalized_alias' => $resolver->normalizePersonName($target->full_name)],
+                ['alias_name' => $target->full_name, 'source' => 'confirmed_match', 'confidence' => 1.00, 'created_by' => auth()->id()]
+            );
+        }
+
+        // Resolve which branch to use
+        $branchId = $validated['branch_id']
+            ?? $resolver->resolveBranchFromExistingAssignments($target->id)
+            ?? $resolver->resolveBranchFromCanonicalEmployee($emp);
+
+        if ($branchId) {
+            \App\Models\EmployeeBranchAssignment::query()->updateOrCreate(
+                ['period_id' => $period->id, 'employee_id' => $emp->id],
+                [
+                    'branch_id'           => $branchId,
+                    'source_type'         => 'lendus',
+                    'source_reference'    => "Confirmado como misma persona que #{$target->id} — {$target->full_name}",
+                    'match_type'          => 'confirmed_match',
+                    'confidence'          => 1.00,
+                    'was_manual_reviewed' => true,
+                    'notes'               => "Unificado manualmente. Alias confirmado con \"{$target->full_name}\".",
+                ]
+            );
+        }
+
+        // Lightweight: refresh only the empleados_sin_sucursal incident without full radiography
+        $this->refreshEmpleadosSinSucursalIncident($period, $dataIds);
+
+        return response()->json(['ok' => true, 'branch_assigned' => (bool) $branchId]);
+    }
+
+    private function refreshEmpleadosSinSucursalIncident(Period $period, array $dataIds): void
+    {
+        $summary = PeriodSummary::query()->where('period_id', $period->id)->first();
+        if (!$summary) return;
+
+        $sinSucursal = DB::table('fact_noi_movements as n')
+            ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period, $dataIds) {
+                $j->on('eba.employee_id', '=', 'n.employee_id')
+                  ->whereIn('eba.period_id', array_merge([$period->id], $dataIds));
+            })
+            ->whereIn('n.period_id', $dataIds)
+            ->whereNotNull('n.employee_id')
+            ->whereNull('eba.branch_id')
+            ->distinct('n.employee_id')
+            ->count('n.employee_id');
+
+        $existing = PeriodIncident::query()
+            ->where('period_summary_id', $summary->id)
+            ->where('type', 'empleados_sin_sucursal')
+            ->first();
+
+        if ($sinSucursal === 0) {
+            $existing?->delete();
+        } elseif ($existing) {
+            $sinSucursalMonto = (float) DB::table('fact_noi_movements as n')
+                ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period, $dataIds) {
+                    $j->on('eba.employee_id', '=', 'n.employee_id')
+                      ->whereIn('eba.period_id', array_merge([$period->id], $dataIds));
+                })
+                ->whereIn('n.period_id', $dataIds)
+                ->whereNotNull('n.employee_id')
+                ->whereNull('eba.branch_id')
+                ->sum('n.amount');
+
+            $severity = abs($sinSucursalMonto) > 0 ? 'high' : 'warning';
+
+            $existing->update([
+                'severity' => $severity,
+                'message'  => "{$sinSucursal} empleado(s) del NOI no tienen sucursal asignada. Sus datos no aparecen en reportes por sucursal."
+                    . ($severity === 'high' ? ' Impacto monetario: $' . number_format(abs($sinSucursalMonto), 2) : ''),
+                'context'  => array_merge($existing->context ?? [], ['count' => $sinSucursal, 'monto' => $sinSucursalMonto]),
+            ]);
+        }
+    }
+
+    public function resolvePendingLocation(Period $period, \Illuminate\Http\Request $request): \Illuminate\Http\RedirectResponse
+    {
+        $validated = $request->validate([
+            'incident_id' => ['required', 'integer'],
+            'action'      => ['required', 'in:map_to_branch,exclude,mark_corporate,mark_closed'],
+            'branch_id'   => ['nullable', 'integer', 'exists:branches,id'],
+        ]);
+
+        $incident = PeriodIncident::findOrFail($validated['incident_id']);
+        abort_unless($incident->periodSummary?->period_id === $period->id, 404);
+
+        $actionLabel = match ($validated['action']) {
+            'map_to_branch'  => 'Mapeada a sucursal',
+            'exclude'        => 'Excluida del reporte',
+            'mark_corporate' => 'Marcada como Corporativo',
+            'mark_closed'    => 'Marcada como sucursal cerrada',
+        };
+
+        $branchName = null;
+        if ($validated['branch_id']) {
+            $branchName = \App\Models\Branch::find($validated['branch_id'])?->name;
+        }
+
+        $incident->update([
+            'severity' => 'resolved',
+            'context'  => array_merge($incident->context ?? [], [
+                'resolved_action' => $validated['action'],
+                'resolved_branch' => $branchName,
+                'resolved_by'     => auth()->id(),
+                'resolved_at'     => now()->toDateTimeString(),
+            ]),
+        ]);
+
+        return back()->with('success', "Ubicación resuelta: {$actionLabel}.");
     }
 
     public function resolveIncident(Period $period, PeriodIncident $incident, Request $request): RedirectResponse
@@ -453,15 +757,168 @@ class ReportUploadController extends Controller {
             return back()->with('error', 'No hay un proceso activo para cancelar en este periodo.');
         }
 
+        // Remove the job from the queue so it doesn't run after being cancelled
+        $this->deleteJobForRun($run->id);
+
         $cancelledBy = auth()->user()?->name ?? 'usuario';
         $run->update([
-            'status'        => 'failed',
+            'status'        => 'cancelled',
             'finished_at'   => now(),
-            'log'           => "Proceso cancelado manualmente por {$cancelledBy}.",
+            'log'           => "Carga cancelada por {$cancelledBy}.",
             'error_message' => 'Cancelado manualmente.',
         ]);
 
         return back()->with('success', 'El proceso fue cancelado. Puedes reintentarlo cuando estés listo.');
+    }
+
+    public function clearStuckDatabaseUpdate(Period $period): RedirectResponse
+    {
+        $run = PeriodDatabaseUpdateRun::query()
+            ->where('period_id', $period->id)
+            ->whereIn('status', ['queued', 'running'])
+            ->latest('id')
+            ->first();
+
+        if (!$run) {
+            return back()->with('error', 'No hay un proceso en estado atascado para este periodo.');
+        }
+
+        $this->deleteJobForRun($run->id);
+
+        $run->update([
+            'status'        => 'cancelled',
+            'finished_at'   => now(),
+            'log'           => 'Estado limpiado manualmente por ' . (auth()->user()?->name ?? 'usuario') . '.',
+            'error_message' => 'Limpiado manualmente (proceso atascado).',
+        ]);
+
+        return back()->with('success', 'Estado limpiado. Ya puedes volver a iniciar la carga.');
+    }
+
+    public function loadProgressStatus(Period $period): \Illuminate\Http\JsonResponse
+    {
+        $dbRun = PeriodDatabaseUpdateRun::query()
+            ->where('period_id', $period->id)
+            ->latest('id')
+            ->first();
+
+        if (!$dbRun) {
+            return response()->json(['status' => null]);
+        }
+
+        $status   = $dbRun->status;
+        $isQueued = $status === 'queued';
+        $running  = in_array($status, ['queued', 'running'], true);
+
+        $elapsedSeconds = null;
+        $stuckWarning   = false;
+        $jobInQueue     = false;
+        $orphaned       = false;
+
+        if ($running) {
+            $ref = $isQueued
+                ? ($dbRun->queued_at ?? $dbRun->created_at)
+                : ($dbRun->started_at ?? $dbRun->queued_at ?? $dbRun->created_at);
+            $elapsedSeconds = $ref ? max(0, (int) now()->diffInSeconds($ref)) : null;
+            $stuckWarning   = $elapsedSeconds !== null && (
+                ($isQueued && $elapsedSeconds >= 300) ||
+                (!$isQueued && $elapsedSeconds >= 1800)
+            );
+
+            if ($isQueued) {
+                $jobInQueue = $this->jobExistsForRun($dbRun->id);
+                $orphaned   = !$jobInQueue;
+            }
+        } elseif ($dbRun->started_at && $dbRun->finished_at) {
+            $elapsedSeconds = max(0, (int) $dbRun->started_at->diffInSeconds($dbRun->finished_at));
+        }
+
+        return response()->json([
+            'status'          => $status,
+            'log'             => $dbRun->log ? mb_strimwidth($dbRun->log, 0, 300) : null,
+            'error_message'   => $dbRun->error_message ? mb_strimwidth($dbRun->error_message, 0, 300) : null,
+            'queued_at'       => optional($dbRun->queued_at ?? $dbRun->created_at)->format('d/m/Y H:i'),
+            'started_at'      => $isQueued ? null : optional($dbRun->started_at)->format('d/m/Y H:i'),
+            'finished_at'     => optional($dbRun->finished_at)->format('d/m/Y H:i'),
+            'elapsed_seconds' => $elapsedSeconds,
+            'stuck_warning'   => $stuckWarning,
+            'metadata'        => $dbRun->metadata,
+            'job_in_queue'    => $jobInQueue,
+            'orphaned'        => $orphaned,
+            'can_process_now' => !app()->isProduction() && $isQueued,
+        ]);
+    }
+
+    public function processNow(Period $period): RedirectResponse
+    {
+        abort_if(app()->isProduction(), 403, 'Solo disponible en entorno local/debug.');
+
+        $run = PeriodDatabaseUpdateRun::query()
+            ->where('period_id', $period->id)
+            ->where('status', 'queued')
+            ->latest('id')
+            ->first();
+
+        if (!$run) {
+            return back()->with('error', 'No hay un run en cola para procesar.');
+        }
+
+        // Remove from jobs table to prevent double-processing if worker starts later
+        $this->deleteJobForRun($run->id);
+
+        @set_time_limit(0);
+        @ini_set('memory_limit', '512M');
+
+        try {
+            $job = new UpdatePeriodDatabaseJob($period->id, $run->id, auth()->id());
+            app()->call([$job, 'handle']);
+            return back()->with('success', 'Proceso completado. Revisa el resultado en esta misma página.');
+        } catch (\Throwable $e) {
+            // Job already marked run as failed and sent email before re-throwing
+            return back()->with('info', 'El proceso terminó con error. Revisa el detalle en la etapa de carga.');
+        }
+    }
+
+    public function requeueRun(Period $period): RedirectResponse
+    {
+        $run = PeriodDatabaseUpdateRun::query()
+            ->where('period_id', $period->id)
+            ->where('status', 'queued')
+            ->latest('id')
+            ->first();
+
+        if (!$run) {
+            return back()->with('error', 'No hay un run en cola para reencolar.');
+        }
+
+        if ($this->jobExistsForRun($run->id)) {
+            return back()->with('info', 'El job ya existe en la cola. Inicia el worker para procesarlo.');
+        }
+
+        $run->update([
+            'queued_at' => now(),
+            'log'       => 'Job reencolado. Esperando worker.',
+        ]);
+
+        UpdatePeriodDatabaseJob::dispatch($period->id, $run->id, auth()->id());
+
+        return back()->with('success', 'Job reencolado. Inicia el worker para procesarlo.');
+    }
+
+    private function jobExistsForRun(int $runId): bool
+    {
+        return DB::table('jobs')
+            ->where('payload', 'LIKE', '%UpdatePeriodDatabaseJob%')
+            ->where('payload', 'LIKE', '%runId%i:' . $runId . ';%')
+            ->exists();
+    }
+
+    private function deleteJobForRun(int $runId): void
+    {
+        DB::table('jobs')
+            ->where('payload', 'LIKE', '%UpdatePeriodDatabaseJob%')
+            ->where('payload', 'LIKE', '%runId%i:' . $runId . ';%')
+            ->delete();
     }
 
     // ── Helpers privados ──────────────────────────────────────────────
@@ -583,16 +1040,20 @@ class ReportUploadController extends Controller {
 
         $dbElapsedSeconds = null;
         $dbStuckWarning   = false;
+        $dbJobOrphaned    = false;
         if ($dbRun) {
             if ($dbRunning) {
                 $ref = $dbRunStatus === 'queued'
-                    ? $dbRun->created_at
-                    : ($dbRun->started_at ?? $dbRun->created_at);
+                    ? ($dbRun->queued_at ?? $dbRun->created_at)
+                    : ($dbRun->started_at ?? $dbRun->queued_at ?? $dbRun->created_at);
                 $dbElapsedSeconds = $ref ? max(0, (int) now()->diffInSeconds($ref)) : null;
                 $dbStuckWarning   = $dbElapsedSeconds !== null && (
                     ($dbRunStatus === 'queued' && $dbElapsedSeconds >= 300) ||
                     ($dbRunStatus !== 'queued' && $dbElapsedSeconds >= 1800)
                 );
+                if ($dbRunStatus === 'queued') {
+                    $dbJobOrphaned = !$this->jobExistsForRun($dbRun->id);
+                }
             } elseif ($dbRun->started_at && $dbRun->finished_at) {
                 $dbElapsedSeconds = max(0, (int) $dbRun->started_at->diffInSeconds($dbRun->finished_at));
             }
@@ -626,20 +1087,20 @@ class ReportUploadController extends Controller {
                     $dataIdsLocal = array_values(array_unique(array_merge($weeklyIdsLocal, [$period->id])));
 
                     if (($gm['colocacion_total'] ?? 0) == 0) {
-                        $gm['colocacion_total'] = (float) \Illuminate\Support\Facades\DB::table('fact_placements')->whereIn('period_id', $dataIdsLocal)->sum('amount');
+                        $gm['colocacion_total'] = (float) DB::table('fact_placements')->whereIn('period_id', $dataIdsLocal)->sum('amount');
                     }
                     if (($gm['recuperacion_total'] ?? 0) == 0) {
-                        $gm['recuperacion_total'] = (float) \Illuminate\Support\Facades\DB::table('fact_recoveries')->whereIn('period_id', $dataIdsLocal)->sum('total_amount');
+                        $gm['recuperacion_total'] = (float) DB::table('fact_recoveries')->whereIn('period_id', $dataIdsLocal)->sum('total_amount');
                     }
                     if (($gm['valor_cartera_total'] ?? 0) == 0) {
-                        $ct = (float) \Illuminate\Support\Facades\DB::table('fact_portfolios')->whereIn('period_id', $dataIdsLocal)->sum('balance');
-                        $cv = (float) \Illuminate\Support\Facades\DB::table('fact_portfolios')->whereIn('period_id', $dataIdsLocal)->where('days_past_due', '>', 0)->sum('balance');
+                        $ct = (float) DB::table('fact_portfolios')->whereIn('period_id', $dataIdsLocal)->sum('balance');
+                        $cv = (float) DB::table('fact_portfolios')->whereIn('period_id', $dataIdsLocal)->where('days_past_due', '>', 0)->sum('balance');
                         $gm['valor_cartera_total']   = $ct;
                         $gm['cartera_vencida_total'] = $cv;
                         $gm['mora_porcentaje']       = $ct > 0 ? round($cv / $ct * 100, 2) : 0;
                     }
                     if (($gm['gasto_total'] ?? 0) == 0) {
-                        $gm['gasto_total'] = (float) \Illuminate\Support\Facades\DB::table('fact_expenses')->whereIn('period_id', $dataIdsLocal)->sum('amount');
+                        $gm['gasto_total'] = (float) DB::table('fact_expenses')->whereIn('period_id', $dataIdsLocal)->sum('amount');
                     }
                 }
             }
@@ -648,7 +1109,7 @@ class ReportUploadController extends Controller {
             if (($gm['pagos_total'] ?? 0) == 0) {
                 $periodForPayroll = isset($period) ? $period : \App\Models\Period::find($summary->period_id);
                 if ($periodForPayroll) {
-                    $mes = \Illuminate\Support\Facades\DB::table('fact_period_employee_summary')
+                    $mes = DB::table('fact_period_employee_summary')
                         ->where('period_id', $periodForPayroll->id)
                         ->selectRaw('COUNT(*) as cnt, SUM(total_payments) as pagos, SUM(total_bonuses) as bonos, SUM(net_amount) as neto')
                         ->first();
@@ -664,20 +1125,20 @@ class ReportUploadController extends Controller {
                             $wIds = $periodForPayroll->resolveBaseWeeklyIds($allPeriodsLocal2);
                             $dataIdsLocal = empty($wIds) ? [$periodForPayroll->id] : array_values(array_unique(array_merge($wIds, [$periodForPayroll->id])));
                         }
-                        $noiPagos = (float) \Illuminate\Support\Facades\DB::table('fact_noi_movements')
+                        $noiPagos = (float) DB::table('fact_noi_movements')
                             ->whereIn('period_id', $dataIdsLocal)
                             ->whereNotNull('employee_id')
                             ->whereRaw("LOWER(COALESCE(concept_type,'')) = 'percepcion'")
                             ->whereRaw("LOWER(COALESCE(concept,'')) NOT LIKE '%bono%'")
                             ->sum('amount');
-                        $noiComisiones = (float) \Illuminate\Support\Facades\DB::table('fact_noi_movements')
+                        $noiComisiones = (float) DB::table('fact_noi_movements')
                             ->whereIn('period_id', $dataIdsLocal)
                             ->whereNotNull('employee_id')
                             ->whereRaw("LOWER(COALESCE(concept,'')) LIKE '%comisi%'")
                             ->sum('amount');
                         if ($noiPagos + $noiComisiones > 0) {
                             $gm['pagos_total'] = $noiPagos + $noiComisiones;
-                            $noiDesc = (float) \Illuminate\Support\Facades\DB::table('fact_noi_movements')
+                            $noiDesc = (float) DB::table('fact_noi_movements')
                                 ->whereIn('period_id', $dataIdsLocal)
                                 ->whereNotNull('employee_id')
                                 ->whereRaw("LOWER(COALESCE(concept_type,'')) IN ('deduccion','descuento')")
@@ -685,7 +1146,7 @@ class ReportUploadController extends Controller {
                             $gm['neto_total'] = $gm['pagos_total'] - $noiDesc;
                         }
                         if (($gm['total_empleados'] ?? 0) == 0) {
-                            $gm['total_empleados'] = (int) \Illuminate\Support\Facades\DB::table('fact_noi_movements')
+                            $gm['total_empleados'] = (int) DB::table('fact_noi_movements')
                                 ->whereIn('period_id', $dataIdsLocal)->whereNotNull('employee_id')->distinct('employee_id')->count('employee_id');
                         }
                     }
@@ -705,11 +1166,14 @@ class ReportUploadController extends Controller {
             'database_update_run_status'      => $dbRunStatus,
             'database_update_run_log'         => $dbRun?->log ? mb_strimwidth($dbRun->log, 0, 300) : null,
             'database_update_run_error'       => $dbRun?->error_message ? mb_strimwidth($dbRun->error_message, 0, 300) : null,
-            'database_update_run_started_at'  => optional($dbRun?->started_at)->format('d/m/Y H:i'),
+            'database_update_run_queued_at'   => optional($dbRun?->queued_at ?? $dbRun?->created_at)->format('d/m/Y H:i'),
+            'database_update_run_started_at'  => ($dbRunStatus !== 'queued') ? optional($dbRun?->started_at)->format('d/m/Y H:i') : null,
             'database_update_run_finished_at' => optional($dbRun?->finished_at)->format('d/m/Y H:i'),
             'database_update_run_metadata'    => $dbRun?->metadata,
             'database_update_elapsed_seconds' => $dbElapsedSeconds,
             'database_update_stuck_warning'   => $dbStuckWarning,
+            'database_update_job_orphaned'    => $dbJobOrphaned,
+            'database_update_can_process_now' => !app()->isProduction() && $dbRunStatus === 'queued',
             'pending_critical_incidents_count' => $pendingCritical,
             'missing_database_sources'        => $missingDb,
             'missing_radiography_sources'     => $missingRadiography,

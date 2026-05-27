@@ -25,7 +25,7 @@ class DatabaseUpdateCompletedMail extends Mailable
     public function envelope(): Envelope
     {
         return new Envelope(
-            subject: 'Base de datos actualizada — ' . $this->period->label,
+            subject: 'Carga de registros completada — ' . $this->period->label,
         );
     }
 

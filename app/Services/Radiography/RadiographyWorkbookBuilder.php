@@ -186,10 +186,11 @@ class RadiographyWorkbookBuilder
         $ingrInteres   = $brCalcGlobal ? (float)$brCalcGlobal['interes_recuperado']  : 0.0;
         $ingrImpuesto  = $brCalcGlobal ? (float)$brCalcGlobal['impuesto_recuperado'] : 0.0;
         $ingrMuletas   = $brCalcGlobal ? (float)$brCalcGlobal['charges']             : 0.0;
-        $ingrCargosIni = $brCalcGlobal ? (float)$brCalcGlobal['cargos_inicio']       : 0.0;
-        $ingrComAper   = $brCalcGlobal ? (float)$brCalcGlobal['comision_apertura']   : 0.0;
-        $ingrVencidos  = 0.0; // no hay cruce confiable con +90 días
-        $ingrTotal     = $ingrCapital + $ingrInteres + $ingrImpuesto + $ingrMuletas + $ingrCargosIni + $ingrComAper + $ingrVencidos;
+        $ingrCargosIni  = $brCalcGlobal ? (float)$brCalcGlobal['cargos_inicio']       : 0.0;
+        $ingrComAper    = $brCalcGlobal ? (float)$brCalcGlobal['comision_apertura']   : 0.0;
+        $ingrPolCrece   = $brCalcGlobal ? (float)$brCalcGlobal['polizas_crece_30']    : 0.0;
+        $ingrVencidos   = 0.0; // no hay cruce confiable con +90 días
+        $ingrTotal      = $ingrCapital + $ingrInteres + $ingrImpuesto + $ingrMuletas + $ingrCargosIni + $ingrComAper + $ingrPolCrece + $ingrVencidos;
 
         $ingrItems = [
             ['Capital por producto',                   $ingrCapital,   'currency'],
@@ -198,6 +199,7 @@ class RadiographyWorkbookBuilder
             ['Multas por producto',                    $ingrMuletas,   'currency'],
             ['Cargos al inicio',                       $ingrCargosIni, 'currency'],
             ['Comisión por apertura',                  $ingrComAper,   'currency'],
+            ['Pólizas CRECE (30%)',                    $ingrPolCrece,  'currency'],
             ['Ingreso de créditos vencidos (+90 días)',$ingrVencidos,  'currency'],
         ];
         $ingrIdx = 0;
@@ -1151,7 +1153,8 @@ class RadiographyWorkbookBuilder
             $bIngrInteres  = $calc ? (float)$calc['interes_recuperado']  : 0.0;
             $bIngrImpuesto = $calc ? (float)$calc['impuesto_recuperado'] : 0.0;
             $bIngrMuletas  = $calc ? (float)$calc['charges']             : 0.0;
-            $bIngrTotal    = $bIngrCapital + $bIngrInteres + $bIngrImpuesto + $bIngrMuletas;
+            $bIngrPolCrece = $calc ? (float)$calc['polizas_crece_30']    : 0.0;
+            $bIngrTotal    = $bIngrCapital + $bIngrInteres + $bIngrImpuesto + $bIngrMuletas + $bIngrPolCrece;
             $bIngrItems = [
                 'Capital por producto'                    => $bIngrCapital,
                 'Intereses por producto'                  => $bIngrInteres,
@@ -1159,6 +1162,7 @@ class RadiographyWorkbookBuilder
                 'Multas por producto'                     => $bIngrMuletas,
                 'Cargos al inicio'                        => 0.0,
                 'Comisión por apertura'                   => 0.0,
+                'Pólizas CRECE (30%)'                     => $bIngrPolCrece,
                 'Ingreso de créditos vencidos (+90 días)' => 0.0,
             ];
             $bIngrIdx = 0;

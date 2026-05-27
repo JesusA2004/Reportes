@@ -14,8 +14,8 @@ use Illuminate\Support\Str;
  */
 class SaveheartsRuleService
 {
-    // Normalized keywords that identify a Savehearts row via the Operación column
-    private const OPERATION_KEYWORDS = ['seguro', 'seguros'];
+    // Normalized keywords that identify a Savehearts/insurance row via the Operación column
+    private const OPERATION_KEYWORDS = ['seguro', 'seguros', 'poliza', 'polizas'];
 
     // Normalized keywords that identify a Savehearts row via the Concepto column
     private const CONCEPT_KEYWORDS = ['savehearts', 'cobertura savehearts'];
@@ -56,11 +56,37 @@ class SaveheartsRuleService
 
     /**
      * Returns true when the product is any CRECE variant.
-     * Case-insensitive, accent-insensitive.
+     * Handles: CRECE, CRECE12, CRECE 12, CRECE SAC, CRECE12 SAC,
+     * CRECE CON/SIN ACTIVIDAD COMERCIAL, CRECE24, CRECE 24.
+     * Optional $duration (from a separate column): if product="CRECE" and duration=12,
+     * treats it as CRECE 12.
      */
-    public function isCreceProduct(string $product): bool
+    public function isCreceProduct(string $product, ?int $duration = null): bool
     {
-        return str_contains($this->normalize($product), self::CRECE_KEYWORD);
+        $norm = $this->normalize($product);
+        if (!str_contains($norm, self::CRECE_KEYWORD)) {
+            return false;
+        }
+        // Any product whose normalized form contains 'crece' is a CRECE product.
+        // The duration parameter is used externally for sub-classification only.
+        return true;
+    }
+
+    /**
+     * Returns the canonical CRECE product label (e.g. "CRECE 12", "CRECE 24", "CRECE").
+     */
+    public function creceProductLabel(string $product, ?int $duration = null): string
+    {
+        $norm = $this->normalize($product);
+
+        if (str_contains($norm, 'crece') && (str_contains($norm, '24') || $duration === 24)) {
+            return 'CRECE 24';
+        }
+        if (str_contains($norm, 'crece') && (str_contains($norm, '12') || $duration === 12)) {
+            return 'CRECE 12';
+        }
+
+        return 'CRECE';
     }
 
     /**

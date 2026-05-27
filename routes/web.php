@@ -23,8 +23,16 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::post('/{reportUpload}/analizar', [ReportUploadController::class, 'analyze'])->name('analyze');
             Route::post('/{period}/actualizar-bd', [ReportUploadController::class, 'updateDatabase'])->name('update-database');
             Route::post('/{period}/actualizacion-bd/cancelar', [ReportUploadController::class, 'cancelDatabaseUpdate'])->name('cancel-database-update');
+            Route::post('/{period}/actualizacion-bd/limpiar', [ReportUploadController::class, 'clearStuckDatabaseUpdate'])->name('clear-stuck-database-update');
+            Route::get('/{period}/actualizacion-bd/progreso', [ReportUploadController::class, 'loadProgressStatus'])->name('load-progress-status');
+            Route::post('/{period}/actualizacion-bd/procesar-ahora', [ReportUploadController::class, 'processNow'])->name('process-now');
+            Route::post('/{period}/actualizacion-bd/reencolar', [ReportUploadController::class, 'requeueRun'])->name('requeue-run');
             Route::get('/{period}/incidencias', [ReportUploadController::class, 'incidents'])->name('incidents');
             Route::post('/{period}/incidencias/{incident}/resolver', [ReportUploadController::class, 'resolveIncident'])->name('incidents.resolve');
+            Route::post('/{period}/incidencias/refrescar', [ReportUploadController::class, 'refreshIncidents'])->name('incidents.refresh');
+            Route::get('/{period}/personas-sin-sucursal', [ReportUploadController::class, 'personasSinSucursal'])->name('personas-sin-sucursal');
+            Route::post('/{period}/personas-sin-sucursal/confirmar-coincidencia', [ReportUploadController::class, 'confirmarCoincidencia'])->name('personas-sin-sucursal.confirmar');
+            Route::post('/{period}/incidencias/ubicacion-pendiente/resolver', [ReportUploadController::class, 'resolvePendingLocation'])->name('incidents.resolve-location');
             Route::post('/{period}/generar-radiografia', [ReportUploadController::class, 'generateRadiography'])->name('generate-radiography');
             Route::post('/{period}/reprocesar-todo', [ReportUploadController::class, 'reprocessAll'])->name('reprocess-all');
         });
@@ -51,6 +59,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::prefix('empleados')
         ->name('empleados.')
         ->group(function () {
+            Route::post('/batch-asignar-sucursal', [EmployeeController::class, 'batchAssignBranch'])->name('batch-assign-branch');
             Route::post('/{employee}/asignar-sucursal', [EmployeeController::class, 'assignBranch'])->name('assign-branch');
         });
 

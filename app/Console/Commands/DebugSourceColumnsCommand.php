@@ -20,12 +20,16 @@ class DebugSourceColumnsCommand extends Command
 
     public function handle(): int
     {
+        @ini_set('memory_limit', '512M');
         $periodId = (int) $this->argument('period_id');
 
         $uploads = ReportUpload::query()
+            ->with('dataSource')
             ->where('period_id', $periodId)
             ->whereNotNull('stored_path')
-            ->whereIn('source_code', ['lendus_ministraciones', 'lendus_ingresos_cobranza', 'lendus_saldos_cliente'])
+            ->whereHas('dataSource', fn ($q) => $q->whereIn('code', [
+                'lendus_ministraciones', 'lendus_ingresos_cobranza', 'lendus_saldos_cliente',
+            ]))
             ->get();
 
         if ($uploads->isEmpty()) {
@@ -36,7 +40,8 @@ class DebugSourceColumnsCommand extends Command
         foreach ($uploads as $upload) {
             $this->line('');
             $this->line(str_repeat('─', 70));
-            $this->info("Fuente : {$upload->source_code}");
+            $sourceCode = $upload->dataSource?->code ?? 'desconocida';
+            $this->info("Fuente : {$sourceCode}");
             $this->line("Archivo: {$upload->stored_path}");
 
             if (!Storage::disk('public')->exists($upload->stored_path)) {
@@ -46,21 +51,34 @@ class DebugSourceColumnsCommand extends Command
 
             try {
                 $absolutePath = Storage::disk('public')->path($upload->stored_path);
-                $sheets       = Excel::toArray([], $absolutePath);
-                $rows         = $sheets[0] ?? [];
+                $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($absolutePath);
+                $reader->setReadDataOnly(true);
+                if (method_exists($reader, 'setReadEmptyCells')) {
+                    $reader->setReadEmptyCells(false);
+                }
+                // Only load first 100 rows — enough to detect header and columns
+                $reader->setReadFilter(new class implements \PhpOffice\PhpSpreadsheet\Reader\IReadFilter {
+                    public function readCell($columnAddress, $row, $worksheetName = '') {
+                        return $row <= 100;
+                    }
+                });
+                $spreadsheet = $reader->load($absolutePath);
+                $rows        = $spreadsheet->getActiveSheet()->toArray(null, true, false, false);
+                $spreadsheet->disconnectWorksheets();
+                unset($spreadsheet);
             } catch (\Throwable $e) {
                 $this->warn("  ⚠ No se pudo leer el archivo: {$e->getMessage()}");
                 continue;
             }
 
-            $header = $this->detectHeader($rows, $upload->source_code);
+            $header = $this->detectHeader($rows, $sourceCode);
 
             if (empty($header)) {
                 $this->warn('  ⚠ No se detectó encabezado.');
                 continue;
             }
 
-            $result = $this->columnMap->resolveHeader($upload->source_code, $header);
+            $result = $this->columnMap->resolveHeader($sourceCode, $header);
 
             $this->line('');
             $this->line('  COLUMNAS AUTORIZADAS ENCONTRADAS:');
@@ -68,7 +86,7 @@ class DebugSourceColumnsCommand extends Command
                 $this->warn('    (ninguna)');
             } else {
                 foreach ($result['map'] as $field => $colIndex) {
-                    $defs   = $this->columnMap->getFieldDefinitions($upload->source_code);
+                    $defs   = $this->columnMap->getFieldDefinitions($sourceCode);
                     $def    = $defs[$field] ?? [];
                     $flags  = [];
                     if ($def['metric'] ?? false)   { $flags[] = 'métrica'; }

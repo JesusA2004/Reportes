@@ -18,13 +18,13 @@ class RadiografiaExportService
         private RadiographySnapshotBuilder $snapshotBuilder,
     ) {}
 
-    public function export(Period $period): string
+    public function export(Period $period, array $config = []): string
     {
         @ini_set('memory_limit', '1024M');
 
         $summary = $this->requireSummary($period);
 
-        $snapshot    = $this->snapshotBuilder->build($period, $summary);
+        $snapshot    = $this->snapshotBuilder->build($period, $summary, $config);
         $spreadsheet = $this->workbookBuilder->buildFromSnapshot($period, $summary, $snapshot);
 
         $directory  = storage_path('app/radiografias');
@@ -41,14 +41,14 @@ class RadiografiaExportService
         return $outputPath;
     }
 
-    public function exportPdf(Period $period): string
+    public function exportPdf(Period $period, array $config = []): string
     {
         @ini_set('memory_limit', '1024M');
 
         $summary = $this->requireSummary($period);
         $summary->loadMissing(['branchSummaries', 'incidents']);
 
-        $snapshot = $this->snapshotBuilder->build($period, $summary);
+        $snapshot = $this->snapshotBuilder->build($period, $summary, $config);
 
         $pdf = Pdf::loadView('reports.radiography-pdf', [
             'period'   => $period,
@@ -166,11 +166,11 @@ class RadiografiaExportService
      * Build the snapshot for use in the web preview page.
      * This avoids recalculating in the controller.
      */
-    public function buildSnapshot(Period $period): array
+    public function buildSnapshot(Period $period, array $config = []): array
     {
         $summary = $this->requireSummary($period);
         $summary->loadMissing(['branchSummaries', 'incidents']);
-        return $this->snapshotBuilder->build($period, $summary);
+        return $this->snapshotBuilder->build($period, $summary, $config);
     }
 
     private function requireSummary(Period $period): PeriodSummary

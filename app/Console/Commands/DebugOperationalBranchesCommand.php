@@ -48,7 +48,20 @@ class DebugOperationalBranchesCommand extends Command
         $this->line('');
 
         $operative = $this->resolver->operativeFinancialBranches();
-        $this->line(sprintf('  Sucursales operativas configuradas: <fg=green>%d</>', count($operative)));
+
+        // ── Lista explícita de sucursales ──────────────────────────────────
+        $this->info('── Sucursales incluidas para el reporte general ─────────────────────');
+        foreach ($operative as $name) {
+            $this->line("  <fg=green>✓</> {$name}");
+        }
+        $this->line('');
+
+        $this->info('── Sucursales excluidas ─────────────────────────────────────────────');
+        $this->line('  <fg=red>✗</> SAN JUAN DEL RÍO  — Sucursal cerrada');
+        $this->line('  <fg=red>✗</> CORPORATIVO       — No operativo');
+        $this->line('');
+
+        $this->line(sprintf('  Total incluidas: <fg=green>%d</>   Total excluidas conocidas: <fg=red>2</>', count($operative)));
         $this->line('');
 
         $result   = $this->calculator->buildBranches($period, $dataIds);
@@ -64,10 +77,10 @@ class DebugOperationalBranchesCommand extends Command
         $this->line('  ' . str_repeat('─', 82));
 
         foreach ($branches as $b) {
-            $cartera     = (float) $b['valor_cartera'];
-            $colocacion  = (float) $b['colocacion'];
-            $recuperacion = (float) $b['recuperacion_total'];
-            $mora        = $cartera > 0 ? ((float) $b['mora_total'] / $cartera * 100) : 0.0;
+            $cartera      = (float) ($b['valor_cartera'] ?? 0);
+            $colocacion   = (float) ($b['colocacion'] ?? 0);
+            $recuperacion = (float) ($b['recuperacion_total'] ?? 0);
+            $mora         = $cartera > 0 ? ((float) ($b['mora_total'] ?? 0) / $cartera * 100) : 0.0;
 
             $allZero = ($cartera + $colocacion + $recuperacion) < 1.0;
             if ($allZero) {
@@ -88,10 +101,10 @@ class DebugOperationalBranchesCommand extends Command
 
         // Global totals
         $global = $this->calculator->sumGlobal($branches, $result['unassigned'] ?? []);
-        $gCartera     = (float) $global['valor_cartera'];
-        $gColocacion  = (float) $global['colocacion'];
-        $gRecuperacion = (float) $global['recuperacion_total'];
-        $gMora        = $gCartera > 0 ? ((float) $global['mora_total'] / $gCartera * 100) : 0.0;
+        $gCartera      = (float) ($global['valor_cartera'] ?? 0);
+        $gColocacion   = (float) ($global['colocacion'] ?? 0);
+        $gRecuperacion = (float) ($global['recuperacion_total'] ?? 0);
+        $gMora         = $gCartera > 0 ? ((float) ($global['mora_total'] ?? 0) / $gCartera * 100) : 0.0;
 
         $this->line('  ' . str_repeat('─', 82));
         $this->line(sprintf(
@@ -117,13 +130,60 @@ class DebugOperationalBranchesCommand extends Command
             }
         }
 
-        // SAN JUAN DEL RÍO should NOT appear
-        $hasClosedBranch = in_array('SAN JUAN DEL RÍO', $included, true);
-        if ($hasClosedBranch) {
-            $this->line('  <fg=red>ERROR: SAN JUAN DEL RÍO apareció en los resultados — debería estar excluida.</>');
-            $warnings++;
+        // SAN JUAN DEL RÍO y CORPORATIVO NO deben aparecer en los resultados operativos
+        foreach (['SAN JUAN DEL RÍO', 'CORPORATIVO'] as $excludedName) {
+            if (in_array($excludedName, $included, true)) {
+                $this->line("  <fg=red>ERROR: {$excludedName} apareció en los resultados — debería estar excluida.</>");
+                $warnings++;
+            } else {
+                $this->line("  <fg=green>{$excludedName} correctamente excluida.</>");
+            }
+        }
+
+        // Ubicaciones pendientes: branches en DB que NO resuelven a una sucursal operativa
+        // ni a una exclusión conocida. Routes como "ORIZABA SUR" no cuentan porque
+        // resolveRealBranchFromRoute("ORIZABA SUR") → "ORIZABA" (operativa).
+        $this->info('── Ubicaciones pendientes de clasificación ───────────────────────────');
+        $operativeNorm  = array_map(
+            fn ($s) => (string) \Illuminate\Support\Str::ascii(mb_strtoupper($s)),
+            $this->resolver->operativeFinancialBranches(),
+        );
+        $exclusionNorm  = array_map(
+            fn ($s) => (string) \Illuminate\Support\Str::ascii(mb_strtoupper($s)),
+            ['SAN JUAN DEL RÍO', 'CORPORATIVO'],
+        );
+        $allKnownNorm = array_merge($operativeNorm, $exclusionNorm);
+        $normalize    = fn (string $s) => (string) \Illuminate\Support\Str::ascii(mb_strtoupper($s));
+
+        $allBranchNames = \App\Models\Branch::pluck('name')->all();
+        $pendingFound   = [];
+        foreach ($allBranchNames as $branchName) {
+            // Try to resolve to real branch via route map
+            $resolved     = $this->resolver->resolveRealBranchFromRoute($branchName);
+            $resolvedNorm = $resolved ? $normalize($resolved) : null;
+
+            if ($resolvedNorm && in_array($resolvedNorm, $allKnownNorm, true)) {
+                continue; // resuelve a operativa o exclusión conocida → OK
+            }
+
+            $rawNorm = $normalize($branchName);
+            if (in_array($rawNorm, $allKnownNorm, true)) {
+                continue; // es directamente una sucursal operativa o exclusión → OK
+            }
+
+            // No se puede resolver → pendiente
+            if (!in_array($branchName, $pendingFound, true)) {
+                $pendingFound[] = $branchName;
+            }
+        }
+
+        if (empty($pendingFound)) {
+            $this->line('  <fg=green>Ninguna ubicación pendiente detectada.</>');
         } else {
-            $this->line('  <fg=green>SAN JUAN DEL RÍO correctamente excluida.</>');
+            foreach ($pendingFound as $name) {
+                $this->line("  <fg=yellow>⚠ Pendiente:</> {$name}");
+            }
+            $warnings += count($pendingFound);
         }
 
         $this->line('');

@@ -33,10 +33,11 @@ class RadiographySnapshotBuilder
         private readonly BranchRadiographyCalculator $branchCalculator,
     ) {}
 
-    public function build(Period $period, PeriodSummary $summary): array
+    public function build(Period $period, PeriodSummary $summary, array $config = []): array
     {
         $this->branchCache = [];
         $this->dataIds     = $this->resolveDataIds($period);
+        $includedBranchIds = $config['included_branch_ids'] ?? [];
 
         $gm = $summary->global_metrics ?? [];
 
@@ -203,7 +204,7 @@ class RadiographySnapshotBuilder
         // Returns ['branches' => [...13 summaries...], 'unassigned' => [...]]
         // GLOBAL = suma de 13 sucursales + unassigned (solo nómina/comisiones/bonos/gastos).
         // Cartera / recuperación / colocación / mora ONLY from branches (not unassigned).
-        $branchCalcResult   = $this->branchCalculator->buildBranches($period, $this->dataIds);
+        $branchCalcResult   = $this->branchCalculator->buildBranches($period, $this->dataIds, $includedBranchIds);
         $branchCalcBranches = $branchCalcResult['branches'];
         $branchCalcUnassigned = $branchCalcResult['unassigned'];
         $branchCalcGlobal   = $this->branchCalculator->sumGlobal($branchCalcBranches, $branchCalcUnassigned);

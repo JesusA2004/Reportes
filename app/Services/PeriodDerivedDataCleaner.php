@@ -11,6 +11,7 @@ use App\Models\PeriodCorporateSummary;
 use App\Models\PeriodIncident;
 use App\Models\PeriodRadiographyExport;
 use App\Models\PeriodSummary;
+use App\Models\LendusEmployeeDirectory;
 use App\Models\Placement;
 use App\Models\Portfolio;
 use App\Models\Recovery;
@@ -75,6 +76,7 @@ class PeriodDerivedDataCleaner
         Recovery::query()->where('report_upload_id', $upload->id)->delete();
         Portfolio::query()->where('report_upload_id', $upload->id)->delete();
         Expense::query()->where('report_upload_id', $upload->id)->delete();
+        LendusEmployeeDirectory::query()->where('report_upload_id', $upload->id)->delete();
 
         Log::info('PeriodDerivedDataCleaner: clearForUpload done', ['upload_id' => $upload->id]);
     }

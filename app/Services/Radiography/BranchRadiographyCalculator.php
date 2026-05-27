@@ -65,16 +65,44 @@ class BranchRadiographyCalculator
      *
      * Returns ['branches' => [...12 summaries...], 'unassigned' => [nómina/comisiones/bonos/gastos sin sucursal]]
      * GLOBAL must be computed via sumGlobal($branches, $unassigned) to include unassigned amounts.
+     *
+     * @param array $includedBranchIds When non-empty, only these branch IDs contribute to metrics.
      */
-    public function buildBranches(Period $period, array $dataIds): array
+    public function buildBranches(Period $period, array $dataIds, array $includedBranchIds = []): array
     {
         $maps            = $this->buildBranchMap();
         $operativeMap    = $maps['operative'];
-        $operativeIds    = array_keys($operativeMap);
         $corporativoIds  = $maps['corporativo'];
+
+        // Filter operativeMap to only the requested branches.
+        // Routes that resolve to the same real branch are excluded when that branch is excluded.
+        if (!empty($includedBranchIds)) {
+            $includedNames = DB::table('branches')
+                ->whereIn('id', $includedBranchIds)
+                ->pluck('name')
+                ->map(fn ($n) => strtoupper(trim((string) \Illuminate\Support\Str::ascii($n))))
+                ->all();
+
+            $operativeMap = array_filter(
+                $operativeMap,
+                fn ($resolvedName) => in_array(
+                    strtoupper(trim((string) \Illuminate\Support\Str::ascii($resolvedName))),
+                    $includedNames,
+                    true
+                )
+            );
+        }
+
+        $operativeIds    = array_keys($operativeMap);
 
         $summaries = [];
         foreach ($this->resolver->operativeFinancialBranches() as $sucursal) {
+            if (!empty($includedBranchIds)) {
+                $sucNorm = strtoupper(trim((string) \Illuminate\Support\Str::ascii($sucursal)));
+                if (!in_array($sucNorm, $includedNames, true)) {
+                    continue;
+                }
+            }
             $summaries[$sucursal] = $this->emptyBranchSummary($sucursal);
         }
 
@@ -96,6 +124,9 @@ class BranchRadiographyCalculator
 
         // Nómina/comisiones/bonos: employee_branch_assignments; sin match → unassigned
         $this->accumulateNomina($dataIds, $operativeMap, $summaries, $unassigned);
+
+        // Pólizas CRECE: 30% share stored in fact_recoveries.savehearts_crece_share
+        $this->accumulatePolizasCrece($dataIds, $operativeIds, $operativeMap, $summaries);
 
         return ['branches' => array_values($summaries), 'unassigned' => $unassigned];
     }
@@ -593,6 +624,31 @@ class BranchRadiographyCalculator
         }
     }
 
+    // ── Pólizas CRECE (savehearts_crece_share) ───────────────────────────────
+
+    private function accumulatePolizasCrece(array $dataIds, array $branchIds, array $operativeMap, array &$summaries): void
+    {
+        if (empty($branchIds)) {
+            return;
+        }
+
+        $rows = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('branch_id', $branchIds)
+            ->where('savehearts_crece_share', '>', 0)
+            ->selectRaw('branch_id, SUM(savehearts_crece_share) as crece_share')
+            ->groupBy('branch_id')
+            ->get();
+
+        foreach ($rows as $row) {
+            $suc = $operativeMap[(int) $row->branch_id] ?? null;
+            if (!$suc || !isset($summaries[$suc])) {
+                continue;
+            }
+            $summaries[$suc]['polizas_crece_30'] += (float) $row->crece_share;
+        }
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private function emptyBranchSummary(string $sucursal): array
@@ -625,6 +681,7 @@ class BranchRadiographyCalculator
             'nomina_detalle'      => [],   // display_label => amount (IMSS, gasolina, finiquito, etc.)
             'excedentes'          => 0.0,
             'prestamos_fondea'    => 0.0,
+            'polizas_crece_30'    => 0.0,
         ];
     }
 

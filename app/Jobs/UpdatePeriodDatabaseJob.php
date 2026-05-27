@@ -47,7 +47,7 @@ class UpdatePeriodDatabaseJob implements ShouldQueue
 
         $run->update([
             'status'     => 'running',
-            'started_at' => $run->started_at ?? now(),
+            'started_at' => now(),
             'log'        => 'Procesando NOI Nómina y Cobranza…',
             'metadata'   => ['current_step' => 'Iniciando proceso…', 'progress_percent' => 0],
         ]);

@@ -28,8 +28,15 @@ const props = defineProps<{
     employees: Array<{ id: number; full_name: string; branch_name?: string }>
 }>()
 
-const selectedPeriodId = ref<number | null>(props.currentPeriodId ?? null)
-const incidents        = ref<any[]>([])
+const OPERATIVE_BRANCH_NAMES_INIT = new Set([
+    'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
+    'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN LUIS POTOSI',
+    'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
+])
+
+const selectedPeriodId    = ref<number | null>(props.currentPeriodId ?? null)
+const incidents           = ref<any[]>([])
+const incidentsReloadKey  = ref(0)
 const reportConfig     = ref({
     report_type: 'simple',
     scope: 'general',
@@ -38,6 +45,9 @@ const reportConfig     = ref({
     compare_period_id: null as number | null,
     extra_employee_expense_amount: 0,
     extra_employee_expense_notes: '',
+    included_branch_ids: props.branches
+        .filter((b) => OPERATIVE_BRANCH_NAMES_INIT.has(b.name.trim().toUpperCase()))
+        .map((b) => b.id),
 })
 
 const period  = computed(() => props.periods.find((p) => p.id === selectedPeriodId.value) ?? null)
@@ -114,6 +124,13 @@ watch(() => period.value?.database_update_run_status, (newStatus, oldStatus) => 
             icon: 'error',
             confirmButtonText: 'Ver detalle',
         }).then(() => selectStep('load'))
+    } else if (newStatus === 'cancelled') {
+        Swal.fire({
+            title: 'Carga cancelada',
+            text: 'El proceso fue cancelado. Puedes reiniciarlo cuando estés listo.',
+            icon: 'info',
+            confirmButtonText: 'Entendido',
+        })
     }
 })
 
@@ -157,11 +174,16 @@ const updateDatabase = async () => {
     })
 }
 
+// ── Incidencias críticas — bloquean Paso 4 ───────────────────────────
+const hasCriticalIncidents = computed(() =>
+    incidents.value.some((i) => ['high', 'critical'].includes(i.severity) && i.severity !== 'resolved')
+)
+
 const cancelDatabaseUpdate = async () => {
     if (!selectedPeriodId.value) return
     const result = await Swal.fire({
         title: '¿Cancelar la carga de registros?',
-        text: 'El proceso se marcará como fallido. Podrás reintentarlo desde la etapa de Cargar registros.',
+        text: 'El proceso se marcará como cancelado. Podrás reiniciarlo desde la etapa de Cargar registros.',
         icon: 'warning',
         showCancelButton: true,
         confirmButtonText: 'Sí, cancelar proceso',
@@ -172,8 +194,56 @@ const cancelDatabaseUpdate = async () => {
     if (!result.isConfirmed) return
     router.post(`/historico-general/${selectedPeriodId.value}/actualizacion-bd/cancelar`, {}, {
         preserveScroll: true,
-        onSuccess: () => Swal.fire({ title: 'Proceso cancelado', text: 'Puedes reintentar la actualización cuando estés listo.', icon: 'info', confirmButtonText: 'Entendido' }),
+        onSuccess: () => Swal.fire({ title: 'Carga cancelada', text: 'Puedes reiniciar la carga cuando estés listo.', icon: 'info', confirmButtonText: 'Entendido' }),
         onError:   () => Swal.fire('No se pudo cancelar', 'El proceso ya terminó o no existe.', 'error'),
+    })
+}
+
+const processNow = async () => {
+    if (!selectedPeriodId.value) return
+    const result = await Swal.fire({
+        title: 'Procesar ahora (local)',
+        text: 'Ejecuta el job directamente sin worker. La página esperará hasta que termine (puede tardar varios minutos).',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonText: 'Procesar ahora',
+        cancelButtonText: 'Cancelar',
+        reverseButtons: true,
+    })
+    if (!result.isConfirmed) return
+    Swal.fire({ title: 'Procesando…', text: 'Ejecutando carga de registros directamente. No cierres esta ventana.', allowOutsideClick: false, showConfirmButton: false, didOpen: () => Swal.showLoading() })
+    router.post(`/historico-general/${selectedPeriodId.value}/actualizacion-bd/procesar-ahora`, {}, {
+        preserveScroll: true,
+        onSuccess: () => Swal.fire({ title: 'Listo', text: 'El proceso terminó. Revisa el resultado.', icon: 'success', confirmButtonText: 'Ver resultado' }),
+        onError:   () => Swal.fire({ title: 'El proceso terminó con error', text: 'Revisa el detalle en la etapa de carga.', icon: 'error', confirmButtonText: 'Ver detalle' }).then(() => selectStep('load')),
+    })
+}
+
+const requeueRun = async () => {
+    if (!selectedPeriodId.value) return
+    router.post(`/historico-general/${selectedPeriodId.value}/actualizacion-bd/reencolar`, {}, {
+        preserveScroll: true,
+        onSuccess: () => Swal.fire({ title: 'Job reencolado', text: 'Inicia el worker para procesarlo: php artisan queue:work --tries=1 --timeout=0 -vvv', icon: 'info', confirmButtonText: 'Entendido' }),
+        onError:   () => Swal.fire('No se pudo reencolar', 'El run ya no está en cola o el job ya existe.', 'error'),
+    })
+}
+
+const clearStuckDatabaseUpdate = async () => {
+    if (!selectedPeriodId.value) return
+    const result = await Swal.fire({
+        title: 'Limpiar estado atascado',
+        text: 'Se marcará el proceso como cancelado para que puedas volver a iniciar la carga.',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonText: 'Limpiar estado',
+        cancelButtonText: 'Cancelar',
+        reverseButtons: true,
+    })
+    if (!result.isConfirmed) return
+    router.post(`/historico-general/${selectedPeriodId.value}/actualizacion-bd/limpiar`, {}, {
+        preserveScroll: true,
+        onSuccess: () => Swal.fire({ title: 'Estado limpiado', text: 'Ya puedes reiniciar la carga de registros.', icon: 'success', confirmButtonText: 'Entendido' }),
+        onError:   () => Swal.fire('No se pudo limpiar', 'No hay proceso atascado o ya fue limpiado.', 'error'),
     })
 }
 
@@ -183,6 +253,61 @@ const resolveIncident = async (id: number) => {
     router.post(`/historico-general/${selectedPeriodId.value}/incidencias/${id}/resolver`, { resolution_note: result.value }, {
         preserveScroll: true,
         onSuccess: () => { Swal.fire('Incidencia resuelta', 'El estado del flujo se actualizó.', 'success'); loadIncidents() },
+        onError:   () => Swal.fire('No se pudo resolver', 'Intenta nuevamente.', 'error'),
+    })
+}
+
+const assignBranchFromIncident = async ({ employee_ids, employee_id, branch_id, period_id }: { employee_ids?: number[]; employee_id: number; branch_id: number; period_id: number }) => {
+    if (!selectedPeriodId.value) return
+    const ids  = employee_ids && employee_ids.length > 0 ? employee_ids : [employee_id]
+    const csrf = (document.querySelector('meta[name="csrf-token"]') as HTMLMetaElement)?.content ?? ''
+    try {
+        const res = await fetch('/empleados/batch-asignar-sucursal', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf, 'X-Requested-With': 'XMLHttpRequest' },
+            body:    JSON.stringify({ employee_ids: ids, branch_id, period_id, notes: 'Asignado desde incidencias.' }),
+        })
+        if (!res.ok) throw new Error()
+        try {
+            await fetch(`/historico-general/${selectedPeriodId.value}/incidencias/refrescar`, {
+                method: 'POST', headers: { 'X-CSRF-TOKEN': csrf, 'X-Requested-With': 'XMLHttpRequest' },
+            })
+        } catch { /* non-fatal */ }
+        await loadIncidents()
+        incidentsReloadKey.value++
+        Swal.fire({ title: 'Sucursal asignada', text: 'La persona fue asignada correctamente.', icon: 'success', timer: 2000, showConfirmButton: false })
+    } catch {
+        Swal.fire('No se pudo asignar', 'Intenta nuevamente.', 'error')
+    }
+}
+
+const confirmMatchFromIncident = async ({ employee_id, target_employee_id, branch_id }: { employee_id: number; target_employee_id: number; branch_id?: number }) => {
+    if (!selectedPeriodId.value) return
+    try {
+        const csrf = (document.querySelector('meta[name="csrf-token"]') as HTMLMetaElement)?.content ?? ''
+        const res = await fetch(`/historico-general/${selectedPeriodId.value}/personas-sin-sucursal/confirmar-coincidencia`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf, 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ employee_id, target_employee_id, branch_id }),
+        })
+        if (!res.ok) throw new Error()
+        const data = await res.json()
+        await loadIncidents()
+        incidentsReloadKey.value++
+        const text = data.branch_assigned
+            ? 'La persona fue unificada y se heredó la sucursal correspondiente.'
+            : 'La persona fue unificada. Aún requiere asignar sucursal.'
+        Swal.fire({ title: 'Coincidencia confirmada', text, icon: 'success', timer: 3000, showConfirmButton: false })
+    } catch {
+        Swal.fire('No se pudo confirmar', 'Intenta nuevamente.', 'error')
+    }
+}
+
+const resolveLocationFromIncident = ({ incident_id, action, branch_id }: { incident_id: number; action: string; branch_id: number | null }) => {
+    if (!selectedPeriodId.value) return
+    router.post(`/historico-general/${selectedPeriodId.value}/incidencias/ubicacion-pendiente/resolver`, { incident_id, action, branch_id }, {
+        preserveScroll: true,
+        onSuccess: () => { Swal.fire('Ubicación resuelta', 'La ubicación fue clasificada correctamente.', 'success'); loadIncidents() },
         onError:   () => Swal.fire('No se pudo resolver', 'Intenta nuevamente.', 'error'),
     })
 }
@@ -280,17 +405,40 @@ const generateReport = () => {
                         :can-update="Boolean(period?.can_update_database)"
                         @update="updateDatabase"
                         @cancel="cancelDatabaseUpdate"
+                        @clear-stuck="clearStuckDatabaseUpdate"
                         @refresh="() => router.reload({ only: ['periods', 'groupedUploads'] })"
+                        @process-now="processNow"
+                        @requeue="requeueRun"
                     />
                     <IncidentsStep
                         v-else-if="currentStep === 'incidents'"
                         :period="period"
                         :incidents="incidents"
+                        :branches="branches"
+                        :reload-key="incidentsReloadKey"
                         @resolve="resolveIncident"
                         @refresh="loadIncidents"
+                        @assign-branch="assignBranchFromIncident"
+                        @confirm-match="confirmMatchFromIncident"
+                        @resolve-location="resolveLocationFromIncident"
                     />
                     <div v-else-if="currentStep === 'config'" class="space-y-5">
+                        <!-- Bloqueo por incidencias críticas -->
+                        <div v-if="hasCriticalIncidents" class="flex flex-col items-center justify-center gap-4 rounded-[2rem] border-2 border-dashed border-red-300 bg-red-50 p-10 text-center shadow-sm">
+                            <div class="flex size-14 items-center justify-center rounded-2xl bg-red-100 shadow">
+                                <svg class="size-7 text-red-600" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
+                            </div>
+                            <div>
+                                <p class="text-lg font-black text-red-800">Configuración bloqueada</p>
+                                <p class="mt-1.5 max-w-sm text-sm leading-6 text-red-700">Resuelve las incidencias críticas antes de configurar el reporte.</p>
+                            </div>
+                            <button type="button" class="inline-flex h-10 items-center gap-2 rounded-2xl bg-red-600 px-5 text-sm font-black text-white shadow-lg shadow-red-200 transition hover:bg-red-700" @click="selectStep('incidents')">
+                                Ir a incidencias
+                                <svg class="size-4" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" /></svg>
+                            </button>
+                        </div>
                         <ReportConfigurationStep
+                            v-else
                             v-model="reportConfig"
                             :period="period"
                             :periods="periods"

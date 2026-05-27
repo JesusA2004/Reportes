@@ -26,7 +26,7 @@ class PeriodRadiographyService
     ) {
     }
 
-    public function generate(Period $period, ?int $userId = null): PeriodSummary
+    public function generate(Period $period, ?int $userId = null, array $config = []): PeriodSummary
     {
         @ini_set('memory_limit', '1024M');
         @ini_set('max_execution_time', '1800');
@@ -51,7 +51,9 @@ class PeriodRadiographyService
 
         $uploads = $this->importSourcesForFinalRadiography($period, $dataIds, $allPeriods);
 
-        return DB::transaction(function () use ($period, $userId, $uploads, $dataIds) {
+        $includedBranchIds = $config['included_branch_ids'] ?? [];
+
+        return DB::transaction(function () use ($period, $userId, $uploads, $dataIds, $includedBranchIds) {
             $summary = PeriodSummary::query()->updateOrCreate(
                 ['period_id' => $period->id],
                 [
@@ -66,7 +68,7 @@ class PeriodRadiographyService
 
             $summary->update([
                 'source_upload_ids' => $uploads->pluck('id')->values()->all(),
-                'global_metrics' => $this->globalMetrics($period, $dataIds),
+                'global_metrics' => $this->globalMetrics($period, $dataIds, $includedBranchIds),
                 'warnings' => [],
                 'version' => (int) ($summary->version ?? 0) + 1,
             ]);
@@ -75,7 +77,7 @@ class PeriodRadiographyService
                 ->where('period_summary_id', $summary->id)
                 ->delete();
 
-            foreach ($this->branchMetrics($period, $dataIds) as $row) {
+            foreach ($this->branchMetrics($period, $dataIds, $includedBranchIds) as $row) {
                 PeriodBranchSummary::query()->create([
                     'period_summary_id' => $summary->id,
                     'branch_id' => $row['branch_id'],
@@ -210,31 +212,43 @@ class PeriodRadiographyService
             ->all();
     }
 
-    private function globalMetrics(Period $period, array $dataIds): array
+    private function globalMetrics(Period $period, array $dataIds, array $includedBranchIds = []): array
     {
-        $valorCartera = (float) Portfolio::query()
-            ->whereIn('period_id', $dataIds)
+        $branchFilter = fn ($q) => !empty($includedBranchIds)
+            ? $q->whereIn('branch_id', $includedBranchIds)
+            : $q;
+
+        $valorCartera = (float) $branchFilter(Portfolio::query()
+            ->whereIn('period_id', $dataIds))
             ->sum('balance');
 
-        $carteraVencida = (float) Portfolio::query()
-            ->whereIn('period_id', $dataIds)
+        $carteraVencida = (float) $branchFilter(Portfolio::query()
+            ->whereIn('period_id', $dataIds))
             ->sum('past_due_balance');
 
         // Fallback: if past_due_balance is all zero but days_past_due > 0 exists, use balance of overdue records
         if ($carteraVencida === 0.0 && $valorCartera > 0) {
-            $hasOverdueDays = Portfolio::query()->whereIn('period_id', $dataIds)->where('days_past_due', '>', 0)->exists();
+            $hasOverdueDays = $branchFilter(Portfolio::query()->whereIn('period_id', $dataIds))->where('days_past_due', '>', 0)->exists();
             if ($hasOverdueDays) {
-                $carteraVencida = (float) Portfolio::query()->whereIn('period_id', $dataIds)->where('days_past_due', '>', 0)->sum('balance');
+                $carteraVencida = (float) $branchFilter(Portfolio::query()->whereIn('period_id', $dataIds))->where('days_past_due', '>', 0)->sum('balance');
             }
         }
+
+        $polizasCrece30 = (float) DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->when(!empty($includedBranchIds), fn ($q) => $q->whereIn('branch_id', $includedBranchIds))
+            ->sum('savehearts_crece_share');
 
         // ── Payroll aggregates (for preview cards) ──
         $payroll = $this->payrollMetrics($period, $dataIds);
 
+        $recoveryBase = (float) $branchFilter(Recovery::query()->whereIn('period_id', $dataIds))->sum('total_amount');
+
         return [
-            'gasto_total'           => (float) Expense::query()->whereIn('period_id', $dataIds)->sum('amount'),
-            'recuperacion_total'    => (float) Recovery::query()->whereIn('period_id', $dataIds)->sum('total_amount'),
-            'colocacion_total'      => (float) Placement::query()->whereIn('period_id', $dataIds)->sum('amount'),
+            'gasto_total'           => (float) $branchFilter(Expense::query()->whereIn('period_id', $dataIds))->sum('amount'),
+            'recuperacion_total'    => $recoveryBase,
+            'colocacion_total'      => (float) $branchFilter(Placement::query()->whereIn('period_id', $dataIds))->sum('amount'),
+            'polizas_crece_30'      => $polizasCrece30,
             'valor_cartera_total'   => $valorCartera,
             'cartera_vencida_total' => $carteraVencida,
             'mora_porcentaje'       => $valorCartera > 0
@@ -327,12 +341,12 @@ class PeriodRadiographyService
         ];
     }
 
-    private function corporateMetrics(Period $period, array $dataIds): array
+    private function corporateMetrics(Period $period, array $dataIds, array $includedBranchIds = []): array
     {
-        return $this->globalMetrics($period, $dataIds);
+        return $this->globalMetrics($period, $dataIds, $includedBranchIds);
     }
 
-    private function branchMetrics(Period $period, array $dataIds): array
+    private function branchMetrics(Period $period, array $dataIds, array $includedBranchIds = []): array
     {
         $rows = [];
 
@@ -343,6 +357,7 @@ class PeriodRadiographyService
             ->merge(Portfolio::query()->whereIn('period_id', $dataIds)->pluck('branch_id'))
             ->filter()
             ->unique()
+            ->when(!empty($includedBranchIds), fn ($c) => $c->filter(fn ($id) => in_array($id, $includedBranchIds)))
             ->values();
 
         foreach ($branchIds as $branchId) {
@@ -434,11 +449,25 @@ class PeriodRadiographyService
             ->count('n.employee_id');
 
         if ($sinSucursal > 0) {
+            // Check monetary impact to decide severity
+            $sinSucursalMonto = (float) DB::table('fact_noi_movements as n')
+                ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period, $dataIds) {
+                    $j->on('eba.employee_id', '=', 'n.employee_id')
+                      ->whereIn('eba.period_id', array_merge([$period->id], $dataIds));
+                })
+                ->whereIn('n.period_id', $dataIds)
+                ->whereNotNull('n.employee_id')
+                ->whereNull('eba.branch_id')
+                ->sum('n.amount');
+
+            $severity = abs($sinSucursalMonto) > 0 ? 'high' : 'warning';
+
             $items[] = [
                 'type'     => 'empleados_sin_sucursal',
-                'severity' => 'warning',
-                'message'  => "{$sinSucursal} empleado(s) del NOI no tienen sucursal asignada. Sus datos no aparecen en reportes por sucursal.",
-                'context'  => ['count' => $sinSucursal],
+                'severity' => $severity,
+                'message'  => "{$sinSucursal} empleado(s) del NOI no tienen sucursal asignada. Sus datos no aparecen en reportes por sucursal."
+                    . ($severity === 'high' ? " Impacto monetario: $" . number_format(abs($sinSucursalMonto), 2) : ''),
+                'context'  => ['count' => $sinSucursal, 'monto' => $sinSucursalMonto],
             ];
         }
 
@@ -460,6 +489,47 @@ class PeriodRadiographyService
                 'severity' => 'warning',
                 'message'  => "{$gestoresSinMatch} gestor(es) de ministraciones no coinciden con ningún empleado NOI. Revisa los nombres en ambos archivos.",
                 'context'  => ['count' => $gestoresSinMatch],
+            ];
+        }
+
+        // Detect possible coincidences: employees with similar but NOT identical normalized names.
+        // Exact normalized_name matches are intentionally excluded — they are the same person
+        // split across multiple source systems and handled via canonical_same_name resolution.
+        $employeeNames = DB::table('employees')
+            ->select('id', 'full_name', 'normalized_name')
+            ->whereNotNull('normalized_name')
+            ->get();
+
+        $coincidencias = [];
+        $checked       = [];
+        foreach ($employeeNames as $a) {
+            foreach ($employeeNames as $b) {
+                if ($a->id >= $b->id) continue;
+                // Skip: same normalized_name = same person from different sources, not a typo variant
+                if ((string) $a->normalized_name === (string) $b->normalized_name) continue;
+                $key = min($a->id, $b->id) . '_' . max($a->id, $b->id);
+                if (isset($checked[$key])) continue;
+                $checked[$key] = true;
+
+                $tokensA = array_filter(explode(' ', (string) $a->normalized_name));
+                $tokensB = array_filter(explode(' ', (string) $b->normalized_name));
+                if (count($tokensA) < 2 || count($tokensB) < 2) continue;
+
+                $intersection = count(array_intersect($tokensA, $tokensB));
+                $minLen       = min(count($tokensA), count($tokensB));
+                if ($minLen > 0 && ($intersection / $minLen) >= 0.75) {
+                    $coincidencias[] = ['a' => $a->full_name, 'b' => $b->full_name];
+                    if (count($coincidencias) >= 20) break 2;
+                }
+            }
+        }
+
+        if (!empty($coincidencias)) {
+            $items[] = [
+                'type'     => 'posibles_coincidencias_persona',
+                'severity' => 'warning',
+                'message'  => count($coincidencias) . ' posible(s) coincidencia(s) de persona detectada(s). Verifica si se trata de la misma persona escrita de forma diferente.',
+                'context'  => ['count' => count($coincidencias), 'samples' => array_slice($coincidencias, 0, 5)],
             ];
         }
 

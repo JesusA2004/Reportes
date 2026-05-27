@@ -25,7 +25,7 @@ class DatabaseUpdateFailedMail extends Mailable
     public function envelope(): Envelope
     {
         return new Envelope(
-            subject: 'Error al actualizar base de datos — ' . $this->period->label,
+            subject: 'Error en carga de registros — ' . $this->period->label,
         );
     }
 

@@ -11,6 +11,42 @@ use Illuminate\Http\Request;
 
 class EmployeeController extends Controller
 {
+    /**
+     * Assign a branch to multiple employee IDs at once.
+     * Used when personasSinSucursal groups NOI regular + NOI fiscal rows for the same person.
+     */
+    public function batchAssignBranch(Request $request): \Illuminate\Http\JsonResponse
+    {
+        $validated = $request->validate([
+            'employee_ids'   => ['required', 'array', 'min:1'],
+            'employee_ids.*' => ['required', 'integer', 'exists:employees,id'],
+            'branch_id'      => ['required', 'integer', 'exists:branches,id'],
+            'period_id'      => ['required', 'integer', 'exists:periods,id'],
+            'notes'          => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $branch = Branch::findOrFail($validated['branch_id']);
+        $period = Period::findOrFail($validated['period_id']);
+        $note   = $validated['notes'] ?? "Asignado manualmente a {$branch->name}.";
+
+        foreach ($validated['employee_ids'] as $employeeId) {
+            EmployeeBranchAssignment::query()->updateOrCreate(
+                ['period_id' => $period->id, 'employee_id' => $employeeId],
+                [
+                    'branch_id'           => $branch->id,
+                    'source_type'         => 'manual',
+                    'source_reference'    => "Asignación manual — {$period->label}",
+                    'match_type'          => 'manual',
+                    'confidence'          => 1.00,
+                    'was_manual_reviewed' => true,
+                    'notes'               => $note,
+                ]
+            );
+        }
+
+        return response()->json(['ok' => true, 'assigned' => count($validated['employee_ids'])]);
+    }
+
     // Asignación manual de sucursal a un empleado para un periodo específico.
     // Respeta y marca la asignación como manual_reviewed = true
     // para que futuros cruces automáticos no la sobreescriban.

@@ -368,6 +368,9 @@ class LendusIngresosCobranzaImportService {
                                 'metadata' => array_merge($run->metadata ?? [], [
                                     'current_step'     => "Leyendo Lendus Cobranza… {$uniq} promotores",
                                     'progress_percent' => $pct,
+                                    'current_source'   => 'lendus_ingresos_cobranza',
+                                    'processed_rows'   => $rowsRead,
+                                    'total_rows'       => $totalRowsEstimate,
                                     'cobranza_rows_read'          => $rowsRead,
                                     'cobranza_rows_skipped'       => $rowsSkipped,
                                     'cobranza_total_rows'         => $totalRowsEstimate,
@@ -402,10 +405,15 @@ class LendusIngresosCobranzaImportService {
         }
 
         // ── 4. Incidents: promoters that never appeared with a branch ──────
+        // Severity 'warning' (not 'high') so these don't block report generation.
         $incidents = [];
         foreach ($noAnyBranch as $normalized => $rawName) {
             if (empty($promoterBranchMap[$normalized]['branches'])) {
-                $incidents[] = ['type' => 'promoter_without_branch', 'message' => "Promotor sin sucursal: {$rawName}"];
+                $incidents[] = [
+                    'type'     => 'promoter_without_branch',
+                    'severity' => 'warning',
+                    'message'  => "Promotor sin sucursal: {$rawName}",
+                ];
             }
         }
 
@@ -554,11 +562,18 @@ class LendusIngresosCobranzaImportService {
             );
         }
 
+        // Routes and non-operative location strings from cobranza are silently ignored.
+        // They are NOT branches, they do not generate incidents, and they do not block the report.
+
         $duration = round(microtime(true) - $startTime, 1);
 
         return [
             'promoters_detected'           => count($promoterBranchMap),
             'branches_detected'            => count($branchRows),
+            'records_loaded'               => $rowsRead,
+            'records_excluded'             => $rowsSkipped,
+            'pending_locations'            => 0,
+            'pending_location_names'       => [],
             'cobranza_rows_read'           => $rowsRead,
             'cobranza_rows_skipped'        => $rowsSkipped,
             'cobranza_promoters_detected'  => count($promoterBranchMap),
@@ -686,16 +701,27 @@ class LendusIngresosCobranzaImportService {
         }
     }
 
-    private function updateRun(?PeriodDatabaseUpdateRun $run, int $pct, string $step): void
-    {
+    private function updateRun(
+        ?PeriodDatabaseUpdateRun $run,
+        int $pct,
+        string $step,
+        int $processedRows = 0,
+        int $totalRows = 0,
+    ): void {
         if (!$run) return;
+
+        $extra = ['current_source' => 'lendus_ingresos_cobranza'];
+        if ($totalRows > 0) {
+            $extra['processed_rows'] = $processedRows;
+            $extra['total_rows']     = $totalRows;
+        }
 
         $run->update([
             'log'      => $step,
             'metadata' => array_merge($run->metadata ?? [], [
                 'current_step'     => $step,
                 'progress_percent' => $pct,
-            ]),
+            ] + $extra),
         ]);
     }
 

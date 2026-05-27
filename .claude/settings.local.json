@@ -58,7 +58,10 @@
       "Bash(2>&1)",
       "Bash(Start-Sleep -Seconds 30)",
       "Bash(grep *)",
-      "Bash(Sort-Object)"
+      "Bash(Sort-Object)",
+      "Bash(xargs -I {} grep -l \"EBITDA\\\\|ebitda\\\\|ingreso_savehearts\" \"{}\")",
+      "Bash(Find \"C:\\\\wamp64\\\\www\\\\Reportes\\\\app\\\\Http\\\\Controllers\" -name \"*.php\")",
+      "PowerShell(Set-Location \"C:\\\\wamp64\\\\www\\\\Reportes\"; $env:PHP_CLI_SERVER_WORKERS = '1'; $output = php artisan tinker --execute=\"echo 'starting';`$s=app\\(App\\\\Services\\\\EmployeeBranchAutoMatchService::class\\);`$r=`$s->handle\\(5\\);echo 'done:'.`$r['matched'].'/'.\\(\\(`$r['matched']+`$r['unmatched']\\)\\);\"; echo $output)"
     ]
   }
 }

@@ -80,7 +80,7 @@ class GenerateRadiographyJob implements ShouldQueue
             $cleaner->clearGeneratedReports($period);
 
             // ── 1. Generate summary (metrics from Expense/Recovery/Placement/Portfolio) ──
-            $summary = $radiographyService->generate($period, $this->userId);
+            $summary = $radiographyService->generate($period, $this->userId, $this->config);
 
             $run->update([
                 'status'            => 'running',
@@ -100,14 +100,14 @@ class GenerateRadiographyJob implements ShouldQueue
             ]);
 
             // ── 3. Export Excel (from scratch, no template) ──
-            $path = $exportService->export($period);
+            $path = $exportService->export($period, $this->config);
 
             $run->update([
                 'log' => 'Generando PDF.',
             ]);
 
             // ── 4. Export PDF (via Blade + dompdf) ──
-            $pdfPath = $exportService->exportPdf($period);
+            $pdfPath = $exportService->exportPdf($period, $this->config);
 
             // ── 5. Reload summary and register exports ──
             $summary = PeriodSummary::query()
