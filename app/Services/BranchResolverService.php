@@ -193,6 +193,38 @@ class BranchResolverService
             return $product;
         }
 
+        // ── CRECE family normalization ────────────────────────────────────────
+        // Groups all CRECE variants by plazo and SAC flag.
+        // Rules:
+        //   CRECE + 12 (explicit in name or numPayments) → CRECE12 (+ SAC if present)
+        //   CRECE + 24 → CRECE24
+        //   CRECE with no determinable plazo → leave as CRECE (no grouping error)
+        if (str_contains($upper, 'CRECE')) {
+            $hasSac = str_contains($upper, 'SAC');
+
+            // Plazo explicit in product name ("CRECE12", "CRECE 12", "CRECE 12 CON...", "CRECE 12 MAX...")
+            if (preg_match('/CRECE\s*(\d+)/', $upper, $m)) {
+                $plazo = (int)$m[1];
+                if ($plazo === 12) return 'CRECE12' . ($hasSac ? ' SAC' : '');
+                if ($plazo === 24) return 'CRECE24' . ($hasSac ? ' SAC' : '');
+                return "CRECE{$plazo}" . ($hasSac ? ' SAC' : '');
+            }
+
+            // Plazo from numPayments parameter (weekly product: 12 weeks = CRECE12)
+            if ($numPayments !== null) {
+                if ($numPayments === 12) return 'CRECE12' . ($hasSac ? ' SAC' : '');
+                if ($numPayments === 24) return 'CRECE24' . ($hasSac ? ' SAC' : '');
+            }
+
+            // Already in canonical form ("CRECE12", "CRECE24", "CRECE12 SAC", "CRECE24 SAC")
+            if (preg_match('/^CRECE(12|24)( SAC)?$/i', $product)) {
+                return strtoupper(trim($product));
+            }
+
+            // CRECE with no plazo info — return as-is (do NOT invent a plazo)
+            return $product;
+        }
+
         // MR LANA DIARIO / LANA DIARIO / CREDITO DIARIO with multi-option slash notation
         if ((str_contains($upper, 'DIARIO') && (str_contains($upper, 'LANA') || str_contains($upper, 'CREDITO') || str_contains($upper, 'MR')))
             || preg_match('/\bi\d+\s*\/\s*i\d+/i', $product)
@@ -222,11 +254,24 @@ class BranchResolverService
             }
         }
 
-        // "CREDITO DIARIO I20" pattern — i-code embedded in product name
+        // "CREDITO DIARIO I20" pattern — i-code embedded in product name (with I prefix)
         if (str_contains($upper, 'DIARIO') && preg_match('/[Ii](\d+)/', $upper, $m)) {
             $n = (int) $m[1];
             if (in_array($n, [20, 30, 40, 60], true)) {
                 return 'i' . $n;
+            }
+        }
+
+        // "DIARIO 40" / "DIARIO 30" — bare number after DIARIO keyword (no I prefix)
+        if (str_contains($upper, 'DIARIO') && preg_match('/DIARIO\s+(20|30|40|60)\b/', $upper, $m)) {
+            return 'i' . (int)$m[1];
+        }
+
+        // CREDITO DIARIO + numPayments → normalize if numPayments provided and no i-code in name
+        if (str_contains($upper, 'DIARIO') && $numPayments !== null && in_array($numPayments, [20, 30, 40, 60], true)) {
+            $hasICode = preg_match('/[Ii](20|30|40|60)/', $upper);
+            if (!$hasICode) {
+                return 'i' . $numPayments;
             }
         }
 

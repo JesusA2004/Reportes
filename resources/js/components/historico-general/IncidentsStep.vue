@@ -11,6 +11,8 @@ const props = defineProps<{
     period: any
     branches: Array<{ id: number; name: string }>
     reloadKey?: number
+    incidentsHasData?: boolean | null   // false = fact tables empty, show "sin datos"
+    incidentsNoDataMessage?: string
 }>()
 
 const emit = defineEmits(['resolve', 'refresh', 'assign-branch', 'confirm-match', 'resolve-location', 'confirm-coincidencia-from-duplicates', 'discard-coincidencia'])
@@ -180,13 +182,25 @@ watch(() => props.reloadKey, (newVal, oldVal) => {
     if (newVal !== oldVal && showPersonas.value) loadPersonas()
 })
 
+const personasNoData    = ref(false)
+const personasNoDataMsg = ref('')
+
 async function loadPersonas() {
     if (!props.period?.id) return
     personasLoading.value = true
+    personasNoData.value  = false
+    personasNoDataMsg.value = ''
     try {
         const res  = await fetch(`/historico-general/${props.period.id}/personas-sin-sucursal`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
         const data = await res.json()
-        personasItems.value = data.items ?? []
+        if (data.no_data) {
+            personasNoData.value    = true
+            personasNoDataMsg.value = data.message ?? 'Sin datos de nómina para este periodo.'
+            personasItems.value     = []
+        } else {
+            personasItems.value = data.items ?? []
+            personasNoData.value = false
+        }
         personaAction.value  = {}
         personaBranch.value  = {}
     } finally {
@@ -241,8 +255,22 @@ const LOCATION_ACTIONS = [
             <button type="button" class="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50" @click="emit('refresh')">Refrescar</button>
         </SectionHeader>
 
-        <!-- Contadores -->
-        <div class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <!-- Estado sin datos: fact tables vacías — no confundir con "0 incidencias limpias" -->
+        <div v-if="incidentsHasData === false" class="mt-6 flex items-start gap-4 rounded-2xl border border-amber-200 bg-amber-50 p-5">
+            <svg class="mt-0.5 size-6 shrink-0 text-amber-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+            </svg>
+            <div>
+                <p class="font-bold text-amber-800">Sin registros procesados</p>
+                <p class="mt-1 text-sm text-amber-700">
+                    {{ incidentsNoDataMessage || 'No hay registros cargados para este periodo. Las incidencias no pueden calcularse hasta que ejecutes "Cargar registros" (Etapa 2).' }}
+                </p>
+                <p class="mt-2 text-xs text-amber-600">Este estado no significa que no hay incidencias — significa que aún no hay datos para validar.</p>
+            </div>
+        </div>
+
+        <!-- Contadores (solo si hay datos) -->
+        <div v-if="incidentsHasData !== false" class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
             <!-- Incidencias críticas: count of critical incident groups -->
             <div class="rounded-2xl border border-rose-100 bg-rose-50 p-4">
                 <p class="text-xs font-bold text-rose-700">Incidencias críticas</p>
@@ -394,7 +422,11 @@ const LOCATION_ACTIONS = [
 
                 <div v-if="showPersonas" class="p-5">
                     <div v-if="personasLoading" class="py-4 text-center text-sm text-slate-400">Cargando personas...</div>
-                    <div v-else-if="!personasItems.length" class="py-4 text-center text-sm text-slate-400">Sin datos o todas ya tienen sucursal asignada.</div>
+                    <div v-else-if="personasNoData" class="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                        <svg class="mt-0.5 size-4 shrink-0 text-amber-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-3.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
+                        {{ personasNoDataMsg }}
+                    </div>
+                    <div v-else-if="!personasItems.length" class="py-4 text-center text-sm text-slate-400">Todas las personas tienen sucursal asignada.</div>
                     <div v-else class="overflow-x-auto">
                         <table class="w-full text-sm">
                             <thead>

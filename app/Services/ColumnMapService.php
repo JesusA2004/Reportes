@@ -105,16 +105,34 @@ class ColumnMapService
                 'description' => 'Nombre del gestor/promotor operativo.',
             ],
             'product_name' => [
-                'aliases'     => ['producto_de_credito', 'linea_de_credito', 'producto', 'tipo_credito', 'tipo_de_credito', 'producto_credito'],
+                // ONLY "Producto de crédito" — NEVER "Línea de crédito" ni "Financiamiento"
+                'aliases'     => ['producto_de_credito', 'producto', 'tipo_credito', 'tipo_de_credito', 'producto_credito'],
                 'required'    => true,
                 'metric'      => true,
-                'description' => 'Producto de crédito (CRECE, I30, S12, etc.).',
+                'description' => 'Producto de crédito (CRECE, I30, S12, etc.). Col "Producto de crédito" únicamente.',
             ],
             'amount' => [
-                'aliases'     => ['monto_desembolsado', 'desembolsado', 'monto_desembolso', 'monto_de_desembolso', 'importe_desembolsado', 'importe_desembolso', 'monto_ministrado', 'capital_otorgado', 'capital_por_producto'],
+                // Col 53 "Monto desembolsado" — total del crédito (usado para DESEMBOLSO)
+                'aliases'     => ['monto_desembolsado', 'monto_desembolso', 'monto_de_desembolso', 'importe_desembolso', 'monto_ministrado', 'capital_otorgado', 'capital_por_producto'],
                 'required'    => true,
                 'metric'      => true,
-                'description' => 'Monto real desembolsado. Representa colocación/desembolso real.',
+                'description' => 'Monto total del crédito (col "Monto desembolsado"). Para DESEMBOLSO es colocación real.',
+            ],
+            'amount_disbursed' => [
+                // Col 54 "$ Desembolsado" — efectivo entregado al cliente (usado para REFINANCIAMIENTO)
+                'aliases'     => ['desembolsado', 'importe_desembolsado', 'monto_dispersado', 'monto_entregado'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Efectivo realmente entregado al cliente (col "$ Desembolsado"). Colocación real en REFINANCIAMIENTO.',
+            ],
+            'credit_origin' => [
+                // Col 31 "Origen crédito" — DESEMBOLSO, REFINANCIAMIENTO, REESTRUCTURA, etc.
+                'aliases'     => ['origen_credito', 'origen_de_credito', 'tipo_origen_credito', 'tipo_credito_origen'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Origen del crédito: DESEMBOLSO, REFINANCIAMIENTO, REESTRUCTURACION, UNIFICACION. Determina qué monto usar.',
             ],
             'client_name' => [
                 'aliases'     => ['cliente', 'nombre_del_cliente', 'nombre_cliente', 'acreditado', 'nombre_acreditado', 'socio'],
@@ -135,6 +153,28 @@ class ColumnMapService
                 'required'    => false,
                 'metric'      => false,
                 'description' => 'Fecha del desembolso. Metadato para trazabilidad temporal.',
+            ],
+            // ── Needed for product normalization (CREDITO DIARIO → i40, SEMANAL → s12) ──
+            'num_payments' => [
+                'aliases'     => ['numero_de_pagos', 'no_pagos', 'num_pagos', 'numero_pagos', 'pagos', 'plazo_pagos', 'num_de_pagos'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Número de pagos del crédito. Permite normalizar CREDITO DIARIO → i20/i30/i40/i60.',
+            ],
+            'periodicity' => [
+                'aliases'     => ['periodicidad', 'periodo_pago', 'tipo_periodicidad', 'frecuencia_pago', 'frecuencia'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Periodicidad del crédito (DIARIO, SEMANAL, MENSUAL). Usada junto a num_payments.',
+            ],
+            'term' => [
+                'aliases'     => ['plazo', 'plazo_credito', 'duracion', 'duración'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Plazo/duración del crédito en pagos o días. Alternativa a num_payments.',
             ],
         ];
     }

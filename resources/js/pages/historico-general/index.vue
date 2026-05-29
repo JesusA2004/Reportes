@@ -35,6 +35,8 @@ const OPERATIVE_BRANCH_NAMES_INIT = new Set([
 
 const selectedPeriodId    = ref<number | null>(props.currentPeriodId ?? null)
 const incidents           = ref<any[]>([])
+const incidentsHasData    = ref<boolean | null>(null)  // null = not loaded yet
+const incidentsNoDataMsg  = ref<string>('')
 const incidentsReloadKey  = ref(0)
 const incidentsStepRef    = ref<any>(null)
 const reportConfig     = ref({
@@ -66,12 +68,16 @@ async function loadIncidents() {
     if (!selectedPeriodId.value) return
     const res  = await fetch(`/historico-general/${selectedPeriodId.value}/incidencias`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
     const data = await res.json()
-    incidents.value = data.items ?? []
+    incidents.value      = data.items ?? []
+    incidentsHasData.value = data.has_data !== false  // undefined = true (old API compat)
+    incidentsNoDataMsg.value = data.message ?? ''
 }
 
 watch(selectedPeriodId, () => {
-    incidents.value    = []
-    currentStep.value  = 'files'
+    incidents.value        = []
+    incidentsHasData.value = null
+    incidentsNoDataMsg.value = ''
+    currentStep.value      = 'files'
     // Solo cargar incidencias si los registros ya fueron cargados
     if (period.value?.database_updated) loadIncidents()
 }, { immediate: true })
@@ -630,6 +636,8 @@ const processGenerationNow = async () => {
                         ref="incidentsStepRef"
                         :period="period"
                         :incidents="incidents"
+                        :incidents-has-data="incidentsHasData"
+                        :incidents-no-data-message="incidentsNoDataMsg"
                         :branches="branches"
                         :reload-key="incidentsReloadKey"
                         @resolve="resolveIncident"

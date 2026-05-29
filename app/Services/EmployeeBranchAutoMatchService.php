@@ -70,6 +70,15 @@ class EmployeeBranchAutoMatchService
         $unmatched = 0;
         $manualKept = 0;
 
+        // Load cobranza recoveries ONCE outside the loop — prevents 168× repeated 61K-row queries.
+        $cachedRecoveries = !empty($cobranzaUploadIds)
+            ? Recovery::query()
+                ->with('branch:id,name,normalized_name')
+                ->whereIn('report_upload_id', $cobranzaUploadIds)
+                ->whereNotNull('branch_id')
+                ->get()
+            : collect();
+
         foreach ($employees as $employee) {
             $processed++;
 
@@ -88,7 +97,7 @@ class EmployeeBranchAutoMatchService
                 continue;
             }
 
-            $candidate = $this->resolveBranchCandidate($period, $employee, $cobranzaUploadIds);
+            $candidate = $this->resolveBranchCandidate($period, $employee, $cobranzaUploadIds, $cachedRecoveries);
 
             if (!$candidate) {
                 $candidate = $this->resolveCandidateFromPlacements($period, $employee);
@@ -269,13 +278,18 @@ class EmployeeBranchAutoMatchService
             ->get();
     }
 
-    private function resolveBranchCandidate(Period $period, Employee $employee, array $cobranzaUploadIds): ?array
-    {
+    private function resolveBranchCandidate(
+        Period $period,
+        Employee $employee,
+        array $cobranzaUploadIds,
+        ?\Illuminate\Support\Collection $cachedRecoveries = null
+    ): ?array {
         if (empty($cobranzaUploadIds)) {
             return null;
         }
 
-        $recoveries = Recovery::query()
+        // Use pre-loaded collection if available (avoids repeating 61K-row query per employee).
+        $recoveries = $cachedRecoveries ?? Recovery::query()
             ->with('branch:id,name,normalized_name')
             ->whereIn('report_upload_id', $cobranzaUploadIds)
             ->whereNotNull('branch_id')

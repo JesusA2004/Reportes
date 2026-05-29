@@ -203,8 +203,14 @@ class ReportUploadController extends Controller {
             ->whereIn('name', self::OPERATIVE_BRANCH_NAMES)
             ->orderBy('name')
             ->get(['id', 'name']);
+        // Load employees with their assignment for the CURRENT period only.
+        // Using ->latest() without a period_id filter was showing employees as "Sin sucursal"
+        // even when they had a valid assignment in a different period.
         $employees = Employee::query()->where('is_active', true)->orderBy('full_name')
-            ->with(['employeeBranchAssignments' => fn ($q) => $q->with('branch:id,name')->latest()])
+            ->with(['employeeBranchAssignments' => fn ($q) => $q
+                ->where('period_id', $currentPeriodId)
+                ->with('branch:id,name')
+            ])
             ->get(['id', 'full_name', 'normalized_name'])
             ->unique(fn (Employee $e) => $e->normalized_name ?: mb_strtolower(trim($e->full_name)))
             ->values()
@@ -313,6 +319,21 @@ class ReportUploadController extends Controller {
             empty($weeklyIds) ? [] : $weeklyIds,
             [$period->id]
         )));
+
+        // Guard: if fact tables are empty, there's no real data to validate incidents against.
+        // Return a clear "no data" state instead of 0 incidents (which is misleading).
+        $hasFactData = DB::table('fact_noi_movements')->whereIn('period_id', $dataIds)->exists()
+                    || DB::table('fact_recoveries')->whereIn('period_id', $dataIds)->exists();
+
+        if (!$hasFactData) {
+            return response()->json([
+                'items'        => [],
+                'has_critical' => false,
+                'has_data'     => false,
+                'message'      => 'Sin registros procesados para este periodo. Ejecuta primero "Cargar registros" (Etapa 2) para que las incidencias puedan calcularse.',
+            ]);
+        }
+
         // Lightweight refreshes: keep both counters in sync without full radiography
         $this->refreshEmpleadosSinSucursalIncident($period, $dataIds);
         $this->refreshCoincidenciasIncident($period, $dataIds);
@@ -332,6 +353,7 @@ class ReportUploadController extends Controller {
         return response()->json([
             'items'        => $items,
             'has_critical' => (bool) ($items->contains(fn ($item) => $item['severity'] === 'high') ?? false),
+            'has_data'     => true,
         ]);
     }
 
@@ -369,6 +391,18 @@ class ReportUploadController extends Controller {
             empty($weeklyIds) ? [] : $weeklyIds,
             [$period->id]
         )));
+
+        // Guard: if fact_noi_movements is empty, return no_data state.
+        // This prevents showing a stale cached list in Vue or an empty list that
+        // looks like "all employees are assigned" when data simply wasn't loaded.
+        $hasNoi = DB::table('fact_noi_movements')->whereIn('period_id', $dataIds)->exists();
+        if (!$hasNoi) {
+            return response()->json([
+                'items'   => [],
+                'no_data' => true,
+                'message' => 'Sin datos de nómina procesados para este periodo. Ejecuta primero "Cargar registros" para poder ver las personas sin sucursal asignada.',
+            ]);
+        }
 
         // Raw per-employee-per-source rows (employees that have no branch assignment)
         $rawItems = DB::table('fact_noi_movements as n')
@@ -1318,10 +1352,51 @@ class ReportUploadController extends Controller {
         })->values()->all();
 
         $pendingCritical = (int) ($summary?->incidents()->where('severity', 'high')->count() ?? 0);
-        $databaseUpdated = (in_array($summary?->status, ['database_updated', 'generated'], true) && !$summary?->invalidated_at)
-            || ($compoundPeriod && empty($missingDb) && empty($failedDb));
 
-        $radiographyReady = ($summary?->status === 'generated') && !$summary?->invalidated_at;
+        // ── Stale-upload detection ────────────────────────────────────────────
+        // The BD state is stale (period_summary says 'database_updated' but data is gone) when:
+        //   - The last DB_UPDATE_RUN completed successfully
+        //   - AND at least one BD-required upload is NOT processed
+        //
+        // Note: the DB_UPDATE_RUN does NOT necessarily mark uploads as 'processed' itself —
+        // that happens via separate reimport flows. So the simple fact that a BD-required upload
+        // is pending while a successful run exists means there's a discrepancy.
+        $staleUploads    = [];
+        $staleUploadInfo = [];
+        if ($dbRun && $dbRun->status === 'success' && $dbRun->finished_at && $summary) {
+            // Only flag as stale if summary was created from this run (status still 'database_updated')
+            // AND fact data is absent for the BD-required sources
+            $summaryIsFromRun = in_array($summary->status, ['database_updated', 'generated'], true)
+                && !$summary->invalidated_at;
+
+            if ($summaryIsFromRun) {
+                foreach ($bdSourceCodes as $code) {
+                    $upload = $uploads->first(fn ($item) => ($item->dataSource?->code ?? '') === $code);
+                    if (!$upload) continue;
+                    $status = (string) ($upload->status?->value ?? $upload->status ?? 'unknown');
+                    if ($status === 'processed') continue;
+
+                    // BD-required upload is pending/failed while run is marked success → stale
+                    $uploadTs = $upload->updated_at ?? $upload->created_at;
+                    $staleUploads[]    = $code;
+                    $staleUploadInfo[] = [
+                        'code'      => $code,
+                        'filename'  => $upload->original_name,
+                        'status'    => $status,
+                        'uploaded'  => optional($uploadTs)->format('d/m/Y H:i'),
+                        'last_run'  => optional($dbRun->finished_at)->format('d/m/Y H:i'),
+                        'reason'    => 'Upload en estado "' . $status . '" aunque el último DB_UPDATE_RUN completó exitosamente. Vuelve a ejecutar Cargar registros.',
+                    ];
+                }
+            }
+        }
+
+        $summaryValid    = in_array($summary?->status, ['database_updated', 'generated'], true)
+                           && !$summary?->invalidated_at
+                           && empty($staleUploads);   // stale uploads invalidate BD state
+        $databaseUpdated = $summaryValid || ($compoundPeriod && empty($missingDb) && empty($failedDb));
+
+        $radiographyReady = ($summary?->status === 'generated') && !$summary?->invalidated_at && empty($staleUploads);
         $runStatus        = $run?->status;
         $running          = in_array($runStatus, ['queued', 'running'], true);
         $dbRunStatus      = $dbRun?->status;
@@ -1349,14 +1424,45 @@ class ReportUploadController extends Controller {
         }
 
         $blockingReasons = [];
-        if (!empty($missingDb))         $blockingReasons[] = 'Faltan archivos de BD obligatorios: ' . implode(', ', $missingDb) . '.';
-        if (!empty($failedDb))          $blockingReasons[] = 'Fuentes de BD tienen error de procesamiento.';
-        if ($dbRunning)                 $blockingReasons[] = 'La actualización de base de datos está en proceso.';
-        if (!$databaseUpdated)          $blockingReasons[] = 'Primero actualiza la BD.';
-        if ($pendingCritical > 0)       $blockingReasons[] = 'Hay incidencias críticas pendientes.';
-        if (!empty($missingRadiography)) $blockingReasons[] = 'Faltan fuentes para generar la Radiografía.';
-        if (!empty($unprocessedRadiography)) $blockingReasons[] = 'Hay fuentes sin procesar. Todas deben quedar procesadas.';
-        if ($running)                   $blockingReasons[] = 'La Radiografía está en proceso.';
+        if (!empty($missingDb)) {
+            $blockingReasons[] = 'Faltan archivos de BD obligatorios: ' . implode(', ', $missingDb) . '.';
+        }
+        if (!empty($failedDb)) {
+            $blockingReasons[] = 'Fuentes de BD tienen error de procesamiento.';
+        }
+        if ($dbRunning) {
+            $blockingReasons[] = 'La actualización de base de datos está en proceso.';
+        }
+        if (!empty($staleUploads)) {
+            $names = implode(', ', array_map(
+                fn ($s) => $s['code'] . ' (' . $s['filename'] . ', subido ' . $s['uploaded'] . ')',
+                $staleUploadInfo
+            ));
+            $blockingReasons[] = "Se reemplazaron archivos de BD después de la última carga "
+                . "(última carga: " . optional($dbRun?->finished_at)->format('d/m/Y H:i') . "). "
+                . "Ejecuta nuevamente Cargar registros. Archivos: {$names}.";
+        }
+        if (!$databaseUpdated) {
+            $blockingReasons[] = 'Primero actualiza la BD (ejecuta Cargar registros).';
+        }
+        if ($pendingCritical > 0) {
+            $blockingReasons[] = 'Hay incidencias críticas pendientes.';
+        }
+        if (!empty($missingRadiography)) {
+            $blockingReasons[] = 'Faltan fuentes para generar la Radiografía: ' . implode(', ', $missingRadiography) . '.';
+        }
+        if (!empty($unprocessedRadiography)) {
+            $details = implode('; ', collect($unprocessedRadiography)->map(function ($code) use ($uploads) {
+                $u = $uploads->first(fn ($item) => ($item->dataSource?->code ?? '') === $code);
+                $status   = $u ? (string) ($u->status?->value ?? $u->status ?? 'desconocido') : 'no subido';
+                $filename = $u?->original_name ?? 'sin archivo';
+                return "{$code} — {$filename} [{$status}]";
+            })->all());
+            $blockingReasons[] = "Fuentes sin procesar (todas deben estar en estado 'procesado' para generar): {$details}";
+        }
+        if ($running) {
+            $blockingReasons[] = 'La Radiografía está en proceso.';
+        }
 
         $previewSummary = null;
         if ($radiographyReady && $summary) {
@@ -1481,6 +1587,10 @@ class ReportUploadController extends Controller {
             'can_export_radiography'          => $radiographyReady && empty($missingRadiography) && empty($unprocessedRadiography) && !$running,
             'blocking_reasons'                => array_values(array_unique($blockingReasons)),
             'preview_summary'                 => $previewSummary,
+            // Stale-upload state: visible to UI so it can show "archivos reemplazados" warning
+            'has_stale_uploads'               => !empty($staleUploads),
+            'stale_upload_sources'            => $staleUploads,
+            'stale_upload_details'            => $staleUploadInfo,
         ];
     }
 }

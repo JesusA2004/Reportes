@@ -71,7 +71,12 @@
       "PowerShell(cd C:\\\\wamp64\\\\www\\\\Reportes; php artisan reportes:debug-person-resolution 5 2>&1 | Select-String \"Total:|Sin sucursal:|Exit\" ; echo \"Person-resolution exit: $LASTEXITCODE\")",
       "PowerShell(cd C:\\\\wamp64\\\\www\\\\Reportes; php artisan reportes:debug-employee-branch-assignments 5 2>&1 | Select-String \"Total|Sin asignación|asignados\" | Select-Object -First 5; echo \"Assignments exit: $LASTEXITCODE\")",
       "Bash(npx tsc *)",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(mysql -u root --password=\"\" Reportes -e \"DESCRIBE fact_placements;\")",
+      "Bash(mysql -u root Reportes -e \"DESCRIBE fact_placements;\")",
+      "Bash(timeout 180 tail -f \"C:\\\\Users\\\\Jesus\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--wamp64-www-Reportes\\\\ceedf8d6-97cf-4107-b5dd-251028fad2c8\\\\tasks\\\\bdmr4d1yi.output\")",
+      "Bash(Select-Object -Last 20)",
+      "Bash(kill 44920)"
     ]
   }
 }

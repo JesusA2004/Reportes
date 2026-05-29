@@ -400,7 +400,7 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                     </div>
                     <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition"
                          :class="kpiUtil < 0 ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50'">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Utilidad</p>
+                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">EBITDA</p>
                         <p class="mt-1 text-xl font-black" :class="kpiUtil < 0 ? 'text-red-700' : 'text-emerald-800'">{{ money(kpiUtil) }}</p>
                     </div>
                 </div>
@@ -587,7 +587,7 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                     ['Mora total',           money(kpiMora)],
                                     ['Índice de mora',       pct(kpiMoraPct)],
                                     ['Gastos operativos',    money(kpiGastos)],
-                                    ['Utilidad del periodo', money(kpiUtil)],
+                                    ['EBITDA del periodo', money(kpiUtil)],
                                 ]" :key="row[0]" class="border-b last:border-0">
                                     <td class="py-2 text-slate-600 font-medium">{{ row[0] }}</td>
                                     <td class="py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
@@ -852,7 +852,7 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                         ['Ingresos totales',                  moneyFull(recGlobal)],
                                         ['Otorgamientos',                     moneyFull(colGlobal)],
                                         ['Gastos totales',                    moneyFull(brGlobalGastosTotal)],
-                                        ['Utilidad',                          moneyFull(utilidadGlobal)],
+                                        ['EBITDA',                            moneyFull(utilidadGlobal)],
                                         ['Saldo final en caja',               moneyFull(0)],
                                         ['Préstamos inter sucursales',        moneyFull(fondeoGlobal)],
                                         ['Envío de utilidad a corporativo',   moneyFull(excGlobal)],
@@ -861,6 +861,7 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                         ['Mora de 31 a 60 días',              moneyFull(mora31_60g)],
                                         ['Mora de 61 a 90 días',              moneyFull(mora61_90g)],
                                         ['Mora de 91 a 120 días',             moneyFull(mora91_120g)],
+                                        ['Mora 120+ días',                    moneyFull(mora120plusG)],
                                         ['Valor cartera',                     moneyFull(carteraGlobal)],
                                     ]" :key="row[0]"
                                         class="border-b last:border-0"
@@ -872,10 +873,10 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                             </table>
                         </div>
 
-                        <!-- 8. UTILIDAD -->
+                        <!-- 8. EBITDA -->
                         <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
                             <div class="bg-indigo-700 px-5 py-2.5">
-                                <span class="text-xs font-black uppercase tracking-wider text-white">8. Utilidad</span>
+                                <span class="text-xs font-black uppercase tracking-wider text-white">8. EBITDA</span>
                             </div>
                             <table class="w-full text-sm">
                                 <tbody>
@@ -892,7 +893,7 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                         <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(nomTotal) }}</td>
                                     </tr>
                                     <tr :class="utilidadGlobal >= 0 ? 'bg-emerald-50 border-t-2 border-emerald-300' : 'bg-red-50 border-t-2 border-red-300'">
-                                        <td class="px-5 py-2 font-black" :class="utilidadGlobal >= 0 ? 'text-emerald-900' : 'text-red-900'">Utilidad del periodo</td>
+                                        <td class="px-5 py-2 font-black" :class="utilidadGlobal >= 0 ? 'text-emerald-900' : 'text-red-900'">EBITDA del periodo</td>
                                         <td class="px-5 py-2 text-right font-black text-xl" :class="utilidadGlobal >= 0 ? 'text-emerald-900' : 'text-red-900'">{{ moneyFull(utilidadGlobal) }}</td>
                                     </tr>
                                 </tbody>

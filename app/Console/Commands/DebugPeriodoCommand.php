@@ -126,8 +126,7 @@ class DebugPeriodoCommand extends Command
             ['label' => 'Mora 31-60',        'min' => 31,  'max' => 60 ],
             ['label' => 'Mora 61-90',        'min' => 61,  'max' => 90 ],
             ['label' => 'Mora 91-120',       'min' => 91,  'max' => 120],
-            ['label' => 'Mora 121-180',      'min' => 121, 'max' => 180],
-            ['label' => 'Mora 180+',         'min' => 181, 'max' => 99999],
+            ['label' => 'Mora 120+',         'min' => 121, 'max' => 99999],
         ];
         $bucketRows = [];
         foreach ($buckets as $b) {

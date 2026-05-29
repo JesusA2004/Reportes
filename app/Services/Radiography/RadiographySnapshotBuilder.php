@@ -477,7 +477,7 @@ class RadiographySnapshotBuilder
 
     // ── PRODUCTS ─────────────────────────────────────────────────────────────
 
-    private const PRODUCT_SPECIAL_PATTERN    = 'CRECE|A LA MEDIDA|DIARIO|CREDITO CONSUMO';
+    private const PRODUCT_SPECIAL_PATTERN    = 'A LA MEDIDA|DIARIO|CREDITO CONSUMO';
     private const PRODUCT_RESTRUCTURE_PATTERN = 'REESTRUCTURA|UNIFICACION|MIGRACION|INSOLUTOS';
     // Excludes multi-option grouped product names like "S12 / S16" or "I20 / I30"
     private const PRODUCT_GROUP_PATTERN = '[Ss][0-9]+\\s*/\\s*[Ss][0-9]+|[Ii][0-9]+\\s*/\\s*[Ii][0-9]+';
@@ -790,8 +790,7 @@ class RadiographySnapshotBuilder
             ['label' => 'Mora 31-60',    'min' => 31,  'max' => 60    ],
             ['label' => 'Mora 61-90',    'min' => 61,  'max' => 90    ],
             ['label' => 'Mora 91-120',   'min' => 91,  'max' => 120   ],
-            ['label' => 'Mora 121-180',  'min' => 121, 'max' => 180   ],
-            ['label' => 'Mora 180+',     'min' => 181, 'max' => 99999 ],
+            ['label' => 'Mora 120+',     'min' => 121, 'max' => 99999 ],
         ];
 
         $excludeNames = array_merge(RegionNorteFilter::names(), OperationalExclusion::names());
@@ -1340,6 +1339,7 @@ class RadiographySnapshotBuilder
         $rows = DB::table('fact_placements')
             ->whereIn('period_id', $this->dataIds)
             ->whereRaw("(product_name NOT REGEXP ? OR product_name IS NULL)", [self::PRODUCT_GROUP_PATTERN])
+            ->whereRaw("(product_name NOT REGEXP ? OR product_name IS NULL)", [self::PRODUCT_RESTRUCTURE_PATTERN . '|RECURSOS PROPIOS'])
             ->selectRaw('COALESCE(NULLIF(product_name, ""), "Sin producto") as label, SUM(amount) as value')
             ->groupBy('product_name')
             ->orderByDesc('value')
@@ -2017,8 +2017,7 @@ class RadiographySnapshotBuilder
             ['label' => 'mora_31_60',   'min' => 31,  'max' => 60    ],
             ['label' => 'mora_61_90',   'min' => 61,  'max' => 90    ],
             ['label' => 'mora_91_120',  'min' => 91,  'max' => 120   ],
-            ['label' => 'mora_121_180', 'min' => 121, 'max' => 180   ],
-            ['label' => 'mora_180_mas', 'min' => 181, 'max' => 99999 ],
+            ['label' => 'mora_120_plus', 'min' => 121, 'max' => 99999 ],
         ];
 
         $rows = DB::table('fact_portfolios as po')

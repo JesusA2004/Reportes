@@ -174,6 +174,7 @@ class RadiographyWorkbookBuilder
             ['Mora de 31 a 60 días',         $mora31_60,     'currency', $carteraTotal > 0 ? round($mora31_60 / $carteraTotal * 100, 2) : ''],
             ['Mora de 61 a 90 días',         $mora61_90,     'currency', $carteraTotal > 0 ? round($mora61_90 / $carteraTotal * 100, 2) : ''],
             ['Mora de 91 a 120 días',        $mora91_120,    'currency', $carteraTotal > 0 ? round($mora91_120 / $carteraTotal * 100, 2) : ''],
+            ['Mora 120+ días',               $mora120p,      'currency', $carteraTotal > 0 ? round($mora120p  / $carteraTotal * 100, 2) : ''],
             ['Mora total',                   $moraTotal,     'currency', $carteraTotal > 0 ? round($moraTotal / $carteraTotal * 100, 2) : ''],
             ['Envío de utilidad a corporativo', $excedentes, 'currency', ''],
         ]);
@@ -345,12 +346,13 @@ class RadiographyWorkbookBuilder
         $mora31_60g   = $brCalcGlobal ? (float)$brCalcGlobal['mora_31_60']   : $mora31_60;
         $mora61_90g   = $brCalcGlobal ? (float)$brCalcGlobal['mora_61_90']   : $mora61_90;
         $mora91_120g  = $brCalcGlobal ? (float)$brCalcGlobal['mora_91_120']  : $mora91_120;
+        $mora120pg    = $brCalcGlobal ? (float)$brCalcGlobal['mora_120_plus'] : $mora120p;
         $r = $writeRows($r, [
             ['Saldo inicial en caja',              0,              'currency', ''],
             ['Ingresos Totales',                   $recTotal,      'currency', ''],
             ['Otorgamientos',                      $colTotal,      'currency', ''],
             ['Gastos Totales',                     $gastosTotal,   'currency', ''],
-            ['Utilidad',                           $utilidad,      'currency', ''],
+            ['EBITDA',                             $utilidad,      'currency', ''],
             ['Saldo final en caja',                0,              'currency', ''],
             ['Préstamos inter sucursales',         $brGlobalFondea,'currency', ''],
             ['Envío de utilidad a corporativo',    $excGlobal,     'currency', ''],
@@ -359,12 +361,13 @@ class RadiographyWorkbookBuilder
             ['Mora de 31 a 60 días',               $mora31_60g,    'currency', ''],
             ['Mora de 61 a 90 días',               $mora61_90g,    'currency', ''],
             ['Mora de 91 a 120 días',              $mora91_120g,   'currency', ''],
+            ['Mora 120+ días',                     $mora120pg,     'currency', ''],
             ['Valor cartera',                      $carteraTotal,  'currency', ''],
         ]);
         $r++;
 
-        // ── 8. Utilidad ───────────────────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. UTILIDAD');
+        // ── 8. EBITDA ─────────────────────────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. EBITDA');
         $r++;
         $r = $writeRows($r, [
             ['Total', $utilidad, 'currency', ''],
@@ -1313,7 +1316,7 @@ class RadiographyWorkbookBuilder
                 ['Ingresos Totales',                   $recB,       'currency'],
                 ['Otorgamientos',                      $colB,       'currency'],
                 ['Gastos Totales',                     $gopTotal,   'currency'],
-                ['Utilidad',                           $brUtilidad, 'currency'],
+                ['EBITDA',                             $brUtilidad, 'currency'],
                 ['Saldo final en caja',                0,           'currency'],
                 ['Préstamos inter sucursales',         $brFondeoB,  'currency'],
                 ['Envío de utilidad a corporativo',    $brExcedCalc,'currency'],
@@ -1322,6 +1325,7 @@ class RadiographyWorkbookBuilder
                 ['Mora de 31 a 60 días',               $mora31_60,  'currency'],
                 ['Mora de 61 a 90 días',               $mora61_90,  'currency'],
                 ['Mora de 91 a 120 días',              $mora91120,  'currency'],
+                ['Mora 120+ días',                     $mora120p,   'currency'],
                 ['Valor cartera',                      $carteraB,   'currency'],
             ] as $i => [$label, $val, $fmt]) {
                 $sheet->setCellValue("A{$r}", $label);
@@ -1332,8 +1336,8 @@ class RadiographyWorkbookBuilder
             }
             $r++;
 
-            // 8. Utilidad
-            $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. UTILIDAD');
+            // 8. EBITDA
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. EBITDA');
             $r++;
             $sheet->setCellValue("A{$r}", 'Total');
             $sheet->setCellValue("B{$r}", $brUtilidad);
@@ -2287,7 +2291,7 @@ class RadiographyWorkbookBuilder
 
         $r   = 3;
         $tot = array_fill_keys(['vencida_total', 'cartera_total', 'mora_1_30', 'mora_31_60',
-                                'mora_61_90', 'mora_91_120', 'mora_121_180', 'mora_180_mas'], 0.0);
+                                'mora_61_90', 'mora_91_120', 'mora_120_plus'], 0.0);
 
         foreach ($rows as $i => $row) {
             $bg = $i % 2 === 0 ? self::BG_GREEN_ROW : self::BG_EVEN;
@@ -2298,7 +2302,7 @@ class RadiographyWorkbookBuilder
             $m31_60  = (float)($row['mora_31_60']   ?? 0);
             $m61_90  = (float)($row['mora_61_90']   ?? 0);
             $m91_120 = (float)($row['mora_91_120']  ?? 0);
-            $m120p   = ((float)($row['mora_121_180'] ?? 0)) + ((float)($row['mora_180_mas'] ?? 0));
+            $m120p   = (float)($row['mora_120_plus'] ?? 0);
 
             $sheet->setCellValue("A{$r}", $row['branch']);
             $sheet->setCellValue("B{$r}", $vencida);   // capital atrasado proxy
@@ -2333,7 +2337,7 @@ class RadiographyWorkbookBuilder
             $tot['mora_31_60']     += $m31_60;
             $tot['mora_61_90']     += $m61_90;
             $tot['mora_91_120']    += $m91_120;
-            $tot['mora_121_180']   += $m120p;
+            $tot['mora_120_plus']  += $m120p;
             $r++;
         }
 
@@ -2348,7 +2352,7 @@ class RadiographyWorkbookBuilder
         $sheet->setCellValue("H{$r}", $tot['mora_31_60']);
         $sheet->setCellValue("I{$r}", $tot['mora_61_90']);
         $sheet->setCellValue("J{$r}", $tot['mora_91_120']);
-        $sheet->setCellValue("K{$r}", $tot['mora_121_180']);
+        $sheet->setCellValue("K{$r}", $tot['mora_120_plus']);
         $sheet->setCellValue("L{$r}", $tot['cartera_total']);
         $sheet->getStyle("A{$r}:L{$r}")->applyFromArray([
             'font'      => ['bold' => true, 'size' => 10, 'color' => ['argb' => self::FG_WHITE]],
@@ -2820,7 +2824,7 @@ class RadiographyWorkbookBuilder
         $empRows  = $snap['sections']['employees_gestores'] ?? [];
 
         $this->sheetTitle($sheet, 'A1:C1', 'CATEGORIA GESTORES — ' . strtoupper($period->label));
-        $this->colHeaders($sheet, 2, ['A' => 'SUCURSAL', 'B' => 'UTILIDAD', 'C' => 'CATEGORÍA']);
+        $this->colHeaders($sheet, 2, ['A' => 'SUCURSAL', 'B' => 'EBITDA', 'C' => 'CATEGORÍA']);
 
         if (empty($branches)) {
             $sheet->setCellValue('A3', 'Sin datos por sucursal para calcular categorías.');
@@ -3082,10 +3086,11 @@ class RadiographyWorkbookBuilder
         $moraPct   = $carteraB > 0 ? round($vencidaB / $carteraB * 100, 2) : 0.0;
 
         $morRow    = $morIdx[$brUp] ?? [];
-        $mora0_30  = (float)($morRow['mora_1_30']   ?? 0);
+        $mora0_30  = (float)($morRow['mora_1_30']    ?? 0);
         $mora31_60 = (float)($morRow['mora_31_60']  ?? 0);
         $mora61_90 = (float)($morRow['mora_61_90']  ?? 0);
         $mora91120 = (float)($morRow['mora_91_120'] ?? 0);
+        $mora120p  = (float)($morRow['mora_120_plus'] ?? 0);
 
         $branchPayroll = $payBC[$branchName] ?? $payBC[$brUp] ?? [];
         $nomTotal = 0.0;
@@ -3253,12 +3258,13 @@ class RadiographyWorkbookBuilder
             ['Ingresos Totales',            $recB,       'currency'],
             ['Otorgamientos',               $colB,        'currency'],
             ['Gastos Totales',              $gastosB,     'currency'],
-            ['Utilidad estimada',           $utilidad,    'currency'],
+            ['EBITDA estimado',             $utilidad,    'currency'],
             ['Préstamos intersucursales',   $loanFondea,  'currency'],
             ['Mora 0-30 días',              $mora0_30,   'currency'],
             ['Mora 31-60 días',             $mora31_60,  'currency'],
             ['Mora 61-90 días',             $mora61_90,  'currency'],
             ['Mora 91-120 días',            $mora91120,  'currency'],
+            ['Mora 120+ días',              $mora120p,   'currency'],
             ['Valor cartera',               $carteraB,   'currency'],
         ] as $i => [$label, $val, $fmt]) {
             $sheet->setCellValue("A{$r}", $label);
@@ -3269,8 +3275,8 @@ class RadiographyWorkbookBuilder
         }
         $r++;
 
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '8. UTILIDAD'); $r++;
-        $sheet->setCellValue("A{$r}", 'Utilidad estimada (Rec - Gastos - Nómina)');
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '8. EBITDA'); $r++;
+        $sheet->setCellValue("A{$r}", 'EBITDA estimado (Rec - Gastos - Nómina)');
         $sheet->setCellValue("B{$r}", $utilidad);
         $this->dataRow($sheet, "A{$r}:D{$r}", true);
         $this->applyFmt($sheet, "B{$r}", 'currency', $utilidad);
@@ -3567,7 +3573,7 @@ class RadiographyWorkbookBuilder
         $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
 
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '4. UTILIDAD ESTIMADA'); $r++;
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '4. EBITDA ESTIMADO'); $r++;
         $sheet->setCellValue("A{$r}", 'Rec - (Pagos + Bonos - Desctos) - Gastos');
         $sheet->setCellValue("B{$r}", $utilidad);
         $this->dataRow($sheet, "A{$r}:D{$r}", true);
@@ -3912,12 +3918,12 @@ class RadiographyWorkbookBuilder
         }
         $utilPrev = $get($compareSnap,'recuperacion') - $get($compareSnap,'gastos') - ($get($compareSnap,'pagos') + $get($compareSnap,'bonos') - $get($compareSnap,'descuentos'));
         $utilCurr = $get($currentSnap,'recuperacion') - $get($currentSnap,'gastos') - ($get($currentSnap,'pagos') + $get($currentSnap,'bonos') - $get($currentSnap,'descuentos'));
-        $writeComp($r, 'Utilidad estimada', $utilPrev, $utilCurr, 'currency', true);
+        $writeComp($r, 'EBITDA estimado', $utilPrev, $utilCurr, 'currency', true);
         $r++;
 
-        // ── Section 8: Utilidad ──────────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:G{$r}", '8. UTILIDAD'); $r++;
-        $writeComp($r, 'Utilidad estimada', $utilPrev, $utilCurr, 'currency', true);
+        // ── Section 8: EBITDA ────────────────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '8. EBITDA'); $r++;
+        $writeComp($r, 'EBITDA estimado', $utilPrev, $utilCurr, 'currency', true);
         $r++;
 
         // ── Sections 9-10: N/A ───────────────────────────────────────────────

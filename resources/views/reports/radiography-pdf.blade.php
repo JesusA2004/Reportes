@@ -182,7 +182,7 @@ foreach ($brBranches as $b) {
     <tr>
         <td class="card"><div class="card-label">Gastos Op.</div><div class="card-value">{{ $fmt($gastosOpTotal) }}</div></td>
         <td class="card"><div class="card-label">Nómina</div><div class="card-value">{{ $fmt($nomTotal) }}</div></td>
-        <td class="card"><div class="card-label">Utilidad</div><div class="card-value @if($utilidad < 0) card-red @endif">{{ $fmt($utilidad) }}</div></td>
+        <td class="card"><div class="card-label">EBITDA</div><div class="card-value @if($utilidad < 0) card-red @endif">{{ $fmt($utilidad) }}</div></td>
         <td class="card"><div class="card-label">Empleados</div><div class="card-value">{{ $fmtn($sum['employees_count']) }}</div></td>
     </tr>
 </table>
@@ -276,7 +276,7 @@ foreach ($brBranches as $b) {
     <tr><td>Ingresos Totales</td><td>{{ $fmt($recTotal) }}</td></tr>
     <tr><td>Otorgamientos</td><td>{{ $fmt($colocacion) }}</td></tr>
     <tr><td>Gastos Totales</td><td>{{ $fmt($gastosOpTotal) }}</td></tr>
-    <tr><td>Utilidad</td><td @if($utilidad < 0) style="color:#b91c1c;font-weight:bold;" @endif>{{ $fmt($utilidad) }}</td></tr>
+    <tr><td>EBITDA</td><td @if($utilidad < 0) style="color:#b91c1c;font-weight:bold;" @endif>{{ $fmt($utilidad) }}</td></tr>
     <tr><td>Saldo final en caja</td><td>—</td></tr>
     <tr><td>Préstamos inter sucursales</td><td>{{ $fmt($fondeoTotal) }}</td></tr>
     <tr><td>Envío de utilidad a corporativo</td><td>{{ $fmt($excedentes) }}</td></tr>
@@ -285,13 +285,14 @@ foreach ($brBranches as $b) {
     <tr><td>Mora de 31 a 60 días</td><td>{{ $fmt($mora31_60) }}</td></tr>
     <tr><td>Mora de 61 a 90 días</td><td>{{ $fmt($mora61_90) }}</td></tr>
     <tr><td>Mora de 91 a 120 días</td><td>{{ $fmt($mora91_120) }}</td></tr>
+    <tr><td>Mora 120+ días</td><td>{{ $fmt($mora120p) }}</td></tr>
     <tr><td>Valor cartera</td><td>{{ $fmt($cartera) }}</td></tr>
 </table>
 
 <!-- ═══════════════════════════════════════════════════════════════════ -->
-<!-- 8. UTILIDAD                                                         -->
+<!-- 8. EBITDA                                                           -->
 <!-- ═══════════════════════════════════════════════════════════════════ -->
-<div class="section-title">8. UTILIDAD</div>
+<div class="section-title">8. EBITDA</div>
 <table class="metric">
     <tr class="totals-row"><td>Total</td><td style="text-align:right; @if($utilidad < 0) color:#f87171; @else color:#6ee7b7; @endif">{{ $fmt($utilidad) }}</td></tr>
 </table>
@@ -481,7 +482,7 @@ foreach ($brBranches as $b) {
         <td class="r">{{ $fmt($mb['mora_31_60'] ?? 0) }}</td>
         <td class="r">{{ $fmt($mb['mora_61_90'] ?? 0) }}</td>
         <td class="r">{{ $fmt($mb['mora_91_120'] ?? 0) }}</td>
-        <td class="r">{{ $fmt(($mb['mora_121_180'] ?? 0) + ($mb['mora_180_mas'] ?? 0)) }}</td>
+        <td class="r">{{ $fmt($mb['mora_120_plus'] ?? 0) }}</td>
         <td class="r @if($mpct > 25) card-red @endif">{{ $fmtp($mpct) }}</td>
     </tr>
     @endforeach
@@ -551,9 +552,9 @@ foreach ($brBranches as $b) {
 
 <!-- ═══ CATEGORÍAS ══════════════════════════════════════════════════ -->
 @if(!empty($categorias))
-<div class="section-title">CATEGORÍA GESTORES POR UTILIDAD</div>
+<div class="section-title">CATEGORÍA GESTORES POR EBITDA</div>
 <table class="data">
-    <tr><th>Sucursal</th><th class="r">Utilidad Estimada</th><th class="c">Categoría</th></tr>
+    <tr><th>Sucursal</th><th class="r">EBITDA Estimado</th><th class="c">Categoría</th></tr>
     @foreach($categorias as $cat)
     <tr>
         <td class="b">{{ $cat['nombre'] }}</td>
@@ -562,7 +563,7 @@ foreach ($brBranches as $b) {
     </tr>
     @endforeach
 </table>
-<div style="font-size:7.5pt;color:#64748b;margin-top:4px;">* Utilidad = Recuperación − Gastos − Nómina completa estimada por sucursal.</div>
+<div style="font-size:7.5pt;color:#64748b;margin-top:4px;">* EBITDA = Recuperación − Gastos − Nómina completa estimada por sucursal.</div>
 @endif
 
 <!-- ═══ FOOTER ═══════════════════════════════════════════════════════ -->

@@ -7,10 +7,14 @@ use App\Models\Period;
 use App\Models\PeriodDatabaseUpdateRun;
 use App\Models\PeriodIncident;
 use App\Models\PeriodSummary;
+use App\Models\ReportUpload;
 use App\Services\EmployeeBranchAutoMatchService;
 use App\Services\Imports\LendusEmployeeDirectoryImportService;
 use App\Services\Imports\LendusIngresosCobranzaImportService;
 use App\Services\Imports\NoiNominaImportService;
+use App\Services\ReportAnalysisService;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 
@@ -21,6 +25,7 @@ class DatabaseUpdateService
         protected LendusIngresosCobranzaImportService $lendusIngresosCobranzaImportService,
         protected LendusEmployeeDirectoryImportService $lendusEmployeeDirectoryImportService,
         protected EmployeeBranchAutoMatchService $employeeBranchAutoMatchService,
+        protected ReportAnalysisService $reportAnalysisService,
     ) {}
 
     public function updateForPeriod(Period $period, ?PeriodDatabaseUpdateRun $run = null): void
@@ -140,6 +145,66 @@ class DatabaseUpdateService
             'warnings'          => $warningCount,
         ];
 
+        // ── Phase 2: Full import of ALL uploads into fact_* tables ───────────
+        // After the scan/detection phase, we now import every upload so that
+        // fact_* tables are populated and each upload.status = 'processed'.
+        // This ensures Etapa 2 leaves the system in a fully consistent state:
+        // uploads processed, fact_* populated, database_updated = true.
+        $this->progress($run, 'Importando archivos a tablas de hechos (fact_*)…', 92);
+        $this->checkCancelled($run);
+
+        $allUploads  = ReportUpload::query()->with('dataSource')
+            ->where('period_id', $period->id)
+            ->get();
+        $importErrors = [];
+
+        foreach ($allUploads as $upload) {
+            $code = $upload->dataSource?->code ?? '';
+            if (!$code || !$upload->stored_path || !Storage::disk('public')->exists($upload->stored_path)) {
+                continue;
+            }
+            $this->checkCancelled($run);
+            try {
+                $this->reportAnalysisService->analyze($upload);
+            } catch (\Throwable $e) {
+                $importErrors[] = ($upload->dataSource?->name ?? $code) . ': ' . mb_strimwidth($e->getMessage(), 0, 120);
+                Log::warning('DatabaseUpdateService: error importing upload', [
+                    'upload_id'  => $upload->id,
+                    'source'     => $code,
+                    'error'      => $e->getMessage(),
+                ]);
+            }
+        }
+
+        // ── Consistency validation ────────────────────────────────────────────
+        // If critical BD sources are empty after import, fail the run so the user
+        // gets a real error instead of a misleading 'success' with empty fact tables.
+        $dataIds        = array_values(array_unique(array_merge([$period->id],
+            $period->resolveBaseWeeklyIds(Period::all()))));
+        $hasNoi         = DB::table('fact_noi_movements')->whereIn('period_id', $dataIds)->exists();
+        $hasCobranza    = DB::table('fact_recoveries')->whereIn('period_id', $dataIds)->exists();
+
+        if (!$hasNoi || !$hasCobranza) {
+            $missing = [];
+            if (!$hasNoi)      $missing[] = 'fact_noi_movements (NOI Nómina)';
+            if (!$hasCobranza) $missing[] = 'fact_recoveries (Cobranza)';
+            throw new \RuntimeException(
+                'Cargar registros completó el escaneo pero las tablas de hechos requeridas quedaron vacías: '
+                . implode(', ', $missing)
+                . '. Verifica los archivos y vuelve a intentarlo.'
+                . (!empty($importErrors) ? ' Errores: ' . implode('; ', $importErrors) : '')
+            );
+        }
+
+        if (!empty($importErrors)) {
+            // Non-critical import errors: log but continue (some sources may be optional)
+            Log::warning('DatabaseUpdateService: import completed with non-critical errors', [
+                'period_id' => $period->id,
+                'errors'    => $importErrors,
+            ]);
+        }
+
+        $stats['import_errors'] = count($importErrors);
         $this->progress($run, 'Actualización completada.', 100, $stats);
     }
 

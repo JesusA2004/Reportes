@@ -64,14 +64,31 @@ class UpdatePeriodDatabaseJob implements ShouldQueue
 
             $warnings = $period->fresh()?->periodSummary?->warnings['db_update'] ?? [];
 
+            // Validate consistency before marking success: uploads must be processed
+            // and email must only be sent when fact_* actually have data.
+            $allPeriods  = \App\Models\Period::all();
+            $dataIds     = array_values(array_unique(array_merge([$this->periodId],
+                $period->resolveBaseWeeklyIds($allPeriods))));
+            $hasNoi      = \Illuminate\Support\Facades\DB::table('fact_noi_movements')->whereIn('period_id', $dataIds)->exists();
+            $hasCobranza = \Illuminate\Support\Facades\DB::table('fact_recoveries')->whereIn('period_id', $dataIds)->exists();
+
+            if (!$hasNoi || !$hasCobranza) {
+                // Fact tables empty despite no exception — mark as failed
+                $missing = array_filter([!$hasNoi ? 'NOI' : null, !$hasCobranza ? 'Cobranza' : null]);
+                throw new \RuntimeException(
+                    'El proceso terminó sin errores pero las tablas de hechos quedaron vacías (' . implode(', ', $missing) . '). '
+                    . 'Verifica los archivos y vuelve a ejecutar Cargar registros.'
+                );
+            }
+
             $run->update([
                 'status'      => 'success',
                 'finished_at' => now(),
-                'log'         => 'Base de datos actualizada correctamente.',
+                'log'         => 'Base de datos actualizada correctamente. Todos los archivos importados y uploads procesados.',
             ]);
 
             $emailNote = $this->notifyUser('success', $period, $run, $warnings);
-            $run->update(['log' => 'Base de datos actualizada correctamente. ' . $emailNote]);
+            $run->update(['log' => 'Base de datos actualizada correctamente. Todos los archivos importados y uploads procesados. ' . $emailNote]);
         } catch (\Throwable $exception) {
             // Don't overwrite a manual cancel
             $run->refresh();

@@ -70,7 +70,17 @@ class LendusMinistracionesImportService
             $stats['rows_read']++;
 
             try {
-                $amount = $this->toDecimal($this->valueFromRow($row, $map, 'amount'));
+                $amountMonto  = $this->toDecimal($this->valueFromRow($row, $map, 'amount'));
+                $amountDesemb = $this->toDecimal($this->valueFromRow($row, $map, 'amount_disbursed'));
+                $creditOrigin = $this->clean($this->valueFromRow($row, $map, 'credit_origin'));
+
+                // Rule: REFINANCIAMIENTO → use "$ Desembolsado" (efectivo entregado).
+                //       DESEMBOLSO/otros → use "Monto desembolsado" (total crédito).
+                $isRefi = $creditOrigin !== null &&
+                          str_contains(strtoupper($creditOrigin), 'REFINANCIAMIENTO');
+                $amount = ($isRefi && $amountDesemb !== null && $amountDesemb > 0)
+                    ? $amountDesemb
+                    : $amountMonto;
 
                 if (($amount ?? 0) <= 0) {
                     $stats['rows_skipped']++;
@@ -91,8 +101,15 @@ class LendusMinistracionesImportService
                     $promoterName = null;
                 }
 
+                // Read plazo/periodicidad for accurate product normalization
+                // (needed for: CREDITO DIARIO → i40, SEMANAL sin código → s12, etc.)
+                $numPaymentsRaw = $this->valueFromRow($row, $map, 'num_payments')
+                                ?? $this->valueFromRow($row, $map, 'term');
+                $numPayments    = is_numeric($numPaymentsRaw) ? (int)round((float)$numPaymentsRaw) : null;
+                $periodicity    = $this->clean($this->valueFromRow($row, $map, 'periodicity'));
+
                 $normalizedProduct = $productName
-                    ? $this->branchResolver->normalizeProduct($productName, null, null)
+                    ? $this->branchResolver->normalizeProduct($productName, $numPayments, $periodicity)
                     : null;
 
                 // Branch resolution: only promoter_code prefix (authorized columns only)
@@ -112,7 +129,13 @@ class LendusMinistracionesImportService
                     'product_name'            => $normalizedProduct,
                     'amount'                  => $amount,
                     'operation_date'          => $this->toDate($this->valueFromRow($row, $map, 'operation_date')),
-                    'raw_payload'             => null,
+                    'raw_payload'             => json_encode([
+                        'credit_origin'   => $creditOrigin,
+                        'amount_monto53'  => $amountMonto,
+                        'amount_desemb54' => $amountDesemb,
+                        'amount_used'     => $amount,
+                        'is_refi'         => $isRefi,
+                    ]),
                 ]);
 
                 $stats['rows_inserted']++;
