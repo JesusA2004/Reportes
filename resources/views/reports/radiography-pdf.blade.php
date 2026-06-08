@@ -146,7 +146,22 @@ $colocacion = (float)($brGlobal['colocacion']     ?? $sum['placement_total']);
 $recTotal   = (float)($brGlobal['recuperacion_total'] ?? $sum['recovery_total']);
 
 // ── Utilidad (sección 8) ─────────────────────────────────────────────────────
-$utilidad = $recTotal - $gastosOpTotal - $nomTotal;
+// Descuentos NOI: al empleado, no son gasto adicional de la empresa
+$noiDeducLabels = ['Descuentos Infonavit','Pensión Alimenticia','Descuento Servicios Moto',
+    'Financiamiento de Motos (desc.)','Préstamo Personal','Subsidio para el Empleo APL',
+    'Otros descuentos NOI','Descuento de uniformes'];
+$nomDescuentosNOI = 0.0;
+foreach ($noiDeducLabels as $lbl) { $nomDescuentosNOI += (float)($nomDetalle[$lbl] ?? 0); }
+$nomPercepPdf   = $nomNomina + $nomComis + $nomVac + $nomPrimaVac + $nomBonos;
+$nomExtraExpPdf = 0.0;
+foreach ($nomDetalle as $dk => $dv) {
+    if (!in_array($dk, $noiDeducLabels)) { $nomExtraExpPdf += max(0.0, (float)$dv); }
+}
+$nomNeto         = $nomPercepPdf + $nomExtraExpPdf - $nomDescuentosNOI;
+$gastosTotal     = $gastosOpTotal + $nomNeto;
+$utilidad        = $recTotal - $colocacion - $gastosTotal;
+$inconsistencia  = $excedentes > $utilidad;
+$diferencia      = $inconsistencia ? 0.0 : ($utilidad - $excedentes);
 
 // ── Categorías sucursal ──────────────────────────────────────────────────────
 $categorias = [];
@@ -275,12 +290,15 @@ foreach ($brBranches as $b) {
     <tr><td>Saldo inicial en caja</td><td>—</td></tr>
     <tr><td>Ingresos Totales</td><td>{{ $fmt($recTotal) }}</td></tr>
     <tr><td>Otorgamientos</td><td>{{ $fmt($colocacion) }}</td></tr>
-    <tr><td>Gastos Totales</td><td>{{ $fmt($gastosOpTotal) }}</td></tr>
-    <tr><td>EBITDA</td><td @if($utilidad < 0) style="color:#b91c1c;font-weight:bold;" @endif>{{ $fmt($utilidad) }}</td></tr>
+    <tr><td>Gastos Totales</td><td>{{ $fmt($gastosTotal) }}</td></tr>
+    <tr><td>EBITDA / Utilidad disponible</td><td @if($utilidad < 0) style="color:#b91c1c;font-weight:bold;" @endif>{{ $fmt($utilidad) }}</td></tr>
     <tr><td>Saldo final en caja</td><td>—</td></tr>
     <tr><td>Préstamos inter sucursales</td><td>{{ $fmt($fondeoTotal) }}</td></tr>
     <tr><td>Envío de utilidad a corporativo</td><td>{{ $fmt($excedentes) }}</td></tr>
-    <tr><td>Diferencia</td><td>—</td></tr>
+    <tr><td>Diferencia / sobrante</td><td @if($inconsistencia) style="color:#b91c1c;font-weight:bold;" @endif>{{ $inconsistencia ? '—' : $fmt($diferencia) }}</td></tr>
+    @if($inconsistencia)
+    <tr style="background:#fef2f2;"><td colspan="2" style="color:#991b1b;font-weight:bold;font-size:8pt;">⚠ INCONSISTENCIA: El envío corporativo supera la utilidad disponible. Revisar clasificación de ingresos, gastos, otorgamientos o envío corporativo.</td></tr>
+    @endif
     <tr><td>Mora de 0 a 30 días</td><td>{{ $fmt($mora0_30) }}</td></tr>
     <tr><td>Mora de 31 a 60 días</td><td>{{ $fmt($mora31_60) }}</td></tr>
     <tr><td>Mora de 61 a 90 días</td><td>{{ $fmt($mora61_90) }}</td></tr>
@@ -292,9 +310,19 @@ foreach ($brBranches as $b) {
 <!-- ═══════════════════════════════════════════════════════════════════ -->
 <!-- 8. EBITDA                                                           -->
 <!-- ═══════════════════════════════════════════════════════════════════ -->
-<div class="section-title">8. EBITDA</div>
+<div class="section-title">8. EBITDA / Utilidad disponible</div>
 <table class="metric">
-    <tr class="totals-row"><td>Total</td><td style="text-align:right; @if($utilidad < 0) color:#f87171; @else color:#6ee7b7; @endif">{{ $fmt($utilidad) }}</td></tr>
+    <tr><td>Ingresos Totales</td><td>{{ $fmt($recTotal) }}</td></tr>
+    <tr><td>Menos: Otorgamientos</td><td>{{ $fmt($colocacion) }}</td></tr>
+    <tr><td>Menos: Gastos Totales</td><td>{{ $fmt($gastosTotal) }}</td></tr>
+    <tr><td style="padding-left:16px;color:#64748b;">  Gastos operativos</td><td style="color:#64748b;">{{ $fmt($gastosOpTotal) }}</td></tr>
+    <tr><td style="padding-left:16px;color:#64748b;">  Nómina neta</td><td style="color:#64748b;">{{ $fmt($nomNeto) }}</td></tr>
+    <tr class="totals-row"><td>= EBITDA / Utilidad disponible</td><td style="text-align:right; @if($utilidad < 0) color:#f87171; @else color:#6ee7b7; @endif">{{ $fmt($utilidad) }}</td></tr>
+    <tr><td>Envío utilidad a corporativo</td><td>{{ $fmt($excedentes) }}</td></tr>
+    <tr><td>Diferencia / sobrante</td><td @if($inconsistencia) style="color:#b91c1c;font-weight:bold;" @endif>{{ $inconsistencia ? '$0.00' : $fmt($diferencia) }}</td></tr>
+    @if($inconsistencia)
+    <tr style="background:#fef2f2;"><td colspan="2" style="color:#991b1b;font-weight:bold;font-size:8pt;">⚠ INCONSISTENCIA: El envío corporativo supera la utilidad disponible.</td></tr>
+    @endif
 </table>
 
 <!-- ═══════════════════════════════════════════════════════════════════ -->

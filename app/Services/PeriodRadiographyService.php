@@ -244,10 +244,33 @@ class PeriodRadiographyService
 
         $recoveryBase = (float) $branchFilter(Recovery::query()->whereIn('period_id', $dataIds))->sum('total_amount');
 
+        $gastoSourceIds = DB::table('data_sources')
+            ->whereIn('code', ['gastos_lendus', 'gastos_erp'])
+            ->pluck('id');
+        $gastoTotalQuery = DB::table('fact_expenses as e')
+            ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+            ->whereIn('e.period_id', $dataIds)
+            ->whereIn('ru.data_source_id', $gastoSourceIds)
+            ->whereNotIn('e.category', ['Envío de utilidad a corporativo', 'Nómina y Capital Humano', 'Préstamos Intersucursales']);
+        if (!empty($includedBranchIds)) {
+            $gastoTotalQuery->whereIn('e.branch_id', $includedBranchIds);
+        }
+        $gastoTotal = (float) $gastoTotalQuery->selectRaw('SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as t')->value('t');
+
+        $colocacionQuery = DB::table('fact_placements as p')
+            ->whereIn('p.period_id', $dataIds)
+            ->where(function ($q) { $q->whereNull('p.product_name')->orWhereRaw("p.product_name NOT REGEXP ?", ['REESTRUCTURA|UNIFICACION|RECURSOS PROPIOS']); });
+        if (!empty($includedBranchIds)) {
+            $colocacionQuery->whereIn('p.branch_id', $includedBranchIds);
+        }
+        $colocacionTotal = (float)($colocacionQuery
+            ->selectRaw("SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.amount_monto53')) AS DECIMAL(14,2))) as tot")
+            ->value('tot') ?? 0);
+
         return [
-            'gasto_total'           => (float) $branchFilter(Expense::query()->whereIn('period_id', $dataIds))->sum('amount'),
+            'gasto_total'           => $gastoTotal,
             'recuperacion_total'    => $recoveryBase,
-            'colocacion_total'      => (float) $branchFilter(Placement::query()->whereIn('period_id', $dataIds))->sum('amount'),
+            'colocacion_total'      => $colocacionTotal,
             'polizas_crece_30'      => $polizasCrece30,
             'valor_cartera_total'   => $valorCartera,
             'cartera_vencida_total' => $carteraVencida,
@@ -555,9 +578,18 @@ class PeriodRadiographyService
             $aliasedWith[(string) $row->normalized_alias][(string) $row->owner_norm] = true;
         }
 
+        // Limit to employees that actually appear in NOI data for these periods.
+        // Checking all system employees causes false positives from unrelated periods.
+        $noiEmployeeIds = DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereNotNull('employee_id')
+            ->distinct()
+            ->pluck('employee_id');
+
         $employees = DB::table('employees')
             ->select('id', 'full_name', 'normalized_name', 'source_system')
             ->whereNotNull('normalized_name')
+            ->whereIn('id', $noiEmployeeIds)
             ->orderBy('id')
             ->get();
 

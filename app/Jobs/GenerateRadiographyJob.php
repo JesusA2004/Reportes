@@ -90,8 +90,13 @@ class GenerateRadiographyJob implements ShouldQueue
             $run->update(['period_summary_id' => $summary->id]);
 
             // ── 3. Verify and refine branch assignments (reads fact tables, does NOT re-import) ──
+            // Skip if every relevant employee already has an EBA — avoids 168×61K-row scan.
             $this->updateProgress($run, 55, 'Revisando asignaciones de sucursales', 'Verificando y refinando asignaciones automáticas de empleados por cobranza, colocación y cartera.');
-            $branchAutoMatch->handle($period->id);
+            if ($this->shouldRunAutomatch($period->id)) {
+                $branchAutoMatch->handle($period->id);
+            } else {
+                $this->updateProgress($run, 66, 'Asignaciones verificadas', 'Todos los empleados ya tienen sucursal — omitiendo auto-asignación.');
+            }
 
             // ── 4. Consolidate employee summaries (populates fact_period_employee_summary) ──
             $this->updateProgress($run, 68, 'Consolidando resumen de empleados', 'Calculando totales de nómina, percepciones y deducciones por persona y sucursal.');
@@ -290,5 +295,25 @@ class GenerateRadiographyJob implements ShouldQueue
         }
 
         return 'No se pudo generar la Radiografía. Revisa las fuentes cargadas, incidencias y configuración del reporte.';
+    }
+
+    private function shouldRunAutomatch(int $periodId): bool
+    {
+        $periodEmployeeIds = \Illuminate\Support\Facades\DB::table('fact_noi_movements')
+            ->where('period_id', $periodId)
+            ->whereNotNull('employee_id')
+            ->distinct()
+            ->pluck('employee_id');
+
+        if ($periodEmployeeIds->isEmpty()) {
+            return false;
+        }
+
+        $assigned = \Illuminate\Support\Facades\DB::table('employee_branch_assignments')
+            ->where('period_id', $periodId)
+            ->whereIn('employee_id', $periodEmployeeIds)
+            ->count();
+
+        return $assigned < $periodEmployeeIds->count();
     }
 }

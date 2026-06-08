@@ -48,24 +48,53 @@ class DebugEbitdaCommand extends Command
             ->whereIn('period_id', $dataIds)
             ->sum('total_amount');
 
-        $gastos = (float) DB::table('fact_expenses')
+        $otorgamientos = (float) DB::table('fact_placements')
             ->whereIn('period_id', $dataIds)
+            ->sum('amount');
+
+        $gastosOp = (float) DB::table('fact_expenses')
+            ->whereIn('period_id', $dataIds)
+            ->whereNotIn('category', ['Nómina y Capital Humano', 'Envío de utilidad a corporativo', 'Préstamos Intersucursales'])
             ->selectRaw('SUM(COALESCE(NULLIF(paid_amount,0), amount)) as t')
             ->value('t');
 
-        $nom = (float) DB::table('fact_noi_movements')
+        $nomPercep = (float) DB::table('fact_noi_movements')
             ->whereIn('period_id', $dataIds)
-            ->where('concept_type', '!=', 'DESCUENTO')
+            ->where('concept_type', 'percepcion')
             ->sum('amount');
 
-        $ebitda = $rec - $gastos - $nom;
+        $nomDesctos = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->where('concept_type', 'deduccion')
+            ->whereRaw("concept REGEXP '^D(094|010|113|123|004)'")
+            ->sum('amount');
+
+        $nomNeta     = $nomPercep - $nomDesctos;
+        $gastosTotal = $gastosOp + $nomNeta;
+        $ebitda      = $rec - $otorgamientos - $gastosTotal;
+
+        $envio = (float) DB::table('fact_expenses')
+            ->whereIn('period_id', $dataIds)
+            ->where('category', 'Envío de utilidad a corporativo')
+            ->selectRaw('SUM(COALESCE(NULLIF(paid_amount,0), amount)) as t')
+            ->value('t');
+
+        $diferencia = $ebitda - $envio;
 
         $this->line('');
-        $this->info('─── EBITDA aproximado desde BD ───');
-        $this->line(str_pad('Recuperación:', 35) . '$' . number_format($rec,    2));
-        $this->line(str_pad('Gastos:', 35)       . '$' . number_format($gastos, 2));
-        $this->line(str_pad('Nómina NOI:', 35)   . '$' . number_format($nom,    2));
-        $this->line(str_repeat('-', 50));
-        $this->line(str_pad('EBITDA estimado:', 35) . '$' . number_format($ebitda, 2));
+        $this->info('─── EBITDA = Ingresos − Otorgamientos − Gastos Totales ───');
+        $this->line(str_pad('Ingresos (recuperación):', 38) . ' $' . number_format($rec, 2));
+        $this->line(str_pad('Menos: Otorgamientos:',    38) . '−$' . number_format($otorgamientos, 2));
+        $this->line(str_pad('Menos: Gastos totales:',   38) . '−$' . number_format($gastosTotal, 2));
+        $this->line(str_pad('  Gastos operativos:',     38) . '  $' . number_format($gastosOp, 2));
+        $this->line(str_pad('  Nómina neta NOI:',       38) . '  $' . number_format($nomNeta, 2));
+        $this->line(str_pad('    Percepciones:',        38) . '   $' . number_format($nomPercep, 2));
+        $this->line(str_pad('    Descuentos NOI:',      38) . '  −$' . number_format($nomDesctos, 2));
+        $this->line(str_repeat('-', 55));
+        $this->line(str_pad('EBITDA:',                  38) . ' $' . number_format($ebitda, 2));
+        $this->line('');
+        $this->line(str_pad('Envío a corporativo:',     38) . '−$' . number_format($envio, 2));
+        $this->line(str_repeat('-', 55));
+        $this->line(str_pad('Diferencia:',              38) . ' $' . number_format($diferencia, 2));
     }
 }

@@ -213,9 +213,26 @@ const nomDetalle = computed<{ label: string; value: number }[]>(() => {
     return rows
 })
 
+// All items summed (for display in section 4)
 const nomTotal = computed(() => {
     const base = nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value
     return base + nomDetalle.value.reduce((s, r) => s + r.value, 0)
+})
+
+// NOI deductions: employee deductions, NOT additional company cost
+const NOI_DEDUCTION_LABELS_UI = new Set([
+    'Descuentos Infonavit', 'Pensión Alimenticia', 'Descuento Servicios Moto',
+    'Financiamiento de Motos (desc.)', 'Préstamo Personal', 'Subsidio para el Empleo APL',
+    'Otros descuentos NOI', 'Descuento de uniformes',
+])
+const nomDescuentosNOI = computed(() =>
+    nomDetalle.value.filter(r => NOI_DEDUCTION_LABELS_UI.has(r.label)).reduce((s, r) => s + r.value, 0)
+)
+// nomNeto = percepciones + expense_detail_items − NOI_deductions (true company cost)
+const nomNeto = computed(() => {
+    const percep    = nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value
+    const expItems  = nomDetalle.value.filter(r => !NOI_DEDUCTION_LABELS_UI.has(r.label)).reduce((s, r) => s + r.value, 0)
+    return percep + expItems - nomDescuentosNOI.value
 })
 
 // ── Sección 5: Préstamos intersucursales ─────────────────────────────────────
@@ -234,8 +251,13 @@ const mora91_120g = computed(() => Number(brGlobal.value?.mora_91_120)        ||
 const mora120plusG  = computed(() => Number(brGlobal.value?.mora_120_plus)       || 0)
 const moraTotalGlobal = computed(() => mora0_30g.value + mora31_60g.value + mora61_90g.value + mora91_120g.value + mora120plusG.value)
 
-// ── Sección 8: Utilidad ──────────────────────────────────────────────────────
-const utilidadGlobal = computed(() => recGlobal.value - brGlobalGastosTotal.value - nomTotal.value)
+// ── Sección 8: EBITDA = Ingresos − Otorgamientos − Gastos Totales ────────────
+// Gastos Totales = gastosOp + nóminaNet (percepciones − descuentos NOI)
+const gastosEbitdaTotal    = computed(() => brGlobalGastosTotal.value + nomNeto.value)
+const utilidadGlobal       = computed(() => recGlobal.value - colGlobal.value - gastosEbitdaTotal.value)
+// Si el envío corporativo supera la utilidad, hay inconsistencia en los datos
+const ebitdaInconsistencia = computed(() => excGlobal.value > utilidadGlobal.value)
+const diferencia           = computed(() => ebitdaInconsistencia.value ? 0 : utilidadGlobal.value - excGlobal.value)
 
 // ── KPI primario (branch_radiography → fallback summary) ─────────────────────
 const kpiRec     = computed(() => brGlobal.value ? recGlobal.value     : Number(snap.value?.summary?.recovery_total ?? 0))
@@ -771,6 +793,7 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                             </div>
                             <table class="w-full text-sm">
                                 <tbody>
+                                    <!-- Percepciones -->
                                     <tr v-for="(row, i) in ([
                                         ['Nómina',           nomNomina,   nomNomina > 0],
                                         ['Comisiones',       nomComis,    nomComis > 0],
@@ -784,15 +807,34 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                         <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
                                         <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(row[1]) }}</td>
                                     </tr>
-                                    <tr v-for="(d, j) in nomDetalle" :key="d.label"
+                                    <!-- Gastos de nómina (IMSS, gasolina, etc.) — costos de empresa -->
+                                    <tr v-for="(d, j) in nomDetalle.filter(r => !NOI_DEDUCTION_LABELS_UI.has(r.label))"
+                                        :key="d.label"
                                         class="border-b last:border-0"
-                                        :class="(j + 5) % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
+                                        :class="j % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
                                         <td class="px-5 py-2 text-slate-600 font-medium pl-8">{{ d.label }}</td>
                                         <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(d.value) }}</td>
                                     </tr>
+                                    <!-- Descuentos NOI — deducciones al empleado, no gasto empresa -->
+                                    <template v-if="nomDescuentosNOI > 0">
+                                        <tr class="bg-red-50 border-b border-red-100">
+                                            <td colspan="2" class="px-5 py-1.5 text-xs font-bold text-red-700 uppercase tracking-wider">Descuentos NOI (deducciones al empleado)</td>
+                                        </tr>
+                                        <tr v-for="(d, j) in nomDetalle.filter(r => NOI_DEDUCTION_LABELS_UI.has(r.label))"
+                                            :key="d.label"
+                                            class="border-b border-red-100 bg-red-50">
+                                            <td class="px-5 py-2 text-red-700 font-medium pl-8">(−) {{ d.label }}</td>
+                                            <td class="px-5 py-2 text-right font-black text-red-700">−{{ moneyFull(d.value) }}</td>
+                                        </tr>
+                                        <tr class="bg-red-100 border-b border-red-200">
+                                            <td class="px-5 py-2 font-black text-red-900">Total descuentos NOI</td>
+                                            <td class="px-5 py-2 text-right font-black text-red-900">−{{ moneyFull(nomDescuentosNOI) }}</td>
+                                        </tr>
+                                    </template>
+                                    <!-- Neto nómina -->
                                     <tr class="bg-indigo-50 border-t-2 border-indigo-200">
-                                        <td class="px-5 py-2 font-black text-indigo-900">Total nómina y capital humano</td>
-                                        <td class="px-5 py-2 text-right font-black text-indigo-900">{{ moneyFull(nomTotal) }}</td>
+                                        <td class="px-5 py-2 font-black text-indigo-900">Neto nómina (percepciones − descuentos)</td>
+                                        <td class="px-5 py-2 text-right font-black text-indigo-900">{{ moneyFull(nomNeto) }}</td>
                                     </tr>
                                 </tbody>
                             </table>
@@ -851,12 +893,12 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                         ['Saldo inicial en caja',             moneyFull(0)],
                                         ['Ingresos totales',                  moneyFull(recGlobal)],
                                         ['Otorgamientos',                     moneyFull(colGlobal)],
-                                        ['Gastos totales',                    moneyFull(brGlobalGastosTotal)],
+                                        ['Gastos Totales',                    moneyFull(gastosEbitdaTotal)],
                                         ['EBITDA',                            moneyFull(utilidadGlobal)],
                                         ['Saldo final en caja',               moneyFull(0)],
                                         ['Préstamos inter sucursales',        moneyFull(fondeoGlobal)],
                                         ['Envío de utilidad a corporativo',   moneyFull(excGlobal)],
-                                        ['Diferencia',                        moneyFull(0)],
+                                        ['Diferencia / sobrante',             ebitdaInconsistencia ? '⚠ INCONSISTENCIA' : moneyFull(diferencia)],
                                         ['Mora de 0 a 30 días',               moneyFull(mora0_30g)],
                                         ['Mora de 31 a 60 días',              moneyFull(mora31_60g)],
                                         ['Mora de 61 a 90 días',              moneyFull(mora61_90g)],
@@ -873,28 +915,53 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                             </table>
                         </div>
 
-                        <!-- 8. EBITDA -->
+                        <!-- 8. EBITDA = Ingresos − Otorgamientos − Gastos Totales -->
                         <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
                             <div class="bg-indigo-700 px-5 py-2.5">
-                                <span class="text-xs font-black uppercase tracking-wider text-white">8. EBITDA</span>
+                                <span class="text-xs font-black uppercase tracking-wider text-white">8. EBITDA / Utilidad</span>
                             </div>
                             <table class="w-full text-sm">
                                 <tbody>
                                     <tr class="bg-white border-b">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">Recuperación total</td>
+                                        <td class="px-5 py-2 text-slate-600 font-medium">Ingresos Totales</td>
                                         <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(recGlobal) }}</td>
                                     </tr>
                                     <tr class="bg-slate-50 border-b">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">Menos: Gastos operativos</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(brGlobalGastosTotal) }}</td>
+                                        <td class="px-5 py-2 text-slate-600 font-medium">Menos: Otorgamientos</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(colGlobal) }}</td>
                                     </tr>
                                     <tr class="bg-white border-b">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">Menos: Nómina y capital humano</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(nomTotal) }}</td>
+                                        <td class="px-5 py-2 text-slate-600 font-medium">Menos: Gastos Totales</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(gastosEbitdaTotal) }}</td>
+                                    </tr>
+                                    <tr class="bg-slate-50 border-b">
+                                        <td class="px-5 py-2 pl-10 text-slate-500 text-xs">Gastos operativos</td>
+                                        <td class="px-5 py-2 text-right text-slate-500 text-xs">{{ moneyFull(brGlobalGastosTotal) }}</td>
+                                    </tr>
+                                    <tr class="bg-white border-b">
+                                        <td class="px-5 py-2 pl-10 text-slate-500 text-xs">Nómina neta</td>
+                                        <td class="px-5 py-2 text-right text-slate-500 text-xs">{{ moneyFull(nomNeto) }}</td>
                                     </tr>
                                     <tr :class="utilidadGlobal >= 0 ? 'bg-emerald-50 border-t-2 border-emerald-300' : 'bg-red-50 border-t-2 border-red-300'">
-                                        <td class="px-5 py-2 font-black" :class="utilidadGlobal >= 0 ? 'text-emerald-900' : 'text-red-900'">EBITDA del periodo</td>
+                                        <td class="px-5 py-2 font-black" :class="utilidadGlobal >= 0 ? 'text-emerald-900' : 'text-red-900'">= EBITDA / Utilidad disponible</td>
                                         <td class="px-5 py-2 text-right font-black text-xl" :class="utilidadGlobal >= 0 ? 'text-emerald-900' : 'text-red-900'">{{ moneyFull(utilidadGlobal) }}</td>
+                                    </tr>
+                                    <tr class="bg-slate-100 border-b">
+                                        <td class="px-5 py-2 text-slate-600 font-medium">Envío utilidad a corporativo</td>
+                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(excGlobal) }}</td>
+                                    </tr>
+                                    <tr v-if="!ebitdaInconsistencia" class="bg-sky-50">
+                                        <td class="px-5 py-2 font-black text-sky-800">Diferencia / sobrante</td>
+                                        <td class="px-5 py-2 text-right font-black text-sky-800">{{ moneyFull(diferencia) }}</td>
+                                    </tr>
+                                    <tr v-if="ebitdaInconsistencia" class="bg-red-50 border-t-2 border-red-400">
+                                        <td class="px-5 py-2 font-bold text-red-800">Diferencia / sobrante</td>
+                                        <td class="px-5 py-2 text-right font-bold text-red-800">{{ moneyFull(0) }}</td>
+                                    </tr>
+                                    <tr v-if="ebitdaInconsistencia" class="bg-red-100 border-b border-red-300">
+                                        <td colspan="2" class="px-5 py-3 text-xs font-bold text-red-800">
+                                            ⚠ INCONSISTENCIA: El envío a corporativo ({{ moneyFull(excGlobal) }}) supera la utilidad disponible ({{ moneyFull(utilidadGlobal) }}). Revisar clasificación de ingresos, gastos, otorgamientos o envío corporativo.
+                                        </td>
                                     </tr>
                                 </tbody>
                             </table>

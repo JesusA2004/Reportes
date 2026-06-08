@@ -66,11 +66,17 @@ const form = useForm({ period_id: '', data_source_id: '', file: null as File | n
 // ── Carga de incidencias ──────────────────────────────────────────────
 async function loadIncidents() {
     if (!selectedPeriodId.value) return
+    const wasBlocked = !period.value?.can_generate_radiography
     const res  = await fetch(`/historico-general/${selectedPeriodId.value}/incidencias`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
     const data = await res.json()
     incidents.value      = data.items ?? []
     incidentsHasData.value = data.has_data !== false  // undefined = true (old API compat)
     incidentsNoDataMsg.value = data.message ?? ''
+    // When the period was blocked and all critical incidents are now resolved, refresh the
+    // Inertia period prop so can_generate_radiography updates without a full page reload.
+    if (wasBlocked && data.has_data !== false && data.has_critical === false) {
+        router.reload({ only: ['periods'] })
+    }
 }
 
 watch(selectedPeriodId, () => {

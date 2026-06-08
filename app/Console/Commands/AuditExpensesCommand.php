@@ -22,7 +22,9 @@ class AuditExpensesCommand extends Command
                                 {--concept= : filter by concept keyword}
                                 {--category= : filter by category keyword}
                                 {--without-branch : only show expenses without branch assignment}
-                                {--check-duplicates : highlight likely duplicate records}';
+                                {--check-duplicates : highlight likely duplicate records}
+                                {--compare-reference= : referencia de gastos totales (ej. 2223315.50) — audita si nómina está incluida}
+                                {--detail : show full source deduplication analysis}';
     protected $description = 'Auditoría de gastos: duplicados, sin-sucursal, normalización de conceptos, EBITDA';
 
     // Categories NOT included in EBITDA
@@ -104,7 +106,143 @@ class AuditExpensesCommand extends Command
             $this->analyzeExcedentes($dataIds);
         }
 
+        // ── Análisis de fuentes (duplicación crítica) ────────────────────────
+        if ($this->option('detail')) {
+            $this->line('');
+            $this->info('════ ANÁLISIS DE FUENTES — DEDUPLICACIÓN ════');
+            $this->analyzeSourceDuplication($dataIds);
+        }
+
+        // ── Comparación vs referencia ─────────────────────────────────────────
+        if ($this->option('compare-reference') !== null) {
+            $this->showCompareReference($dataIds, (float) $this->option('compare-reference'));
+        }
+
         return 0;
+    }
+
+    private function showCompareReference(array $dataIds, float $ref): void
+    {
+        $this->line('');
+        $this->info('════════════════════════════════════════════════════════════════════════');
+        $this->info('  COMPARACIÓN VS REFERENCIA GASTOS: $' . number_format($ref, 2));
+        $this->info('  Objetivo: determinar si la referencia incluye nómina o no, y qué fuentes usa');
+        $this->info('════════════════════════════════════════════════════════════════════════');
+
+        $lendusId = DB::table('data_sources')->where('code', 'gastos_lendus')->value('id');
+        $erpId    = DB::table('data_sources')->where('code', 'gastos_erp')->value('id');
+
+        // Exclusion categories (same as BranchCalc)
+        $excCatsEbitda  = ['Nómina y Capital Humano', 'Envío de utilidad a corporativo', 'Préstamos Intersucursales'];
+        $lendusPresentCats = ['Gastos Operativos', 'Pólizas', 'Renta Oficina', 'Recargas Telefónicas', 'Gasolina', 'Agua'];
+
+        $makeSum = function (string $srcCode, ?array $catExclude = [], ?array $catIncludeOnly = null) use ($dataIds) {
+            $srcId = DB::table('data_sources')->where('code', $srcCode)->value('id');
+            if (!$srcId) return 0.0;
+            $q = DB::table('fact_expenses as fe')
+                ->join('report_uploads as ru', 'fe.report_upload_id', '=', 'ru.id')
+                ->whereIn('fe.period_id', $dataIds)
+                ->where('ru.data_source_id', $srcId);
+            if ($catIncludeOnly !== null) {
+                $q->whereIn('fe.category', $catIncludeOnly);
+            } elseif (!empty($catExclude)) {
+                $q->whereNotIn('fe.category', $catExclude);
+            }
+            return (float) $q->selectRaw('SUM(COALESCE(NULLIF(fe.paid_amount,0),fe.amount)) as t')->value('t');
+        };
+
+        // Key sub-totals
+        $lendusAll      = $makeSum('gastos_lendus');
+        $lendusOp       = $makeSum('gastos_lendus', $excCatsEbitda);
+        $erpAll         = $makeSum('gastos_erp');
+        $erpOpNoDup     = $makeSum('gastos_erp', array_merge($excCatsEbitda, $lendusPresentCats));
+        $erpAllCats     = $makeSum('gastos_erp', $excCatsEbitda);
+        $lendusNomina   = $makeSum('gastos_lendus', [], ['Nómina y Capital Humano']);
+        $erpNomina      = $makeSum('gastos_erp',    [], ['Nómina y Capital Humano']);
+
+        // NOI from fact_noi_movements (used in BranchCalc for nomina_total)
+        $noiPercep = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('code', ['P001','P002','P009','P010','P108','P109','P120','P123'])
+            ->sum('amount');
+
+        // Scenarios to reproduce reference
+        $scenarios = [
+            ['A) gastos_lendus (todo)',                                   $lendusAll],
+            ['B) gastos_lendus (excl. Envío + Nómina + Fondeo)',         $lendusOp],
+            ['C) gastos_erp (todo)',                                      $erpAll],
+            ['D) gastos_erp (excl. categorías EBITDA)',                   $erpAllCats],
+            ['E) gastos_erp (BranchCalc: sin dup lendus cats)',           $erpOpNoDup],
+            ['F) gastos_lendus(op) + gastos_erp(op)',                     $lendusOp + $erpAllCats],
+            ['G) gastos_lendus(op) + gastos_erp(BranchCalc)',             $lendusOp + $erpOpNoDup],
+            ['H) gastos_lendus(all) + gastos_erp(BranchCalc)',            $lendusAll + $erpOpNoDup],
+            ['I) Sólo gastos_lendus(nómina en gastos)',                   $lendusNomina],
+            ['J) gastos_lendus(op) + NOI percepciones',                   $lendusOp + $noiPercep],
+            ['K) gastos_lendus(op) + gastos_erp(BranchCalc) + NOI perc', $lendusOp + $erpOpNoDup + $noiPercep],
+            ['L) gastos_lendus(all excl envío)',                          $makeSum('gastos_lendus', ['Envío de utilidad a corporativo'])],
+        ];
+
+        $this->line('');
+        $this->line(str_pad('Escenario', 54) . str_pad('Monto', 18) . str_pad('Diff vs Ref', 16) . 'Match');
+        $this->line(str_repeat('─', 100));
+
+        foreach ($scenarios as [$lbl, $val]) {
+            $diff  = $val - $ref;
+            $sign  = $diff >= 0 ? '+' : '';
+            $match = abs($diff) < 100 ? '✓ EXACTO' : (abs($diff) < 10000 ? '≈ CERCANO' : '');
+            $line  = str_pad($lbl, 54) .
+                     str_pad('$' . number_format($val, 2), 18) .
+                     str_pad($sign . '$' . number_format($diff, 2), 16) .
+                     $match;
+            if ($match === '✓ EXACTO') {
+                $this->info($line);
+            } elseif ($match === '≈ CERCANO') {
+                $this->warn($line);
+            } else {
+                $this->line($line);
+            }
+        }
+
+        $this->line(str_repeat('─', 100));
+        $this->line(str_pad('REFERENCIA', 54) . '$' . number_format($ref, 2));
+
+        // Summary: does reference include nómina?
+        $this->line('');
+        $this->info('════ DIAGNÓSTICO: ¿La referencia incluye nómina? ════');
+        $this->line('');
+        $this->line(str_pad('Componente', 50) . 'Monto');
+        $this->line(str_repeat('─', 72));
+        $this->line(str_pad('gastos_lendus (solo operativos, excl. envío/nómina/fondeo)', 50) . '$' . number_format($lendusOp, 2));
+        $this->line(str_pad('gastos_erp (BranchCalc, sin duplicar cats lendus)',          50) . '$' . number_format($erpOpNoDup, 2));
+        $this->line(str_pad('= Gastos Operativos (BranchCalc)',                            50) . '$' . number_format($lendusOp + $erpOpNoDup, 2));
+        $this->line('');
+        $this->line(str_pad('Nómina en gastos_lendus (cat. "Nómina y Capital Humano")',   50) . '$' . number_format($lendusNomina, 2));
+        $this->line(str_pad('Nómina en gastos_erp (cat. "Nómina y Capital Humano")',      50) . '$' . number_format($erpNomina, 2));
+        $this->line(str_pad('Percepciones NOI (P001/P002/P009/P010/Bonos)',               50) . '$' . number_format($noiPercep, 2));
+        $this->line('');
+
+        $gastosOpSolo = $lendusOp + $erpOpNoDup;
+        $difConNomGastos  = abs(($gastosOpSolo + $lendusNomina + $erpNomina) - $ref);
+        $difSinNom        = abs($gastosOpSolo - $ref);
+        $difConNoi        = abs($gastosOpSolo + $noiPercep - $ref);
+
+        $this->info('  Hipótesis A: Referencia = solo gastos operativos (SIN nómina)');
+        $this->line('    → Diferencia: $' . number_format($difSinNom, 2) . ($difSinNom < 5000 ? ' ≈ PLAUSIBLE' : ''));
+        $this->line('');
+        $this->info('  Hipótesis B: Referencia = gastos op + nómina en gastos_lendus/erp');
+        $this->line('    → Diferencia: $' . number_format($difConNomGastos, 2) . ($difConNomGastos < 5000 ? ' ≈ PLAUSIBLE' : ''));
+        $this->line('');
+        $this->info('  Hipótesis C: Referencia = gastos op + NOI percepciones brutas');
+        $this->line('    → Diferencia: $' . number_format($difConNoi, 2) . ($difConNoi < 5000 ? ' ≈ PLAUSIBLE' : ''));
+        $this->line('');
+
+        $best = collect([
+            ['sin nómina',        $difSinNom],
+            ['con nómina gastos', $difConNomGastos],
+            ['con NOI',           $difConNoi],
+        ])->sortBy(1)->first();
+
+        $this->info('  CONCLUSIÓN MÁS PROBABLE: Referencia ' . $best[0] . ' (menor diferencia: $' . number_format($best[1], 2) . ')');
     }
 
     private function showByCategory(array $dataIds): void
@@ -395,5 +533,127 @@ class AuditExpensesCommand extends Command
         } else {
             $this->info("  ✓ EXCEDENTES solo aparece en categoría 'Envío de utilidad a corporativo' → correctamente excluido.");
         }
+    }
+
+    private function analyzeSourceDuplication(array $dataIds): void
+    {
+        $this->line('  Comparando gastos por fuente de datos (data_source.code)...');
+        $this->line('');
+
+        $bySrc = DB::table('fact_expenses as fe')
+            ->join('report_uploads as ru', 'fe.report_upload_id', '=', 'ru.id')
+            ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+            ->whereIn('fe.period_id', $dataIds)
+            ->select(
+                'ds.code',
+                'ds.name',
+                DB::raw('COUNT(*) as cnt'),
+                DB::raw('SUM(COALESCE(NULLIF(fe.paid_amount,0),fe.amount)) as total'),
+                DB::raw('SUM(CASE WHEN fe.category NOT IN ("Nómina y Capital Humano","Envío de utilidad a corporativo","Préstamos Intersucursales") THEN COALESCE(NULLIF(fe.paid_amount,0),fe.amount) ELSE 0 END) as gastos_op'),
+                DB::raw('SUM(CASE WHEN fe.category = "Envío de utilidad a corporativo" THEN COALESCE(NULLIF(fe.paid_amount,0),fe.amount) ELSE 0 END) as excedentes'),
+                DB::raw('SUM(CASE WHEN fe.category = "Nómina y Capital Humano" THEN COALESCE(NULLIF(fe.paid_amount,0),fe.amount) ELSE 0 END) as nomina_exp')
+            )
+            ->groupBy('ds.code', 'ds.name')
+            ->orderByDesc('total')
+            ->get();
+
+        $this->line(str_pad('Fuente (code)', 26) . str_pad('Regs', 7) . str_pad('Total', 17) .
+                    str_pad('Gastos Op', 17) . str_pad('Excedentes', 14) . str_pad('Nómina Exp', 14) . 'Descripción');
+        $this->line(str_repeat('─', 110));
+
+        foreach ($bySrc as $s) {
+            $this->line(
+                str_pad($s->code ?? 'NULL', 26) .
+                str_pad(number_format($s->cnt), 7) .
+                str_pad('$' . number_format((float)$s->total, 0), 17) .
+                str_pad('$' . number_format((float)$s->gastos_op, 0), 17) .
+                str_pad('$' . number_format((float)$s->excedentes, 0), 14) .
+                str_pad('$' . number_format((float)$s->nomina_exp, 0), 14) .
+                ($s->name ?? '')
+            );
+        }
+
+        $this->line('');
+        $this->info('════ DIAGNÓSTICO DE DUPLICACIÓN ════');
+
+        // Detect duplicate sources (same row count + similar total)
+        $sources = $bySrc->keyBy('code');
+        $lendus    = $sources['gastos_lendus'] ?? null;
+        $lendusXls = $sources['gastos_lendus_excel'] ?? null;
+
+        if ($lendus && $lendusXls) {
+            $cntMatch  = $lendus->cnt === $lendusXls->cnt;
+            $totDiff   = abs((float)$lendus->total - (float)$lendusXls->total);
+            $isDup     = $cntMatch && $totDiff < 1.0;
+
+            if ($isDup) {
+                $this->warn('  ⚠ DUPLICACIÓN CRÍTICA DETECTADA:');
+                $this->warn('    gastos_lendus  = ' . number_format($lendus->cnt) . ' filas, $' . number_format((float)$lendus->total, 2));
+                $this->warn('    gastos_lendus_excel = ' . number_format($lendusXls->cnt) . ' filas, $' . number_format((float)$lendusXls->total, 2));
+                $this->warn('    → MISMO conteo, MISMO total. Son el mismo archivo (PDF vs Excel del mismo reporte).');
+                $this->warn('    → Los gastos están siendo SUMADOS DOBLE. Impacto: +$' . number_format((float)$lendus->total, 2) . ' inflado.');
+                $this->line('');
+                $this->line('  IMPACTO POR CATEGORÍA (gastos_lendus_excel duplicado sobrante):');
+                $this->line('    Excedentes/Envío Corp duplicado:  +$' . number_format((float)$lendusXls->excedentes, 0));
+                $this->line('    Nómina en gastos duplicada:       +$' . number_format((float)$lendusXls->nomina_exp, 0));
+                $this->line('    Gastos operativos duplicados:     +$' . number_format((float)$lendusXls->gastos_op, 0));
+                $this->line('');
+                $this->line('  REFERENCIA COMPARATIVA:');
+                $refGastosOp   = 2_223_315.50;
+                $refEnvio      = 3_076_800.00;
+                $erp = $sources['gastos_erp'] ?? null;
+                $erpTotal = $erp ? (float)$erp->total : 0.0;
+
+                $singleLendus    = (float)$lendus->total;
+                $singleTotal     = $singleLendus + $erpTotal;
+                $currentTotal    = (float)$bySrc->sum('total');
+
+                $this->line(str_pad('Escenario', 50) . 'Total gastos');
+                $this->line(str_repeat('─', 70));
+                $this->line(str_pad('ACTUAL (gastos_lendus + gastos_lendus_excel + ERP)', 50) . '$' . number_format($currentTotal, 2));
+                $this->line(str_pad('SIN DUPLICADO (solo gastos_lendus + ERP)', 50) . '$' . number_format($singleTotal, 2));
+                $this->line(str_pad('SIN DUPLICADO (solo gastos_lendus_excel + ERP)', 50) . '$' . number_format((float)$lendusXls->total + $erpTotal, 2));
+                $this->line(str_pad('REFERENCIA (gastos totales aprox)', 50) . '$' . number_format($refGastosOp, 2) . ' (gastos op solamente)');
+                $this->line('');
+                $this->warn('  → FIX REQUERIDO: Eliminar uno de los dos fuentes (gastos_lendus O gastos_lendus_excel)');
+                $this->warn('    del proceso de importación, o implementar deduplicación por código de fuente.');
+            } else {
+                $this->info('  ✓ gastos_lendus y gastos_lendus_excel difieren en contenido — pueden ser fuentes distintas.');
+                $this->line('    gastos_lendus: ' . $lendus->cnt . ' filas / $' . number_format((float)$lendus->total, 2));
+                $this->line('    gastos_lendus_excel: ' . $lendusXls->cnt . ' filas / $' . number_format((float)$lendusXls->total, 2));
+            }
+        }
+
+        // Envío corporativo por fuente
+        $this->line('');
+        $this->info('════ EXCEDENTES / ENVÍO CORPORATIVO POR FUENTE ════');
+        $excSrc = DB::table('fact_expenses as fe')
+            ->join('report_uploads as ru', 'fe.report_upload_id', '=', 'ru.id')
+            ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+            ->whereIn('fe.period_id', $dataIds)
+            ->whereRaw("UPPER(COALESCE(fe.concept,'')) LIKE '%EXCEDENTE%'")
+            ->select('ds.code', 'fe.category', DB::raw('COUNT(*) as cnt'), DB::raw('SUM(COALESCE(NULLIF(fe.paid_amount,0),fe.amount)) as total'))
+            ->groupBy('ds.code', 'fe.category')
+            ->orderByDesc('total')
+            ->get();
+
+        $this->line(str_pad('Fuente', 26) . str_pad('Categoría', 38) . str_pad('Regs', 7) . 'Monto');
+        $this->line(str_repeat('─', 85));
+        $excTotal = 0.0;
+        foreach ($excSrc as $r) {
+            $this->line(
+                str_pad($r->code ?? 'NULL', 26) .
+                str_pad($r->category ?? 'NULL', 38) .
+                str_pad(number_format($r->cnt), 7) .
+                '$' . number_format((float)$r->total, 2)
+            );
+            if ($r->category === 'Envío de utilidad a corporativo') {
+                $excTotal += (float)$r->total;
+            }
+        }
+        $this->line(str_repeat('─', 85));
+        $this->line(str_pad('TOTAL categoría Envío corporativo (actual)', 70) . '$' . number_format($excTotal, 2));
+        $this->line(str_pad('REFERENCIA abril 2026',                        70) . '$' . number_format(3_076_800.00, 2));
+        $this->line(str_pad('Diferencia',                                   70) . '$' . number_format($excTotal - 3_076_800.00, 2));
     }
 }

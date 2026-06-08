@@ -110,39 +110,26 @@ class DebugEmployeeUiCommand extends Command
         // ── C. Estado que usa la UI (employees prop) ─────────────────────────
         $this->line('');
         $this->info('════ C. PROP `employees` QUE USA LA UI ════');
-        $this->line('  Fuente: ReportUploadController::index() línea 206-215');
+        $this->line('  Fuente: ReportUploadController::index()');
         $this->line('  Endpoint: GET /historico-general');
         $this->line('  Tabla: employees WHERE is_active=true');
-        $this->line('  JOIN: employeeBranchAssignments->latest() SIN FILTRO DE PERIODO');
+        $this->line('  JOIN: employeeBranchAssignments WHERE period_id = ' . $period->id . ' (filtrado por periodo)');
         $this->line('');
 
-        // Simulate what the prop returns
-        $allActive = DB::table('employees as e')
+        // Simulate what the corrected prop returns (filtered by current period)
+        $withBranchInProp = DB::table('employees as e')
+            ->join('employee_branch_assignments as eba', 'eba.employee_id', '=', 'e.id')
+            ->leftJoin('branches as b', 'eba.branch_id', '=', 'b.id')
             ->where('e.is_active', true)
-            ->select('e.id', 'e.full_name', 'e.normalized_name')
-            ->get();
-
-        $withBranchInProp = 0;
-        $noBranchInProp   = 0;
-        foreach ($allActive as $emp) {
-            $latestEba = DB::table('employee_branch_assignments as eba')
-                ->leftJoin('branches as b', 'eba.branch_id', '=', 'b.id')
-                ->where('eba.employee_id', $emp->id)
-                ->orderByDesc('eba.period_id')
-                ->first(['b.name as branch_name']);
-            if ($latestEba?->branch_name) {
-                $withBranchInProp++;
-            } else {
-                $noBranchInProp++;
-            }
-        }
+            ->where('eba.period_id', $period->id)
+            ->whereNotNull('eba.branch_id')
+            ->distinct('e.id')
+            ->count('e.id');
+        $noBranchInProp = $totalActive - $withBranchInProp;
 
         $this->line("  Total empleados activos en prop: {$totalActive}");
-        $this->line("  Con sucursal (latest EBA, cualquier período): {$withBranchInProp}");
-        $this->warn("  Sin sucursal en prop (bug - no filtrado por período {$period->id}): {$noBranchInProp}");
-        $this->line('');
-        $this->info('  BUG CONFIRMADO: La prop usa ->latest() sin WHERE period_id = ' . $period->id);
-        $this->info('  FIX: Filtrar employeeBranchAssignments por period_id actual.');
+        $this->line("  Con sucursal en período {$period->id}: {$withBranchInProp}");
+        $this->line("  Sin sucursal en prop (sin EBA en este período): {$noBranchInProp}");
         $this->line('');
 
         // What SHOULD the prop return (corrected)
@@ -199,7 +186,7 @@ class DebugEmployeeUiCommand extends Command
             $ebaP5Str     = $ebaP5 ? mb_substr($ebaP5->bname ?? 'sin suc', 0, 20) : 'SIN EBA período';
             $ebaLatestStr = $ebaLatest ? mb_substr(($ebaLatest->bname ?? 'NULL') . '(p' . $ebaLatest->period_id . ')', 0, 16) : 'NUNCA';
             $inNoiStr     = $inNoi ? 'SÍ' : 'NO';
-            $uiShows      = ($ebaLatest?->bname) ? $ebaLatest->bname : 'Sin sucursal ←BUG';
+            $uiShows = $ebaP5 ? ($ebaP5->bname ?? 'sin suc período') : 'Sin EBA este período';
 
             $this->line(
                 str_pad(mb_substr($emp->full_name, 0, 43), 45) .
@@ -242,10 +229,10 @@ class DebugEmployeeUiCommand extends Command
         $this->line(str_repeat('─', 90));
 
         $items = [
-            ['period_incidents',                        "0 incidentes",                  'SÍ (0 y 0)'],
-            ['employees prop (BUG actual)',              "{$noBranchInProp} sin sucursal", 'NO — bug: sin filtro de periodo'],
-            ['employees prop (con fix)',                 "{$noBranchPeriod} sin sucursal", 'SÍ — si 0, consistente con 0 incidents'],
-            ['/personas-sin-sucursal (actual)',          $noiTotal === 0 ? '0 (fact_noi vacío)' : 'N/A',  'SÍ — si NOI vacío → 0'],
+            ['period_incidents',                       "0 incidentes",                       'SÍ (0 y 0)'],
+            ['employees prop (filtrado por período)',   "{$noBranchInProp} sin sucursal",     $noBranchInProp === 0 ? '✓ Consistente' : 'Revisar EBAs'],
+            ['employees prop (todos activos sin EBA)', "{$noBranchPeriod} sin sucursal",      'Normal: activos de otros períodos'],
+            ['/personas-sin-sucursal (actual)',         $noiTotal === 0 ? '0 (fact_noi vacío)' : 'N/A', 'SÍ — si NOI vacío → 0'],
             ['employee_branch_assignments sin branch',  "{$ebaNoSuc} sin suc / {$ebaCount} total", 'Depende del contexto'],
         ];
         foreach ($items as [$fuente, $dato, $consistente]) {

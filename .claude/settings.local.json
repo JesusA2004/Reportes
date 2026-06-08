@@ -76,7 +76,9 @@
       "Bash(mysql -u root Reportes -e \"DESCRIBE fact_placements;\")",
       "Bash(timeout 180 tail -f \"C:\\\\Users\\\\Jesus\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--wamp64-www-Reportes\\\\ceedf8d6-97cf-4107-b5dd-251028fad2c8\\\\tasks\\\\bdmr4d1yi.output\")",
       "Bash(Select-Object -Last 20)",
-      "Bash(kill 44920)"
+      "Bash(kill 44920)",
+      "Bash(git pull *)",
+      "Bash(dir \"C:\\\\Users\\\\Jesus\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--wamp64-www-Reportes\\\\62020e04-167c-4c1a-a4a1-5139e014da47\\\\tasks\\\\\" 2>&1 *)"
     ]
   }
 }

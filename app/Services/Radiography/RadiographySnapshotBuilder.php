@@ -118,8 +118,9 @@ class RadiographySnapshotBuilder
         $cv = (float)($gm['cartera_vencida_total'] ?? 0);
         $gm['mora_porcentaje'] = $ct > 0 ? round($cv / $ct * 100, 2) : 0;
 
-        // Colocación: exclude Norte + Corporativo/Falso + reestructuras
-        $filteredColocacion = (float) DB::table('fact_placements as p')
+        // Colocación: usa amount_monto53 (monto autorizado face-value) en lugar de amount (desembolso neto).
+        // Excluye Norte + Corporativo + reestructuras.
+        $filteredColocacion = (float)(DB::table('fact_placements as p')
             ->leftJoin('branches as b', 'p.branch_id', '=', 'b.id')
             ->whereIn('p.period_id', $this->dataIds)
             ->where(function ($q) use ($excludeNames) {
@@ -132,11 +133,15 @@ class RadiographySnapshotBuilder
                 $q->whereNull('p.product_name')
                   ->orWhereRaw("p.product_name NOT REGEXP ?", ['REESTRUCTURA|UNIFICACION|UNIFICACIÓN|RECURSOS PROPIOS']);
             })
-            ->sum('p.amount');
+            ->selectRaw("SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.amount_monto53')) AS DECIMAL(14,2))) as tot")
+            ->value('tot') ?? 0);
         if ($filteredColocacion > 0) {
             $gm['colocacion_total'] = $filteredColocacion;
         } elseif (($gm['colocacion_total'] ?? 0) == 0) {
-            $gm['colocacion_total'] = (float) DB::table('fact_placements')->whereIn('period_id', $this->dataIds)->sum('amount');
+            $gm['colocacion_total'] = (float)(DB::table('fact_placements as p')
+                ->whereIn('p.period_id', $this->dataIds)
+                ->selectRaw("SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.amount_monto53')) AS DECIMAL(14,2))) as tot")
+                ->value('tot') ?? 0);
         }
 
         // Recuperación: precise Norte filter (accredited prefix + zone + unambiguous names)
@@ -271,6 +276,9 @@ class RadiographySnapshotBuilder
                 'recovery_detail'            => $this->buildRecoveryDetail($period),
                 'portfolio_by_branch_product' => $this->buildPortfolioByBranchProduct($period),
                 'mora_by_branch'             => $this->buildMoraByBranch($period),
+                'mora_by_product'            => $this->buildMoraByProduct($period),
+                'mora_by_gestor'             => $this->buildMoraByGestor($period),
+                'mora_by_branch_product'     => $this->buildMoraByBranchProduct($period),
                 'corporate_funding'          => $this->buildCorporateFunding($period),
                 'placement_by_branch_product'=> $this->buildPlacementByBranchProduct($period),
             ],
@@ -2185,5 +2193,211 @@ class RadiographySnapshotBuilder
             $this->branchCache[$id] = Branch::query()->find($id);
         }
         return $this->branchCache[$id];
+    }
+
+    // ── MORA DETALLADA ───────────────────────────────────────────────────────
+
+    private function moraBucketDefs(): array
+    {
+        return [
+            ['key' => 'al_corriente', 'label' => 'Al corriente',  'min' => 0,   'max' => 0     ],
+            ['key' => 'mora_1_30',    'label' => 'Mora 1-30',     'min' => 1,   'max' => 30    ],
+            ['key' => 'mora_31_60',   'label' => 'Mora 31-60',    'min' => 31,  'max' => 60    ],
+            ['key' => 'mora_61_90',   'label' => 'Mora 61-90',    'min' => 61,  'max' => 90    ],
+            ['key' => 'mora_91_120',  'label' => 'Mora 91-120',   'min' => 91,  'max' => 120   ],
+            ['key' => 'mora_120_plus','label' => 'Mora 120+',     'min' => 121, 'max' => 99999 ],
+        ];
+    }
+
+    private function buildMoraByProduct(Period $period): array
+    {
+        $realBranchNames = $this->resolveRealBranchNormalizedNames();
+        $defs = $this->moraBucketDefs();
+
+        $rows = DB::table('fact_portfolios as po')
+            ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $this->dataIds)
+            ->whereNotNull('po.product_name')
+            ->when(!empty($realBranchNames), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNames))
+            ->selectRaw('
+                po.product_name as product,
+                po.days_past_due,
+                COUNT(*) as contratos,
+                SUM(po.balance) as balance,
+                SUM(COALESCE(po.past_due_balance, 0)) as past_due_balance
+            ')
+            ->groupBy('po.product_name', 'po.days_past_due')
+            ->get();
+
+        $byProduct = [];
+        foreach ($rows as $row) {
+            $product = $row->product;
+            $dpd     = (int) $row->days_past_due;
+            $bal     = (float) $row->balance;
+            $pdb     = (float) $row->past_due_balance;
+            $cnt     = (int) $row->contratos;
+
+            foreach ($defs as $def) {
+                if ($dpd >= $def['min'] && $dpd <= $def['max']) {
+                    $amount = $def['key'] === 'al_corriente' ? $bal : ($pdb > 0 ? $pdb : $bal);
+                    $byProduct[$product]['contratos']        = ($byProduct[$product]['contratos']        ?? 0) + $cnt;
+                    $byProduct[$product][$def['key']]        = ($byProduct[$product][$def['key']]        ?? 0.0) + $amount;
+                    $byProduct[$product]['balance_total']    = ($byProduct[$product]['balance_total']    ?? 0.0) + $bal;
+                    break;
+                }
+            }
+        }
+
+        $result = [];
+        foreach ($byProduct as $product => $data) {
+            $vencida = array_sum(array_filter($data, fn ($v, $k) => !in_array($k, ['al_corriente', 'contratos', 'balance_total'], true), ARRAY_FILTER_USE_BOTH));
+            $cartera = (float) ($data['balance_total'] ?? 0);
+            $row = [
+                'product'   => $product,
+                'contratos' => (int) ($data['contratos'] ?? 0),
+                'cartera'   => $cartera,
+                'vencida'   => $vencida,
+                'mora_pct'  => $cartera > 0 ? round($vencida / $cartera * 100, 2) : 0,
+            ];
+            foreach ($defs as $def) {
+                $row[$def['key']] = $data[$def['key']] ?? 0.0;
+            }
+            $result[] = $row;
+        }
+
+        usort($result, fn ($a, $b) => $b['cartera'] <=> $a['cartera']);
+        return $result;
+    }
+
+    private function buildMoraByGestor(Period $period): array
+    {
+        $realBranchNames = $this->resolveRealBranchNormalizedNames();
+        $defs = $this->moraBucketDefs();
+
+        $rows = DB::table('fact_portfolios as po')
+            ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $this->dataIds)
+            ->where(fn ($q) => $q->whereNotNull('po.promoter_name')->orWhereNotNull('po.promoter_code'))
+            ->when(!empty($realBranchNames), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNames))
+            ->selectRaw('
+                COALESCE(po.promoter_name, po.promoter_code, \'Sin nombre\') as gestor,
+                b.name as sucursal,
+                po.days_past_due,
+                COUNT(*) as contratos,
+                SUM(po.balance) as balance,
+                SUM(COALESCE(po.past_due_balance, 0)) as past_due_balance
+            ')
+            ->groupBy('po.promoter_name', 'po.promoter_code', 'b.name', 'po.days_past_due')
+            ->get();
+
+        $byGestor = [];
+        foreach ($rows as $row) {
+            $key = $row->gestor . '|||' . ($row->sucursal ?? '');
+            $dpd = (int) $row->days_past_due;
+            $bal = (float) $row->balance;
+            $pdb = (float) $row->past_due_balance;
+            $cnt = (int) $row->contratos;
+
+            if (!isset($byGestor[$key])) {
+                $byGestor[$key] = ['gestor' => $row->gestor, 'sucursal' => $row->sucursal, 'contratos' => 0, 'balance_total' => 0.0];
+            }
+
+            foreach ($defs as $def) {
+                if ($dpd >= $def['min'] && $dpd <= $def['max']) {
+                    $amount = $def['key'] === 'al_corriente' ? $bal : ($pdb > 0 ? $pdb : $bal);
+                    $byGestor[$key][$def['key']]     = ($byGestor[$key][$def['key']]     ?? 0.0) + $amount;
+                    $byGestor[$key]['contratos']     += $cnt;
+                    $byGestor[$key]['balance_total'] += $bal;
+                    break;
+                }
+            }
+        }
+
+        $result = [];
+        foreach ($byGestor as $data) {
+            $vencida = array_sum(array_filter($data, fn ($v, $k) => !in_array($k, ['al_corriente', 'contratos', 'balance_total', 'gestor', 'sucursal'], true), ARRAY_FILTER_USE_BOTH));
+            $cartera = (float) ($data['balance_total'] ?? 0);
+            $row = [
+                'gestor'    => $data['gestor'],
+                'sucursal'  => $data['sucursal'],
+                'contratos' => (int) ($data['contratos'] ?? 0),
+                'cartera'   => $cartera,
+                'vencida'   => $vencida,
+                'mora_pct'  => $cartera > 0 ? round($vencida / $cartera * 100, 2) : 0,
+            ];
+            foreach ($defs as $def) {
+                $row[$def['key']] = $data[$def['key']] ?? 0.0;
+            }
+            $result[] = $row;
+        }
+
+        usort($result, fn ($a, $b) => strcmp($a['sucursal'] ?? '', $b['sucursal'] ?? '') ?: $b['cartera'] <=> $a['cartera']);
+        return $result;
+    }
+
+    private function buildMoraByBranchProduct(Period $period): array
+    {
+        $realBranchNames = $this->resolveRealBranchNormalizedNames();
+        $defs = $this->moraBucketDefs();
+
+        $rows = DB::table('fact_portfolios as po')
+            ->join('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $this->dataIds)
+            ->whereNotNull('po.product_name')
+            ->when(!empty($realBranchNames), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNames))
+            ->selectRaw('
+                b.name as branch,
+                po.product_name as product,
+                po.days_past_due,
+                COUNT(*) as contratos,
+                SUM(po.balance) as balance,
+                SUM(COALESCE(po.past_due_balance, 0)) as past_due_balance
+            ')
+            ->groupBy('b.id', 'b.name', 'po.product_name', 'po.days_past_due')
+            ->get();
+
+        $byBranchProduct = [];
+        foreach ($rows as $row) {
+            $key = $row->branch . '|||' . $row->product;
+            $dpd = (int) $row->days_past_due;
+            $bal = (float) $row->balance;
+            $pdb = (float) $row->past_due_balance;
+            $cnt = (int) $row->contratos;
+
+            if (!isset($byBranchProduct[$key])) {
+                $byBranchProduct[$key] = ['branch' => $row->branch, 'product' => $row->product, 'contratos' => 0, 'balance_total' => 0.0];
+            }
+
+            foreach ($defs as $def) {
+                if ($dpd >= $def['min'] && $dpd <= $def['max']) {
+                    $amount = $def['key'] === 'al_corriente' ? $bal : ($pdb > 0 ? $pdb : $bal);
+                    $byBranchProduct[$key][$def['key']]     = ($byBranchProduct[$key][$def['key']]     ?? 0.0) + $amount;
+                    $byBranchProduct[$key]['contratos']     += $cnt;
+                    $byBranchProduct[$key]['balance_total'] += $bal;
+                    break;
+                }
+            }
+        }
+
+        $result = [];
+        foreach ($byBranchProduct as $data) {
+            $vencida = array_sum(array_filter($data, fn ($v, $k) => !in_array($k, ['al_corriente', 'contratos', 'balance_total', 'branch', 'product'], true), ARRAY_FILTER_USE_BOTH));
+            $cartera = (float) ($data['balance_total'] ?? 0);
+            $row = [
+                'branch'    => $data['branch'],
+                'product'   => $data['product'],
+                'contratos' => (int) ($data['contratos'] ?? 0),
+                'cartera'   => $cartera,
+                'vencida'   => $vencida,
+                'mora_pct'  => $cartera > 0 ? round($vencida / $cartera * 100, 2) : 0,
+            ];
+            foreach ($defs as $def) {
+                $row[$def['key']] = $data[$def['key']] ?? 0.0;
+            }
+            $result[] = $row;
+        }
+
+        usort($result, fn ($a, $b) => strcmp($a['branch'], $b['branch']) ?: $b['cartera'] <=> $a['cartera']);
+        return $result;
     }
 }

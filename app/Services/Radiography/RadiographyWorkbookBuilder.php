@@ -38,6 +38,19 @@ class RadiographyWorkbookBuilder
     private const BG_GREEN_TOT = 'FF047857';
     private const DATE_FMT     = 'DD/MM/YYYY';
 
+    // NOI D-code labels that are employee deductions — NOT additional company costs.
+    // These reduce nómina display and should NOT inflate Gastos Totales.
+    private const NOI_DEDUCTION_LABELS = [
+        'Descuentos Infonavit',
+        'Pensión Alimenticia',
+        'Descuento Servicios Moto',
+        'Financiamiento de Motos (desc.)',
+        'Préstamo Personal',
+        'Subsidio para el Empleo APL',
+        'Otros descuentos NOI',
+        'Descuento de uniformes',
+    ];
+
     public function buildFromSnapshot(Period $period, PeriodSummary $summary, array $snap): Spreadsheet
     {
         $spreadsheet = new Spreadsheet();
@@ -47,7 +60,7 @@ class RadiographyWorkbookBuilder
             ->setSubject('Radiografía Financiera')
             ->setDescription('Generado automáticamente — sin plantilla');
 
-        // Sheet order: GLOBAL, analysis sheets, branch sheets, SIN ASIGNAR, PRODUCTOS
+        // Sheet order: GLOBAL, analysis sheets, branch sheets, PRODUCTOS, NÓMINA POR GESTOR, MORA DETALLE
         $this->buildGlobalSheet($spreadsheet, $period, $snap);
         $this->buildValorCarteraSheet($spreadsheet, $period, $snap);
         $this->buildMorasSheet($spreadsheet, $period, $snap);
@@ -55,8 +68,9 @@ class RadiographyWorkbookBuilder
         $this->buildGastosSheet($spreadsheet, $period, $snap);
         $this->buildNominaSheet($spreadsheet, $period, $snap);
         $this->buildBranchSheets($spreadsheet, $period, $snap);
-        $this->buildSinAsignarSheet($spreadsheet, $period, $snap);
         $this->buildProductosSheet($spreadsheet, $period, $snap);
+        $this->buildNominaGestorSheet($spreadsheet, $period, $snap);
+        $this->buildMoraDetalleSheet($spreadsheet, $period, $snap);
 
         // Remove default empty sheet if it exists
         if ($spreadsheet->getSheetCount() > 1) {
@@ -295,21 +309,32 @@ class RadiographyWorkbookBuilder
             }
         }
 
-        $nomTotal = 0.0;
-        $nomIdx   = 0;
+        // Split display: percepciones/expense items (positive) vs NOI deductions (negative)
+        $nomPercepTotal = 0.0;
+        $nomDesctoTotal = 0.0;
+        $nomIdx         = 0;
         foreach ($nomDisplayOrder as $nomName => $nomVal) {
             if ($nomVal == 0) continue;
-            $sheet->setCellValue("A{$r}", $nomName);
+            $isDeduccion = in_array($nomName, self::NOI_DEDUCTION_LABELS, true);
+            $label = $isDeduccion ? "(−) {$nomName}" : $nomName;
+            $sheet->setCellValue("A{$r}", $label);
             $sheet->setCellValue("B{$r}", $nomVal);
             $sheet->setCellValue("C{$r}", '');
             $this->dataRow($sheet, "A{$r}:C{$r}", $nomIdx % 2 === 0);
             $this->applyFmt($sheet, "B{$r}", 'currency', $nomVal);
-            $nomTotal += $nomVal;
+            if ($isDeduccion) {
+                $sheet->getStyle("A{$r}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFB91C1C'));
+                $sheet->getStyle("B{$r}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFB91C1C'));
+                $nomDesctoTotal += $nomVal;
+            } else {
+                $nomPercepTotal += $nomVal;
+            }
             $nomIdx++;
             $r++;
         }
-        $sheet->setCellValue("A{$r}", 'Total Nómina y Capital Humano');
-        $sheet->setCellValue("B{$r}", $nomTotal);
+        $nomNeto = $nomPercepTotal - $nomDesctoTotal;
+        $sheet->setCellValue("A{$r}", 'Neto nómina (percepciones − descuentos NOI)');
+        $sheet->setCellValue("B{$r}", $nomNeto);
         $this->totalsRow($sheet, "A{$r}:C{$r}");
         $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
@@ -339,9 +364,14 @@ class RadiographyWorkbookBuilder
         // ── 7. Análisis de Tendencias y Proyecciones ──────────────────────────
         $this->sectionHeader($sheet, "A{$r}:C{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES');
         $r++;
-        $gastosTotal  = $gastosOpTotal;
-        $utilidad     = $recTotal - $gastosTotal - $nomTotal;
-        $excGlobal    = $brCalcGlobal ? (float)$brCalcGlobal['excedentes'] : $excedentes;
+        // EBITDA = Ingresos − Otorgamientos − Gastos Totales
+        // Gastos Totales = gastosOp + nóminaNet (percepciones − descuentos NOI)
+        $excGlobal      = $brCalcGlobal ? (float)$brCalcGlobal['excedentes'] : $excedentes;
+        $gastosTotal    = $gastosOpTotal + $nomNeto;
+        $utilidad       = $recTotal - $colTotal - $gastosTotal;
+        // Validación: el envío corporativo no puede superar la utilidad disponible
+        $inconsistencia = $excGlobal > $utilidad;
+        $diferencia     = $inconsistencia ? 0.0 : ($utilidad - $excGlobal);
         $mora0_30g    = $brCalcGlobal ? (float)$brCalcGlobal['mora_0_30']    : $mora0_30;
         $mora31_60g   = $brCalcGlobal ? (float)$brCalcGlobal['mora_31_60']   : $mora31_60;
         $mora61_90g   = $brCalcGlobal ? (float)$brCalcGlobal['mora_61_90']   : $mora61_90;
@@ -356,7 +386,7 @@ class RadiographyWorkbookBuilder
             ['Saldo final en caja',                0,              'currency', ''],
             ['Préstamos inter sucursales',         $brGlobalFondea,'currency', ''],
             ['Envío de utilidad a corporativo',    $excGlobal,     'currency', ''],
-            ['Diferencia',                         0,              'currency', ''],
+            ['Diferencia / sobrante',              $diferencia,    'currency', ''],
             ['Mora de 0 a 30 días',                $mora0_30g,     'currency', ''],
             ['Mora de 31 a 60 días',               $mora31_60g,    'currency', ''],
             ['Mora de 61 a 90 días',               $mora61_90g,    'currency', ''],
@@ -364,14 +394,30 @@ class RadiographyWorkbookBuilder
             ['Mora 120+ días',                     $mora120pg,     'currency', ''],
             ['Valor cartera',                      $carteraTotal,  'currency', ''],
         ]);
+        if ($inconsistencia) {
+            $this->writeInconsistenciaRow($sheet, $r, 'C');
+            $r++;
+        }
         $r++;
 
         // ── 8. EBITDA ─────────────────────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. EBITDA');
+        // EBITDA = Ingresos Totales − Otorgamientos − Gastos Totales
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. EBITDA / Utilidad disponible');
         $r++;
         $r = $writeRows($r, [
-            ['Total', $utilidad, 'currency', ''],
+            ['Ingresos Totales',                    $recTotal,      'currency', ''],
+            ['Menos: Otorgamientos',                $colTotal,      'currency', ''],
+            ['Menos: Gastos Totales',               $gastosTotal,   'currency', ''],
+            ['  Gastos operativos',                 $gastosOpTotal, 'currency', ''],
+            ['  Nómina neta',                       $nomNeto,       'currency', ''],
+            ['= EBITDA / Utilidad disponible',      $utilidad,      'currency', ''],
+            ['Envío utilidad a corporativo',        $excGlobal,     'currency', ''],
+            ['Diferencia / sobrante',               $diferencia,    'currency', ''],
         ]);
+        if ($inconsistencia) {
+            $this->writeInconsistenciaRow($sheet, $r, 'C');
+            $r++;
+        }
         $r++;
 
         // ── 9. Saldo Total Acumulado Cuentas ──────────────────────────────────
@@ -1110,10 +1156,9 @@ class RadiographyWorkbookBuilder
                 if (strtoupper($lRow['branch']) === $brUp) { $loanB += (float)$lRow['total']; break; }
             }
 
-            $nomTotalCalc = $calc
-                ? ((float)$calc['nomina_total'] + (float)$calc['comisiones'] + (float)$calc['bonos'])
-                : $nomTotal;
-            $utilidad = $recB - $gastosB - $nomTotalCalc;
+            // EBITDA = Ingresos − Otorgamientos − (GastosOp + NóminaNet)
+            $brNomNeto = $calc ? $this->calcNomNeto($calc) : $nomTotal;
+            $utilidad  = $recB - $colB - ($gastosB + $brNomNeto);
 
             $r = 4;
 
@@ -1255,20 +1300,30 @@ class RadiographyWorkbookBuilder
                 }
             }
 
-            $nomTotal2 = 0.0;
-            $i2 = 0;
+            $brNomPercep = 0.0;
+            $brNomDescto = 0.0;
+            $i2          = 0;
             foreach ($brNomDisplay as $nomName => $nomVal) {
                 if ($nomVal == 0.0) continue;
-                $sheet->setCellValue("A{$r}", $nomName);
+                $isDed = in_array($nomName, self::NOI_DEDUCTION_LABELS, true);
+                $label = $isDed ? "(−) {$nomName}" : $nomName;
+                $sheet->setCellValue("A{$r}", $label);
                 $sheet->setCellValue("B{$r}", $nomVal);
                 $this->dataRow($sheet, "A{$r}:C{$r}", $i2 % 2 === 0);
                 $this->applyFmt($sheet, "B{$r}", 'currency', $nomVal);
-                $nomTotal2 += $nomVal;
+                if ($isDed) {
+                    $sheet->getStyle("A{$r}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFB91C1C'));
+                    $sheet->getStyle("B{$r}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFB91C1C'));
+                    $brNomDescto += $nomVal;
+                } else {
+                    $brNomPercep += $nomVal;
+                }
                 $i2++;
                 $r++;
             }
-            $sheet->setCellValue("A{$r}", 'Total Nómina y Capital Humano');
-            $sheet->setCellValue("B{$r}", $nomTotal2);
+            $brNomNetoDisplay = $brNomPercep - $brNomDescto;
+            $sheet->setCellValue("A{$r}", 'Neto nómina (percepciones − descuentos NOI)');
+            $sheet->setCellValue("B{$r}", $brNomNetoDisplay);
             $this->totalsRow($sheet, "A{$r}:C{$r}");
             $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
             $r += 2;
@@ -1307,26 +1362,28 @@ class RadiographyWorkbookBuilder
             // 7. Análisis de Tendencias
             $this->sectionHeader($sheet, "A{$r}:C{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES');
             $r++;
-            $brNomTotal  = $nomTotal2;
-            $brUtilidad  = $recB - $gopTotal - $brNomTotal;
-            $brFondeoB   = $calc ? (float)$calc['prestamos_fondea'] : $fondeoCalc;
-            $brExcedCalc = $calc ? (float)$calc['excedentes']       : $excedCalc;
+            $brGastosTotal    = $gopTotal + $brNomNeto;
+            $brUtilidad       = $recB - $colB - $brGastosTotal;
+            $brFondeoB        = $calc ? (float)$calc['prestamos_fondea'] : $fondeoCalc;
+            $brExcedCalc      = $calc ? (float)$calc['excedentes']       : $excedCalc;
+            $brInconsistencia = $brExcedCalc > $brUtilidad;
+            $brDiferencia     = $brInconsistencia ? 0.0 : ($brUtilidad - $brExcedCalc);
             foreach ([
-                ['Saldo inicial en caja',              0,           'currency'],
-                ['Ingresos Totales',                   $recB,       'currency'],
-                ['Otorgamientos',                      $colB,       'currency'],
-                ['Gastos Totales',                     $gopTotal,   'currency'],
-                ['EBITDA',                             $brUtilidad, 'currency'],
-                ['Saldo final en caja',                0,           'currency'],
-                ['Préstamos inter sucursales',         $brFondeoB,  'currency'],
-                ['Envío de utilidad a corporativo',    $brExcedCalc,'currency'],
-                ['Diferencia',                         0,           'currency'],
-                ['Mora de 0 a 30 días',                $mora0_30,   'currency'],
-                ['Mora de 31 a 60 días',               $mora31_60,  'currency'],
-                ['Mora de 61 a 90 días',               $mora61_90,  'currency'],
-                ['Mora de 91 a 120 días',              $mora91120,  'currency'],
-                ['Mora 120+ días',                     $mora120p,   'currency'],
-                ['Valor cartera',                      $carteraB,   'currency'],
+                ['Saldo inicial en caja',              0,              'currency'],
+                ['Ingresos Totales',                   $recB,          'currency'],
+                ['Otorgamientos',                      $colB,          'currency'],
+                ['Gastos Totales',                     $brGastosTotal, 'currency'],
+                ['EBITDA',                             $brUtilidad,    'currency'],
+                ['Saldo final en caja',                0,              'currency'],
+                ['Préstamos inter sucursales',         $brFondeoB,     'currency'],
+                ['Envío de utilidad a corporativo',    $brExcedCalc,   'currency'],
+                ['Diferencia / sobrante',              $brDiferencia,  'currency'],
+                ['Mora de 0 a 30 días',                $mora0_30,      'currency'],
+                ['Mora de 31 a 60 días',               $mora31_60,     'currency'],
+                ['Mora de 61 a 90 días',               $mora61_90,     'currency'],
+                ['Mora de 91 a 120 días',              $mora91120,     'currency'],
+                ['Mora 120+ días',                     $mora120p,      'currency'],
+                ['Valor cartera',                      $carteraB,      'currency'],
             ] as $i => [$label, $val, $fmt]) {
                 $sheet->setCellValue("A{$r}", $label);
                 $sheet->setCellValue("B{$r}", $val);
@@ -1334,15 +1391,35 @@ class RadiographyWorkbookBuilder
                 $this->applyFmt($sheet, "B{$r}", $fmt, $val);
                 $r++;
             }
+            if ($brInconsistencia) {
+                $this->writeInconsistenciaRow($sheet, $r, 'C');
+                $r++;
+            }
             $r++;
 
-            // 8. EBITDA
-            $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. EBITDA');
+            // 8. EBITDA = Ingresos − Otorgamientos − Gastos Totales
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. EBITDA / Utilidad disponible');
             $r++;
-            $sheet->setCellValue("A{$r}", 'Total');
-            $sheet->setCellValue("B{$r}", $brUtilidad);
-            $this->dataRow($sheet, "A{$r}:C{$r}", true);
-            $this->applyFmt($sheet, "B{$r}", 'currency', $brUtilidad);
+            foreach ([
+                ['Ingresos Totales',                   $recB,          'currency'],
+                ['Menos: Otorgamientos',               $colB,          'currency'],
+                ['Menos: Gastos Totales',              $brGastosTotal, 'currency'],
+                ['  Gastos operativos',                $gopTotal,      'currency'],
+                ['  Nómina neta',                      $brNomNeto,     'currency'],
+                ['= EBITDA / Utilidad disponible',     $brUtilidad,    'currency'],
+                ['Envío utilidad a corporativo',       $brExcedCalc,   'currency'],
+                ['Diferencia / sobrante',              $brDiferencia,  'currency'],
+            ] as $i => [$label, $val, $fmt]) {
+                $sheet->setCellValue("A{$r}", $label);
+                $sheet->setCellValue("B{$r}", $val);
+                $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
+                $this->applyFmt($sheet, "B{$r}", $fmt, $val);
+                $r++;
+            }
+            if ($brInconsistencia) {
+                $this->writeInconsistenciaRow($sheet, $r, 'C');
+                $r++;
+            }
             $r += 2;
 
             // 9. Saldo Total Acumulado Cuentas
@@ -1564,18 +1641,8 @@ class RadiographyWorkbookBuilder
             $r++;
         }
 
-        // SIN ASIGNAR link — always included (empleados/gastos sin sucursal)
-        $unassigned = $snap['branch_radiography']['unassigned'] ?? [];
-        $hasUnassigned = (($unassigned['nomina_total'] ?? 0) + ($unassigned['comisiones'] ?? 0)
-                        + ($unassigned['bonos'] ?? 0) + ($unassigned['gastos_operativos'] ?? 0)) > 0;
-        $sinAsignarSheet = $ss->getSheetByName('SIN ASIGNAR');
-        if ($sinAsignarSheet !== null) {
-            $nota = $hasUnassigned
-                ? 'PENDIENTE ASIGNACIÓN — montos incluidos en GLOBAL'
-                : 'Sin montos pendientes';
-            $writeLink($r, 'SIN ASIGNAR', 'SIN ASIGNAR', $nota, count($sucursales) % 2 !== 0);
-            $r++;
-        }
+        // Nota: hoja SIN ASIGNAR eliminada; gastos corporativos/no operativos
+        // se muestran en GASTOS como sección administrativa.
 
         $r++;
 
@@ -2846,7 +2913,8 @@ class RadiographyWorkbookBuilder
             $rec      = (float)($branch['recuperacion'] ?? 0);
             $gastos   = (float)($branch['gastos'] ?? 0);
             $nomina   = $payrollByBranch[strtoupper(trim($brName))] ?? 0.0;
-            $utilidad = $rec - $gastos - $nomina;
+            $coloc    = (float)($branch['colocacion'] ?? 0);
+            $utilidad = $rec - $coloc - ($gastos + $nomina);
 
             $categoria = match(true) {
                 $utilidad >= 300_000 => 'SENIOR',
@@ -2877,6 +2945,52 @@ class RadiographyWorkbookBuilder
         $this->setColWidths($sheet, ['A' => 28, 'B' => 20, 'C' => 16]);
         $sheet->setAutoFilter("A2:C2");
         $sheet->freezePane('A3');
+    }
+
+    // ── EBITDA helpers ────────────────────────────────────────────────────────
+
+    /**
+     * Escribe fila roja de INCONSISTENCIA EBITDA en la hoja activa.
+     * $lastCol: última columna del rango ('C' para 3 cols, 'D' para 4 cols).
+     */
+    private function writeInconsistenciaRow(\PhpOffice\PhpSpreadsheet\Worksheet\Worksheet $sheet, int $row, string $lastCol = 'C'): void
+    {
+        $range = "A{$row}:{$lastCol}{$row}";
+        $sheet->setCellValue("A{$row}", '⚠ INCONSISTENCIA: El envío a corporativo supera la utilidad disponible. Revisar ingresos, gastos, otorgamientos o envío corporativo.');
+        $sheet->mergeCells($range);
+        $sheet->getStyle($range)->applyFromArray([
+            'fill'      => ['fillType' => \PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFEF2F2']],
+            'font'      => ['bold' => true, 'color' => ['argb' => 'FFB91C1C'], 'size' => 9],
+            'borders'   => ['allBorders' => ['borderStyle' => \PhpOffice\PhpSpreadsheet\Style\Border::BORDER_THIN, 'color' => ['argb' => 'FFEF4444']]],
+            'alignment' => ['wrapText' => true, 'vertical' => \PhpOffice\PhpSpreadsheet\Style\Alignment::VERTICAL_CENTER],
+        ]);
+        $sheet->getRowDimension($row)->setRowHeight(30);
+    }
+
+    /**
+     * Computes nómina neta (true company cost) from BranchRadiographyCalculator data.
+     * percepciones (P001+P002+bonos+vacac+prima) + expense_detalle_items − NOI_deductions
+     */
+    private function calcNomNeto(array $calc): float
+    {
+        $percep = (float)($calc['nomina_total'] ?? 0)
+                + (float)($calc['comisiones']   ?? 0)
+                + (float)($calc['bonos']         ?? 0)
+                + (float)($calc['vacaciones']    ?? 0)
+                + (float)($calc['prima_vacacional'] ?? 0);
+
+        $detalle   = (array)($calc['nomina_detalle'] ?? []);
+        $expItems  = 0.0;
+        $desctos   = 0.0;
+        foreach ($detalle as $key => $val) {
+            if (in_array($key, self::NOI_DEDUCTION_LABELS, true)) {
+                $desctos += (float)$val;
+            } else {
+                $expItems += (float)$val;
+            }
+        }
+
+        return $percep + $expItems - $desctos;
     }
 
     // ── Style helpers ─────────────────────────────────────────────────────────
@@ -3125,7 +3239,10 @@ class RadiographyWorkbookBuilder
             if (strtoupper($lRow['branch']) === $brUp) { $loanRecibe += (float)$lRow['total']; }
         }
 
-        $utilidad = $recB - $gastosB - $nomTotal;
+        // EBITDA = Ingresos − Otorgamientos − (GastosOp + NóminaNet)
+        // $nomTotal from payBC already excludes DESCUENTO/DEDUCCION keywords
+        $gopTotalBW = $gopTotal > 0 ? $gopTotal : $gastosB;
+        $utilidad   = $recB - $colB - ($gopTotalBW + $nomTotal);
 
         // ── Sheet 1: RESUMEN ─────────────────────────────────────────────────
         $sheet = $spreadsheet->getActiveSheet()->setTitle('RESUMEN');
@@ -3253,19 +3370,20 @@ class RadiographyWorkbookBuilder
         }
         $r++;
 
+        $bwGastosTotal = $gopTotalBW + $nomTotal;
         $this->sectionHeader($sheet, "A{$r}:D{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES'); $r++;
         foreach ([
-            ['Ingresos Totales',            $recB,       'currency'],
-            ['Otorgamientos',               $colB,        'currency'],
-            ['Gastos Totales',              $gastosB,     'currency'],
-            ['EBITDA estimado',             $utilidad,    'currency'],
-            ['Préstamos intersucursales',   $loanFondea,  'currency'],
-            ['Mora 0-30 días',              $mora0_30,   'currency'],
-            ['Mora 31-60 días',             $mora31_60,  'currency'],
-            ['Mora 61-90 días',             $mora61_90,  'currency'],
-            ['Mora 91-120 días',            $mora91120,  'currency'],
-            ['Mora 120+ días',              $mora120p,   'currency'],
-            ['Valor cartera',               $carteraB,   'currency'],
+            ['Ingresos Totales',            $recB,          'currency'],
+            ['Otorgamientos',               $colB,          'currency'],
+            ['Gastos Totales',              $bwGastosTotal, 'currency'],
+            ['EBITDA',                      $utilidad,      'currency'],
+            ['Préstamos intersucursales',   $loanFondea,    'currency'],
+            ['Mora 0-30 días',              $mora0_30,      'currency'],
+            ['Mora 31-60 días',             $mora31_60,     'currency'],
+            ['Mora 61-90 días',             $mora61_90,     'currency'],
+            ['Mora 91-120 días',            $mora91120,     'currency'],
+            ['Mora 120+ días',              $mora120p,      'currency'],
+            ['Valor cartera',               $carteraB,      'currency'],
         ] as $i => [$label, $val, $fmt]) {
             $sheet->setCellValue("A{$r}", $label);
             $sheet->setCellValue("B{$r}", $val);
@@ -3276,10 +3394,20 @@ class RadiographyWorkbookBuilder
         $r++;
 
         $this->sectionHeader($sheet, "A{$r}:D{$r}", '8. EBITDA'); $r++;
-        $sheet->setCellValue("A{$r}", 'EBITDA estimado (Rec - Gastos - Nómina)');
-        $sheet->setCellValue("B{$r}", $utilidad);
-        $this->dataRow($sheet, "A{$r}:D{$r}", true);
-        $this->applyFmt($sheet, "B{$r}", 'currency', $utilidad);
+        foreach ([
+            ['Ingresos Totales',             $recB,          'currency'],
+            ['Menos: Otorgamientos',         $colB,          'currency'],
+            ['Menos: Gastos Totales',        $bwGastosTotal, 'currency'],
+            ['  Gastos operativos',          $gopTotalBW,    'currency'],
+            ['  Nómina neta',                $nomTotal,      'currency'],
+            ['= EBITDA del periodo',         $utilidad,      'currency'],
+        ] as $i => [$label, $val, $fmt]) {
+            $sheet->setCellValue("A{$r}", $label);
+            $sheet->setCellValue("B{$r}", $val);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $val);
+            $r++;
+        }
         $r += 2;
 
         $this->sectionHeader($sheet, "A{$r}:D{$r}", '9. SALDO TOTAL ACUMULADO CUENTAS'); $r++;
@@ -3505,7 +3633,8 @@ class RadiographyWorkbookBuilder
         $vencida   = (float)($empRow['vencida']       ?? 0);
         $mora      = $cartera > 0 ? round($vencida / $cartera * 100, 2) : (float)($empRow['mora'] ?? 0);
 
-        $utilidad  = $rec - $gastos - ($pagos + $bonos - $desctos);
+        // EBITDA = Ingresos − Otorgamientos − (Gastos + NóminaNet)
+        $utilidad  = $rec - $coloc - ($gastos + $pagos + $bonos - $desctos);
 
         $spreadsheet = new Spreadsheet();
         $spreadsheet->getProperties()
@@ -3574,7 +3703,7 @@ class RadiographyWorkbookBuilder
         $r += 2;
 
         $this->sectionHeader($sheet, "A{$r}:D{$r}", '4. EBITDA ESTIMADO'); $r++;
-        $sheet->setCellValue("A{$r}", 'Rec - (Pagos + Bonos - Desctos) - Gastos');
+        $sheet->setCellValue("A{$r}", 'Rec − Otorg − (Gastos + Pagos + Bonos − Desctos)');
         $sheet->setCellValue("B{$r}", $utilidad);
         $this->dataRow($sheet, "A{$r}:D{$r}", true);
         $this->applyFmt($sheet, "B{$r}", 'currency', $utilidad);
@@ -3916,8 +4045,9 @@ class RadiographyWorkbookBuilder
         ] as $i => [$label, $key]) {
             $writeComp($r, $label, $get($compareSnap,$key), $get($currentSnap,$key), 'currency', $i % 2 === 0);
         }
-        $utilPrev = $get($compareSnap,'recuperacion') - $get($compareSnap,'gastos') - ($get($compareSnap,'pagos') + $get($compareSnap,'bonos') - $get($compareSnap,'descuentos'));
-        $utilCurr = $get($currentSnap,'recuperacion') - $get($currentSnap,'gastos') - ($get($currentSnap,'pagos') + $get($currentSnap,'bonos') - $get($currentSnap,'descuentos'));
+        // EBITDA = Ingresos − Otorgamientos − (GastosOp + NóminaNet)
+        $utilPrev = $get($compareSnap,'recuperacion') - $get($compareSnap,'colocacion') - ($get($compareSnap,'gastos') + $get($compareSnap,'pagos') + $get($compareSnap,'bonos') - $get($compareSnap,'descuentos'));
+        $utilCurr = $get($currentSnap,'recuperacion') - $get($currentSnap,'colocacion') - ($get($currentSnap,'gastos') + $get($currentSnap,'pagos') + $get($currentSnap,'bonos') - $get($currentSnap,'descuentos'));
         $writeComp($r, 'EBITDA estimado', $utilPrev, $utilCurr, 'currency', true);
         $r++;
 
@@ -3944,5 +4074,356 @@ class RadiographyWorkbookBuilder
 
         $spreadsheet->setActiveSheetIndex(0);
         return $spreadsheet;
+    }
+
+    // ── NÓMINA POR GESTOR ────────────────────────────────────────────────────
+
+    private function buildNominaGestorSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet = $ss->createSheet()->setTitle('NÓMINA POR GESTOR');
+        $label = strtoupper($period->label);
+        $this->sheetTitle($sheet, 'A1:M1', 'NÓMINA POR GESTOR — ' . $label);
+        $sheet->setCellValue('A2', '← GLOBAL');
+        $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
+        $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
+
+        // All dataIds (weekly base periods + this period)
+        $allPeriods = \App\Models\Period::all();
+        $weeklyIds  = $period->resolveBaseWeeklyIds($allPeriods);
+        $dataIds    = array_values(array_unique(array_merge(empty($weeklyIds) ? [] : $weeklyIds, [$period->id])));
+
+        $amtExpr = "CASE
+            WHEN LOWER(COALESCE(n.concept_type,'')) LIKE '%comisi%' OR LOWER(COALESCE(n.concept,'')) LIKE '%comisi%' THEN n.amount
+            ELSE 0 END";
+
+        $rows = \Illuminate\Support\Facades\DB::table('fact_noi_movements as n')
+            ->join('employees as e', 'n.employee_id', '=', 'e.id')
+            ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period) {
+                $j->on('eba.employee_id', '=', 'n.employee_id')->where('eba.period_id', '=', $period->id);
+            })
+            ->leftJoin('branches as b', 'eba.branch_id', '=', 'b.id')
+            ->whereIn('n.period_id', $dataIds)
+            ->whereNotNull('n.employee_id')
+            ->selectRaw("
+                COALESCE(b.name, 'Sin sucursal') as sucursal,
+                e.full_name as empleado,
+                SUM(CASE WHEN LOWER(COALESCE(n.concept_type,''))='percepcion'
+                             AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%bono%'
+                             AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%comisi%'
+                             AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%vacaci%'
+                             AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%prima%'
+                         THEN n.amount ELSE 0 END) as sueldos,
+                SUM(CASE WHEN LOWER(COALESCE(n.concept,'')) LIKE '%comisi%' THEN n.amount ELSE 0 END) as comisiones,
+                SUM(CASE WHEN LOWER(COALESCE(n.concept_type,''))='percepcion'
+                              AND LOWER(COALESCE(n.concept,'')) LIKE '%bono%'
+                         THEN n.amount ELSE 0 END) as bonos,
+                SUM(CASE WHEN LOWER(COALESCE(n.concept,'')) LIKE '%vacaci%' THEN n.amount ELSE 0 END) as vacaciones,
+                SUM(CASE WHEN LOWER(COALESCE(n.concept,'')) LIKE '%prima%' THEN n.amount ELSE 0 END) as prima_vacacional,
+                SUM(CASE WHEN LOWER(COALESCE(n.concept_type,'')) IN ('deduccion','descuento') THEN n.amount ELSE 0 END) as descuentos,
+                COUNT(n.id) as registros
+            ")
+            ->groupBy('e.id', 'e.full_name', 'b.name')
+            ->orderBy('sucursal')
+            ->orderBy('e.full_name')
+            ->get();
+
+        $headers = [
+            'A' => 'SUCURSAL', 'B' => 'EMPLEADO / GESTOR',
+            'C' => 'SUELDOS', 'D' => 'COMISIONES', 'E' => 'BONOS',
+            'F' => 'VACACIONES', 'G' => 'PRIMA VACACIONAL',
+            'H' => 'DESCUENTOS', 'I' => 'TOTAL NÓMINA', 'J' => 'REGISTROS',
+        ];
+        $this->colHeaders($sheet, 3, $headers);
+        $r = 4;
+
+        $currBranch   = null;
+        $branchTotals = array_fill_keys(['sueldos','comisiones','bonos','vacaciones','prima_vacacional','descuentos','total'], 0.0);
+        $grandTotals  = $branchTotals;
+        $rowIdx       = 0;
+
+        $writeTotals = function (string $branch, array $t) use ($sheet, &$r) {
+            $this->sectionHeader($sheet, "A{$r}:J{$r}", 'SUBTOTAL — ' . strtoupper($branch));
+            $sheet->setCellValue("C{$r}", $t['sueldos']);
+            $sheet->setCellValue("D{$r}", $t['comisiones']);
+            $sheet->setCellValue("E{$r}", $t['bonos']);
+            $sheet->setCellValue("F{$r}", $t['vacaciones']);
+            $sheet->setCellValue("G{$r}", $t['prima_vacacional']);
+            $sheet->setCellValue("H{$r}", $t['descuentos']);
+            $sheet->setCellValue("I{$r}", $t['total']);
+            foreach (['C','D','E','F','G','H','I'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+            }
+            $r++;
+        };
+
+        foreach ($rows as $emp) {
+            if ($currBranch !== null && $currBranch !== $emp->sucursal) {
+                $writeTotals($currBranch, $branchTotals);
+                $branchTotals = array_fill_keys(array_keys($branchTotals), 0.0);
+                $r++;
+                $rowIdx = 0;
+            }
+            $currBranch = $emp->sucursal;
+
+            $total = (float)$emp->sueldos + (float)$emp->comisiones + (float)$emp->bonos
+                   + (float)$emp->vacaciones + (float)$emp->prima_vacacional - (float)$emp->descuentos;
+
+            $sheet->setCellValue("A{$r}", $emp->sucursal);
+            $sheet->setCellValue("B{$r}", $emp->empleado);
+            $sheet->setCellValue("C{$r}", (float)$emp->sueldos);
+            $sheet->setCellValue("D{$r}", (float)$emp->comisiones);
+            $sheet->setCellValue("E{$r}", (float)$emp->bonos);
+            $sheet->setCellValue("F{$r}", (float)$emp->vacaciones);
+            $sheet->setCellValue("G{$r}", (float)$emp->prima_vacacional);
+            $sheet->setCellValue("H{$r}", (float)$emp->descuentos);
+            $sheet->setCellValue("I{$r}", $total);
+            $sheet->setCellValue("J{$r}", (int)$emp->registros);
+            $this->dataRow($sheet, "A{$r}:J{$r}", $rowIdx % 2 === 0);
+            foreach (['C','D','E','F','G','H','I'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+            }
+
+            $branchTotals['sueldos']          += (float)$emp->sueldos;
+            $branchTotals['comisiones']        += (float)$emp->comisiones;
+            $branchTotals['bonos']             += (float)$emp->bonos;
+            $branchTotals['vacaciones']        += (float)$emp->vacaciones;
+            $branchTotals['prima_vacacional']  += (float)$emp->prima_vacacional;
+            $branchTotals['descuentos']        += (float)$emp->descuentos;
+            $branchTotals['total']             += $total;
+
+            $grandTotals['sueldos']          += (float)$emp->sueldos;
+            $grandTotals['comisiones']        += (float)$emp->comisiones;
+            $grandTotals['bonos']             += (float)$emp->bonos;
+            $grandTotals['vacaciones']        += (float)$emp->vacaciones;
+            $grandTotals['prima_vacacional']  += (float)$emp->prima_vacacional;
+            $grandTotals['descuentos']        += (float)$emp->descuentos;
+            $grandTotals['total']             += $total;
+
+            $rowIdx++;
+            $r++;
+        }
+
+        if ($currBranch !== null) {
+            $writeTotals($currBranch, $branchTotals);
+            $r++;
+        }
+
+        // Grand total
+        $this->totalsRow($sheet, "A{$r}:J{$r}");
+        $sheet->setCellValue("A{$r}", 'TOTAL GENERAL');
+        $sheet->setCellValue("C{$r}", $grandTotals['sueldos']);
+        $sheet->setCellValue("D{$r}", $grandTotals['comisiones']);
+        $sheet->setCellValue("E{$r}", $grandTotals['bonos']);
+        $sheet->setCellValue("F{$r}", $grandTotals['vacaciones']);
+        $sheet->setCellValue("G{$r}", $grandTotals['prima_vacacional']);
+        $sheet->setCellValue("H{$r}", $grandTotals['descuentos']);
+        $sheet->setCellValue("I{$r}", $grandTotals['total']);
+        foreach (['C','D','E','F','G','H','I'] as $col) {
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+        }
+        $sheet->getStyle("A{$r}")->getFont()->setBold(true);
+
+        $sheet->getColumnDimension('A')->setWidth(20);
+        $sheet->getColumnDimension('B')->setWidth(36);
+        foreach (['C','D','E','F','G','H','I'] as $col) {
+            $sheet->getColumnDimension($col)->setWidth(15);
+        }
+        $sheet->getColumnDimension('J')->setWidth(10);
+        $sheet->setAutoFilter('A3:J3');
+        $sheet->freezePane('C4');
+    }
+
+    // ── MORA DETALLE (por producto / gestor / sucursal+producto) ─────────────
+
+    private function buildMoraDetalleSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet = $ss->createSheet()->setTitle('MORA DETALLE');
+        $label = strtoupper($period->label);
+        $this->sheetTitle($sheet, 'A1:J1', 'MORA DETALLADA — ' . $label);
+        $sheet->setCellValue('A2', '← GLOBAL');
+        $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
+        $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
+
+        $bucketHeaders = ['Al corriente', 'Mora 1-30', 'Mora 31-60', 'Mora 61-90', 'Mora 91-120', 'Mora 120+'];
+        $bucketKeys    = ['al_corriente', 'mora_1_30', 'mora_31_60', 'mora_61_90', 'mora_91_120', 'mora_120_plus'];
+
+        $r = 4;
+
+        // ── Sección 1: Mora por producto ─────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:J{$r}", '1. MORA POR PRODUCTO');
+        $r++;
+        $this->colHeaders($sheet, $r, [
+            'A' => 'PRODUCTO', 'B' => 'CONTRATOS', 'C' => 'CARTERA',
+            'D' => 'VENCIDO', 'E' => 'MORA %',
+            'F' => 'AL CORRIENTE', 'G' => 'MORA 1-30', 'H' => 'MORA 31-60',
+            'I' => 'MORA 61-90', 'J' => 'MORA 91-120', 'K' => 'MORA 120+',
+        ]);
+        $r++;
+
+        $moraByProduct = $snap['sections']['mora_by_product'] ?? [];
+        $totCont = 0; $totCart = 0.0; $totVenc = 0.0;
+        $totBuckets = array_fill_keys($bucketKeys, 0.0);
+        foreach ($moraByProduct as $i => $row) {
+            $sheet->setCellValue("A{$r}", $row['product']);
+            $sheet->setCellValue("B{$r}", $row['contratos']);
+            $sheet->setCellValue("C{$r}", $row['cartera']);
+            $sheet->setCellValue("D{$r}", $row['vencida']);
+            $sheet->setCellValue("E{$r}", $row['mora_pct']);
+            foreach ($bucketKeys as $idx => $key) {
+                $col = chr(ord('F') + $idx);
+                $sheet->setCellValue("{$col}{$r}", $row[$key] ?? 0.0);
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+                $totBuckets[$key] += $row[$key] ?? 0.0;
+            }
+            $this->dataRow($sheet, "A{$r}:K{$r}", $i % 2 === 0);
+            foreach (['C','D'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+            }
+            $sheet->getStyle("E{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            $totCont += $row['contratos']; $totCart += $row['cartera']; $totVenc += $row['vencida'];
+            $r++;
+        }
+        $this->totalsRow($sheet, "A{$r}:K{$r}");
+        $sheet->setCellValue("A{$r}", 'TOTAL');
+        $sheet->setCellValue("B{$r}", $totCont);
+        $sheet->setCellValue("C{$r}", $totCart);
+        $sheet->setCellValue("D{$r}", $totVenc);
+        $sheet->setCellValue("E{$r}", $totCart > 0 ? round($totVenc / $totCart * 100, 2) : 0);
+        foreach ($bucketKeys as $idx => $key) {
+            $col = chr(ord('F') + $idx);
+            $sheet->setCellValue("{$col}{$r}", $totBuckets[$key]);
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+        }
+        foreach (['C','D'] as $col) {
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+        }
+        $sheet->getStyle("E{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+        $r += 3;
+
+        // ── Sección 2: Mora por gestor ────────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:J{$r}", '2. MORA POR GESTOR');
+        $r++;
+        $this->colHeaders($sheet, $r, [
+            'A' => 'SUCURSAL', 'B' => 'GESTOR', 'C' => 'CONTRATOS',
+            'D' => 'CARTERA', 'E' => 'VENCIDO', 'F' => 'MORA %',
+            'G' => 'AL CORRIENTE', 'H' => 'MORA 1-30', 'I' => 'MORA 31-60',
+            'J' => 'MORA 61-90', 'K' => 'MORA 91-120', 'L' => 'MORA 120+',
+        ]);
+        $r++;
+
+        $moraByGestor = $snap['sections']['mora_by_gestor'] ?? [];
+        $totCont2 = 0; $totCart2 = 0.0; $totVenc2 = 0.0;
+        $totBuckets2 = array_fill_keys($bucketKeys, 0.0);
+        foreach ($moraByGestor as $i => $row) {
+            $sheet->setCellValue("A{$r}", $row['sucursal'] ?? '—');
+            $sheet->setCellValue("B{$r}", $row['gestor']);
+            $sheet->setCellValue("C{$r}", $row['contratos']);
+            $sheet->setCellValue("D{$r}", $row['cartera']);
+            $sheet->setCellValue("E{$r}", $row['vencida']);
+            $sheet->setCellValue("F{$r}", $row['mora_pct']);
+            foreach ($bucketKeys as $idx => $key) {
+                $col = chr(ord('G') + $idx);
+                $sheet->setCellValue("{$col}{$r}", $row[$key] ?? 0.0);
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+                $totBuckets2[$key] += $row[$key] ?? 0.0;
+            }
+            $this->dataRow($sheet, "A{$r}:L{$r}", $i % 2 === 0);
+            foreach (['D','E'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+            }
+            $sheet->getStyle("F{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            $totCont2 += $row['contratos']; $totCart2 += $row['cartera']; $totVenc2 += $row['vencida'];
+            $r++;
+        }
+        $this->totalsRow($sheet, "A{$r}:L{$r}");
+        $sheet->setCellValue("A{$r}", 'TOTAL');
+        $sheet->setCellValue("C{$r}", $totCont2);
+        $sheet->setCellValue("D{$r}", $totCart2);
+        $sheet->setCellValue("E{$r}", $totVenc2);
+        $sheet->setCellValue("F{$r}", $totCart2 > 0 ? round($totVenc2 / $totCart2 * 100, 2) : 0);
+        foreach ($bucketKeys as $idx => $key) {
+            $col = chr(ord('G') + $idx);
+            $sheet->setCellValue("{$col}{$r}", $totBuckets2[$key]);
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+        }
+        foreach (['D','E'] as $col) {
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+        }
+        $sheet->getStyle("F{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+        $r += 3;
+
+        // ── Sección 3: Mora por sucursal + producto ───────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:L{$r}", '3. MORA POR SUCURSAL + PRODUCTO');
+        $r++;
+        $this->colHeaders($sheet, $r, [
+            'A' => 'SUCURSAL', 'B' => 'PRODUCTO', 'C' => 'CONTRATOS',
+            'D' => 'CARTERA', 'E' => 'VENCIDO', 'F' => 'MORA %',
+            'G' => 'AL CORRIENTE', 'H' => 'MORA 1-30', 'I' => 'MORA 31-60',
+            'J' => 'MORA 61-90', 'K' => 'MORA 91-120', 'L' => 'MORA 120+',
+        ]);
+        $r++;
+
+        $moraByBP = $snap['sections']['mora_by_branch_product'] ?? [];
+        $totCont3 = 0; $totCart3 = 0.0; $totVenc3 = 0.0;
+        $totBuckets3 = array_fill_keys($bucketKeys, 0.0);
+        foreach ($moraByBP as $i => $row) {
+            $sheet->setCellValue("A{$r}", $row['branch']);
+            $sheet->setCellValue("B{$r}", $row['product']);
+            $sheet->setCellValue("C{$r}", $row['contratos']);
+            $sheet->setCellValue("D{$r}", $row['cartera']);
+            $sheet->setCellValue("E{$r}", $row['vencida']);
+            $sheet->setCellValue("F{$r}", $row['mora_pct']);
+            foreach ($bucketKeys as $idx => $key) {
+                $col = chr(ord('G') + $idx);
+                $sheet->setCellValue("{$col}{$r}", $row[$key] ?? 0.0);
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+                $totBuckets3[$key] += $row[$key] ?? 0.0;
+            }
+            $this->dataRow($sheet, "A{$r}:L{$r}", $i % 2 === 0);
+            foreach (['D','E'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+            }
+            $sheet->getStyle("F{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            $totCont3 += $row['contratos']; $totCart3 += $row['cartera']; $totVenc3 += $row['vencida'];
+            $r++;
+        }
+        $this->totalsRow($sheet, "A{$r}:L{$r}");
+        $sheet->setCellValue("A{$r}", 'TOTAL');
+        $sheet->setCellValue("C{$r}", $totCont3);
+        $sheet->setCellValue("D{$r}", $totCart3);
+        $sheet->setCellValue("E{$r}", $totVenc3);
+        $sheet->setCellValue("F{$r}", $totCart3 > 0 ? round($totVenc3 / $totCart3 * 100, 2) : 0);
+        foreach ($bucketKeys as $idx => $key) {
+            $col = chr(ord('G') + $idx);
+            $sheet->setCellValue("{$col}{$r}", $totBuckets3[$key]);
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+        }
+        foreach (['D','E'] as $col) {
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+        }
+        $sheet->getStyle("F{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+
+        // Column widths
+        $sheet->getColumnDimension('A')->setWidth(20);
+        $sheet->getColumnDimension('B')->setWidth(28);
+        foreach (['C','D','E','F','G','H','I','J','K','L'] as $col) {
+            $sheet->getColumnDimension($col)->setWidth(14);
+        }
+        $sheet->freezePane('C4');
     }
 }

@@ -204,6 +204,8 @@ class BranchRadiographyCalculator
 
     private function accumulateColocacion(array $dataIds, array $branchIds, array $operativeMap, array &$summaries): void
     {
+        // Usa amount_monto53 (monto autorizado face-value) en lugar de amount (desembolso neto).
+        // En refinanciamientos el desembolso < monto autorizado, así que monto53 cuadra con la referencia.
         $rows = DB::table('fact_placements')
             ->whereIn('period_id', $dataIds)
             ->whereIn('branch_id', $branchIds)
@@ -211,7 +213,7 @@ class BranchRadiographyCalculator
                 $q->whereNull('product_name')
                   ->orWhereRaw("product_name NOT REGEXP ?", ['REESTRUCTURA|UNIFICACION|UNIFICACIONES|RECURSOS PROPIOS']);
             })
-            ->selectRaw('branch_id, SUM(amount) as colocacion, COUNT(*) as creditos')
+            ->selectRaw('branch_id, SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(raw_payload), \'$.amount_monto53\')) AS DECIMAL(14,2))) as colocacion, COUNT(*) as creditos')
             ->groupBy('branch_id')
             ->get();
 
@@ -513,12 +515,12 @@ class BranchRadiographyCalculator
             }
         }
 
-        // ── Deducciones NOI: Infonavit, Pensión, Servicio Moto, Préstamo Moto
+        // ── Deducciones NOI: al empleado — NO costo adicional de la empresa
         $dedRows = DB::table('fact_noi_movements as n')
             ->leftJoin('employee_branch_assignments as eba', 'n.employee_id', '=', 'eba.employee_id')
             ->whereIn('n.period_id', $dataIds)
             ->where('n.concept_type', 'deduccion')
-            ->whereRaw("n.concept REGEXP '^D(094|010|113|123|004)'")
+            ->whereRaw("n.concept REGEXP '^D(094|010|113|123|004|111)'")
             ->selectRaw("COALESCE(eba.branch_id, -1) AS assigned_branch_id, n.concept, SUM(n.amount) AS total")
             ->groupByRaw("COALESCE(eba.branch_id, -1), n.concept")
             ->get();
@@ -534,6 +536,7 @@ class BranchRadiographyCalculator
                 str_starts_with($concept, 'D113') => 'Descuento Servicios Moto',
                 str_starts_with($concept, 'D123') => 'Financiamiento de Motos (desc.)',
                 str_starts_with($concept, 'D004') => 'Préstamo Personal',
+                str_starts_with($concept, 'D111') => 'Subsidio para el Empleo APL',
                 default                           => 'Otros descuentos NOI',
             };
 

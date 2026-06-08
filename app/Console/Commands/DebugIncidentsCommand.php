@@ -185,9 +185,17 @@ class DebugIncidentsCommand extends Command
         $this->line('');
         $this->info('── Coincidencias — desglose de deduplicación (en vivo) ──────────────');
 
+        // Only check employees with NOI data in these periods (same logic as detectCoincidencias)
+        $noiEmployeeIds = DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereNotNull('employee_id')
+            ->distinct()
+            ->pluck('employee_id');
+
         $allEmployees = DB::table('employees')
             ->select('id', 'normalized_name')
             ->whereNotNull('normalized_name')
+            ->whereIn('id', $noiEmployeeIds)
             ->orderBy('id')
             ->get();
 
