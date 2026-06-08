@@ -85,12 +85,13 @@ class ReportAnalysisService
             $rowsSkipped = (int) ($result['rows_skipped'] ?? 0);
             $rowsWithErrors = (int) ($result['rows_with_errors'] ?? 0);
             $log = (string) ($result['log'] ?? 'Análisis finalizado.');
-            $successStatus = $rowsInserted > 0
-                ? ReportUploadStatus::Processed
-                : ReportUploadStatus::Pending;
+            // Always mark as Processed on success — even with 0 rows the file was analyzed.
+            // Returning Pending was wrong: it caused uploads to appear as "sin procesar" after
+            // a completed DB run and blocked can_generate_radiography indefinitely.
+            $successStatus = ReportUploadStatus::Processed;
             $successLog = $rowsInserted > 0
                 ? $log
-                : 'El archivo fue analizado, pero no generó registros útiles. Revisa Asignación sucursal, incidencias y el mapeo de columnas.';
+                : 'El archivo fue analizado sin errores pero no generó registros útiles (0 filas insertadas). Puede ser archivo complementario o con datos ya cubiertos por otra fuente.';
             $run->update([
                 'rows_read' => $rowsRead,
                 'rows_inserted' => $rowsInserted,

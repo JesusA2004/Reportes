@@ -26,8 +26,8 @@ class GastosLendusExcelImportService
         }
 
         @ini_set('memory_limit', '512M');
-        @ini_set('max_execution_time', '300');
-        @set_time_limit(300);
+        @ini_set('max_execution_time', '0');
+        @set_time_limit(0);
 
         $absolutePath = Storage::disk('public')->path($upload->stored_path);
 

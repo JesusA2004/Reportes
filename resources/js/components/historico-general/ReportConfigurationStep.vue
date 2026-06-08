@@ -303,7 +303,17 @@ const SCOPES = [
                         Guardar configuración y continuar
                     </button>
 
-                    <div v-if="!canSubmit && canGenerate" class="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                    <!-- Razón de bloqueo cuando la etapa 2 no está completa -->
+                    <div v-if="!canGenerate" class="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                        <p class="mb-1 font-semibold">No puedes continuar todavía:</p>
+                        <ul v-if="period?.blocking_reasons?.length" class="list-inside list-disc space-y-1">
+                            <li v-for="reason in period.blocking_reasons" :key="reason">{{ reason }}</li>
+                        </ul>
+                        <p v-else>Completa las etapas previas (Cargar registros) antes de configurar el reporte.</p>
+                    </div>
+
+                    <!-- Razón de bloqueo cuando canGenerate=true pero falta configuración -->
+                    <div v-else-if="!canSubmit" class="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
                         <p v-if="isBranchScope && !modelValue.branch_id">Selecciona una sucursal para continuar.</p>
                         <p v-else-if="isEmployeeScope && !modelValue.employee_id">Selecciona un empleado o gestor para continuar.</p>
                         <p v-else-if="isComparative && !modelValue.compare_period_id">Selecciona el periodo a comparar.</p>

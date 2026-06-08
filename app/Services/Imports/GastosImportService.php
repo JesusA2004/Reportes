@@ -24,8 +24,8 @@ class GastosImportService
         }
 
         @ini_set('memory_limit', '1024M');
-        @ini_set('max_execution_time', '600');
-        @set_time_limit(600);
+        @ini_set('max_execution_time', '0');
+        @set_time_limit(0);
 
         $absolutePath = Storage::disk('public')->path($upload->stored_path);
         $sheets = Excel::toArray([], $absolutePath);

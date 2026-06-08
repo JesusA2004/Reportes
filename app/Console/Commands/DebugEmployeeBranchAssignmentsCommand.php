@@ -133,6 +133,13 @@ class DebugEmployeeBranchAssignmentsCommand extends Command
             $this->info("── C. DIAGNÓSTICO SIN SUCURSAL ({$sinSuc} personas) ─────────────────");
             $this->line('');
 
+            // Normalized name helper (defined first — used by preloads below)
+            $normalize = fn (?string $s): string => mb_strtolower(
+                preg_replace('/\s+/', ' ', trim(
+                    iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', (string) $s)
+                ))
+            );
+
             // Preload Lendus directory
             $lendusDir = DB::table('lendus_employee_directory')
                 ->get(['id', 'codigo', 'nombre', 'normalized_name', 'inferred_branch_id', 'puesto'])
@@ -149,13 +156,14 @@ class DebugEmployeeBranchAssignmentsCommand extends Command
                 ->selectRaw('normalized_promoter_name, COUNT(*) as cnt, MAX(promoter_code) as promoter_code')
                 ->pluck('cnt', 'normalized_promoter_name');
 
-            // Preload fact_recoveries employee matches
-            $recoveriesByEmployee = DB::table('fact_recoveries')
+            // Preload fact_recoveries by normalized promoter_name (no employee_id column in this table)
+            $recoveriesByNormName = DB::table('fact_recoveries')
                 ->whereIn('period_id', $dataIds)
-                ->whereNotNull('employee_id')
-                ->groupBy('employee_id')
-                ->selectRaw('employee_id, COUNT(*) as cnt')
-                ->pluck('cnt', 'employee_id');
+                ->whereNotNull('promoter_name')
+                ->selectRaw('promoter_name, COUNT(*) as cnt')
+                ->groupBy('promoter_name')
+                ->get()
+                ->mapWithKeys(fn ($row) => [$normalize($row->promoter_name) => (int) $row->cnt]);
 
             // Preload fact_portfolios employee matches
             $portfoliosByName = DB::table('fact_portfolios')
@@ -164,13 +172,6 @@ class DebugEmployeeBranchAssignmentsCommand extends Command
                 ->groupBy('promoter_name')
                 ->selectRaw('promoter_name, COUNT(*) as cnt')
                 ->pluck('cnt', 'promoter_name');
-
-            // Normalized name helper
-            $normalize = fn (?string $s): string => mb_strtolower(
-                preg_replace('/\s+/', ' ', trim(
-                    iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', (string) $s)
-                ))
-            );
 
             $diagHeaders = ['Nombre', 'emp_id', 'Fuente', 'Cód Emp', 'En Lendus Dir', 'Cód Lendus', 'Suc Inferida', 'En Plac.', 'En Cobr.', 'En Saldos', 'Razón no asignó'];
             $diagRows    = [];
@@ -192,8 +193,8 @@ class DebugEmployeeBranchAssignmentsCommand extends Command
                 // fact_placements lookup
                 $enPlacements = $placementsByName->get($normName, 0);
 
-                // fact_recoveries lookup
-                $enCobranza = $recoveriesByEmployee->get($r->id, 0);
+                // fact_recoveries lookup by normalized promoter_name
+                $enCobranza = $recoveriesByNormName->get($normName, 0);
 
                 // fact_portfolios lookup
                 $enSaldos = $portfoliosByName->get($r->full_name, 0)
