@@ -236,7 +236,7 @@ class BranchRadiographyCalculator
             ->whereIn('period_id', $dataIds)
             ->whereIn('branch_id', $branchIds)
             ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) = 'PAGO'")
-            ->selectRaw('branch_id, SUM(capital) as capital, SUM(interest) as interest, SUM(tax) as tax, SUM(GREATEST(total_amount - capital - interest - tax, 0)) as charges, SUM(total_amount) as total')
+            ->selectRaw('branch_id, SUM(capital) as capital, SUM(interest) as interest, SUM(tax) as tax, SUM(charges_due) as charges, SUM(total_amount) as total')
             ->groupBy('branch_id')
             ->get();
 
@@ -266,7 +266,7 @@ class BranchRadiographyCalculator
                 SUM(capital)      AS capital,
                 SUM(interest)     AS interest,
                 SUM(tax)          AS tax,
-                SUM(GREATEST(total_amount - capital - interest - tax, 0)) AS charges,
+                SUM(charges_due)  AS charges,
                 SUM(total_amount) AS total
             ")
             ->groupByRaw("branch_id, LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3)")
@@ -283,6 +283,72 @@ class BranchRadiographyCalculator
             $summaries[$suc]['impuesto_recuperado'] += (float) $row->tax;
             $summaries[$suc]['charges']             += (float) $row->charges;
             $summaries[$suc]['recuperacion_total']  += (float) $row->total;
+        }
+
+        // Pass 3: COMISIÓN POR APERTURA (mapped branches)
+        $comAp = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('branch_id', $branchIds)
+            ->where('operation', 'COMISIÓN POR APERTURA')
+            ->selectRaw('branch_id, SUM(total_amount) as comision')
+            ->groupBy('branch_id')
+            ->get();
+
+        foreach ($comAp as $row) {
+            $suc = $operativeMap[(int) $row->branch_id] ?? null;
+            if (!$suc || !isset($summaries[$suc])) continue;
+            $summaries[$suc]['comision_apertura'] += (float) $row->comision;
+        }
+
+        // Pass 4: COMISIÓN POR APERTURA (fallback route branches)
+        $comApFb = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereNotIn('branch_id', $branchIds)
+            ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
+            ->where('operation', 'COMISIÓN POR APERTURA')
+            ->selectRaw("branch_id, LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3) AS prefix3, SUM(total_amount) AS comision")
+            ->groupByRaw("branch_id, LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3)")
+            ->get();
+
+        foreach ($comApFb as $row) {
+            $prefix3 = strtoupper(trim((string) $row->prefix3));
+            $suc     = $this->resolver->resolveBranchNameFromCode($prefix3);
+            if (!$suc || !$this->resolver->isSheetBranch($suc) || !isset($summaries[$suc])) continue;
+            $summaries[$suc]['comision_apertura'] += (float) $row->comision;
+        }
+
+        // Pass 5: ACUERDO CON CLIENTE — charges_due maps to cargos_inicio (mapped branches)
+        $acuerdos = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('branch_id', $branchIds)
+            ->where('operation', 'ACUERDO CON CLIENTE')
+            ->where('charges_due', '>', 0)
+            ->selectRaw('branch_id, SUM(charges_due) as cargos')
+            ->groupBy('branch_id')
+            ->get();
+
+        foreach ($acuerdos as $row) {
+            $suc = $operativeMap[(int) $row->branch_id] ?? null;
+            if (!$suc || !isset($summaries[$suc])) continue;
+            $summaries[$suc]['cargos_inicio'] += (float) $row->cargos;
+        }
+
+        // Pass 6: ACUERDO CON CLIENTE (fallback route branches)
+        $acuerdosFb = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereNotIn('branch_id', $branchIds)
+            ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
+            ->where('operation', 'ACUERDO CON CLIENTE')
+            ->where('charges_due', '>', 0)
+            ->selectRaw("branch_id, LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3) AS prefix3, SUM(charges_due) AS cargos")
+            ->groupByRaw("branch_id, LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3)")
+            ->get();
+
+        foreach ($acuerdosFb as $row) {
+            $prefix3 = strtoupper(trim((string) $row->prefix3));
+            $suc     = $this->resolver->resolveBranchNameFromCode($prefix3);
+            if (!$suc || !$this->resolver->isSheetBranch($suc) || !isset($summaries[$suc])) continue;
+            $summaries[$suc]['cargos_inicio'] += (float) $row->cargos;
         }
     }
 

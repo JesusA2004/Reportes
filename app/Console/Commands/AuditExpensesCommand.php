@@ -25,7 +25,8 @@ class AuditExpensesCommand extends Command
                                 {--check-duplicates : highlight likely duplicate records}
                                 {--compare-reference= : referencia de gastos totales (ej. 2223315.50) — audita si nómina está incluida}
                                 {--by-concept : desglose per-concepto con análisis de referencia (requiere --compare-reference)}
-                                {--detail : show full source deduplication analysis}';
+                                {--detail : show full source deduplication analysis}
+                                {--exact-table : tabla exacta Concepto/Fuente/Monto/EntraRef vs $2,223,315.50 con escenarios}';
     protected $description = 'Auditoría de gastos: duplicados, sin-sucursal, normalización de conceptos, EBITDA';
 
     // Categories NOT included in EBITDA
@@ -117,6 +118,11 @@ class AuditExpensesCommand extends Command
         // ── Comparación vs referencia ─────────────────────────────────────────
         if ($this->option('compare-reference') !== null) {
             $this->showCompareReference($dataIds, (float) $this->option('compare-reference'));
+        }
+
+        // ── Tabla exacta vs referencia $2,223,315.50 ──────────────────────────
+        if ($this->option('exact-table')) {
+            $this->showExactTable($dataIds);
         }
 
         return 0;
@@ -869,5 +875,219 @@ class AuditExpensesCommand extends Command
         $this->line(str_pad('TOTAL categoría Envío corporativo (actual)', 70) . '$' . number_format($excTotal, 2));
         $this->line(str_pad('REFERENCIA abril 2026',                        70) . '$' . number_format(3_076_800.00, 2));
         $this->line(str_pad('Diferencia',                                   70) . '$' . number_format($excTotal - 3_076_800.00, 2));
+    }
+
+    private function showExactTable(array $dataIds): void
+    {
+        $ref = 2_223_315.50;
+
+        $this->line('');
+        $this->info('════════════════════════════════════════════════════════════════════════');
+        $this->info('  TABLA EXACTA GASTOS — Concepto | Fuente | Monto | Entra en referencia');
+        $this->info('  Referencia: $' . number_format($ref, 2));
+        $this->info('  Hipotesis: gastos_lendus operativos + nomina lendus - deducciones lendus +/- ajuste');
+        $this->info('════════════════════════════════════════════════════════════════════════');
+
+        $lendusId = DB::table('data_sources')->where('code', 'gastos_lendus')->value('id');
+        $erpId    = DB::table('data_sources')->where('code', 'gastos_erp')->value('id');
+
+        $excCats    = ['Nomina y Capital Humano', 'Envio de utilidad a corporativo', 'Prestamos Intersucursales'];
+        $excCatsDb  = ['Nómina y Capital Humano', 'Envío de utilidad a corporativo', 'Préstamos Intersucursales'];
+        $lendusCats = ['Gastos Operativos', 'Polizas', 'Renta Oficina', 'Recargas Telefonicas', 'Gasolina', 'Agua'];
+        $lendusCatsDb = ['Gastos Operativos', 'Pólizas', 'Renta Oficina', 'Recargas Telefónicas', 'Gasolina', 'Agua'];
+
+        $sumSrc = function (int $srcId, ?array $catInclude = null, ?array $catExclude = null, ?string $conceptLike = null) use ($dataIds): float {
+            $q = DB::table('fact_expenses as fe')
+                ->join('report_uploads as ru', 'fe.report_upload_id', '=', 'ru.id')
+                ->whereIn('fe.period_id', $dataIds)
+                ->where('ru.data_source_id', $srcId);
+            if ($catInclude !== null) $q->whereIn('fe.category', $catInclude);
+            if ($catExclude !== null) $q->whereNotIn('fe.category', $catExclude);
+            if ($conceptLike !== null) $q->whereRaw("UPPER(COALESCE(fe.concept,'')) LIKE ?", ["%{$conceptLike}%"]);
+            return (float) $q->selectRaw('SUM(COALESCE(NULLIF(fe.paid_amount,0),fe.amount)) as t')->value('t');
+        };
+
+        // ── Subtotales clave ──────────────────────────────────────────────────
+        $lendusOp    = $sumSrc($lendusId, null, $excCatsDb);
+        $lendusNom   = $sumSrc($lendusId, ['Nómina y Capital Humano']);
+        $lendusEnvio = $sumSrc($lendusId, ['Envío de utilidad a corporativo']);
+        $lendusFond  = $sumSrc($lendusId, ['Préstamos Intersucursales']);
+        $lendusAll   = $sumSrc($lendusId);
+        $erpAdd      = $sumSrc($erpId, null, array_merge($excCatsDb, $lendusCatsDb));
+        $erpNom      = $sumSrc($erpId,  ['Nómina y Capital Humano']);
+        $erpAll      = $sumSrc($erpId);
+
+        // Sub-conceptos dentro de nómina (gastos_lendus)
+        $imss      = $sumSrc($lendusId, null, null, 'IMSS');
+        $gasolina  = $sumSrc($lendusId, null, null, 'GASOLIN');
+        $finiquito = $sumSrc($lendusId, null, null, 'FINIQUITO');
+        $gastMed   = $sumSrc($lendusId, null, null, 'MEDIC');
+        $nomOtros  = max(0.0, $lendusNom - $imss - $gasolina - $finiquito - $gastMed);
+
+        // Deduccion "descuentos" en gastos_lendus (cat nómina con concepto descuento)
+        $descLendus = $sumSrc($lendusId, null, null, 'DESCUENTO');
+
+        // ── Tabla exacta ──────────────────────────────────────────────────────
+        $rows = [
+            // [Concepto, Fuente, Monto, Entra en referencia, Comentario]
+            ['Gastos Lendus operativos',      'gastos_lendus', $lendusOp,    'SI',  'excl. Nomina/Envio/Prestamos — en EBITDA'],
+            ['Nomina y Capital Humano (tot)', 'gastos_lendus', $lendusNom,   'SI*', 'total cat. Nomina en lendus'],
+            ['  IMSS',                         'gastos_lendus', $imss,        'SI*', 'sub-concepto IMSS dentro de Nomina'],
+            ['  Gasolina',                     'gastos_lendus', $gasolina,    'SI*', 'sub-concepto Gasolina dentro de Nomina'],
+            ['  Finiquito',                    'gastos_lendus', $finiquito,   'SI*', 'sub-concepto Finiquito'],
+            ['  Gastos medicos',               'gastos_lendus', $gastMed,     'SI*', 'sub-concepto con MEDIC'],
+            ['  Otros nomina (resto)',         'gastos_lendus', $nomOtros,    'SI*', 'sueldos+otros sin desglosar'],
+            ['Deducciones lendus (desc.)',     'gastos_lendus', $descLendus,  '?',   'concepto DESCUENTO en lendus — puede ser negativo'],
+            ['ERP adicional (no dup)',         'gastos_erp',    $erpAdd,      'SI*', 'cats no presentes en lendus, excl. nomina/envio'],
+            ['Nomina ERP (cat. Nomina)',       'gastos_erp',    $erpNom,      'NO',  'ya incluida en NOI — no duplicar'],
+            ['Envio corporativo (lendus)',     'gastos_lendus', $lendusEnvio, 'NO',  'distribucion de utilidad — excluida siempre'],
+            ['Prestamos intersuc. (lendus)',   'gastos_lendus', $lendusFond,  'NO',  'fondeo intersucursal — excluido de EBITDA'],
+        ];
+
+        $this->line('');
+        $this->line(
+            str_pad('Concepto', 34) .
+            str_pad('Fuente', 16) .
+            str_pad('Monto', 18) .
+            str_pad('Entra en ref', 14) .
+            'Comentario'
+        );
+        $this->line(str_repeat('-', 118));
+
+        foreach ($rows as [$concepto, $fuente, $monto, $entra, $comment]) {
+            $line = str_pad(mb_substr($concepto, 0, 32), 34) .
+                    str_pad($fuente, 16) .
+                    str_pad('$' . number_format($monto, 2), 18) .
+                    str_pad($entra, 14) .
+                    $comment;
+            if ($entra === 'SI')      $this->info($line);
+            elseif ($entra === 'NO')  $this->line($line);
+            else                      $this->warn($line);
+        }
+
+        $this->line(str_repeat('-', 118));
+
+        // ── Totales resumen ───────────────────────────────────────────────────
+        $this->line('');
+        $this->info('════ SUBTOTALES CLAVE ════');
+        $this->line(str_pad('gastos_lendus TOTAL',             46) . '$' . number_format($lendusAll, 2));
+        $this->line(str_pad('  - operativos (excl nom/envio/fond)', 46) . '$' . number_format($lendusOp, 2));
+        $this->line(str_pad('  - Nomina y Cap Humano',         46) . '$' . number_format($lendusNom, 2));
+        $this->line(str_pad('  - Envio corporativo',           46) . '$' . number_format($lendusEnvio, 2));
+        $this->line(str_pad('  - Prestamos intersuc.',         46) . '$' . number_format($lendusFond, 2));
+        $this->line(str_pad('gastos_erp adicional (no dup)',   46) . '$' . number_format($erpAdd, 2));
+        $this->line(str_pad('gastos_erp Nomina (excluir)',     46) . '$' . number_format($erpNom, 2));
+
+        // ── Escenarios hacia referencia ───────────────────────────────────────
+        $this->line('');
+        $this->info('════ ESCENARIOS vs REFERENCIA $' . number_format($ref, 2) . ' ════');
+
+        $gastosOpSolo     = $lendusOp + $erpAdd;
+        $gastosConNom     = $lendusOp + $lendusNom + $erpAdd;
+        $gastosConNomSinIMSS = $lendusOp + $lendusNom - $imss + $erpAdd;
+        $gastosConNomMasAj   = $gastosConNom + 3_055.00;
+        $soloLendusOpNom  = $lendusOp + $lendusNom;
+        $soloLendusOp     = $lendusOp;
+
+        $scenG = [
+            ['Lendus op + ERP adicional (sin nomina)',          $gastosOpSolo],
+            ['Lendus op + Nomina lendus + ERP adicional',       $gastosConNom],
+            ['Lendus op + Nomina lendus - IMSS + ERP',          $gastosConNomSinIMSS],
+            ['Lendus op + Nomina lendus + ERP + ajuste $3,055', $gastosConNomMasAj],
+            ['Solo Lendus (operativos + nomina)',                $soloLendusOpNom],
+            ['Solo Lendus operativos',                          $soloLendusOp],
+        ];
+
+        $this->line(str_pad('Escenario', 54) . str_pad('Monto', 20) . str_pad('Diff vs Ref', 16) . 'Match');
+        $this->line(str_repeat('-', 100));
+        foreach ($scenG as [$lbl, $val]) {
+            $diff  = $val - $ref;
+            $sign  = $diff >= 0 ? '+' : '';
+            $match = abs($diff) < 100 ? 'EXACTO' : (abs($diff) < 5_000 ? 'CERCANO' : '');
+            $line  = str_pad(mb_substr($lbl, 0, 52), 54) .
+                     str_pad('$' . number_format($val, 2), 20) .
+                     str_pad($sign . '$' . number_format($diff, 2), 16) .
+                     $match;
+            if ($match === 'EXACTO')    $this->info($line);
+            elseif ($match === 'CERCANO') $this->warn($line);
+            else                        $this->line($line);
+        }
+        $this->line(str_repeat('-', 100));
+        $this->line(str_pad('REFERENCIA', 54) . '$' . number_format($ref, 2));
+
+        // ── Ajuste residual ───────────────────────────────────────────────────
+        $this->line('');
+        $diffBest = $ref - $gastosConNom;
+        $sign2 = $diffBest >= 0 ? '+' : '';
+        $this->info('  Ajuste residual (hipotesis Lendus op + Nomina + ERP): ' . $sign2 . '$' . number_format($diffBest, 2));
+        if (abs($diffBest) < 10_000) {
+            $this->warn('  -> Diferencia pequena. Revisar si hay deduccion o ajuste no capturado en BD.');
+        }
+        if (abs(abs($diffBest) - 3_055.00) < 100) {
+            $this->info('  -> El ajuste de $3,055 explicaria la diferencia exactamente.');
+        }
+
+        // ── Sub-conceptos detallados dentro de nómina lendus ─────────────────
+        $this->line('');
+        $this->info('════ DETALLE CONCEPTOS EN "Nomina y Capital Humano" (gastos_lendus) ════');
+
+        $nomConceptRows = DB::table('fact_expenses as fe')
+            ->join('report_uploads as ru', 'fe.report_upload_id', '=', 'ru.id')
+            ->whereIn('fe.period_id', $dataIds)
+            ->where('ru.data_source_id', $lendusId)
+            ->where('fe.category', 'Nómina y Capital Humano')
+            ->select(
+                'fe.concept',
+                DB::raw('COUNT(*) as cnt'),
+                DB::raw('SUM(COALESCE(NULLIF(fe.paid_amount,0),fe.amount)) as total')
+            )
+            ->groupBy('fe.concept')
+            ->orderByDesc('total')
+            ->get();
+
+        $this->line(str_pad('Concepto', 40) . str_pad('Regs', 8) . 'Monto');
+        $this->line(str_repeat('-', 70));
+        $nomConceptTotal = 0.0;
+        foreach ($nomConceptRows as $r) {
+            $this->line(
+                str_pad(mb_substr($r->concept ?? 'NULL', 0, 38), 40) .
+                str_pad(number_format($r->cnt), 8) .
+                '$' . number_format((float)$r->total, 2)
+            );
+            $nomConceptTotal += (float)$r->total;
+        }
+        $this->line(str_repeat('-', 70));
+        $this->info(str_pad('TOTAL Nomina lendus', 40) . str_pad('', 8) . '$' . number_format($nomConceptTotal, 2));
+
+        // ── Sub-conceptos en gastos_lendus operativos ─────────────────────────
+        $this->line('');
+        $this->info('════ DETALLE CONCEPTOS EN GASTOS OPERATIVOS (gastos_lendus, top 20) ════');
+
+        $opConceptRows = DB::table('fact_expenses as fe')
+            ->join('report_uploads as ru', 'fe.report_upload_id', '=', 'ru.id')
+            ->whereIn('fe.period_id', $dataIds)
+            ->where('ru.data_source_id', $lendusId)
+            ->whereNotIn('fe.category', $excCatsDb)
+            ->select(
+                'fe.concept',
+                'fe.category',
+                DB::raw('COUNT(*) as cnt'),
+                DB::raw('SUM(COALESCE(NULLIF(fe.paid_amount,0),fe.amount)) as total')
+            )
+            ->groupBy('fe.concept', 'fe.category')
+            ->orderByDesc('total')
+            ->limit(20)
+            ->get();
+
+        $this->line(str_pad('Concepto', 35) . str_pad('Categoria', 28) . str_pad('Regs', 8) . 'Monto');
+        $this->line(str_repeat('-', 85));
+        foreach ($opConceptRows as $r) {
+            $this->line(
+                str_pad(mb_substr($r->concept ?? 'NULL', 0, 33), 35) .
+                str_pad(mb_substr($r->category ?? 'NULL', 0, 26), 28) .
+                str_pad(number_format($r->cnt), 8) .
+                '$' . number_format((float)$r->total, 2)
+            );
+        }
     }
 }

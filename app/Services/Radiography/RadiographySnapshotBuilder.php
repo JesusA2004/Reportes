@@ -242,6 +242,7 @@ class RadiographySnapshotBuilder
                 'start_date' => optional($period->start_date)->format('d/m/Y'),
                 'end_date'   => optional($period->end_date)->format('d/m/Y'),
             ],
+            'saldo_inicial_caja' => (float) ($period->saldo_inicial_caja ?? 0),
             'generated_at' => now('America/Mexico_City')->format('d/m/Y H:i'),
             'version'      => $summary->version ?? 1,
             'branch_radiography' => [

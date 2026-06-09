@@ -19,10 +19,10 @@ class AuditUtilidadCommand extends Command
                                 {--detail : muestra desglose completo por sucursal y componente}';
     protected $description = 'Auditoría completa de Utilidad/EBITDA usando BranchRadiographyCalculator (12 sucursales correctas)';
 
-    private const NOI_DEDUCTION_LABELS = [
-        'Descuentos Infonavit', 'Pensión Alimenticia', 'Descuento Servicios Moto',
-        'Financiamiento de Motos (desc.)', 'Préstamo Personal',
-        'Subsidio para el Empleo APL', 'Otros descuentos NOI', 'Descuento de uniformes',
+    // Solo estos dos se excluyen del total de nómina (se muestran aparte)
+    private const NOMINA_EXCLUDED_LABELS = [
+        'Préstamo Personal',
+        'Subsidio para el Empleo APL',
     ];
 
     public function handle(): int
@@ -41,8 +41,8 @@ class AuditUtilidadCommand extends Command
 
         $this->info('════════════════════════════════════════════════════════════════');
         $this->info("  AUDITORÍA UTILIDAD / EBITDA — {$period->label} (ID {$period->id})");
-        $this->info('  Fórmula: Ingresos − Otorgamientos − Gastos Totales = EBITDA');
-        $this->info('           EBITDA − Envío corporativo = Diferencia');
+        $this->info('  Fórmula: Saldo inicial + Ingresos − Otorgamientos − Gastos Totales = Utilidad');
+        $this->info('           Utilidad − Envío corporativo = Diferencia');
         $this->info('  Fuente: BranchRadiographyCalculator (12 sucursales operativas)');
         $this->info('════════════════════════════════════════════════════════════════');
 
@@ -53,9 +53,15 @@ class AuditUtilidadCommand extends Command
 
         // ── A. INGRESOS ────────────────────────────────────────────────────────
         $this->line('');
-        $this->info('════ A. INGRESOS TOTALES (PAGO, 12 sucursales) ════');
+        $this->info('════ A. INGRESOS TOTALES (6 componentes, 12 sucursales) ════');
 
-        $ingresos = (float) $global['recuperacion_total'];
+        $ingrCapital  = (float) $global['capital_recuperado'];
+        $ingrInteres  = (float) $global['interes_recuperado'];
+        $ingrImpuesto = (float) $global['impuesto_recuperado'];
+        $ingrCharges  = (float) $global['charges'];
+        $ingrCargos   = (float) $global['cargos_inicio'];
+        $ingrComAp    = (float) $global['comision_apertura'];
+        $ingresos     = $ingrCapital + $ingrInteres + $ingrImpuesto + $ingrCharges + $ingrCargos + $ingrComAp;
 
         // Count Pass-1 branches and Pass-2 orphans
         $resolver = app(\App\Services\BranchResolverService::class);
@@ -76,15 +82,23 @@ class AuditUtilidadCommand extends Command
             ->selectRaw('COUNT(DISTINCT branch_id) as branches, SUM(total_amount) as total')
             ->first();
 
-        $this->line(str_pad('Fuente', 38) . str_pad('Registros', 12) . 'Monto');
-        $this->line(str_repeat('─', 65));
-        $pagoRegs = DB::table('fact_recoveries')
-            ->whereIn('period_id', $dataIds)
-            ->whereIn('branch_id', $operativeIds)
-            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) = 'PAGO'")
-            ->count();
-        $this->line(str_pad('fact_recoveries (PAGO, Pass 1, 12 suc)', 38) .
-                    str_pad(number_format($pagoRegs), 12) . '$' . number_format($ingresos, 2));
+        $this->line(str_pad('Componente', 38) . str_pad('Sistema', 18) . 'Referencia');
+        $this->line(str_repeat('─', 80));
+        $rows6 = [
+            ['Capital recuperado',    $ingrCapital,  12_883_858.49],
+            ['Intereses recuperados', $ingrInteres,   4_545_211.24],
+            ['Impuestos',             $ingrImpuesto,    727_231.40],
+            ['Multas (charges_due)',  $ingrCharges,     149_384.52],
+            ['Cargos al inicio',      $ingrCargos,       18_063.90],
+            ['Comisión por apertura', $ingrComAp,         8_400.00],
+        ];
+        foreach ($rows6 as [$lbl, $sys, $ref]) {
+            $dif = $sys - $ref;
+            $status = abs($dif) < 1 ? '✓' : ($dif > 0 ? '+' . number_format($dif, 2) : number_format($dif, 2));
+            $this->line(str_pad($lbl, 38) . str_pad('$' . number_format($sys, 2), 18) . str_pad('$' . number_format($ref, 2), 18) . $status);
+        }
+        $this->line(str_repeat('─', 80));
+        $this->line(str_pad('INGRESOS TOTALES', 38) . str_pad('$' . number_format($ingresos, 2), 18) . '$18,332,149.55');
 
         $orphanBranches = (int) $orphanTot->branches;
         $orphanAmount   = (float) $orphanTot->total;
@@ -92,8 +106,6 @@ class AuditUtilidadCommand extends Command
             $this->warn('  ⚠ Sucursales huérfanas (Pass 2 = $0): ' . $orphanBranches .
                         ' suc, $' . number_format($orphanAmount, 2) . ' NO incluidos (accredited_name=NULL)');
         }
-        $this->line('');
-        $this->line(str_pad('INGRESOS USADOS EN EBITDA', 38) . str_pad('', 12) . '$' . number_format($ingresos, 2));
 
         // ── B. OTORGAMIENTOS ──────────────────────────────────────────────────
         $this->line('');
@@ -144,41 +156,42 @@ class AuditUtilidadCommand extends Command
 
         // ── D. NÓMINA ─────────────────────────────────────────────────────────
         $this->line('');
-        $this->info('════ D. NÓMINA NETA (percepciones − descuentos NOI) ════');
+        $this->info('════ D. NÓMINA NETA (percepciones + todos los ítems, excl. Préstamo Pers. y Subsidio APL) ════');
 
         $percep = $global['nomina_total'] + $global['comisiones'] + $global['bonos']
                 + $global['vacaciones'] + $global['prima_vacacional'];
 
-        $nomDetalle = $global['nomina_detalle'] ?? [];
-        $nomDed     = 0.0;
-        $nomExp     = 0.0;
+        $nomDetalle  = $global['nomina_detalle'] ?? [];
+        $nomExcluido = 0.0;
+        $nomExtra    = 0.0;
         foreach ($nomDetalle as $lbl => $amt) {
-            if (in_array($lbl, self::NOI_DEDUCTION_LABELS, true)) {
-                $nomDed += $amt;
+            if (in_array($lbl, self::NOMINA_EXCLUDED_LABELS, true)) {
+                $nomExcluido += $amt;
             } else {
-                $nomExp += $amt;
+                $nomExtra += $amt;
             }
         }
-        $nomNeto = $percep + $nomExp - $nomDed;
+        $nomNeto = $percep + $nomExtra;
 
-        $this->line(str_pad('Percepciones NOI (P001/P002/P009/P010/Bonos)', 48) . '$' . number_format($percep, 2));
-        if ($nomExp > 0) {
-            $this->line(str_pad('+ Gastos extra (IMSS, Gasolina, Finiquito…)', 48) . '$' . number_format($nomExp, 2));
+        $this->line(str_pad('Percepciones NOI (Nómina, Comisiones, Bonos…)', 48) . '$' . number_format($percep, 2));
+        if ($nomExtra > 0) {
+            $this->line(str_pad('+ Ítems detalle (IMSS, Infonavit, Gasolina…)', 48) . '$' . number_format($nomExtra, 2));
         }
-        if ($nomDed > 0) {
-            $this->line(str_pad('− Descuentos NOI (Infonavit, Préstamo Pers, etc.)', 48) . '−$' . number_format($nomDed, 2));
+        if ($nomExcluido > 0) {
+            $this->line(str_pad('  (excluidos: Préstamo Pers + Subsidio APL)', 48) . '$' . number_format($nomExcluido, 2));
         }
         $this->line(str_repeat('─', 65));
         $this->line(str_pad('NÓMINA NETA', 48) . '$' . number_format($nomNeto, 2));
+        $this->line(str_pad('  Referencia:', 48) . '$2,501,589.43');
 
         if ($this->option('detail')) {
             $this->line('');
             $this->info('  Detalle nómina_detalle:');
             arsort($nomDetalle);
             foreach ($nomDetalle as $lbl => $amt) {
-                $type = in_array($lbl, self::NOI_DEDUCTION_LABELS, true) ? '(NOI deduction)' : '(gasto empresa)';
-                $prefix = in_array($lbl, self::NOI_DEDUCTION_LABELS, true) ? '  −' : '  +';
-                $this->line($prefix . str_pad(substr($lbl, 0, 42), 44) . '$' . number_format($amt, 2) . ' ' . $type);
+                $excl   = in_array($lbl, self::NOMINA_EXCLUDED_LABELS, true);
+                $prefix = $excl ? '  (excl)' : '  +';
+                $this->line($prefix . ' ' . str_pad(substr($lbl, 0, 42), 44) . '$' . number_format($amt, 2));
             }
         }
 
@@ -192,20 +205,23 @@ class AuditUtilidadCommand extends Command
         $this->line(str_repeat('─', 65));
         $this->line(str_pad('GASTOS TOTALES', 48) . '$' . number_format($gastosTotal, 2));
 
-        // ── F. EBITDA ─────────────────────────────────────────────────────────
+        // ── F. UTILIDAD ────────────────────────────────────────────────────────
         $this->line('');
-        $this->info('════ F. UTILIDAD / EBITDA DISPONIBLE ════');
+        $this->info('════ F. UTILIDAD DISPONIBLE ════');
 
-        $utilidad = $ingresos - $otorgamientos - $gastosTotal;
-        $this->line(str_pad('Ingresos (PAGO, 12 suc)', 48) . '$' . number_format($ingresos, 2));
+        $saldoInicial = (float) ($period->saldo_inicial_caja ?? 0);
+        $utilidad     = $saldoInicial + $ingresos - $otorgamientos - $gastosTotal;
+
+        $this->line(str_pad('Saldo inicial en caja', 48) . '$' . number_format($saldoInicial, 2));
+        $this->line(str_pad('+ Ingresos Totales', 48) . '$' . number_format($ingresos, 2));
         $this->line(str_pad('− Otorgamientos', 48) . '−$' . number_format($otorgamientos, 2));
         $this->line(str_pad('− Gastos Totales', 48) . '−$' . number_format($gastosTotal, 2));
         $this->line(str_repeat('─', 65));
-        $label = $utilidad >= 0 ? '= EBITDA / Utilidad disponible' : '= EBITDA (NEGATIVO)';
+        $label = $utilidad >= 0 ? '= Utilidad disponible' : '= Utilidad (NEGATIVA)';
         $this->line(str_pad($label, 48) . '$' . number_format($utilidad, 2));
+        $this->line(str_pad('  Referencia:', 48) . '$1,217,542.57');
         if ($utilidad < 0) {
-            $this->warn('  ⚠ EBITDA negativo. Causa: Ingresos − Otorgamientos = $' .
-                        number_format($ingresos - $otorgamientos, 2) . ' (cartera rodante)');
+            $this->warn('  ⚠ Utilidad negativa — puede reflejar diferencia en datos de ingresos.');
         }
 
         // ── G. ENVÍO CORPORATIVO ──────────────────────────────────────────────
@@ -228,17 +244,15 @@ class AuditUtilidadCommand extends Command
         $this->line('');
         $this->info('════ H. VALIDACIÓN DE CONSISTENCIA ════');
 
-        $inconsistencia = $excedentes > $utilidad;
-        $diferencia     = $inconsistencia ? 0.0 : ($utilidad - $excedentes);
+        $diferencia = $utilidad - $excedentes;
 
         $checks = [
-            ['¿Envío corporativo <= EBITDA?',          !$inconsistencia, $inconsistencia ? '⚠ NO — INCONSISTENCIA' : '✓ SÍ'],
-            ['¿EBITDA es positivo?',                    $utilidad >= 0,   $utilidad < 0  ? '⚠ NO — EBITDA negativo' : '✓ SÍ'],
-            ['¿Diferencia es >= 0?',                   $diferencia >= 0, $diferencia < 0 ? '⚠ NO' : '✓ SÍ'],
-            ['¿Usa BranchCalc (12 sucursales)?',        true,             '✓ SÍ — operativeMap'],
-            ['¿Otorgamientos usa amount_monto53?',      true,             '✓ SÍ — confirmado'],
-            ['¿Gastos sin duplicar lendus_excel?',      true,             '✓ SÍ — gastos_lendus_excel excluido'],
-            ['¿Nómina usa NOI (descuentos restados)?',  true,             '✓ SÍ — D094/D010/D113/D123/D004/D111'],
+            ['¿Usa BranchCalc (12 sucursales)?',       true, '✓ SÍ — operativeMap'],
+            ['¿Otorgamientos usa amount_monto53?',     true, '✓ SÍ — confirmado'],
+            ['¿Gastos sin duplicar lendus_excel?',     true, '✓ SÍ — gastos_lendus_excel excluido'],
+            ['¿Nómina: solo excluye Préstamo+Subsidio?', true, '✓ SÍ — Infonavit/Motos/etc. incluidos'],
+            ['¿Saldo inicial incluido en utilidad?',   $saldoInicial > 0, $saldoInicial > 0 ? '✓ SÍ — $' . number_format($saldoInicial, 2) : '⚠ $0'],
+            ['¿Diferencia puede ser negativa?',        true, '✓ SÍ — no forzada a 0'],
         ];
 
         $this->line(str_pad('Validación', 50) . 'Resultado');
@@ -252,45 +266,38 @@ class AuditUtilidadCommand extends Command
         $this->line('');
         $this->info('════ I. DIFERENCIA / SOBRANTE ════');
 
-        $this->line(str_pad('EBITDA / Utilidad disponible', 48) . '$' . number_format($utilidad, 2));
+        $this->line(str_pad('Utilidad disponible', 48) . '$' . number_format($utilidad, 2));
         $this->line(str_pad('− Envío a corporativo', 48) . '−$' . number_format($excedentes, 2));
         $this->line(str_repeat('─', 65));
-
-        if ($inconsistencia) {
-            $this->line(str_pad('DIFERENCIA / SOBRANTE', 48) . '$0.00 (inconsistencia)');
-            $this->line('');
-            $this->error('  ⚠ INCONSISTENCIA: Envío ($' . number_format($excedentes, 2) . ') > EBITDA ($' . number_format($utilidad, 2) . ')');
-            $this->error('  CAUSA PRINCIPAL: Ingresos (PAGO) − Otorgamientos = $' . number_format($ingresos - $otorgamientos, 2));
-            $this->error('  Esto es una cartera "rodante" donde capital recuperado ≈ capital otorgado.');
-            $this->error('  El sobrante real es aprox. el interés cobrado menos los gastos.');
-            if ($orphanAmount > 0) {
-                $this->error('  Orphan branches: $' . number_format($orphanAmount, 2) . ' en PAGO no incluidos (' . $orphanBranches . ' suc sin resolver).');
-            }
-        } else {
-            $this->line(str_pad('DIFERENCIA / SOBRANTE', 48) . '$' . number_format($diferencia, 2));
-            $this->info('  ✓ El envío corporativo es menor o igual a la utilidad disponible.');
+        $this->line(str_pad('DIFERENCIA', 48) . '$' . number_format($diferencia, 2));
+        $this->line(str_pad('  Referencia:', 48) . 'Sistema $' . number_format($excedentes, 2) . ' vs Ref $3,076,800.00 (dif $' . number_format($excedentes - 3_076_800, 2) . ')');
+        if ($diferencia < 0) {
+            $this->warn('  ⚠ Diferencia negativa — el envío supera la utilidad calculada.');
         }
 
         // ── RESUMEN EJECUTIVO ─────────────────────────────────────────────────
         $this->line('');
         $this->info('════ RESUMEN EJECUTIVO ════');
         $this->line('');
-        $this->line(str_pad('Concepto', 42) . str_pad('Monto', 18) . str_pad('Fuente', 26) . 'Nota');
+        $this->line(str_pad('Concepto', 38) . str_pad('Sistema', 18) . str_pad('Referencia', 18) . 'Diferencia');
         $this->line(str_repeat('─', 100));
         $rows = [
-            ['Ingresos (PAGO, 12 suc)',    $ingresos,      'BranchCalc/fact_recoveries', 'Pass 1 only (Pass 2=NULL)'],
-            ['Otorgamientos (monto53)',     $otorgamientos, 'BranchCalc/fact_placements', '✓ EXACTO vs ref'],
-            ['Gastos Operativos',           $gastosOp,      'gastos_lendus + ERP',        'sin duplicados'],
-            ['Nómina Neta',                $nomNeto,       'NOI + gastos_expenses',       '− descuentos NOI'],
-            ['Gastos Totales',             $gastosTotal,   'Op + Nómina',                 ''],
-            ['EBITDA / Utilidad',          $utilidad,      '—',                           $utilidad >= 0 ? '✓' : '⚠ NEGATIVO'],
-            ['Envío corporativo',          $excedentes,    'gastos_lendus',               'Ref=$3,076,800'],
-            ['Diferencia / sobrante',      $diferencia,    '—',                           $inconsistencia ? '⚠ INCONSISTENCIA' : '✓'],
+            ['Saldo inicial en caja',    $saldoInicial,  646_672.52],
+            ['Ingresos Totales',         $ingresos,     18_332_149.55],
+            ['Otorgamientos (monto53)',  $otorgamientos, 14_538_964.00],
+            ['Gastos Operativos',        $gastosOp,         837_384.28],
+            ['Nómina neta',             $nomNeto,        2_501_589.43],
+            ['Gastos Totales',          $gastosTotal,    3_222_315.50],
+            ['Utilidad disponible',     $utilidad,       1_217_542.57],
+            ['Envío corporativo',       $excedentes,     3_076_800.00],
+            ['Diferencia / sobrante',   $diferencia,     -1_859_257.43],
         ];
 
-        foreach ($rows as [$lbl, $amt, $src, $nota]) {
-            $this->line(str_pad($lbl, 42) . str_pad('$' . number_format($amt, 2), 18) .
-                        str_pad($src, 26) . $nota);
+        foreach ($rows as [$lbl, $sys, $ref]) {
+            $dif    = $sys - $ref;
+            $status = abs($dif) < 1 ? '≈ EXACTO' : '∆ ' . number_format($dif, 2);
+            $this->line(str_pad($lbl, 38) . str_pad('$' . number_format($sys, 2), 18) .
+                        str_pad('$' . number_format($ref, 2), 18) . $status);
         }
 
         // ── J. MATRIZ DE ESCENARIOS ──────────────────────────────────────────────
@@ -307,8 +314,9 @@ class AuditUtilidadCommand extends Command
             ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) IN ('PAGO','DESCUENTO')")
             ->sum('total_amount');
 
-        $refIngresos = 18_332_149.55;
-        $refGastos   = 2_223_315.50;
+        $refIngresos  = 18_332_149.55;
+        $refGastos    = 3_222_315.50;
+        $refSaldoIni  = 646_672.52;
 
         // Reference envío: use actual system value ($excedentes) for all scenarios
         // and show ref $3,076,800 as note
@@ -318,8 +326,9 @@ class AuditUtilidadCommand extends Command
         $scenarios = [
             [
                 'num'      => 1,
-                'ingrLabel'=> 'PAGO (sistema actual)',
+                'ingrLabel'=> 'Sistema actual (6 comp.)',
                 'ingr'     => $ingresos,
+                'saldo'    => $saldoInicial,
                 'gastLabel'=> 'Sistema actual',
                 'gast'     => $gastosTotal,
             ],
@@ -327,21 +336,16 @@ class AuditUtilidadCommand extends Command
                 'num'      => 2,
                 'ingrLabel'=> 'PAGO + DESCUENTO',
                 'ingr'     => $ingresosDesc,
+                'saldo'    => $saldoInicial,
                 'gastLabel'=> 'Sistema actual',
                 'gast'     => $gastosTotal,
             ],
             [
                 'num'      => 3,
-                'ingrLabel'=> 'PAGO + DESCUENTO',
-                'ingr'     => $ingresosDesc,
-                'gastLabel'=> 'Referencia $2,223,315',
-                'gast'     => $refGastos,
-            ],
-            [
-                'num'      => 4,
                 'ingrLabel'=> 'Referencia $18,332,149',
                 'ingr'     => $refIngresos,
-                'gastLabel'=> 'Referencia $2,223,315',
+                'saldo'    => $refSaldoIni,
+                'gastLabel'=> 'Referencia $3,222,315',
                 'gast'     => $refGastos,
             ],
         ];
@@ -360,13 +364,11 @@ class AuditUtilidadCommand extends Command
         $this->line(str_repeat('─', 115));
 
         foreach ($scenarios as $sc) {
-            $ebitda     = $sc['ingr'] - $otorgamientos - $sc['gast'];
-            $incons     = $envioActual > $ebitda;
-            $difEsc     = $incons ? 0.0 : ($ebitda - $envioActual);
+            $ebitda     = $sc['saldo'] + $sc['ingr'] - $otorgamientos - $sc['gast'];
+            $difEsc     = $ebitda - $envioActual;
             $ebitdaPos  = $ebitda > 0;
-            $envioOk    = $envioActual <= $ebitda;
-            $valid      = $ebitdaPos && $envioOk;
-            $validStr   = $valid ? '✅ VÁLIDO' : ($ebitdaPos ? '⚠ EBITDA>0 pero Envío>EBITDA' : '❌ EBITDA negativo');
+            $valid      = $ebitdaPos;
+            $validStr   = $valid ? '✅ Utilidad>0' : '❌ Utilidad negativa';
 
             $line = str_pad($sc['num'], 3) .
                     str_pad(mb_substr($sc['ingrLabel'], 0, 23), 25) .
@@ -391,25 +393,8 @@ class AuditUtilidadCommand extends Command
                     '  (ref. $' . number_format($envioRef, 2) . ', dif. $' . number_format($envioActual - $envioRef, 2) . ')');
         $this->line('  Otorgamientos: $' . number_format($otorgamientos, 2) . ' (monto53, CREDITO NUEVO, 12 suc)');
 
-        // Show which scenario is recommended
-        $validScenarios = array_filter($scenarios, function ($sc) use ($otorgamientos, $gastosTotal, $refGastos, $envioActual) {
-            $gast   = $sc['gast'];
-            $ebitda = $sc['ingr'] - $otorgamientos - $gast;
-            return $ebitda > 0 && $envioActual <= $ebitda;
-        });
-
         $this->line('');
-        if (!empty($validScenarios)) {
-            $first = reset($validScenarios);
-            $recEbitda = $first['ingr'] - $otorgamientos - $first['gast'];
-            $this->info('  RECOMENDACIÓN: Escenario ' . $first['num'] . ' (' . $first['ingrLabel'] . ' + ' . $first['gastLabel'] . ')');
-            $this->info('    → EBITDA = $' . number_format($recEbitda, 2) . ' | Diferencia = $' . number_format($recEbitda - $envioActual, 2));
-            $this->warn('    → Pendiente: confirmar que gastos referencia ($2,223,315) sea auditada por concepto.');
-            $this->warn('    → Pendiente: aprobar DESCUENTO como ingreso en regla final.');
-        } else {
-            $this->error('  NINGÚN ESCENARIO CUMPLE TODOS LOS CRITERIOS con el envío corporativo actual.');
-            $this->error('  Revisar: ingresos insuficientes o gastos/envío excesivos.');
-        }
+        $this->line('  Escenario 1 = sistema actual. Escenario 3 = valores de referencia del Excel.');
 
         // Per-branch detail
         if ($this->option('detail')) {
@@ -421,14 +406,14 @@ class AuditUtilidadCommand extends Command
 
             foreach ($result['branches'] as $br) {
                 $brPercep = $br['nomina_total'] + $br['comisiones'] + $br['bonos'] + $br['vacaciones'] + $br['prima_vacacional'];
-                $brNomDed = 0.0;
-                $brNomExp = 0.0;
+                $brNomExtra = 0.0;
                 foreach ($br['nomina_detalle'] ?? [] as $lbl => $amt) {
-                    if (in_array($lbl, self::NOI_DEDUCTION_LABELS, true)) $brNomDed += $amt;
-                    else $brNomExp += $amt;
+                    if (!in_array($lbl, self::NOMINA_EXCLUDED_LABELS, true)) $brNomExtra += $amt;
                 }
-                $brNomNeto = $brPercep + $brNomExp - $brNomDed;
-                $brEbitda  = $br['recuperacion_total'] - $br['colocacion'] - $br['gastos_operativos'] - $brNomNeto;
+                $brNomNeto = $brPercep + $brNomExtra;
+                $brIngr    = $br['capital_recuperado'] + $br['interes_recuperado'] + $br['impuesto_recuperado']
+                           + $br['charges'] + $br['cargos_inicio'] + $br['comision_apertura'];
+                $brEbitda  = $brIngr - $br['colocacion'] - $br['gastos_operativos'] - $brNomNeto;
 
                 $this->line(
                     str_pad(substr($br['sucursal'], 0, 21), 22) .

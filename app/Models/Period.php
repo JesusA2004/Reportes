@@ -17,6 +17,7 @@ class Period extends Model {
         'sequence',
         'start_date',
         'end_date',
+        'saldo_inicial_caja',
         'component_period_ids',
         'is_closed',
     ];

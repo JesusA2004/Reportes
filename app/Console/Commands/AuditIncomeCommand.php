@@ -20,7 +20,8 @@ class AuditIncomeCommand extends Command
                                 {--by-product : show breakdown by product}
                                 {--by-branch : show breakdown by branch}
                                 {--detail : full conciliation: by transaction type, by data source, approach comparison}
-                                {--compare-reference : deep audit against reference $18,332,149.55 with all combinations}';
+                                {--compare-reference : deep audit against reference $18,332,149.55 with all combinations}
+                                {--descuento-breakdown : desglose DESCUENTO por sucursal/producto/operación + escenarios A-G vs $18,332,149.55}';
     protected $description = 'Auditoría detallada de ingresos/recuperación por componente, producto y sucursal';
 
     public function handle(): int
@@ -314,6 +315,10 @@ class AuditIncomeCommand extends Command
 
         if ($this->option('compare-reference')) {
             $this->showCompareReference($dataIds, $period->label);
+        }
+
+        if ($this->option('descuento-breakdown')) {
+            $this->showDescuentoBreakdown($dataIds);
         }
 
         return 0;
@@ -708,5 +713,229 @@ class AuditIncomeCommand extends Command
         $this->info('  → Ingresos provisionales (PAGO + DESCUENTO, 12 suc): $' . number_format($proposed, 2));
         $this->line('    Si PAGO solo: $' . number_format($pagoBr, 2) . ' (falta $' . number_format($refIngresos - $pagoBr, 2) . ' para ref)');
         $this->line('    Si PAGO+DESCUENTO: $' . number_format($proposed, 2) . ' (diferencia vs ref: ' . $sign . '$' . number_format($diffRef, 2) . ')');
+    }
+
+    private function showDescuentoBreakdown(array $dataIds): void
+    {
+        $ref = 18_332_149.55;
+
+        $this->line('');
+        $this->info('════════════════════════════════════════════════════════════════════════');
+        $this->info('  DESGLOSE DESCUENTO REFINANCIAMIENTO — ¿Qué parte entra en ingresos?');
+        $this->info('  Referencia: $' . number_format($ref, 2));
+        $this->info('════════════════════════════════════════════════════════════════════════');
+
+        $resolver    = app(\App\Services\BranchResolverService::class);
+        $allBranches = DB::table('branches')->get();
+        $operativeMap = [];
+        foreach ($allBranches as $b) {
+            $real = $resolver->resolveRealBranchFromRoute($b->name);
+            if ($real && $resolver->isSheetBranch($real)) {
+                $operativeMap[(int) $b->id] = $real;
+            }
+        }
+        $operativeIds = array_keys($operativeMap);
+
+        $vPago = (float) DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('branch_id', $operativeIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) = 'PAGO'")
+            ->sum('total_amount');
+
+        $this->line('');
+        $this->line('  PAGO (12 suc):                   $' . number_format($vPago, 2));
+        $this->line('  Falta para llegar a referencia:  $' . number_format($ref - $vPago, 2));
+
+        // ── 1. Desglose DESCUENTO por Sucursal / Producto / Operación ─────────
+        $this->line('');
+        $this->info('════ 1. DESCUENTO refinanciamiento — Sucursal | Producto | Operación ════');
+
+        $descRows = DB::table('fact_recoveries as fr')
+            ->leftJoin('branches as b', 'fr.branch_id', '=', 'b.id')
+            ->whereIn('fr.period_id', $dataIds)
+            ->whereIn('fr.branch_id', $operativeIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(fr.raw_payload, '$.transaction')) = 'DESCUENTO'")
+            ->select(
+                'b.name as branch_name',
+                'fr.product_name',
+                'fr.operation',
+                DB::raw('COUNT(*) as cnt'),
+                DB::raw('SUM(fr.capital) as capital'),
+                DB::raw('SUM(fr.interest) as interes'),
+                DB::raw('SUM(fr.tax) as impuesto'),
+                DB::raw('SUM(fr.charges) as cargos'),
+                DB::raw('SUM(fr.total_amount) as total')
+            )
+            ->groupBy('fr.branch_id', 'b.name', 'fr.product_name', 'fr.operation')
+            ->orderByDesc('total')
+            ->get();
+
+        $this->line(
+            str_pad('Sucursal', 22) . str_pad('Producto', 26) . str_pad('Operacion', 20) .
+            str_pad('Regs', 7) . str_pad('Capital', 16) . str_pad('Interes', 14) .
+            str_pad('Impuesto', 13) . str_pad('Cargos', 13) . 'Total'
+        );
+        $this->line(str_repeat('-', 150));
+
+        $totD = ['cnt' => 0, 'capital' => 0.0, 'interes' => 0.0, 'impuesto' => 0.0, 'cargos' => 0.0, 'total' => 0.0];
+        foreach ($descRows as $r) {
+            $city = $resolver->resolveRealBranchFromRoute($r->branch_name ?? '') ?? $r->branch_name ?? '?';
+            $this->line(
+                str_pad(mb_substr($city, 0, 20), 22) .
+                str_pad(mb_substr($r->product_name ?? 'NULL', 0, 24), 26) .
+                str_pad(mb_substr($r->operation ?? 'NULL', 0, 18), 20) .
+                str_pad(number_format($r->cnt), 7) .
+                str_pad('$' . number_format((float)$r->capital, 0), 16) .
+                str_pad('$' . number_format((float)$r->interes, 0), 14) .
+                str_pad('$' . number_format((float)$r->impuesto, 0), 13) .
+                str_pad('$' . number_format((float)$r->cargos, 0), 13) .
+                '$' . number_format((float)$r->total, 2)
+            );
+            $totD['cnt']      += $r->cnt;
+            $totD['capital']  += (float)$r->capital;
+            $totD['interes']  += (float)$r->interes;
+            $totD['impuesto'] += (float)$r->impuesto;
+            $totD['cargos']   += (float)$r->cargos;
+            $totD['total']    += (float)$r->total;
+        }
+        $this->line(str_repeat('-', 150));
+        $this->info(
+            str_pad('TOTAL DESCUENTO (12 suc)', 75) .
+            str_pad(number_format($totD['cnt']), 7) .
+            str_pad('$' . number_format($totD['capital'], 0), 16) .
+            str_pad('$' . number_format($totD['interes'], 0), 14) .
+            str_pad('$' . number_format($totD['impuesto'], 0), 13) .
+            str_pad('$' . number_format($totD['cargos'], 0), 13) .
+            '$' . number_format($totD['total'], 2)
+        );
+
+        // ── 2. Escenarios A-F ─────────────────────────────────────────────────
+        $this->line('');
+        $this->info('════ 2. ESCENARIOS A-F — PAGO + parte del DESCUENTO ════');
+        $this->line('  PAGO = $' . number_format($vPago, 2) .
+                    '   DESCUENTO completo = $' . number_format($totD['total'], 2) .
+                    '   Exceso vs ref = $' . number_format($vPago + $totD['total'] - $ref, 2));
+        $this->line('');
+
+        $mkDesc = function (array $where = [], array $whereNot = [], ?string $col = null) use ($dataIds, $operativeIds, $totD): float {
+            $q = DB::table('fact_recoveries')
+                ->whereIn('period_id', $dataIds)
+                ->whereIn('branch_id', $operativeIds)
+                ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) = 'DESCUENTO'");
+            foreach ($where    as [$clause, $bind]) $q->whereRaw($clause, $bind);
+            foreach ($whereNot as [$clause, $bind]) $q->whereRaw("NOT ($clause)", $bind);
+            if ($col === null) return (float)$q->sum('total_amount');
+            return (float)$q->selectRaw("SUM({$col}) as t")->value('t');
+        };
+
+        $dCapOnly   = $mkDesc([], [], 'capital');
+        $dIntTaxCh  = $mkDesc([], [], 'interest + tax + charges');
+        $dAll       = $totD['total'];
+        $dExclCrece = $mkDesc([["UPPER(COALESCE(product_name,'')) NOT LIKE ?", ['%CRECE%']]]);
+        $dExclCD    = $mkDesc([["UPPER(COALESCE(product_name,'')) NOT LIKE ?", ['%CREDITO DIARIO%']]]);
+        $dCapGt0    = $mkDesc([['capital > 0', []]]);
+
+        $scenarios = [
+            ['A', 'PAGO + DESCUENTO solo capital',           $vPago + $dCapOnly,   'solo columna capital del DESCUENTO'],
+            ['B', 'PAGO + DESCUENTO solo int/imp/cargos',    $vPago + $dIntTaxCh,  'interes + impuesto + cargos del DESCUENTO'],
+            ['C', 'PAGO + DESCUENTO completo',               $vPago + $dAll,       'DESCUENTO total (todas las columnas)'],
+            ['D', 'PAGO + DESCUENTO excl. CRECE',            $vPago + $dExclCrece, 'excluye registros producto CRECE'],
+            ['E', 'PAGO + DESCUENTO excl. CREDITO DIARIO',   $vPago + $dExclCD,    'excluye registros CREDITO DIARIO'],
+            ['F', 'PAGO + DESCUENTO (capital > 0)',          $vPago + $dCapGt0,    'solo registros donde capital > 0'],
+        ];
+
+        $this->line(str_pad('', 4) . str_pad('Escenario', 50) . str_pad('Monto', 20) . str_pad('Diff vs Ref', 18) . str_pad('Match', 12) . 'Nota');
+        $this->line(str_repeat('-', 125));
+        foreach ($scenarios as [$letter, $lbl, $val, $nota]) {
+            $diff  = $val - $ref;
+            $sign  = $diff >= 0 ? '+' : '';
+            $match = abs($diff) < 100 ? 'EXACTO' : (abs($diff) < 100_000 ? 'CERCANO' : '');
+            $line  = str_pad($letter . ')', 4) .
+                     str_pad(mb_substr($lbl, 0, 48), 50) .
+                     str_pad('$' . number_format($val, 2), 20) .
+                     str_pad($sign . '$' . number_format($diff, 2), 18) .
+                     str_pad($match, 12) .
+                     $nota;
+            if ($match === 'EXACTO')   $this->info($line);
+            elseif ($match === 'CERCANO') $this->warn($line);
+            else                      $this->line($line);
+        }
+        $this->line(str_repeat('-', 125));
+        $this->line(str_pad('    REFERENCIA', 54) . '$' . number_format($ref, 2));
+
+        // ── 3. Escenario G: por sucursal ──────────────────────────────────────
+        $this->line('');
+        $this->info('════ 3. G — PAGO + DESCUENTO por sucursal ════');
+
+        $byCity = [];
+        $allByBranch = DB::table('fact_recoveries as fr')
+            ->leftJoin('branches as b', 'fr.branch_id', '=', 'b.id')
+            ->whereIn('fr.period_id', $dataIds)
+            ->whereIn('fr.branch_id', $operativeIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(fr.raw_payload, '$.transaction')) IN ('PAGO','DESCUENTO')")
+            ->select(
+                'b.name as branch_name',
+                DB::raw("JSON_UNQUOTE(JSON_EXTRACT(fr.raw_payload, '$.transaction')) as txn"),
+                DB::raw('SUM(fr.total_amount) as total'),
+                DB::raw('SUM(fr.capital) as capital')
+            )
+            ->groupBy('fr.branch_id', 'b.name', DB::raw("JSON_UNQUOTE(JSON_EXTRACT(fr.raw_payload, '$.transaction'))"))
+            ->get();
+
+        foreach ($allByBranch as $r) {
+            $city = $resolver->resolveRealBranchFromRoute($r->branch_name ?? '') ?? $r->branch_name ?? '?';
+            if (!isset($byCity[$city])) $byCity[$city] = ['pago' => 0.0, 'desc' => 0.0, 'desc_cap' => 0.0];
+            if ($r->txn === 'PAGO') $byCity[$city]['pago']     += (float)$r->total;
+            else                   { $byCity[$city]['desc']     += (float)$r->total;
+                                     $byCity[$city]['desc_cap'] += (float)$r->capital; }
+        }
+        uasort($byCity, fn($a, $b) => ($b['pago'] + $b['desc']) <=> ($a['pago'] + $a['desc']));
+
+        $this->line(str_pad('Ciudad', 22) . str_pad('PAGO', 18) . str_pad('DESC total', 18) . str_pad('DESC capital', 18) . 'PAGO+DESC');
+        $this->line(str_repeat('-', 90));
+        $gTotal = 0.0;
+        foreach ($byCity as $city => $d) {
+            $pd = $d['pago'] + $d['desc'];
+            $gTotal += $pd;
+            $this->line(
+                str_pad(mb_substr($city, 0, 20), 22) .
+                str_pad('$' . number_format($d['pago'], 0), 18) .
+                str_pad('$' . number_format($d['desc'], 0), 18) .
+                str_pad('$' . number_format($d['desc_cap'], 0), 18) .
+                '$' . number_format($pd, 2)
+            );
+        }
+        $this->line(str_repeat('-', 90));
+        $this->line(str_pad('TOTAL (12 suc)', 76) . '$' . number_format($gTotal, 2));
+        $diffG = $gTotal - $ref;
+        $signG = $diffG >= 0 ? '+' : '';
+        $mG = abs($diffG) < 100 ? 'EXACTO' : (abs($diffG) < 100_000 ? 'CERCANO' : '');
+        $gLine = '  Diferencia vs referencia: ' . $signG . '$' . number_format($diffG, 2) . '  ' . $mG;
+        if ($mG === 'EXACTO')    $this->info($gLine);
+        elseif ($mG === 'CERCANO') $this->warn($gLine);
+        else                       $this->line($gLine);
+
+        // ── 4. Diagnóstico ────────────────────────────────────────────────────
+        $this->line('');
+        $this->info('════ 4. DIAGNOSTICO ════');
+        $best = collect($scenarios)->sortBy(fn($s) => abs($s[2] - $ref))->first();
+        $this->info('  Escenario mas cercano: ' . $best[0] . ') ' . $best[1]);
+        $this->info('  Monto: $' . number_format($best[2], 2) . '   Diff: $' . number_format(abs($best[2] - $ref), 2));
+        $this->line('');
+        $this->line('  Desglose DESCUENTO por producto:');
+        $prodRows = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('branch_id', $operativeIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) = 'DESCUENTO'")
+            ->select('product_name', DB::raw('COUNT(*) as cnt'), DB::raw('SUM(capital) as capital'), DB::raw('SUM(total_amount) as total'))
+            ->groupBy('product_name')
+            ->orderByDesc('total')
+            ->get();
+        foreach ($prodRows as $p) {
+            $this->line('    ' . str_pad(mb_substr($p->product_name ?? 'NULL', 0, 35), 38) .
+                        str_pad(number_format($p->cnt) . ' regs', 14) .
+                        str_pad('cap=$' . number_format((float)$p->capital, 0), 20) .
+                        'total=$' . number_format((float)$p->total, 2));
+        }
     }
 }
