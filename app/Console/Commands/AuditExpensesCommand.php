@@ -24,6 +24,7 @@ class AuditExpensesCommand extends Command
                                 {--without-branch : only show expenses without branch assignment}
                                 {--check-duplicates : highlight likely duplicate records}
                                 {--compare-reference= : referencia de gastos totales (ej. 2223315.50) — audita si nómina está incluida}
+                                {--by-concept : desglose per-concepto con análisis de referencia (requiere --compare-reference)}
                                 {--detail : show full source deduplication analysis}';
     protected $description = 'Auditoría de gastos: duplicados, sin-sucursal, normalización de conceptos, EBITDA';
 
@@ -243,6 +244,219 @@ class AuditExpensesCommand extends Command
         ])->sortBy(1)->first();
 
         $this->info('  CONCLUSIÓN MÁS PROBABLE: Referencia ' . $best[0] . ' (menor diferencia: $' . number_format($best[1], 2) . ')');
+
+        if ($this->option('by-concept')) {
+            $this->showByConceptDetail($dataIds, $ref);
+        }
+    }
+
+    private function showByConceptDetail(array $dataIds, float $ref): void
+    {
+        $this->line('');
+        $this->info('════════════════════════════════════════════════════════════════════════════════');
+        $this->info('  DESGLOSE POR CONCEPTO — ¿Qué suma la referencia $' . number_format($ref, 2) . '?');
+        $this->info('════════════════════════════════════════════════════════════════════════════════');
+
+        // Constants (mirror BranchRadiographyCalculator)
+        $nominaExpCats    = ['Gasolina', 'Financiamiento Celular'];
+        $lendusPresentCats = ['Gastos Operativos', 'Pólizas', 'Renta Oficina', 'Recargas Telefónicas', 'Gasolina', 'Agua'];
+        $ebitdaExcludedCats = ['Nómina y Capital Humano', 'Envío de utilidad a corporativo', 'Préstamos Intersucursales'];
+
+        // All concepts with source, category, amount
+        $rows = DB::table('fact_expenses as fe')
+            ->join('report_uploads as ru', 'fe.report_upload_id', '=', 'ru.id')
+            ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+            ->whereIn('fe.period_id', $dataIds)
+            ->select(
+                'fe.concept',
+                'fe.category',
+                'ds.code as src',
+                DB::raw('COUNT(*) as cnt'),
+                DB::raw('SUM(COALESCE(NULLIF(fe.paid_amount,0),fe.amount)) as total')
+            )
+            ->groupBy('fe.concept', 'fe.category', 'ds.code')
+            ->orderByDesc('total')
+            ->get();
+
+        // Classify each row
+        $buckets = [
+            'gastos_op'  => 0.0,
+            'nomina'     => 0.0,
+            'excedentes' => 0.0,
+            'fondeo'     => 0.0,
+            'otro'       => 0.0,
+        ];
+
+        $classified = [];
+        foreach ($rows as $r) {
+            $cat      = $r->category ?? '';
+            $concept  = $r->concept ?? '';
+            $src      = $r->src ?? '';
+            $amt      = (float) $r->total;
+
+            // Determine bucket
+            $isEnvio   = $cat === 'Envío de utilidad a corporativo';
+            $isFondeo  = $cat === 'Préstamos Intersucursales';
+            $isNomCat  = $cat === 'Nómina y Capital Humano';
+            $isNomExp  = in_array($cat, $nominaExpCats, true);
+            $isLendDup = $src === 'gastos_erp' && in_array($cat, $lendusPresentCats, true);
+
+            if ($isEnvio) {
+                $bucket = 'excedentes';
+                $inEbitda = 'NO (envío)';
+                $note = 'Distribución de utilidad — fuera de EBITDA';
+            } elseif ($isFondeo) {
+                $bucket = 'fondeo';
+                $inEbitda = 'NO (fondeo)';
+                $note = 'Préstamo intersucursal — fuera de EBITDA';
+            } elseif ($isNomCat) {
+                $bucket = 'nomina';
+                $inEbitda = 'NO→nómina';
+                $note = 'Va a nómina (NOI), excluida de gastos_op';
+            } elseif ($isNomExp) {
+                $bucket = 'nomina';
+                $inEbitda = 'NO→nómina';
+                $note = "NOMINA_EXPENSE_CAT ({$cat}) — va a nómina_detalle";
+            } elseif ($isLendDup) {
+                $bucket = 'gastos_op';
+                $inEbitda = 'NO (dup ERP)';
+                $note = "Cat presente en Lendus — excluida del ERP para evitar duplicado";
+            } else {
+                $bucket = 'gastos_op';
+                $inEbitda = 'SÍ';
+                $note = 'En gastos operativos EBITDA';
+            }
+
+            $buckets[$bucket] += $amt;
+            $classified[] = [
+                'concept'  => mb_substr($concept ?: 'NULL', 0, 30),
+                'category' => mb_substr($cat ?: 'Sin categoría', 0, 28),
+                'src'      => mb_substr($src, 0, 14),
+                'cnt'      => $r->cnt,
+                'total'    => $amt,
+                'inEbitda' => $inEbitda,
+                'bucket'   => $bucket,
+                'note'     => $note,
+            ];
+        }
+
+        $this->line('');
+        $this->line(
+            str_pad('Concepto', 32) .
+            str_pad('Categoría', 30) .
+            str_pad('Fuente', 16) .
+            str_pad('Regs', 6) .
+            str_pad('Monto', 16) .
+            str_pad('En EBITDA', 14) .
+            'Nota'
+        );
+        $this->line(str_repeat('─', 140));
+
+        foreach ($classified as $r) {
+            $line = str_pad($r['concept'], 32) .
+                    str_pad($r['category'], 30) .
+                    str_pad($r['src'], 16) .
+                    str_pad(number_format($r['cnt']), 6) .
+                    str_pad('$' . number_format($r['total'], 0), 16) .
+                    str_pad($r['inEbitda'], 14) .
+                    $r['note'];
+
+            if ($r['bucket'] === 'excedentes' || $r['bucket'] === 'fondeo') {
+                $this->line($line);
+            } elseif ($r['inEbitda'] === 'SÍ') {
+                $this->line($line);
+            } else {
+                $this->warn($line);
+            }
+        }
+
+        // ── Subtotales por bucket ────────────────────────────────────────────
+        $this->line('');
+        $this->info('════ SUBTOTALES POR BUCKET ════');
+        $this->line('');
+
+        $gastosOp  = $buckets['gastos_op'];
+        $nomina    = $buckets['nomina'];
+        $exc       = $buckets['excedentes'];
+        $fondeo    = $buckets['fondeo'];
+        $total     = $gastosOp + $nomina + $exc + $fondeo;
+
+        $this->line(str_pad('Bucket', 42) . str_pad('Monto', 18) . str_pad('Diff vs Ref', 14) . 'En EBITDA?');
+        $this->line(str_repeat('─', 85));
+
+        foreach ([
+            ['Gastos operativos (en EBITDA)',        $gastosOp,             'SÍ'],
+            ['Nómina (NOI+IMSS+Gasolina+Finiquito)', $nomina,               'SÍ (nomina_total)'],
+            ['Excedentes/Envío corporativo',         $exc,                  'NO'],
+            ['Fondeo/Préstamos Intersucursales',     $fondeo,               'NO'],
+            ['TOTAL GENERAL (todos los buckets)',    $total,                '—'],
+        ] as [$lbl, $val, $ebitdaNote]) {
+            $diff = $val - $ref;
+            $sign = $diff >= 0 ? '+' : '';
+            $this->line(
+                str_pad($lbl, 42) .
+                str_pad('$' . number_format($val, 2), 18) .
+                str_pad($sign . '$' . number_format($diff, 2), 14) .
+                $ebitdaNote
+            );
+        }
+
+        // ── Hipótesis de qué es la referencia ───────────────────────────────
+        $this->line('');
+        $this->info('════ HIPÓTESIS: ¿Qué combinación suma la referencia $' . number_format($ref, 2) . '? ════');
+        $this->line('');
+
+        // NOI data for hypotheses
+        $noiPercep = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('concept', ['P001','P002','P009','P010','P108','P109','P120','P123'])
+            ->sum('amount');
+        $noiDed = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('concept', ['D094','D010','D113','D123','D004','D111'])
+            ->sum('amount');
+        $noiNeta = $noiPercep - abs($noiDed);
+
+        $hypotheses = [
+            ['Solo gastos operativos',                                     $gastosOp],
+            ['Gastos op + NOI neta',                                       $gastosOp + $noiNeta],
+            ['Gastos op + NOI bruta (percepciones)',                       $gastosOp + $noiPercep],
+            ['Gastos op + nómina Lendus (cat. "Nómina y Cap Humano")',     $gastosOp + $nomina],
+            ['Gastos op + nómina sin IMSS ($' . number_format($gastosOp + $nomina, 0) . ' − IMSS)',
+             $gastosOp + $nomina - (float) DB::table('fact_expenses as fe')
+                 ->join('report_uploads as ru', 'fe.report_upload_id', '=', 'ru.id')
+                 ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+                 ->whereIn('fe.period_id', $dataIds)
+                 ->whereRaw("UPPER(COALESCE(fe.concept,'')) LIKE '%IMSS%'")
+                 ->selectRaw('SUM(COALESCE(NULLIF(fe.paid_amount,0),fe.amount)) as t')
+                 ->value('t')],
+        ];
+
+        $this->line(str_pad('Hipótesis', 52) . str_pad('Monto', 18) . str_pad('Diff vs Ref', 14) . 'Plausible?');
+        $this->line(str_repeat('─', 95));
+        foreach ($hypotheses as [$lbl, $val]) {
+            $diff     = $val - $ref;
+            $sign     = $diff >= 0 ? '+' : '';
+            $plaus    = abs($diff) < 100 ? '✓ EXACTO' : (abs($diff) < 10_000 ? '≈ CERCANO' : '');
+            $line = str_pad(mb_substr($lbl, 0, 50), 52) .
+                    str_pad('$' . number_format($val, 2), 18) .
+                    str_pad($sign . '$' . number_format($diff, 2), 14) .
+                    $plaus;
+            if ($plaus === '✓ EXACTO') {
+                $this->info($line);
+            } elseif ($plaus === '≈ CERCANO') {
+                $this->warn($line);
+            } else {
+                $this->line($line);
+            }
+        }
+
+        $this->line('');
+        $this->line('  NOI percepciones brutas: $' . number_format($noiPercep, 2));
+        $this->line('  NOI deducciones:         −$' . number_format(abs($noiDed), 2));
+        $this->line('  NOI neta:                $' . number_format($noiNeta, 2));
+        $this->warn('  → Para identificar la referencia exacta: abre el Excel de referencia');
+        $this->warn('    e indica qué líneas suman $' . number_format($ref, 2) . '.');
     }
 
     private function showByCategory(array $dataIds): void

@@ -605,29 +605,108 @@ class AuditIncomeCommand extends Command
 
         $this->line(str_pad('Enfoque', 46) . str_pad('Monto', 20) . str_pad('Diff vs Ref', 16) . 'Nota');
         $this->line(str_repeat('─', 100));
-        foreach ($rows as [$label, $val, $note]) {
+        foreach ($rows as [$label2, $val, $note]) {
             $diff  = $val - $refIngresos;
             $sign  = $diff >= 0 ? '+' : '';
             $this->line(
-                str_pad($label, 46) .
+                str_pad($label2, 46) .
                 str_pad('$' . number_format($val, 2), 20) .
                 str_pad($sign . '$' . number_format($diff, 2), 16) .
                 $note
             );
         }
 
+        // ── C. REGLA PROVISIONAL: PAGO + DESCUENTO válido (12 suc operativas) ─
         $this->line('');
-        $this->info('════ C. DIAGNÓSTICO ════');
+        $this->info('════ C. REGLA PROVISIONAL — PAGO + DESCUENTO (12 sucursales operativas) ════');
+        $this->line('  DESCUENTO = refinanciamiento: el cliente paga su contrato anterior al recibir uno nuevo.');
+        $this->line('  No es efectivo nuevo, pero sí recuperación contable del crédito vigente.');
+        $this->line('  CONDONACION = monto perdonado → EXCLUIDA (no es recuperación real).');
+        $this->line('');
+
+        $resolver    = app(\App\Services\BranchResolverService::class);
+        $allBranches = DB::table('branches')->get();
+        $operativeIds = [];
+        foreach ($allBranches as $b) {
+            $real = $resolver->resolveRealBranchFromRoute($b->name);
+            if ($real && $resolver->isSheetBranch($real)) {
+                $operativeIds[] = (int) $b->id;
+            }
+        }
+
+        $pagoBr  = (float) DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)->whereIn('branch_id', $operativeIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) = 'PAGO'")
+            ->sum('total_amount');
+        $descBr  = (float) DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)->whereIn('branch_id', $operativeIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) = 'DESCUENTO'")
+            ->sum('total_amount');
+        $condBr  = (float) DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)->whereIn('branch_id', $operativeIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) = 'CONDONACION'")
+            ->sum('total_amount');
+        $proposed = $pagoBr + $descBr;
+
+        $this->line(str_pad('Componente', 46) . str_pad('Monto', 18) . 'Decisión');
+        $this->line(str_repeat('─', 80));
+        $this->line(str_pad('PAGO (12 sucursales operativas)', 46) .
+                    str_pad('$' . number_format($pagoBr, 2), 18) . '✓ INCLUIR');
+        $this->info(str_pad('+ DESCUENTO válido (refinanciamiento, 12 suc)', 46) .
+                    str_pad('+$' . number_format($descBr, 2), 18) . '✓ INCLUIR (decisión provisional)');
+        $this->warn(str_pad('− CONDONACION excluida (monto perdonado)', 46) .
+                    str_pad('−$' . number_format($condBr, 2), 18) . '✗ EXCLUIDA');
+        $this->line(str_repeat('─', 80));
+        $this->info(str_pad('= INGRESOS PROPUESTOS (PAGO + DESCUENTO)', 46) . '$' . number_format($proposed, 2));
+
+        $this->line('');
+        $diffRef = $proposed - $refIngresos;
+        $sign    = $diffRef >= 0 ? '+' : '';
+        $this->line(str_pad('Referencia usuario ($18,332,149.55)', 46) . '$' . number_format($refIngresos, 2));
+        $diffLine = str_pad('Diferencia vs referencia', 46) . $sign . '$' . number_format($diffRef, 2);
+        if ($diffRef > 0) {
+            $this->warn($diffLine . '  ← PAGO+DESC 12suc supera la referencia');
+        } else {
+            $this->line($diffLine);
+        }
+
+        // Desglose DESCUENTO por ciudad
+        $this->line('');
+        $this->line('  Desglose DESCUENTO por ciudad (12 suc operativas):');
+        $descByBranch = DB::table('fact_recoveries as fr')
+            ->leftJoin('branches as b', 'fr.branch_id', '=', 'b.id')
+            ->whereIn('fr.period_id', $dataIds)
+            ->whereIn('fr.branch_id', $operativeIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(fr.raw_payload, '$.transaction')) = 'DESCUENTO'")
+            ->select('b.name as branch_name', DB::raw('COUNT(*) as cnt'), DB::raw('SUM(fr.total_amount) as total'))
+            ->groupBy('fr.branch_id', 'b.name')
+            ->orderByDesc('total')
+            ->get();
+
+        $cityDesc = [];
+        foreach ($descByBranch as $br) {
+            $city = $resolver->resolveRealBranchFromRoute($br->branch_name ?? '') ?? $br->branch_name ?? '?';
+            $cityDesc[$city] = ($cityDesc[$city] ?? 0) + (float) $br->total;
+        }
+        arsort($cityDesc);
+        foreach ($cityDesc as $city => $amt) {
+            $this->line('    ' . str_pad(mb_substr($city, 0, 24), 26) . '$' . number_format($amt, 2));
+        }
+        $this->line('    ' . str_repeat('─', 38));
+        $this->line('    ' . str_pad('TOTAL DESCUENTO (12 suc)', 26) . '$' . number_format($descBr, 2));
+
+        // ── D. DIAGNÓSTICO ────────────────────────────────────────────────────
+        $this->line('');
+        $this->info('════ D. DIAGNÓSTICO ════');
         $this->line('  Brecha actual vs referencia: $' . number_format((float)$totalAll - $refIngresos, 2));
-        $this->line('  DESCUENTO ($' . number_format((float)$totalPagoDesc - (float)$totalPago, 2) . '): Refinanciamiento. ¿Debe contarse como ingreso?');
-        $this->line('  CONDONACION ($' . number_format((float)$totalAll - (float)$totalSinCond, 2) . '): Monto perdonado. Generalmente NO es ingreso real.');
+        $this->line('  DESCUENTO ($' . number_format($descBr, 2) . ', 12 suc): Refinanciamiento. Decisión provisional: INCLUIR.');
+        $this->line('  CONDONACION (12 suc $' . number_format($condBr, 2) . '): Monto perdonado. EXCLUIDO.');
         $this->line('  Cargos vencimiento (charges_due): $' . number_format(
             (float)DB::table('fact_recoveries')->whereIn('period_id', $dataIds)->sum('charges_due'), 2
         ) . ' — acumulado, puede no ser cobro real.');
         $this->line('');
-        $this->warn('  → Para acercarse a la referencia ($' . number_format($refIngresos, 2) . '):');
-        $this->line('    Confirmar si DESCUENTO/refinanciamiento debe incluirse en ingresos.');
-        $this->line('    Si solo PAGO: $' . number_format((float)$totalPago, 2) . ' (falta $' . number_format($refIngresos - (float)$totalPago, 2) . ')');
-        $this->line('    Si PAGO+DESCUENTO: $' . number_format((float)$totalPagoDesc, 2) . ' (sobra $' . number_format((float)$totalPagoDesc - $refIngresos, 2) . ')');
+        $this->info('  → Ingresos provisionales (PAGO + DESCUENTO, 12 suc): $' . number_format($proposed, 2));
+        $this->line('    Si PAGO solo: $' . number_format($pagoBr, 2) . ' (falta $' . number_format($refIngresos - $pagoBr, 2) . ' para ref)');
+        $this->line('    Si PAGO+DESCUENTO: $' . number_format($proposed, 2) . ' (diferencia vs ref: ' . $sign . '$' . number_format($diffRef, 2) . ')');
     }
 }

@@ -258,6 +258,8 @@ const utilidadGlobal       = computed(() => recGlobal.value - colGlobal.value - 
 // Si el envío corporativo supera la utilidad, hay inconsistencia en los datos
 const ebitdaInconsistencia = computed(() => excGlobal.value > utilidadGlobal.value)
 const diferencia           = computed(() => ebitdaInconsistencia.value ? 0 : utilidadGlobal.value - excGlobal.value)
+// Reporte en conciliación si EBITDA negativo o envío > EBITDA
+const enConciliacion       = computed(() => brGlobal.value !== null && (utilidadGlobal.value < 0 || ebitdaInconsistencia.value))
 
 // ── KPI primario (branch_radiography → fallback summary) ─────────────────────
 const kpiRec     = computed(() => brGlobal.value ? recGlobal.value     : Number(snap.value?.summary?.recovery_total ?? 0))
@@ -355,6 +357,9 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                         <p class="text-xs font-bold uppercase tracking-widest text-indigo-400">Radiografía Financiera</p>
                         <h1 class="mt-1 text-2xl font-black">{{ period.label }}</h1>
                         <p class="mt-1 text-sm text-slate-400">
+                            <span v-if="snap && enConciliacion" class="inline-flex items-center gap-1.5 rounded-full bg-amber-400/20 px-2.5 py-0.5 text-xs font-black text-amber-300 mr-2">
+                                EN CONCILIACIÓN
+                            </span>
                             <span v-if="snap">Generado {{ snap.generated_at }} · v{{ snap.version }}</span>
                             <span v-else>Sin radiografía generada</span>
                         </p>
@@ -387,6 +392,25 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
         </div>
 
         <template v-else>
+
+            <!-- BANNER CONCILIACIÓN -->
+            <div v-if="enConciliacion" class="bg-amber-400 px-6 py-3">
+                <div class="mx-auto max-w-screen-2xl flex flex-wrap items-center gap-3">
+                    <AlertTriangle class="size-5 shrink-0 text-amber-900" />
+                    <div class="flex-1 min-w-0">
+                        <span class="font-black text-amber-950 text-sm tracking-wide">
+                            REPORTE EN CONCILIACIÓN — NO CIERRE FINAL
+                        </span>
+                        <span class="ml-3 text-xs text-amber-900">
+                            Inconsistencia detectada:
+                            <template v-if="utilidadGlobal < 0">EBITDA negativo ({{ moneyFull(utilidadGlobal) }}).</template>
+                            <template v-else-if="ebitdaInconsistencia">Envío corporativo ({{ moneyFull(excGlobal) }}) supera el EBITDA ({{ moneyFull(utilidadGlobal) }}).</template>
+                            Regla de ingresos y gastos pendiente de confirmar.
+                        </span>
+                    </div>
+                </div>
+            </div>
+
             <!-- KPI CARDS -->
             <div class="mx-auto max-w-screen-2xl px-6 py-5">
                 <div class="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">

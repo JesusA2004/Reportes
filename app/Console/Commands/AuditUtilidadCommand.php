@@ -293,6 +293,124 @@ class AuditUtilidadCommand extends Command
                         str_pad($src, 26) . $nota);
         }
 
+        // ── J. MATRIZ DE ESCENARIOS ──────────────────────────────────────────────
+        $this->line('');
+        $this->info('════════════════════════════════════════════════════════════════');
+        $this->info('  J. MATRIZ DE ESCENARIOS DE CONCILIACIÓN');
+        $this->info('  Válido = EBITDA > 0 AND Envío <= EBITDA AND Diferencia >= 0');
+        $this->info('════════════════════════════════════════════════════════════════');
+
+        // PAGO + DESCUENTO from 12 operative branches
+        $ingresosDesc = (float) DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('branch_id', $operativeIds)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) IN ('PAGO','DESCUENTO')")
+            ->sum('total_amount');
+
+        $refIngresos = 18_332_149.55;
+        $refGastos   = 2_223_315.50;
+
+        // Reference envío: use actual system value ($excedentes) for all scenarios
+        // and show ref $3,076,800 as note
+        $envioActual = $excedentes;
+        $envioRef    = 3_076_800.00;
+
+        $scenarios = [
+            [
+                'num'      => 1,
+                'ingrLabel'=> 'PAGO (sistema actual)',
+                'ingr'     => $ingresos,
+                'gastLabel'=> 'Sistema actual',
+                'gast'     => $gastosTotal,
+            ],
+            [
+                'num'      => 2,
+                'ingrLabel'=> 'PAGO + DESCUENTO',
+                'ingr'     => $ingresosDesc,
+                'gastLabel'=> 'Sistema actual',
+                'gast'     => $gastosTotal,
+            ],
+            [
+                'num'      => 3,
+                'ingrLabel'=> 'PAGO + DESCUENTO',
+                'ingr'     => $ingresosDesc,
+                'gastLabel'=> 'Referencia $2,223,315',
+                'gast'     => $refGastos,
+            ],
+            [
+                'num'      => 4,
+                'ingrLabel'=> 'Referencia $18,332,149',
+                'ingr'     => $refIngresos,
+                'gastLabel'=> 'Referencia $2,223,315',
+                'gast'     => $refGastos,
+            ],
+        ];
+
+        $this->line('');
+        $this->line(
+            str_pad('#', 3) .
+            str_pad('Ingresos', 25) .
+            str_pad('Otorg.', 16) .
+            str_pad('Gastos', 16) .
+            str_pad('EBITDA', 16) .
+            str_pad('Envío', 14) .
+            str_pad('Diferencia', 14) .
+            '¿Válido?'
+        );
+        $this->line(str_repeat('─', 115));
+
+        foreach ($scenarios as $sc) {
+            $ebitda     = $sc['ingr'] - $otorgamientos - $sc['gast'];
+            $incons     = $envioActual > $ebitda;
+            $difEsc     = $incons ? 0.0 : ($ebitda - $envioActual);
+            $ebitdaPos  = $ebitda > 0;
+            $envioOk    = $envioActual <= $ebitda;
+            $valid      = $ebitdaPos && $envioOk;
+            $validStr   = $valid ? '✅ VÁLIDO' : ($ebitdaPos ? '⚠ EBITDA>0 pero Envío>EBITDA' : '❌ EBITDA negativo');
+
+            $line = str_pad($sc['num'], 3) .
+                    str_pad(mb_substr($sc['ingrLabel'], 0, 23), 25) .
+                    str_pad('$' . number_format($otorgamientos, 0), 16) .
+                    str_pad('$' . number_format($sc['gast'], 0), 16) .
+                    str_pad('$' . number_format($ebitda, 0), 16) .
+                    str_pad('$' . number_format($envioActual, 0), 14) .
+                    str_pad('$' . number_format($difEsc, 0), 14) .
+                    $validStr;
+
+            if ($valid) {
+                $this->info($line);
+            } elseif ($ebitdaPos) {
+                $this->warn($line);
+            } else {
+                $this->error($line);
+            }
+        }
+
+        $this->line('');
+        $this->line('  Envío corporativo usado: $' . number_format($envioActual, 2) .
+                    '  (ref. $' . number_format($envioRef, 2) . ', dif. $' . number_format($envioActual - $envioRef, 2) . ')');
+        $this->line('  Otorgamientos: $' . number_format($otorgamientos, 2) . ' (monto53, CREDITO NUEVO, 12 suc)');
+
+        // Show which scenario is recommended
+        $validScenarios = array_filter($scenarios, function ($sc) use ($otorgamientos, $gastosTotal, $refGastos, $envioActual) {
+            $gast   = $sc['gast'];
+            $ebitda = $sc['ingr'] - $otorgamientos - $gast;
+            return $ebitda > 0 && $envioActual <= $ebitda;
+        });
+
+        $this->line('');
+        if (!empty($validScenarios)) {
+            $first = reset($validScenarios);
+            $recEbitda = $first['ingr'] - $otorgamientos - $first['gast'];
+            $this->info('  RECOMENDACIÓN: Escenario ' . $first['num'] . ' (' . $first['ingrLabel'] . ' + ' . $first['gastLabel'] . ')');
+            $this->info('    → EBITDA = $' . number_format($recEbitda, 2) . ' | Diferencia = $' . number_format($recEbitda - $envioActual, 2));
+            $this->warn('    → Pendiente: confirmar que gastos referencia ($2,223,315) sea auditada por concepto.');
+            $this->warn('    → Pendiente: aprobar DESCUENTO como ingreso en regla final.');
+        } else {
+            $this->error('  NINGÚN ESCENARIO CUMPLE TODOS LOS CRITERIOS con el envío corporativo actual.');
+            $this->error('  Revisar: ingresos insuficientes o gastos/envío excesivos.');
+        }
+
         // Per-branch detail
         if ($this->option('detail')) {
             $this->line('');
