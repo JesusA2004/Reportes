@@ -366,7 +366,7 @@ class AuditScopeCommand extends Command
             $allTxn = DB::table('fact_recoveries')
                 ->whereIn('period_id', $dataIds)
                 ->selectRaw("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw_payload,'$.transaction')),'PAGO') as txn, COUNT(*) as cnt, SUM(total_amount) as total")
-                ->groupByRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload,'$.transaction'))")
+                ->groupByRaw("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw_payload,'$.transaction')),'PAGO')")
                 ->orderByDesc('total')
                 ->get();
 

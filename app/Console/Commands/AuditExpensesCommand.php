@@ -163,7 +163,7 @@ class AuditExpensesCommand extends Command
         // NOI from fact_noi_movements (used in BranchCalc for nomina_total)
         $noiPercep = (float) DB::table('fact_noi_movements')
             ->whereIn('period_id', $dataIds)
-            ->whereIn('code', ['P001','P002','P009','P010','P108','P109','P120','P123'])
+            ->whereIn('concept', ['P001','P002','P009','P010','P108','P109','P120','P123'])
             ->sum('amount');
 
         // Scenarios to reproduce reference
