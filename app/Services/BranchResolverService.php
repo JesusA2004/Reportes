@@ -509,6 +509,26 @@ class BranchResolverService
             'SJR II'                 => 'SAN JUAN DEL RÍO',
             'SJR 2'                  => 'SAN JUAN DEL RÍO',
             'ESEQUIEL MONTES'        => 'SAN JUAN DEL RÍO',
+            // ── Rutas huérfanas mapeadas por employee_branch_assignments ──────
+            // Confirmadas: el promotor de cada ruta tiene asignación exacta a la ciudad
+            'ATOTONILCO'             => 'TULA',            // 2 emp → TULA, HIDALGO
+            'CRUZ AZUL'              => 'TULA',            // 1 emp → TULA, HIDALGO
+            'CUITLAHUAC'             => 'CORDOBA',         // 1 emp → CORDOBA, VERACRUZ
+            'CALZADAS'               => 'CORDOBA',         // 1 emp → CORDOBA, VERACRUZ
+            'TECAMA TOXPAN'          => 'CORDOBA',         // 1 emp → CORDOBA, VERACRUZ
+            'MAGUEYES'               => 'SAN LUIS POTOSI', // 2 emp → SLP
+            'MUNOZ'                  => 'SAN LUIS POTOSI', // 2 emp → SLP (sin acento)
+            'MUÑOZ'                  => 'SAN LUIS POTOSI', // 2 emp → SLP
+            'CHOL'                   => 'ATLIXCO',         // 1 emp → ATLIXCO, PUEBLA
+            'MAT-CEN'                => 'ATLIXCO',         // 1 emp → ATLIXCO, PUEBLA
+            'TOCH'                   => 'ATLIXCO',         // 1 emp → ATLIXCO, PUEBLA
+            'ACAJ'                   => 'HUAMANTLA',       // 1 emp → HUAMANTLA, TLAXCALA
+            'LIBR'                   => 'HUAMANTLA',       // 1 emp → HUAMANTLA, HIDALGO
+            'BARONA'                 => 'CUERNAVACA',      // 2 emp → CUERNAVACA, MORELOS
+            'SAN PABLO'              => 'TLAXCALA',        // 1 emp → TLAXCALA
+            'SAN FELIPE'             => 'ATLACOMULCO',     // 1 emp → ATLACOMULCO, EDO MEX
+            'SAN LORENZO TLACOTEPEC' => 'ATLACOMULCO',    // 1 emp → ATLACOMULCO, EDO MEX
+            'SANTIAGO'               => 'TENANGO DEL VALLE', // 1 emp → TENANGO DEL VALLE
             // ── Cuernavaca extra routes ───────────────────────────────────────
             'TEMIXCO'                => 'CUERNAVACA',
             'XOCHITEPEC'             => 'CUERNAVACA',
