@@ -300,101 +300,187 @@ class AuditUtilidadCommand extends Command
                         str_pad('$' . number_format($ref, 2), 18) . $status);
         }
 
-        // ── J. MATRIZ DE ESCENARIOS ──────────────────────────────────────────────
+        // ── J. TABLA MAESTRA DE CONCILIACIÓN ─────────────────────────────────────
         $this->line('');
-        $this->info('════════════════════════════════════════════════════════════════');
-        $this->info('  J. MATRIZ DE ESCENARIOS DE CONCILIACIÓN');
-        $this->info('  Válido = EBITDA > 0 AND Envío <= EBITDA AND Diferencia >= 0');
-        $this->info('════════════════════════════════════════════════════════════════');
-
-        // PAGO + DESCUENTO from 12 operative branches
-        $ingresosDesc = (float) DB::table('fact_recoveries')
-            ->whereIn('period_id', $dataIds)
-            ->whereIn('branch_id', $operativeIds)
-            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) IN ('PAGO','DESCUENTO')")
-            ->sum('total_amount');
-
-        $refIngresos  = 18_332_149.55;
-        $refGastos    = 3_222_315.50;
-        $refSaldoIni  = 646_672.52;
-
-        // Reference envío: use actual system value ($excedentes) for all scenarios
-        // and show ref $3,076,800 as note
-        $envioActual = $excedentes;
-        $envioRef    = 3_076_800.00;
-
-        $scenarios = [
-            [
-                'num'      => 1,
-                'ingrLabel'=> 'Sistema actual (6 comp.)',
-                'ingr'     => $ingresos,
-                'saldo'    => $saldoInicial,
-                'gastLabel'=> 'Sistema actual',
-                'gast'     => $gastosTotal,
-            ],
-            [
-                'num'      => 2,
-                'ingrLabel'=> 'PAGO + DESCUENTO',
-                'ingr'     => $ingresosDesc,
-                'saldo'    => $saldoInicial,
-                'gastLabel'=> 'Sistema actual',
-                'gast'     => $gastosTotal,
-            ],
-            [
-                'num'      => 3,
-                'ingrLabel'=> 'Referencia $18,332,149',
-                'ingr'     => $refIngresos,
-                'saldo'    => $refSaldoIni,
-                'gastLabel'=> 'Referencia $3,222,315',
-                'gast'     => $refGastos,
-            ],
-        ];
-
+        $this->info('═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════');
+        $this->info('  J. TABLA MAESTRA DE CONCILIACIÓN — Parámetro por parámetro vs Excel Abril 2026');
+        $this->info('  Estados: EXACTO | CASI EXACTO | FALTA EN SISTEMA | SOBRA EN SISTEMA | FÓRMULA DISTINTA | DATO MANUAL | NO ENCONTRADO');
+        $this->info('═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════');
         $this->line('');
-        $this->line(
-            str_pad('#', 3) .
-            str_pad('Ingresos', 25) .
-            str_pad('Otorg.', 16) .
-            str_pad('Gastos', 16) .
-            str_pad('EBITDA', 16) .
-            str_pad('Envío', 14) .
-            str_pad('Diferencia', 14) .
-            '¿Válido?'
-        );
-        $this->line(str_repeat('─', 115));
 
-        foreach ($scenarios as $sc) {
-            $ebitda     = $sc['saldo'] + $sc['ingr'] - $otorgamientos - $sc['gast'];
-            $difEsc     = $ebitda - $envioActual;
-            $ebitdaPos  = $ebitda > 0;
-            $valid      = $ebitdaPos;
-            $validStr   = $valid ? '✅ Utilidad>0' : '❌ Utilidad negativa';
+        // Percepciones NOI para la tabla
+        $nomPercep = (float)($global['nomina_total'] ?? 0)
+                   + (float)($global['comisiones']   ?? 0)
+                   + (float)($global['bonos']         ?? 0)
+                   + (float)($global['vacaciones']    ?? 0)
+                   + (float)($global['prima_vacacional'] ?? 0);
 
-            $line = str_pad($sc['num'], 3) .
-                    str_pad(mb_substr($sc['ingrLabel'], 0, 23), 25) .
-                    str_pad('$' . number_format($otorgamientos, 0), 16) .
-                    str_pad('$' . number_format($sc['gast'], 0), 16) .
-                    str_pad('$' . number_format($ebitda, 0), 16) .
-                    str_pad('$' . number_format($envioActual, 0), 14) .
-                    str_pad('$' . number_format($difEsc, 0), 14) .
-                    $validStr;
+        // Ítems nomina_detalle incluidos en nomNeto
+        $nomDetalleSys = $global['nomina_detalle'] ?? [];
+        $imssAmt       = (float)($nomDetalleSys['IMSS']                           ?? 0);
+        $gasolinaAmt   = (float)($nomDetalleSys['Gasolina']                       ?? 0);
+        $finiquitoAmt  = (float)($nomDetalleSys['Finiquito']                      ?? 0);
+        $infonavitAmt  = (float)($nomDetalleSys['Descuentos Infonavit']           ?? 0);
+        $finMotosAmt   = (float)($nomDetalleSys['Financiamiento de Motos (desc.)'] ?? 0);
+        $gastMedAmt    = (float)($nomDetalleSys['Gastos médicos']                 ?? 0);
+        $pensAmt       = (float)($nomDetalleSys['Pensión Alimenticia']            ?? 0);
+        $descMotoAmt   = (float)($nomDetalleSys['Descuento Servicios Moto']       ?? 0);
+        $otrosNomAmt   = (float)($nomDetalleSys['Otros conceptos nómina']         ?? 0);
+        $prestPersAmt  = (float)($nomDetalleSys['Préstamo Personal']              ?? 0);
+        $subsidioAmt   = (float)($nomDetalleSys['Subsidio para el Empleo APL']    ?? 0);
 
-            if ($valid) {
-                $this->info($line);
-            } elseif ($ebitdaPos) {
+        // Nómina en lendus (fuente separada para la tabla)
+        $lendusNomSrc = DB::table('fact_expenses as fe')
+            ->join('report_uploads as ru', 'fe.report_upload_id', '=', 'ru.id')
+            ->whereIn('fe.period_id', $dataIds)
+            ->where('ru.data_source_id', DB::table('data_sources')->where('code', 'gastos_lendus')->value('id') ?? 0)
+            ->where('fe.category', 'Nómina y Capital Humano')
+            ->selectRaw('SUM(COALESCE(NULLIF(fe.paid_amount,0),fe.amount)) as t')
+            ->value('t');
+        $lendusNom = (float) $lendusNomSrc;
+
+        $hdr = str_pad('Bloque', 8)
+             . str_pad('Métrica', 36)
+             . str_pad('Excel Abril', 18)
+             . str_pad('Sistema Abril', 18)
+             . str_pad('Diferencia', 16)
+             . str_pad('Estado', 20)
+             . str_pad('Fuente actual', 28)
+             . 'Qué falta revisar';
+        $this->line($hdr);
+        $this->line(str_repeat('─', 160));
+
+        $autoStatus = function(float $sys, float $ref, float $tol = 200.0): string {
+            $d = $sys - $ref;
+            if (abs($d) < $tol)  return 'EXACTO';
+            if (abs($d) < 2000)  return 'CASI EXACTO';
+            return $d > 0 ? 'SOBRA EN SISTEMA' : 'FALTA EN SISTEMA';
+        };
+
+        $row = function(string $bl, string $met, ?float $ref, ?float $sys, string $est, string $fuente, string $nota) {
+            $rs  = $ref !== null  ? '$' . number_format($ref, 2) : '—';
+            $ss  = $sys !== null  ? '$' . number_format($sys, 2) : '—';
+            $ds  = ($ref !== null && $sys !== null)
+                ? (($sys - $ref >= 0 ? '+' : '') . '$' . number_format($sys - $ref, 2))
+                : '—';
+            return str_pad(mb_substr($bl,  0, 7),  8)
+                 . str_pad(mb_substr($met, 0, 35), 36)
+                 . str_pad($rs, 18)
+                 . str_pad($ss, 18)
+                 . str_pad($ds, 16)
+                 . str_pad(mb_substr($est, 0, 19), 20)
+                 . str_pad(mb_substr($fuente, 0, 27), 28)
+                 . $nota;
+        };
+
+        // Color helper: warn=amarillo, info=verde, line=sin color
+        $pr = function(string $est, string $line) {
+            if (in_array($est, ['FALTA EN SISTEMA', 'SOBRA EN SISTEMA', 'NO ENCONTRADO', 'FÓRMULA DISTINTA'], true)) {
                 $this->warn($line);
+            } elseif ($est === 'EXACTO') {
+                $this->info($line);
             } else {
-                $this->error($line);
+                $this->line($line);
             }
-        }
+        };
+
+        // ── INGRESOS ──
+        $this->line('');
+        $this->line('  ── BLOQUE INGRESOS ──');
+        $e = $autoStatus($saldoInicial, 646_672.52);
+        $pr($e, $row('INGR', 'Saldo inicial en caja', 646_672.52, $saldoInicial, $e, 'Period.saldo_inicial_caja', '—'));
+        $e = $autoStatus($ingrCapital, 12_883_858.49);
+        $pr($e, $row('INGR', 'Capital recuperado', 12_883_858.49, $ingrCapital, $e, 'fact_recoveries.capital', '-$1.06M: ¿DESCUENTO sin capital?'));
+        $e = $autoStatus($ingrInteres, 4_545_211.24);
+        $pr($e, $row('INGR', 'Intereses recuperados', 4_545_211.24, $ingrInteres, $e, 'fact_recoveries.interest', '-$327K: ¿DESCUENTO refi faltante?'));
+        $e = $autoStatus($ingrImpuesto, 727_231.40);
+        $pr($e, $row('INGR', 'Impuestos (tax)', 727_231.40, $ingrImpuesto, $e, 'fact_recoveries.tax', '-$52K: proporcional a capital'));
+        $e = $autoStatus($ingrCharges, 149_384.52);
+        $pr($e, $row('INGR', 'Multas (charges_due)', 149_384.52, $ingrCharges, $e, 'fact_recoveries.charges_due', '-$7K'));
+        $e = $autoStatus($ingrCargos, 18_063.90);
+        $pr($e, $row('INGR', 'Cargos al inicio', 18_063.90, $ingrCargos, $e, 'fact_recoveries.charges', '+$303 rounding'));
+        $e = $autoStatus($ingrComAp, 8_400.00);
+        $pr($e, $row('INGR', 'Comisión apertura', 8_400.00, $ingrComAp, $e, 'fact_recoveries.comision_apertura', '—'));
+        $e = $autoStatus($ingresos, 18_332_149.55);
+        $pr($e, $row('INGR', '► INGRESOS TOTALES', 18_332_149.55, $ingresos, $e, 'BranchCalc 6 comps (12 suc)', '-$1,448,184 — brecha principal'));
+
+        // ── OTORGAMIENTOS ──
+        $this->line('');
+        $this->line('  ── BLOQUE OTORGAMIENTOS ──');
+        $e = $autoStatus($otorgamientos, 14_538_964.00);
+        $pr($e, $row('OTORG', 'Otorgamientos (monto53)', 14_538_964.00, $otorgamientos, $e, 'fact_placements.amount_monto53', '—'));
+
+        // ── GASTOS OPERATIVOS ──
+        $this->line('');
+        $this->line('  ── BLOQUE GASTOS OPERATIVOS ──');
+        $e = $autoStatus($gastosOp, 837_384.28);
+        $pr($e, $row('GASTO', '► Gastos Operativos', 837_384.28, $gastosOp, $e, 'BranchCalc gastos_op', '+$7,074 — Emergentes sin-suc y ERP dup'));
+
+        // ── NÓMINA ──
+        $this->line('');
+        $this->line('  ── BLOQUE NÓMINA (nómina_detalle + percepciones NOI) ──');
+        $nomSueldos = (float)($global['nomina_total'] ?? 0);
+        $nomComis2  = (float)($global['comisiones']   ?? 0);
+        $nomBonos2  = (float)($global['bonos']        ?? 0);
+        $nomVac2    = (float)($global['vacaciones']   ?? 0);
+        $nomPVac2   = (float)($global['prima_vacacional'] ?? 0);
+
+        $pr('NO ENCONTRADO', $row('NOMINA', 'Nómina sueldos (P001)',      null, $nomSueldos,  'NO ENCONTRADO', 'NOI P001',                    'Sin ref Excel por concepto'));
+        $pr('NO ENCONTRADO', $row('NOMINA', 'Comisiones (P002)',           null, $nomComis2,   'NO ENCONTRADO', 'NOI P002',                    'Sin ref Excel por concepto'));
+        $pr('NO ENCONTRADO', $row('NOMINA', 'Bonos (P108+P120+P123)',      null, $nomBonos2,   'NO ENCONTRADO', 'NOI P108/109/120/123',        'Sin ref Excel por concepto'));
+        $pr('NO ENCONTRADO', $row('NOMINA', 'Vacaciones (P009)',           null, $nomVac2,     'NO ENCONTRADO', 'NOI P009',                    'Sin ref Excel por concepto'));
+        $pr('NO ENCONTRADO', $row('NOMINA', 'Prima vacacional (P010)',     null, $nomPVac2,    'NO ENCONTRADO', 'NOI P010',                    'Sin ref Excel por concepto'));
+        $pr('NO ENCONTRADO', $row('NOMINA', 'IMSS',                        null, $imssAmt,     'NO ENCONTRADO', 'fact_expenses PAGO IMSS',     'Lendus $202,125; suc filtrada'));
+        $pr('NO ENCONTRADO', $row('NOMINA', 'Gasolina',                    null, $gasolinaAmt, 'NO ENCONTRADO', 'fact_expenses Gasolina cat.', 'En nomina_detalle, no gastos_op'));
+        $pr('NO ENCONTRADO', $row('NOMINA', 'Finiquito',                   null, $finiquitoAmt,'NO ENCONTRADO', 'fact_expenses PAGO FINIQUITO','—'));
+        $pr('FÓRMULA DISTINTA', $row('NOMINA', 'Infonavit (D094) — ded. emp.', null, $infonavitAmt,'FÓRMULA DISTINTA','NOI D094 deducción', '¿Excel excluye este de GastosT?'));
+        $pr('FÓRMULA DISTINTA', $row('NOMINA', 'Fin. Motos desc. (D123)',   null, $finMotosAmt, 'FÓRMULA DISTINTA','NOI D123 deducción', '¿Excel excluye este de GastosT?'));
+        $pr('NO ENCONTRADO', $row('NOMINA', 'Gastos médicos',               null, $gastMedAmt,  'NO ENCONTRADO', 'fact_expenses GASTOS MED.',  '—'));
+        $pr('FÓRMULA DISTINTA', $row('NOMINA', 'Pensión Alimenticia (D010)', null, $pensAmt,    'FÓRMULA DISTINTA','NOI D010 deducción', '¿Excel excluye este de GastosT?'));
+        $pr('FÓRMULA DISTINTA', $row('NOMINA', 'Desc. Serv. Moto (D113)',   null, $descMotoAmt,'FÓRMULA DISTINTA','NOI D113 deducción', '¿Excel excluye este de GastosT?'));
+        $pr('DATO MANUAL', $row('NOMINA', 'Préstamo Personal (D004)',       null, $prestPersAmt,'DATO MANUAL',   'NOI D004 — excluido explic.', 'Solo visual, no entra en nomNeto'));
+        $pr('DATO MANUAL', $row('NOMINA', 'Subsidio APL (D111)',            null, $subsidioAmt, 'DATO MANUAL',   'NOI D111 — excluido explic.', 'Solo visual, no entra en nomNeto'));
+        $e = $autoStatus($nomNeto, 2_501_589.43);
+        $pr($e, $row('NOMINA', '► NÓMINA NETA (nomNeto)', 2_501_589.43, $nomNeto, $e, 'BranchCalc nomNeto', '+$3,942 — candid. excluir D094/D123/D010/D113'));
+
+        // ── GASTOS TOTALES ──
+        $this->line('');
+        $this->line('  ── BLOQUE GASTOS TOTALES ──');
+        $e = $autoStatus($gastosTotal, 3_222_315.50);
+        $pr($e, $row('GASTO', '► GASTOS TOTALES',  3_222_315.50, $gastosTotal, $e, 'gastosOp + nomNeto', '+$127,674 — Excel usa fórmula con ∆ $116,658'));
+
+        // ── UTILIDAD ──
+        $this->line('');
+        $this->line('  ── BLOQUE UTILIDAD ──');
+        $e = $autoStatus($utilidad, 1_217_542.57);
+        $pr($e, $row('UTIL', '► Utilidad disponible', 1_217_542.57, $utilidad, $e, 'saldoIni+ingr−otorg−gastosT', 'Negativa por brecha -$1.45M en ingresos'));
+
+        // ── ENVÍO CORPORATIVO ──
+        $this->line('');
+        $this->line('  ── BLOQUE ENVÍO CORPORATIVO ──');
+        $e = $autoStatus($excedentes, 3_076_800.00);
+        $pr($e, $row('ENVIO', '► Envío corporativo', 3_076_800.00, $excedentes, $e, 'fact_exp gastos_lendus cat.', '+$32,000 — 5 regs: CUE/ATL/MIA (IDs 9885,9911,9849,10156,9858)'));
+
+        // ── DIFERENCIA / SOBRANTE ──
+        $this->line('');
+        $this->line('  ── BLOQUE DIFERENCIA / SOBRANTE ──');
+        // Two references: hardcoded vs Excel Análisis Tendencias
+        $pr('FÓRMULA DISTINTA', $row('DIFER', 'Dif. (utilidad − envío)',  -1_859_257.43, $diferencia, 'FÓRMULA DISTINTA', 'utilidad − excedentes', 'Ref. principal=-$1,859,257 | AnálTend=-$2,022,234'));
+
+        // ── SALDO FINAL EN CAJA ──
+        $this->line('');
+        $this->line('  ── BLOQUE SALDO FINAL EN CAJA ──');
+        $pr('FALTA EN SISTEMA', $row('SALDO', '► Saldo final en caja',   494_827.52, null, 'FALTA EN SISTEMA', 'NO CALCULADO', 'Fórmula del Excel no confirmada — agregar al snapshot'));
 
         $this->line('');
-        $this->line('  Envío corporativo usado: $' . number_format($envioActual, 2) .
-                    '  (ref. $' . number_format($envioRef, 2) . ', dif. $' . number_format($envioActual - $envioRef, 2) . ')');
-        $this->line('  Otorgamientos: $' . number_format($otorgamientos, 2) . ' (monto53, CREDITO NUEVO, 12 suc)');
-
-        $this->line('');
-        $this->line('  Escenario 1 = sistema actual. Escenario 3 = valores de referencia del Excel.');
+        $this->line('  Leyenda estados:');
+        $this->info('    EXACTO           → diferencia < $200');
+        $this->line('    CASI EXACTO      → diferencia $200–$2,000');
+        $this->warn('    FALTA EN SISTEMA → sistema < Excel');
+        $this->warn('    SOBRA EN SISTEMA → sistema > Excel');
+        $this->warn('    FÓRMULA DISTINTA → cálculo confirmado diferente al Excel');
+        $this->warn('    NO ENCONTRADO    → sin referencia exacta del Excel por concepto');
+        $this->line('    DATO MANUAL      → valor excluido explícitamente (correcto)');
 
         // Per-branch detail
         if ($this->option('detail')) {
