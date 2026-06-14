@@ -1,4 +1,4 @@
-import { useForm } from '@inertiajs/vue3'
+import { router, useForm } from '@inertiajs/vue3'
 import Swal from 'sweetalert2'
 import { computed, ref } from 'vue'
 
@@ -18,6 +18,12 @@ type PeriodItem = {
     can_receive_uploads?: boolean
     component_period_ids?: number[]
     component_labels?: string[]
+    component_weeks?: Array<{
+        id: number
+        sequence: number | null
+        start_date: string | null
+        end_date: string | null
+    }>
     uploaded_sources_count?: number
     required_sources_count?: number
     can_close?: boolean
@@ -86,7 +92,11 @@ export function usePeriodosIndex(props: Props) {
         const year  = Number(monthlyForm.year)
         const month = Number(monthlyForm.month)
         if (!year || !month) return []
-        return (props.availableWeeks ?? []).filter((w) => w.year === year && w.month === month)
+        // Muestra todas las semanas sin asignar del año (no filtrar por mes calendario)
+        // para que semanas sobrantes del mes anterior estén disponibles
+        return [...(props.availableWeeks ?? [])]
+            .filter((w) => w.year === year)
+            .sort((a, b) => (a.start_date ?? '').localeCompare(b.start_date ?? ''))
     })
 
     const filteredPeriods = computed(() => {
@@ -245,6 +255,24 @@ export function usePeriodosIndex(props: Props) {
         })
     }
 
+    const destroyMonthly = async (period: PeriodItem) => {
+        const result = await Swal.fire({
+            title: '¿Eliminar mes operativo?',
+            html: `Se eliminará únicamente la agrupación <strong>${period.label}</strong>.<br><br>Las semanas base <strong>no se eliminarán</strong> y volverán a estar disponibles para crear otro periodo.`,
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonText: 'Eliminar mes operativo',
+            cancelButtonText: 'Cancelar',
+            confirmButtonColor: '#dc2626',
+        })
+
+        if (!result.isConfirmed) return
+
+        router.delete(`/periodos/${period.id}`, {
+            preserveScroll: true,
+        })
+    }
+
     return {
         filters,
         form,
@@ -259,5 +287,6 @@ export function usePeriodosIndex(props: Props) {
         submitCreate,
         submitConfigureMonth,
         togglePeriod,
+        destroyMonthly,
     }
 }

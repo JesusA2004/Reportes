@@ -41,14 +41,32 @@ class PeriodController extends Controller
                     ->count();
             }
 
-            // Periodos compuestos: mostrar qué meses / semanas los componen
+            // Periodos compuestos: labels y, para mensuales, detalle completo de cada semana
+            $componentIds = collect($period->component_period_ids ?? [])
+                ->map(fn ($id) => (int) $id)
+                ->all();
+
             $componentLabels = [];
-            if (!empty($period->component_period_ids)) {
-                $componentLabels = $allPeriods
-                    ->whereIn('id', collect($period->component_period_ids)->map(fn ($id) => (int) $id)->all())
-                    ->pluck('label')
-                    ->values()
-                    ->all();
+            $componentWeeks  = [];
+
+            if (!empty($componentIds)) {
+                $components = $allPeriods->whereIn('id', $componentIds);
+
+                $componentLabels = $components->pluck('label')->values()->all();
+
+                if ($period->isMonthly()) {
+                    $componentWeeks = $components
+                        ->where('type', 'weekly')
+                        ->sortBy(fn ($w) => optional($w->start_date)->format('Y-m-d'))
+                        ->map(fn ($w) => [
+                            'id'         => $w->id,
+                            'sequence'   => $w->sequence,
+                            'start_date' => optional($w->start_date)->format('Y-m-d'),
+                            'end_date'   => optional($w->end_date)->format('Y-m-d'),
+                        ])
+                        ->values()
+                        ->all();
+                }
             }
 
             return [
@@ -67,6 +85,7 @@ class PeriodController extends Controller
                 'is_compound'            => $period->isCompound(),
                 'component_period_ids'   => $period->component_period_ids ?? [],
                 'component_labels'       => $componentLabels,
+                'component_weeks'        => $componentWeeks,
                 'uploaded_sources_count' => $uploadedSourcesCount,
                 'required_sources_count' => $period->isBase() ? $requiredSourcesCount : 0,
                 'can_close'              => $closeGuard['can_close'],
@@ -75,10 +94,20 @@ class PeriodController extends Controller
             ];
         })->values();
 
-        // Semanas disponibles para seleccionar al crear un periodo mensual
+        // Semanas disponibles = todas las semanales NO asignadas a ningún mes operativo
+        $assignedWeekIds = Period::query()
+            ->where('type', 'monthly')
+            ->whereNotNull('component_period_ids')
+            ->pluck('component_period_ids')
+            ->flatMap(fn ($ids) => is_array($ids) ? $ids : json_decode($ids ?? '[]', true) ?? [])
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->all();
+
         $availableWeeks = Period::query()
             ->where('type', 'weekly')
-            ->orderBy('year')->orderBy('month')->orderBy('sequence')
+            ->when(!empty($assignedWeekIds), fn ($q) => $q->whereNotIn('id', $assignedWeekIds))
+            ->orderBy('start_date')
             ->get(['id', 'name', 'year', 'month', 'sequence', 'start_date', 'end_date'])
             ->map(fn (Period $w) => [
                 'id'         => $w->id,
@@ -137,6 +166,30 @@ class PeriodController extends Controller
         $typeLabel = $typeLabels[$type] ?? $type;
 
         return back()->with('success', "Se generaron {$periods->count()} periodo(s) {$typeLabel}(es) correctamente.");
+    }
+
+    public function destroy(Period $period, PeriodGenerationService $generator): RedirectResponse
+    {
+        if (!$period->isMonthly()) {
+            return back()->with('error', 'Solo se pueden eliminar meses operativos (tipo mensual).');
+        }
+
+        if ($period->reportUploads()->exists()) {
+            return back()->with('error', "No se puede eliminar \"{$period->label}\" porque ya tiene archivos cargados. Primero elimina o reinicia la información procesada.");
+        }
+
+        if ($period->processRuns()->exists()) {
+            return back()->with('error', "No se puede eliminar \"{$period->label}\" porque tiene procesos de carga registrados.");
+        }
+
+        $label = $period->label;
+        $year  = $period->year;
+
+        $period->delete();
+
+        $generator->syncDerivedPeriods($year);
+
+        return back()->with('success', "El mes operativo \"{$label}\" fue eliminado. Las semanas base siguen disponibles.");
     }
 
     public function close(Period $period, PeriodCloseGuardService $guard): RedirectResponse

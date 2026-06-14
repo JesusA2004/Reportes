@@ -252,6 +252,8 @@ class PeriodGenerationService {
     }
 
     // ── Resolución de un bloque compuesto ────────────────────────────
+    // Solo se genera si TODOS los meses operativos del bloque existen.
+    // Nunca usa semanas calendario directamente como componentes.
 
     private function syncGroupedPeriod(
         string $type,
@@ -261,25 +263,15 @@ class PeriodGenerationService {
         string $name,
         string $code,
     ): ?Period {
-        // Preferir mensuales si existen para TODOS los meses del bloque
         $monthlyPeriods = $this->getMonthlyPeriodsForMonths($year, $months);
 
-        if ($monthlyPeriods->count() === count($months)) {
-            $first        = $monthlyPeriods->sortBy('start_date')->first();
-            $last         = $monthlyPeriods->sortByDesc('end_date')->first();
-            $componentIds = $monthlyPeriods->pluck('id')->map(fn ($id) => (int) $id)->values()->all();
-        } else {
-            // Fallback: semanas directamente
-            $weeks = $this->getWeeklyPeriodsForMonths($year, $months);
-
-            if (!$this->monthsAreReady($weeks, $months)) {
-                return null;
-            }
-
-            $first        = $weeks->sortBy('start_date')->first();
-            $last         = $weeks->sortByDesc('end_date')->first();
-            $componentIds = $weeks->pluck('id')->map(fn ($id) => (int) $id)->values()->all();
+        if ($monthlyPeriods->count() !== count($months)) {
+            return null;
         }
+
+        $first        = $monthlyPeriods->sortBy('start_date')->first();
+        $last         = $monthlyPeriods->sortByDesc('end_date')->first();
+        $componentIds = $monthlyPeriods->sortBy('month')->pluck('id')->map(fn ($id) => (int) $id)->values()->all();
 
         if (!$first || !$last) {
             return null;
@@ -319,35 +311,14 @@ class PeriodGenerationService {
             ->get();
     }
 
-    private function getWeeklyPeriodsForMonths(int $year, array $months): Collection
-    {
-        // Use getBasePeriodsForMonth for each month and merge results
-        $results = collect();
-        foreach ($months as $month) {
-            $results = $results->concat($this->getBasePeriodsForMonth($year, (int) $month));
-        }
-        return $results->unique('id')->sortBy('start_date')->values();
-    }
-
     private function getMonthlyPeriodsForMonths(int $year, array $months): Collection
     {
         return Period::query()
             ->where('type', 'monthly')
             ->where('year', $year)
             ->whereIn('month', $months)
-            ->orderBy('start_date')
+            ->orderBy('month')
             ->get();
-    }
-
-    private function monthsAreReady(Collection $weeks, array $months): bool
-    {
-        $available = $weeks->pluck('month')->map(fn ($m) => (int) $m)->unique()->values()->all();
-        foreach ($months as $month) {
-            if (!in_array((int) $month, $available, true)) {
-                return false;
-            }
-        }
-        return true;
     }
 
 }

@@ -46,6 +46,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->group(function () {
             Route::get('/', [PeriodController::class, 'index'])->name('index');
             Route::post('/', [PeriodController::class, 'store'])->name('store');
+            Route::delete('/{period}', [PeriodController::class, 'destroy'])->name('destroy');
             Route::post('/{period}/close', [PeriodController::class, 'close'])->name('close');
             Route::post('/{period}/open', [PeriodController::class, 'open'])->name('open');
         });
