@@ -215,7 +215,9 @@ class GastosErpExcelImportService
             ->orWhereRaw('LOWER(normalized_name) = ?', [$this->normalize($name)])
             ->first();
 
-        return $branch ?? $this->branchResolver->findOrCreateBranchByName($name);
+        // Resolve route → official branch before creating a new record.
+        $officialName = $this->branchResolver->resolveRealBranchFromRoute($name);
+        return $branch ?? ($officialName ? $this->branchResolver->findOrCreateBranchByName($officialName) : null);
     }
 
     private function resolveEmployee(?string $name): ?Employee

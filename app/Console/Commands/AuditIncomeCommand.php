@@ -18,7 +18,8 @@ class AuditIncomeCommand extends Command
                                 {period_id}
                                 {--product= : filter by product keyword}
                                 {--by-product : show breakdown by product}
-                                {--by-branch : show breakdown by branch}
+                                {--by-branch : show breakdown by branch (PAGO+DESCUENTO, depurado)}
+                                {--direction-comercial : per-branch conciliation table vs Dirección Comercial reference}
                                 {--detail : full conciliation: by transaction type, by data source, approach comparison}
                                 {--compare-reference : deep audit against reference $18,332,149.55 with all combinations}
                                 {--descuento-breakdown : desglose DESCUENTO por sucursal/producto/operación + escenarios A-G vs $18,332,149.55}';
@@ -207,9 +208,8 @@ class AuditIncomeCommand extends Command
         // ── Por sucursal (filtrado a 12 sucursales operativas) ───────────────
         if ($this->option('by-branch')) {
             $this->line('');
-            $this->info('════ DESGLOSE POR SUCURSAL (12 sucursales operativas, PAGO solamente) ════');
+            $this->info('════ DESGLOSE POR SUCURSAL (12 sucursales operativas, PAGO + DESCUENTO depurado) ════');
 
-            // Build operative branch IDs (same as BranchRadiographyCalculator)
             $resolver    = app(BranchResolverService::class);
             $allBranches = DB::table('branches')->get();
             $operativeMap = [];
@@ -221,70 +221,84 @@ class AuditIncomeCommand extends Command
             }
             $operativeIds = array_keys($operativeMap);
 
-            // PAGO only, 12 branches
-            $byBranchPago = DB::table('fact_recoveries as fr')
+            $byBranchRows = DB::table('fact_recoveries as fr')
                 ->leftJoin('branches as b', 'fr.branch_id', '=', 'b.id')
                 ->whereIn('fr.period_id', $dataIds)
                 ->whereIn('fr.branch_id', $operativeIds)
-                ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(fr.raw_payload, '$.transaction')) = 'PAGO'")
+                ->whereIn('fr.transaction', ['PAGO', 'DESCUENTO'])
+                ->whereRaw("UPPER(COALESCE(fr.concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
+                ->whereRaw("UPPER(COALESCE(fr.operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
                 ->when($filterProd, fn($q) => $q->whereRaw("UPPER(COALESCE(fr.product_name,'')) LIKE ?", ["%{$filterProd}%"]))
                 ->select(
                     'b.name as branch_name',
+                    'fr.transaction',
                     DB::raw('COUNT(*) as cnt'),
                     DB::raw('SUM(fr.capital) as capital'),
                     DB::raw('SUM(fr.interest) as interes'),
                     DB::raw('SUM(fr.tax) as impuesto'),
                     DB::raw('SUM(fr.charges) as cargos'),
+                    DB::raw('SUM(fr.charges_due) as moratorios'),
                     DB::raw('SUM(fr.total_amount) as total')
                 )
-                ->groupBy('fr.branch_id', 'b.name')
-                ->orderByDesc('total')
+                ->groupBy('fr.branch_id', 'b.name', 'fr.transaction')
+                ->orderBy('b.name')
                 ->get();
 
-            // Group by resolved city name
             $byCity = [];
-            foreach ($byBranchPago as $br) {
+            foreach ($byBranchRows as $br) {
                 $city = $resolver->resolveRealBranchFromRoute($br->branch_name ?? '') ?? $br->branch_name ?? 'Desconocida';
                 if (!isset($byCity[$city])) {
-                    $byCity[$city] = ['cnt' => 0, 'capital' => 0, 'interes' => 0, 'impuesto' => 0, 'cargos' => 0, 'total' => 0];
+                    $byCity[$city] = ['cnt' => 0, 'capital' => 0.0, 'interes' => 0.0, 'impuesto' => 0.0, 'cargos' => 0.0, 'moratorios' => 0.0, 'pago' => 0.0, 'descuento' => 0.0, 'total' => 0.0];
                 }
-                $byCity[$city]['cnt']      += $br->cnt;
-                $byCity[$city]['capital']  += (float) $br->capital;
-                $byCity[$city]['interes']  += (float) $br->interes;
-                $byCity[$city]['impuesto'] += (float) $br->impuesto;
-                $byCity[$city]['cargos']   += (float) $br->cargos;
-                $byCity[$city]['total']    += (float) $br->total;
+                $byCity[$city]['cnt']       += $br->cnt;
+                $byCity[$city]['capital']   += (float) $br->capital;
+                $byCity[$city]['interes']   += (float) $br->interes;
+                $byCity[$city]['impuesto']  += (float) $br->impuesto;
+                $byCity[$city]['cargos']    += (float) $br->cargos;
+                $byCity[$city]['moratorios']+= (float) $br->moratorios;
+                $byCity[$city]['total']     += (float) $br->total;
+                if ($br->transaction === 'PAGO')     $byCity[$city]['pago']     += (float) $br->total;
+                if ($br->transaction === 'DESCUENTO') $byCity[$city]['descuento'] += (float) $br->total;
             }
+            uasort($byCity, fn($a, $b) => $b['total'] <=> $a['total']);
 
-            arsort($byCity);
+            $this->line(str_pad('Ciudad', 22) . str_pad('Regs', 7) . str_pad('Capital', 14) .
+                        str_pad('Interés', 13) . str_pad('Impuesto', 12) . str_pad('Cargos Cal.', 13) .
+                        str_pad('Moratorios', 13) . str_pad('PAGO', 14) . str_pad('DESCUENTO', 14) . 'Total');
+            $this->line(str_repeat('─', 135));
 
-            $this->line(str_pad('Ciudad (resuelta)', 24) . str_pad('Regs', 7) . str_pad('Capital', 16) .
-                        str_pad('Interés', 14) . str_pad('Impuesto', 13) . str_pad('Cargos', 13) . 'Total');
-            $this->line(str_repeat('─', 100));
-
-            $pagoTotal = 0.0;
-            foreach ($byCity as $city => $data) {
+            $grandTotal = 0.0;
+            $grandPago  = 0.0;
+            $grandDesc  = 0.0;
+            foreach ($byCity as $city => $d) {
                 $this->line(
-                    str_pad(mb_substr($city, 0, 22), 24) .
-                    str_pad(number_format($data['cnt']), 7) .
-                    str_pad('$' . number_format($data['capital'], 0), 16) .
-                    str_pad('$' . number_format($data['interes'], 0), 14) .
-                    str_pad('$' . number_format($data['impuesto'], 0), 13) .
-                    str_pad('$' . number_format($data['cargos'], 0), 13) .
-                    '$' . number_format($data['total'], 0)
+                    str_pad(mb_substr($city, 0, 20), 22) .
+                    str_pad(number_format($d['cnt']), 7) .
+                    str_pad('$' . number_format($d['capital'], 0), 14) .
+                    str_pad('$' . number_format($d['interes'], 0), 13) .
+                    str_pad('$' . number_format($d['impuesto'], 0), 12) .
+                    str_pad('$' . number_format($d['cargos'], 0), 13) .
+                    str_pad('$' . number_format($d['moratorios'], 0), 13) .
+                    str_pad('$' . number_format($d['pago'], 0), 14) .
+                    str_pad('$' . number_format($d['descuento'], 0), 14) .
+                    '$' . number_format($d['total'], 2)
                 );
-                $pagoTotal += $data['total'];
+                $grandTotal += $d['total'];
+                $grandPago  += $d['pago'];
+                $grandDesc  += $d['descuento'];
             }
-            $this->line(str_repeat('─', 100));
-            $this->line(str_pad('TOTAL PAGO (12 sucursales)', 24) . str_pad('', 7) .
-                        str_pad('', 56) . '$' . number_format($pagoTotal, 2));
+            $this->line(str_repeat('─', 135));
+            $this->info(str_pad('TOTAL (12 sucursales)', 22) . str_pad('', 110) . '$' . number_format($grandTotal, 2));
+            $this->line('  PAGO: $' . number_format($grandPago, 2) . '   DESCUENTO: $' . number_format($grandDesc, 2));
 
-            // Show orphan branches (excluded)
+            // Orphan rows (branches not in operative map)
             $orphanBranches = DB::table('fact_recoveries as fr')
                 ->leftJoin('branches as b', 'fr.branch_id', '=', 'b.id')
                 ->whereIn('fr.period_id', $dataIds)
                 ->whereNotIn('fr.branch_id', $operativeIds)
-                ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(fr.raw_payload, '$.transaction')) = 'PAGO'")
+                ->whereIn('fr.transaction', ['PAGO', 'DESCUENTO'])
+                ->whereRaw("UPPER(COALESCE(fr.concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
+                ->whereRaw("UPPER(COALESCE(fr.operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
                 ->select(
                     DB::raw('COALESCE(b.name, "Sin sucursal") as sucursal'),
                     DB::raw('COUNT(*) as cnt'),
@@ -296,17 +310,19 @@ class AuditIncomeCommand extends Command
 
             if ($orphanBranches->isNotEmpty()) {
                 $this->line('');
-                $this->warn('  ⚠ SUCURSALES HUÉRFANAS EXCLUIDAS (no resuelven a 12 ciudades, accredited_name=NULL):');
+                $this->warn('  SUCURSALES HUERFANAS (PAGO+DESC depurado, no resuelven a 12 ciudades):');
                 $orphanTotal = 0.0;
                 foreach ($orphanBranches as $ob) {
                     $this->warn('    ' . str_pad(mb_substr($ob->sucursal, 0, 22), 24) .
                                 str_pad(number_format($ob->cnt), 7) . '$' . number_format((float)$ob->total, 2));
                     $orphanTotal += (float) $ob->total;
                 }
-                $this->warn('    TOTAL HUÉRFANAS: $' . number_format($orphanTotal, 2));
-                $this->warn('    → NO incluidos en el cálculo EBITDA actual.');
-                $this->warn('    → Para incluirlas: agregar a routeMap en BranchResolverService.');
+                $this->warn('    TOTAL HUERFANAS: $' . number_format($orphanTotal, 2));
             }
+        }
+
+        if ($this->option('direction-comercial')) {
+            $this->showDireccionComercial($dataIds, $period->label);
         }
 
         if ($this->option('detail')) {
@@ -713,6 +729,142 @@ class AuditIncomeCommand extends Command
         $this->info('  → Ingresos provisionales (PAGO + DESCUENTO, 12 suc): $' . number_format($proposed, 2));
         $this->line('    Si PAGO solo: $' . number_format($pagoBr, 2) . ' (falta $' . number_format($refIngresos - $pagoBr, 2) . ' para ref)');
         $this->line('    Si PAGO+DESCUENTO: $' . number_format($proposed, 2) . ' (diferencia vs ref: ' . $sign . '$' . number_format($diffRef, 2) . ')');
+    }
+
+    private function showDireccionComercial(array $dataIds, string $label): void
+    {
+        // Reference total from Dirección Comercial report (April 2026).
+        // Known conciliation diff of ~$710: ATLIXCO/CRECE ~$500 + TULA/i30 ~$210. Not a bug — documented.
+        $dcRef = 18_323_749.55;
+
+        $this->line('');
+        $this->info('════════════════════════════════════════════════════════════════════════');
+        $this->info("  CONCILIACIÓN vs DIRECCIÓN COMERCIAL — {$label}");
+        $this->info('  Referencia DC: $' . number_format($dcRef, 2));
+        $this->info('  Regla: PAGO + DESCUENTO | Excluir: CONDONACION, COBERTURA SAVEHEARTS, COMISIÓN POR APERTURA');
+        $this->info('════════════════════════════════════════════════════════════════════════');
+
+        $resolver     = app(BranchResolverService::class);
+        $allBranches  = DB::table('branches')->get();
+        $operativeIds = [];
+        foreach ($allBranches as $b) {
+            $real = $resolver->resolveRealBranchFromRoute($b->name);
+            if ($real && $resolver->isSheetBranch($real)) $operativeIds[] = (int) $b->id;
+        }
+
+        // ── Per-branch breakdown (PAGO + DESCUENTO depurado) ─────────────────
+        $rows = DB::table('fact_recoveries as fr')
+            ->leftJoin('branches as b', 'fr.branch_id', '=', 'b.id')
+            ->whereIn('fr.period_id', $dataIds)
+            ->whereIn('fr.branch_id', $operativeIds)
+            ->whereIn('fr.transaction', ['PAGO', 'DESCUENTO'])
+            ->whereRaw("UPPER(COALESCE(fr.concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
+            ->whereRaw("UPPER(COALESCE(fr.operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
+            ->select(
+                'b.name as branch_name',
+                'fr.transaction',
+                DB::raw('SUM(fr.capital) as capital'),
+                DB::raw('SUM(fr.interest) as interes'),
+                DB::raw('SUM(fr.tax) as impuesto'),
+                DB::raw('SUM(fr.charges) as cargos'),
+                DB::raw('SUM(fr.charges_due) as moratorios'),
+                DB::raw('SUM(fr.total_amount) as total')
+            )
+            ->groupBy('fr.branch_id', 'b.name', 'fr.transaction')
+            ->get();
+
+        $byCity = [];
+        foreach ($rows as $r) {
+            $city = $resolver->resolveRealBranchFromRoute($r->branch_name ?? '') ?? $r->branch_name ?? '?';
+            if (!isset($byCity[$city])) {
+                $byCity[$city] = ['capital' => 0.0, 'interes' => 0.0, 'impuesto' => 0.0, 'cargos' => 0.0, 'moratorios' => 0.0, 'pago' => 0.0, 'descuento' => 0.0, 'total' => 0.0];
+            }
+            $byCity[$city]['capital']   += (float)$r->capital;
+            $byCity[$city]['interes']   += (float)$r->interes;
+            $byCity[$city]['impuesto']  += (float)$r->impuesto;
+            $byCity[$city]['cargos']    += (float)$r->cargos;
+            $byCity[$city]['moratorios']+= (float)$r->moratorios;
+            $byCity[$city]['total']     += (float)$r->total;
+            if ($r->transaction === 'PAGO')      $byCity[$city]['pago']     += (float)$r->total;
+            if ($r->transaction === 'DESCUENTO') $byCity[$city]['descuento'] += (float)$r->total;
+        }
+        uasort($byCity, fn($a, $b) => $b['total'] <=> $a['total']);
+
+        $this->line('');
+        $this->line(str_pad('Sucursal', 22) . str_pad('Capital', 14) . str_pad('Interés', 13) .
+                    str_pad('Impuesto', 12) . str_pad('Cargos Cal', 13) . str_pad('Moratorios', 13) .
+                    str_pad('PAGO', 14) . str_pad('DESCUENTO', 14) . 'Total sistema');
+        $this->line(str_repeat('─', 130));
+
+        $grandTotal = 0.0;
+        $grandPago  = 0.0;
+        $grandDesc  = 0.0;
+        foreach ($byCity as $city => $d) {
+            $this->line(
+                str_pad(mb_substr($city, 0, 20), 22) .
+                str_pad('$' . number_format($d['capital'], 0), 14) .
+                str_pad('$' . number_format($d['interes'], 0), 13) .
+                str_pad('$' . number_format($d['impuesto'], 0), 12) .
+                str_pad('$' . number_format($d['cargos'], 0), 13) .
+                str_pad('$' . number_format($d['moratorios'], 0), 13) .
+                str_pad('$' . number_format($d['pago'], 0), 14) .
+                str_pad('$' . number_format($d['descuento'], 0), 14) .
+                '$' . number_format($d['total'], 2)
+            );
+            $grandTotal += $d['total'];
+            $grandPago  += $d['pago'];
+            $grandDesc  += $d['descuento'];
+        }
+        $this->line(str_repeat('─', 130));
+        $diff = $grandTotal - $dcRef;
+        $sign = $diff >= 0 ? '+' : '';
+        $this->info(str_pad('TOTAL SISTEMA (12 suc)', 22) . str_pad('', 106) . '$' . number_format($grandTotal, 2));
+        $this->line(str_pad('Referencia DC', 22) . str_pad('', 106) . '$' . number_format($dcRef, 2));
+        $diffLine = str_pad('Diferencia', 22) . str_pad('', 106) . $sign . '$' . number_format($diff, 2);
+        if (abs($diff) < 2_000) $this->warn($diffLine . '  ← dentro del rango de conciliación aceptable');
+        else                    $this->error($diffLine . '  ← diferencia significativa — revisar');
+
+        // ── Subtotales por tipo de transacción ───────────────────────────────
+        $this->line('');
+        $this->info('── Subtotales por tipo ──');
+        $this->line('  PAGO      (cobros reales):          $' . number_format($grandPago, 2));
+        $this->info('  DESCUENTO (refinanciamiento):       $' . number_format($grandDesc, 2) . '  ← incluido por decisión de negocio');
+
+        // ── Montos excluidos ─────────────────────────────────────────────────
+        $this->line('');
+        $this->info('── Montos excluidos de este total ──');
+
+        $excCondonacion = (float) DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('branch_id', $operativeIds)
+            ->where('transaction', 'CONDONACION')
+            ->sum('total_amount');
+
+        $excSavehearts = (float) DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('branch_id', $operativeIds)
+            ->whereRaw("UPPER(COALESCE(concept, '')) LIKE '%COBERTURA SAVEHEARTS%'")
+            ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
+            ->sum('total_amount');
+
+        $excComision = (float) DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('branch_id', $operativeIds)
+            ->whereRaw("UPPER(COALESCE(operation, '')) LIKE '%COMISION POR APERTURA%'")
+            ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
+            ->sum('total_amount');
+
+        $this->warn('  CONDONACION (monto perdonado):     $' . number_format($excCondonacion, 2));
+        $this->warn('  COBERTURA SAVEHEARTS (concepto):   $' . number_format($excSavehearts, 2));
+        $this->warn('  COMISIÓN POR APERTURA (operación): $' . number_format($excComision, 2));
+
+        // ── Nota de conciliación ──────────────────────────────────────────────
+        $this->line('');
+        $this->info('── Nota de conciliación (~$710 diferencia conocida) ──');
+        $this->line('  ATLIXCO / CRECE:   ~$500  — registros de plataforma vs corte DC');
+        $this->line('  TULA   / i30:      ~$210  — idem');
+        $this->line('  Total diferencia conocida: ~$710 — NO se aplica regla manual para eliminarla.');
+        $this->line('  Esta diferencia se documenta como conciliación aceptable con DC.');
     }
 
     private function showDescuentoBreakdown(array $dataIds): void

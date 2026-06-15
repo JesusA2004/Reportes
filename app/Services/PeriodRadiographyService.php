@@ -242,7 +242,13 @@ class PeriodRadiographyService
         // ── Payroll aggregates (for preview cards) ──
         $payroll = $this->payrollMetrics($period, $dataIds);
 
-        $recoveryBase = (float) $branchFilter(Recovery::query()->whereIn('period_id', $dataIds))->sum('total_amount');
+        $recoveryBase = (float) $branchFilter(
+            Recovery::query()
+                ->whereIn('period_id', $dataIds)
+                ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
+                ->whereRaw("UPPER(COALESCE(concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
+                ->whereRaw("UPPER(COALESCE(operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
+        )->sum('total_amount');
 
         $gastoSourceIds = DB::table('data_sources')
             ->whereIn('code', ['gastos_lendus', 'gastos_erp'])
@@ -403,6 +409,9 @@ class PeriodRadiographyService
                 'recuperacion_total' => (float) Recovery::query()
                     ->whereIn('period_id', $dataIds)
                     ->where('branch_id', $branchId)
+                    ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
+                    ->whereRaw("UPPER(COALESCE(concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
+                    ->whereRaw("UPPER(COALESCE(operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
                     ->sum('total_amount'),
                 'colocacion_total'   => (float) Placement::query()
                     ->whereIn('period_id', $dataIds)

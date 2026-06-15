@@ -16,9 +16,38 @@ const filteredPeriods = computed(() => {
     return nonWeeklyPeriods.value.filter((period) => [period.label, period.code, period.type].join(' ').toLowerCase().includes(term)).slice(0, 24)
 })
 
-const typeLabel = (type?: string) => ({ weekly: 'Semana base', monthly: 'Mes operativo', bimonthly: 'Bimestre automático', quarterly: 'Trimestre automático', annual: 'Anual automático' } as Record<string, string>)[type ?? ''] ?? 'Periodo'
-const status = (period: any) => period.is_derived ? 'automatic' : period.failed_count > 0 ? 'error' : period.missing_sources_count > 0 ? 'blocked' : 'completed'
-const statusLabel = (period: any) => period.is_derived ? 'Automático' : period.failed_count > 0 ? 'Con error' : period.missing_sources_count > 0 ? 'Incompleto' : 'Completo'
+const typeLabel = (type?: string) => ({
+    weekly: 'Semana base',
+    monthly: 'Mes operativo',
+    bimonthly: 'Bimestre automático',
+    quarterly: 'Trimestre automático',
+    semiannual: 'Semestre automático',
+    annual: 'Anual automático',
+} as Record<string, string>)[type ?? ''] ?? 'Periodo'
+
+const automaticStatus = (period: any): string => {
+    if (period.radiography_ready) return 'consolidated'
+    if (period.can_generate_automatic) return 'ready_to_consolidate'
+    return 'waiting'
+}
+
+const status = (period: any): string => {
+    if (period.is_derived) return automaticStatus(period)
+    if (period.failed_count > 0) return 'error'
+    if (period.missing_sources_count > 0) return 'blocked'
+    return 'completed'
+}
+
+const statusLabel = (period: any): string => {
+    if (period.is_derived) return ({
+        consolidated: 'Consolidado',
+        ready_to_consolidate: 'Listo para consolidar',
+        waiting: 'Esperando meses',
+    } as Record<string, string>)[automaticStatus(period)] ?? 'Automático'
+    if (period.failed_count > 0) return 'Con error'
+    if (period.missing_sources_count > 0) return 'Incompleto'
+    return 'Completo'
+}
 </script>
 
 <template>

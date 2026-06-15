@@ -227,7 +227,7 @@ class BranchRadiographyCalculator
         }
     }
 
-    // ── Recuperación (solo transacciones PAGO) ───────────────────────────────
+    // ── Recuperación (PAGO + DESCUENTO, excluyendo CONDONACION / COBERTURA SAVEHEARTS / COMISIÓN POR APERTURA) ─
 
     private function accumulateRecuperacion(array $dataIds, array $branchIds, array $operativeMap, array &$summaries, array $corporativoIds = []): void
     {
@@ -235,7 +235,9 @@ class BranchRadiographyCalculator
         $rows = DB::table('fact_recoveries')
             ->whereIn('period_id', $dataIds)
             ->whereIn('branch_id', $branchIds)
-            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) = 'PAGO'")
+            ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
+            ->whereRaw("UPPER(COALESCE(concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
+            ->whereRaw("UPPER(COALESCE(operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
             ->selectRaw('branch_id, SUM(capital) as capital, SUM(interest) as interest, SUM(tax) as tax, SUM(charges_due) as charges, SUM(total_amount) as total')
             ->groupBy('branch_id')
             ->get();
@@ -253,28 +255,21 @@ class BranchRadiographyCalculator
         }
 
         // Pass 2: route branches not in operativeMap (e.g. CUITLAHUAC, ATOTONILCO…)
-        // Resolve them to an operative sucursal via the accredited_name prefix (first 3 chars).
-        // CORPORATIVO branches are explicitly excluded even if their prefix maps to an operative sucursal.
+        // Resolve to operative sucursal via contract prefix (supports legacy ORI09247 and new 25CUE0667939 formats).
+        // CORPORATIVO branches are explicitly excluded.
         $fallback = DB::table('fact_recoveries')
             ->whereIn('period_id', $dataIds)
             ->whereNotIn('branch_id', $branchIds)
             ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
-            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')) = 'PAGO'")
-            ->selectRaw("
-                branch_id,
-                LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3) AS prefix3,
-                SUM(capital)      AS capital,
-                SUM(interest)     AS interest,
-                SUM(tax)          AS tax,
-                SUM(charges_due)  AS charges,
-                SUM(total_amount) AS total
-            ")
-            ->groupByRaw("branch_id, LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3)")
+            ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
+            ->whereRaw("UPPER(COALESCE(concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
+            ->whereRaw("UPPER(COALESCE(operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
+            ->selectRaw('branch_id, contract, SUM(capital) AS capital, SUM(interest) AS interest, SUM(tax) AS tax, SUM(charges_due) AS charges, SUM(total_amount) AS total')
+            ->groupBy('branch_id', 'contract')
             ->get();
 
         foreach ($fallback as $row) {
-            $prefix3 = strtoupper(trim((string) $row->prefix3));
-            $suc     = $this->resolver->resolveBranchNameFromCode($prefix3);
+            $suc = $this->resolver->resolveBranchNameFromCode((string) $row->contract);
             if (!$suc || !$this->resolver->isSheetBranch($suc) || !isset($summaries[$suc])) {
                 continue;
             }

@@ -77,6 +77,7 @@ class BranchResolverService
             return null;
         }
 
+        // Legacy format: ORI09247, HUA071663, SLP123
         $prefix3 = substr($code, 0, 3);
         if (isset(self::PREFIX_3[$prefix3])) {
             return self::PREFIX_3[$prefix3];
@@ -85,6 +86,19 @@ class BranchResolverService
         $prefix2 = substr($code, 0, 2);
         if (isset(self::PREFIX_2[$prefix2])) {
             return self::PREFIX_2[$prefix2];
+        }
+
+        // New format: 25CUE0667939, 24ORI032294 — 2-digit year prefix before the branch letters.
+        if (strlen($code) > 4 && ctype_digit(substr($code, 0, 2))) {
+            $stripped = substr($code, 2);
+            $p3 = substr($stripped, 0, 3);
+            if (isset(self::PREFIX_3[$p3])) {
+                return self::PREFIX_3[$p3];
+            }
+            $p2 = substr($stripped, 0, 2);
+            if (isset(self::PREFIX_2[$p2])) {
+                return self::PREFIX_2[$p2];
+            }
         }
 
         return null;
@@ -123,6 +137,32 @@ class BranchResolverService
         }
 
         return $this->findOrCreateBranchByName($branchName);
+    }
+
+    /**
+     * Safely resolves any raw route/branch name to an operative Branch record.
+     * - Runs the name through resolveRealBranchFromRoute() first.
+     * - Only creates/returns a Branch when the resolved name is one of the 12 operative branches.
+     * - Returns null (never auto-creates) for unknown routes. Logs a warning.
+     */
+    public function resolveOfficialBranchByName(?string $rawName): ?Branch
+    {
+        if (!$rawName) {
+            return null;
+        }
+
+        $officialName = $this->resolveRealBranchFromRoute($rawName);
+
+        if (!$officialName) {
+            \Illuminate\Support\Facades\Log::warning('BranchResolverService: unknown route/branch — skipping create.', ['raw' => $rawName]);
+            return null;
+        }
+
+        if (!$this->isSheetBranch($officialName)) {
+            return null;
+        }
+
+        return $this->findOrCreateBranchByName($officialName);
     }
 
     /**

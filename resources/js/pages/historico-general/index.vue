@@ -13,6 +13,7 @@ import ReportConfigurationStep from '@/components/historico-general/ReportConfig
 import GenerateReportStep from '@/components/historico-general/GenerateReportStep.vue'
 import ReportPreview from '@/components/historico-general/ReportPreview.vue'
 import GeneratedReportActions from '@/components/historico-general/GeneratedReportActions.vue'
+import AutomaticPeriodDetail from '@/components/historico-general/AutomaticPeriodDetail.vue'
 import { useHistoricWorkflow } from '@/composables/useHistoricWorkflow'
 
 defineOptions({ layout: AppLayout })
@@ -60,7 +61,17 @@ const uploadsBySource = computed(() => {
     return map
 })
 
-const { currentStep, steps, selectStep } = useHistoricWorkflow(period, incidents)
+// True when the report config in Step 4 is complete enough to proceed to Step 5.
+const configValid = computed(() => {
+    const cfg = reportConfig.value
+    if (!cfg.report_type) return false
+    if (cfg.report_type !== 'simple' && !cfg.compare_period_id) return false
+    if (cfg.scope === 'branch') return cfg.branch_id !== null
+    if (cfg.scope === 'employee') return cfg.employee_id !== null
+    return cfg.included_branch_ids.length > 0
+})
+
+const { currentStep, steps, selectStep } = useHistoricWorkflow(period, incidents, configValid)
 const form = useForm({ period_id: '', data_source_id: '', file: null as File | null, notes: '', covered_period_ids: [] as number[] })
 
 // ── Carga de incidencias ──────────────────────────────────────────────
@@ -157,7 +168,9 @@ watch(() => period.value?.radiography_run_status, (newStatus, oldStatus) => {
             html: `El reporte del periodo <strong>${period.value?.label ?? ''}</strong> ya está listo.<br><br>Descarga Excel y PDF desde el paso de reporte o en Reportes mensuales.`,
             icon: 'success',
             confirmButtonText: 'Ver resultado',
-        }).then(() => selectStep('generate'))
+        }).then(() => {
+            if (!period.value?.is_derived) selectStep('generate')
+        })
     } else if (newStatus === 'failed') {
         Swal.fire({
             title: 'La generación falló',
@@ -586,7 +599,14 @@ const processGenerationNow = async () => {
                 </p>
             </div>
 
-            <!-- Con periodo: stepper + contenido de la etapa -->
+            <!-- Periodo automático: vista simplificada sin stepper -->
+            <AutomaticPeriodDetail
+                v-else-if="period?.is_derived"
+                :period="period"
+                @generate="generateReport"
+            />
+
+            <!-- Periodo mensual: stepper + contenido de la etapa -->
             <template v-else>
 
                 <!-- ② Stepper del flujo -->

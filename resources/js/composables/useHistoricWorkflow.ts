@@ -1,6 +1,6 @@
-import { computed, ref } from 'vue'
+import { computed, ref, type Ref } from 'vue'
 
-export function useHistoricWorkflow(period: any, incidents: any) {
+export function useHistoricWorkflow(period: any, incidents: any, configValid?: Ref<boolean>) {
     const currentStep = ref('files')
 
     const steps = computed(() => {
@@ -15,6 +15,7 @@ export function useHistoricWorkflow(period: any, incidents: any) {
         const radioRunning  = !!selected?.radiography_running
         const hasRealPreview = !!selected?.preview_summary
         const canExport     = !!selected?.can_export_radiography
+        const cfgValid      = configValid?.value !== false  // true when not explicitly false
 
         const loadStatus = dbDone
             ? 'completed'
@@ -40,11 +41,13 @@ export function useHistoricWorkflow(period: any, incidents: any) {
 
         const generateStatus = !canConfig
             ? 'blocked'
-            : radioRunning
-                ? 'running'
-                : hasRealPreview
-                    ? 'generated'
-                    : 'ready'
+            : !cfgValid
+                ? 'blocked'
+                : radioRunning
+                    ? 'running'
+                    : hasRealPreview
+                        ? 'generated'
+                        : 'ready'
 
         return [
             {

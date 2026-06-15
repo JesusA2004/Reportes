@@ -151,13 +151,20 @@ class RadiographySnapshotBuilder
                 DB::table('fact_recoveries as r')
                     ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
                     ->whereIn('r.period_id', $this->dataIds)
-                    ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.raw_payload, '$.transaction')) = 'PAGO'")
+                    ->whereIn('r.transaction', ['PAGO', 'DESCUENTO'])
+                    ->whereRaw("UPPER(COALESCE(r.concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
+                    ->whereRaw("UPPER(COALESCE(r.operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
             )
         )->sum('r.total_amount');
         if ($filteredRecuperacion > 0) {
             $gm['recuperacion_total'] = $filteredRecuperacion;
         } elseif (($gm['recuperacion_total'] ?? 0) == 0) {
-            $gm['recuperacion_total'] = (float) DB::table('fact_recoveries')->whereIn('period_id', $this->dataIds)->sum('total_amount');
+            $gm['recuperacion_total'] = (float) DB::table('fact_recoveries')
+                ->whereIn('period_id', $this->dataIds)
+                ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
+                ->whereRaw("UPPER(COALESCE(concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
+                ->whereRaw("UPPER(COALESCE(operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
+                ->sum('total_amount');
         }
 
         if (($gm['gasto_total'] ?? 0) == 0) {

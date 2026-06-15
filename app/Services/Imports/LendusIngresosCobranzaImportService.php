@@ -901,24 +901,8 @@ class LendusIngresosCobranzaImportService {
             return $this->branchCache[$normalized];
         }
 
-        $code = Str::upper(Str::limit(str_replace(' ', '_', $normalized), 60, ''));
-
-        $branch = Branch::query()->firstOrCreate(
-            ['code' => $code],
-            [
-                'name' => $branchName,
-                'normalized_name' => $normalized,
-                'is_active' => true,
-            ],
-        );
-
-        if (!$branch->normalized_name || !$branch->name) {
-            $branch->update([
-                'name' => $branch->name ?: $branchName,
-                'normalized_name' => $branch->normalized_name ?: $normalized,
-                'is_active' => true,
-            ]);
-        }
+        // Resolve route/office name → official operative branch. Never auto-create unknown routes.
+        $branch = $this->branchResolver->resolveOfficialBranchByName($branchName);
 
         return $this->branchCache[$normalized] = $branch;
     }

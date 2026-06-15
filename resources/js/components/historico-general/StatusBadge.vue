@@ -22,6 +22,9 @@ const label = computed(() => props.label ?? ({
     queued: 'En cola',
     warning: 'Advertencia',
     automatic: 'Automático',
+    waiting: 'Esperando meses',
+    ready_to_consolidate: 'Listo para consolidar',
+    consolidated: 'Consolidado',
     resolved: 'Resuelto',
 } as Record<string, string>)[normalized.value] ?? normalized.value)
 
@@ -39,6 +42,9 @@ const badgeClass = computed(() => ({
     queued: 'border-violet-200 bg-violet-50 text-violet-700',
     warning: 'border-orange-200 bg-orange-50 text-orange-700',
     automatic: 'border-violet-200 bg-violet-50 text-violet-700',
+    waiting: 'border-amber-200 bg-amber-50 text-amber-700',
+    ready_to_consolidate: 'border-sky-200 bg-sky-50 text-sky-700',
+    consolidated: 'border-emerald-200 bg-emerald-50 text-emerald-700',
     resolved: 'border-emerald-200 bg-emerald-50 text-emerald-700',
 } as Record<string, string>)[normalized.value] ?? 'border-slate-200 bg-slate-50 text-slate-600')
 </script>

@@ -271,8 +271,13 @@ class GastosLendusPdfImportService
             return $branch;
         }
 
-        // Create branch by exact display name (handles CORPORATIVO and all others)
-        return $this->branchResolver->findOrCreateBranchByName($name);
+        // Resolve route → official branch; log + skip unknown names.
+        $officialName = $this->branchResolver->resolveRealBranchFromRoute($name);
+        if (!$officialName) {
+            \Illuminate\Support\Facades\Log::warning('GastosLendusPdfImportService: unknown branch name.', ['raw' => $name]);
+            return null;
+        }
+        return $this->branchResolver->findOrCreateBranchByName($officialName);
     }
 
     private function resolveEmployee(string $name): ?Employee
