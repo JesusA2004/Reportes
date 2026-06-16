@@ -29,10 +29,10 @@ use Inertia\Response;
 
 class ReportUploadController extends Controller {
 
-    /** Las 12 sucursales financieras operativas — fuente de verdad para el selector UI. */
+    /** Las 13 sucursales financieras operativas — fuente de verdad para el selector UI. SJR es period-aware. */
     private const OPERATIVE_BRANCH_NAMES = [
         'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
-        'IXTLAHUACA', 'MIACATLAN', 'ORIZABA',
+        'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN JUAN DEL RÍO',
         'SAN LUIS POTOSI', 'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
     ];
 
@@ -267,7 +267,7 @@ class ReportUploadController extends Controller {
                 'branch_name' => $e->employeeBranchAssignments->first()?->branch?->name,
             ]);
 
-        return Inertia::render('historico-general/index', [
+        return Inertia::render('Historico-General/index', [
             'periods'         => $periods,
             'sources'         => $sources,
             'groupedUploads'  => $groupedUploads,
@@ -924,6 +924,33 @@ class ReportUploadController extends Controller {
         $config = $request->input('config', []);
         $scope  = $config['scope'] ?? 'general';
         $type   = ($config['report_type'] ?? 'simple') === 'simple' ? 'Radiografía simple' : 'Reporte comparativo';
+
+        // Validate scope config before queuing — backend must reject invalid configs even if frontend fails.
+        if ($scope === 'general') {
+            $included = array_filter(array_map('intval', $config['included_branch_ids'] ?? []));
+            if (empty($included)) {
+                return back()->with('error', 'No se puede generar el reporte porque falta configurar correctamente el alcance. Selecciona al menos una sucursal oficial.');
+            }
+            // Verify all included branches are operative
+            $validIds = Branch::query()->whereIn('name', self::OPERATIVE_BRANCH_NAMES)->pluck('id')->all();
+            $invalid  = array_diff($included, $validIds);
+            if (!empty($invalid)) {
+                return back()->with('error', 'No se puede generar el reporte: included_branch_ids contiene sucursales no oficiales. Revisa la configuración del alcance.');
+            }
+        } elseif ($scope === 'branch') {
+            $branchId = (int) ($config['branch_id'] ?? 0);
+            if (!$branchId) {
+                return back()->with('error', 'No se puede generar el reporte porque falta seleccionar una sucursal.');
+            }
+            $valid = Branch::query()->where('id', $branchId)->whereIn('name', self::OPERATIVE_BRANCH_NAMES)->exists();
+            if (!$valid) {
+                return back()->with('error', 'La sucursal seleccionada no es operativa. Selecciona una sucursal oficial.');
+            }
+        } elseif ($scope === 'employee') {
+            if (empty($config['employee_id'])) {
+                return back()->with('error', 'No se puede generar el reporte porque falta seleccionar un empleado o gestor.');
+            }
+        }
 
         $run = PeriodRadiographyRun::query()->create([
             'period_id'  => $period->id,

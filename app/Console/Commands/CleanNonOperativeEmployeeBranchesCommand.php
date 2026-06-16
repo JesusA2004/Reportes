@@ -15,12 +15,12 @@ class CleanNonOperativeEmployeeBranchesCommand extends Command
 
     private const OPERATIVE_BRANCHES = [
         'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
-        'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN LUIS POTOSI',
-        'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
+        'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN JUAN DEL RÍO',
+        'SAN LUIS POTOSI', 'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
     ];
 
-    // Allowed non-operative branches (exclusions knowns)
-    private const ALLOWED_BRANCHES = ['CORPORATIVO', 'SAN JUAN DEL RÍO', 'SAN JUAN DEL RIO'];
+    // CORPORATIVO is allowed but not operative (excluded from most metrics)
+    private const ALLOWED_BRANCHES = ['CORPORATIVO'];
 
     public function __construct(
         private readonly BranchResolverService $branchResolver,

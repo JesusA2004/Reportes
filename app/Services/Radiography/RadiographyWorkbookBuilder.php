@@ -38,18 +38,9 @@ class RadiographyWorkbookBuilder
     private const BG_GREEN_TOT = 'FF047857';
     private const DATE_FMT     = 'DD/MM/YYYY';
 
-    // NOI D-code labels that are employee deductions — NOT additional company costs.
-    // These reduce nómina display and should NOT inflate Gastos Totales.
-    private const NOI_DEDUCTION_LABELS = [
-        'Descuentos Infonavit',
-        'Pensión Alimenticia',
-        'Descuento Servicios Moto',
-        'Financiamiento de Motos (desc.)',
-        'Préstamo Personal',
-        'Subsidio para el Empleo APL',
-        'Otros descuentos NOI',
-        'Descuento de uniformes',
-    ];
+    // All nomina_detalle items are displayed as POSITIVE additions to the payroll block.
+    // The total "Nómina y Capital Humano" = SUM of all configured concepts, not a net figure.
+    private const NOI_DEDUCTION_LABELS = [];
 
     public function buildFromSnapshot(Period $period, PeriodSummary $summary, array $snap): Spreadsheet
     {
@@ -281,60 +272,70 @@ class RadiographyWorkbookBuilder
         $globalPrimaVac  = $brCalcGlobal ? (float)$brCalcGlobal['prima_vacacional'] : 0.0;
         $globalNomDet    = (array)($brCalcGlobal['nomina_detalle'] ?? []);
 
-        // Ordered display list: scalars first, then detail items
+        // 24 mandatory rows — always shown even if $0
         $nomDisplayOrder = [
-            'Nómina'           => $globalNomina,
-            'Comisiones'       => $globalComisions,
-            'Vacaciones'       => $globalVacac,
-            'Prima vacacional' => $globalPrimaVac,
-            'Bonos'            => $globalBonos,
+            'Nómina'                                    => $globalNomina,
+            'Comisiones'                                => $globalComisions,
+            'Vacaciones'                                => $globalVacac,
+            'Prima vacacional'                          => $globalPrimaVac,
+            'Bonos'                                     => $globalBonos,
+            'Bonos Aceleradores'                        => 0.0,
+            'IMSS'                                      => 0.0,
+            'Descuentos Infonavit'                      => 0.0,
+            'Finiquito'                                 => 0.0,
+            'Gastos médicos'                            => 0.0,
+            'Gasolina'                                  => 0.0,
+            'Financiamiento De Motos'                   => 0.0,
+            'Descuento Servicios Moto'                  => 0.0,
+            'Financiamiento Celular'                    => 0.0,
+            'Cascos'                                    => 0.0,
+            'Descuento de uniformes'                    => 0.0,
+            'Descuento gastos sin comprobar'            => 0.0,
+            'Descuento extravío tarjeta de circulación' => 0.0,
+            'Descuento tienda Mr Lana'                  => 0.0,
+            'Descuento Servicios Automóvil'             => 0.0,
+            'Descuento faltante en caja'                => 0.0,
+            'Anticipo de nómina'                        => 0.0,
+            'Formatería'                                => 0.0,
+            'Pensión Alimenticia'                       => 0.0,
         ];
-        // Append nomina_detalle items in a canonical order
-        $nomDetalleOrder = [
-            'IMSS','Descuentos Infonavit','Finiquito','Gastos médicos',
-            'Gasolina','Financiamiento de Motos','Financiamiento de Motos (desc.)',
-            'Descuento Servicios Moto','Financiamiento Celular','Cascos',
-            'Descuento de uniformes','Pensión Alimenticia','Préstamo Personal',
-            'Anticipo de nómina','Otros conceptos nómina','Otros descuentos NOI',
+        // Aliases: calculator key → canonical display label
+        $nomDetAlias = [
+            'Financiamiento de Motos'   => 'Financiamiento De Motos',
+            'Descuentos Tienda Mr Lana' => 'Descuento tienda Mr Lana',
         ];
-        foreach ($nomDetalleOrder as $detKey) {
-            if (isset($globalNomDet[$detKey]) && $globalNomDet[$detKey] > 0) {
-                $nomDisplayOrder[$detKey] = $globalNomDet[$detKey];
+        $mandatory24 = array_keys($nomDisplayOrder);
+        $claimed = [];
+        foreach ($globalNomDet as $detKey => $detVal) {
+            $canonical = $nomDetAlias[$detKey] ?? $detKey;
+            if (array_key_exists($canonical, $nomDisplayOrder)) {
+                $nomDisplayOrder[$canonical] += (float) $detVal;
+                $claimed[$detKey] = true;
             }
         }
-        // Any remaining detail items not in the ordered list
+        // Overflow: nomina_detalle items not covered by mandatory rows (only shown if > 0)
         foreach ($globalNomDet as $detKey => $detVal) {
-            if (!isset($nomDisplayOrder[$detKey]) && $detVal > 0) {
-                $nomDisplayOrder[$detKey] = $detVal;
+            if (!isset($claimed[$detKey]) && (float) $detVal > 0) {
+                $nomDisplayOrder[$detKey] = ($nomDisplayOrder[$detKey] ?? 0.0) + (float) $detVal;
             }
         }
 
-        // Split display: percepciones/expense items (positive) vs NOI deductions (negative)
-        $nomPercepTotal = 0.0;
-        $nomDesctoTotal = 0.0;
-        $nomIdx         = 0;
+        // Render all rows; mandatory 24 shown even at $0, overflow only if > 0
+        $nomTotal = 0.0;
+        $nomIdx   = 0;
         foreach ($nomDisplayOrder as $nomName => $nomVal) {
-            if ($nomVal == 0) continue;
-            $isDeduccion = in_array($nomName, self::NOI_DEDUCTION_LABELS, true);
-            $label = $isDeduccion ? "(−) {$nomName}" : $nomName;
-            $sheet->setCellValue("A{$r}", $label);
+            if ($nomVal == 0 && !in_array($nomName, $mandatory24)) continue;
+            $sheet->setCellValue("A{$r}", $nomName);
             $sheet->setCellValue("B{$r}", $nomVal);
             $sheet->setCellValue("C{$r}", '');
             $this->dataRow($sheet, "A{$r}:C{$r}", $nomIdx % 2 === 0);
             $this->applyFmt($sheet, "B{$r}", 'currency', $nomVal);
-            if ($isDeduccion) {
-                $sheet->getStyle("A{$r}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFB91C1C'));
-                $sheet->getStyle("B{$r}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFB91C1C'));
-                $nomDesctoTotal += $nomVal;
-            } else {
-                $nomPercepTotal += $nomVal;
-            }
+            $nomTotal += $nomVal;
             $nomIdx++;
             $r++;
         }
-        $nomNeto = $nomPercepTotal - $nomDesctoTotal;
-        $sheet->setCellValue("A{$r}", 'Neto nómina (percepciones − descuentos NOI)');
-        $sheet->setCellValue("B{$r}", $nomNeto);
+        $sheet->setCellValue("A{$r}", 'Total Nómina y Capital Humano');
+        $sheet->setCellValue("B{$r}", $nomTotal);
         $this->totalsRow($sheet, "A{$r}:C{$r}");
         $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
@@ -365,9 +366,9 @@ class RadiographyWorkbookBuilder
         $this->sectionHeader($sheet, "A{$r}:C{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES');
         $r++;
         // EBITDA = Ingresos − Otorgamientos − Gastos Totales
-        // Gastos Totales = gastosOp + nóminaNet (percepciones − descuentos NOI)
+        // Gastos Totales = gastosOp + Total Nómina y Capital Humano (suma de todos los conceptos)
         $excGlobal      = $brCalcGlobal ? (float)$brCalcGlobal['excedentes'] : $excedentes;
-        $gastosTotal    = $gastosOpTotal + $nomNeto;
+        $gastosTotal    = $gastosOpTotal + $nomTotal;
         $utilidad       = $recTotal - $colTotal - $gastosTotal;
         // Validación: el envío corporativo no puede superar la utilidad disponible
         $inconsistencia = $excGlobal > $utilidad;
@@ -409,7 +410,7 @@ class RadiographyWorkbookBuilder
             ['Menos: Otorgamientos',                $colTotal,      'currency', ''],
             ['Menos: Gastos Totales',               $gastosTotal,   'currency', ''],
             ['  Gastos operativos',                 $gastosOpTotal, 'currency', ''],
-            ['  Nómina neta',                       $nomNeto,       'currency', ''],
+            ['  Nómina y Capital Humano',            $nomTotal,      'currency', ''],
             ['= EBITDA / Utilidad disponible',      $utilidad,      'currency', ''],
             ['Envío utilidad a corporativo',        $excGlobal,     'currency', ''],
             ['Diferencia / sobrante',               $diferencia,    'currency', ''],
@@ -886,10 +887,9 @@ class RadiographyWorkbookBuilder
         ];
         $detOrder = [
             'IMSS','Descuentos Infonavit','Finiquito','Gastos médicos',
-            'Gasolina','Financiamiento de Motos','Financiamiento de Motos (desc.)',
-            'Descuento Servicios Moto','Financiamiento Celular','Cascos',
-            'Descuento de uniformes','Pensión Alimenticia','Préstamo Personal',
-            'Anticipo de nómina','Otros conceptos nómina','Otros descuentos NOI',
+            'Gasolina','Financiamiento de Motos','Cascos',
+            'Descuentos Infonavit','Descuento Servicios Moto','Financiamiento Celular',
+            'Descuento de uniformes','Anticipo de nómina','Otros conceptos nómina','Otros descuentos NOI',
         ];
 
         usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
@@ -1156,9 +1156,7 @@ class RadiographyWorkbookBuilder
                 if (strtoupper($lRow['branch']) === $brUp) { $loanB += (float)$lRow['total']; break; }
             }
 
-            // EBITDA = Ingresos − Otorgamientos − (GastosOp + NóminaNet)
-            $brNomNeto = $calc ? $this->calcNomNeto($calc) : $nomTotal;
-            $utilidad  = $recB - $colB - ($gastosB + $brNomNeto);
+            // EBITDA y gastos totales se calculan más abajo tras construir el desglose de nómina.
 
             $r = 4;
 
@@ -1275,55 +1273,66 @@ class RadiographyWorkbookBuilder
             $brPrimaVac  = $calc ? (float)$calc['prima_vacacional'] : 0.0;
             $brNomDet    = (array)($calc['nomina_detalle'] ?? []);
 
+            // 24 mandatory rows — always shown even if $0
             $brNomDisplay = [
-                'Nómina'           => $brNomina,
-                'Comisiones'       => $brComisions,
-                'Vacaciones'       => $brVacac,
-                'Prima vacacional' => $brPrimaVac,
-                'Bonos'            => $brBonos,
+                'Nómina'                                    => $brNomina,
+                'Comisiones'                                => $brComisions,
+                'Vacaciones'                                => $brVacac,
+                'Prima vacacional'                          => $brPrimaVac,
+                'Bonos'                                     => $brBonos,
+                'Bonos Aceleradores'                        => 0.0,
+                'IMSS'                                      => 0.0,
+                'Descuentos Infonavit'                      => 0.0,
+                'Finiquito'                                 => 0.0,
+                'Gastos médicos'                            => 0.0,
+                'Gasolina'                                  => 0.0,
+                'Financiamiento De Motos'                   => 0.0,
+                'Descuento Servicios Moto'                  => 0.0,
+                'Financiamiento Celular'                    => 0.0,
+                'Cascos'                                    => 0.0,
+                'Descuento de uniformes'                    => 0.0,
+                'Descuento gastos sin comprobar'            => 0.0,
+                'Descuento extravío tarjeta de circulación' => 0.0,
+                'Descuento tienda Mr Lana'                  => 0.0,
+                'Descuento Servicios Automóvil'             => 0.0,
+                'Descuento faltante en caja'                => 0.0,
+                'Anticipo de nómina'                        => 0.0,
+                'Formatería'                                => 0.0,
+                'Pensión Alimenticia'                       => 0.0,
             ];
-            $brNomDetalleOrder = [
-                'IMSS','Descuentos Infonavit','Finiquito','Gastos médicos',
-                'Gasolina','Financiamiento de Motos','Financiamiento de Motos (desc.)',
-                'Descuento Servicios Moto','Financiamiento Celular','Cascos',
-                'Descuento de uniformes','Pensión Alimenticia','Préstamo Personal',
-                'Anticipo de nómina','Otros conceptos nómina','Otros descuentos NOI',
+            $brNomAlias = [
+                'Financiamiento de Motos'   => 'Financiamiento De Motos',
+                'Descuentos Tienda Mr Lana' => 'Descuento tienda Mr Lana',
             ];
-            foreach ($brNomDetalleOrder as $detKey) {
-                if (isset($brNomDet[$detKey]) && $brNomDet[$detKey] > 0) {
-                    $brNomDisplay[$detKey] = $brNomDet[$detKey];
+            $brMandatory24 = array_keys($brNomDisplay);
+            $brClaimed = [];
+            foreach ($brNomDet as $detKey => $detVal) {
+                $canonical = $brNomAlias[$detKey] ?? $detKey;
+                if (array_key_exists($canonical, $brNomDisplay)) {
+                    $brNomDisplay[$canonical] += (float) $detVal;
+                    $brClaimed[$detKey] = true;
                 }
             }
             foreach ($brNomDet as $detKey => $detVal) {
-                if (!isset($brNomDisplay[$detKey]) && $detVal > 0) {
-                    $brNomDisplay[$detKey] = $detVal;
+                if (!isset($brClaimed[$detKey]) && (float) $detVal > 0) {
+                    $brNomDisplay[$detKey] = ($brNomDisplay[$detKey] ?? 0.0) + (float) $detVal;
                 }
             }
 
-            $brNomPercep = 0.0;
-            $brNomDescto = 0.0;
-            $i2          = 0;
+            $brNomTotal = 0.0;
+            $i2         = 0;
             foreach ($brNomDisplay as $nomName => $nomVal) {
-                if ($nomVal == 0.0) continue;
-                $isDed = in_array($nomName, self::NOI_DEDUCTION_LABELS, true);
-                $label = $isDed ? "(−) {$nomName}" : $nomName;
-                $sheet->setCellValue("A{$r}", $label);
+                if ($nomVal == 0.0 && !in_array($nomName, $brMandatory24)) continue;
+                $sheet->setCellValue("A{$r}", $nomName);
                 $sheet->setCellValue("B{$r}", $nomVal);
                 $this->dataRow($sheet, "A{$r}:C{$r}", $i2 % 2 === 0);
                 $this->applyFmt($sheet, "B{$r}", 'currency', $nomVal);
-                if ($isDed) {
-                    $sheet->getStyle("A{$r}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFB91C1C'));
-                    $sheet->getStyle("B{$r}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFB91C1C'));
-                    $brNomDescto += $nomVal;
-                } else {
-                    $brNomPercep += $nomVal;
-                }
+                $brNomTotal += $nomVal;
                 $i2++;
                 $r++;
             }
-            $brNomNetoDisplay = $brNomPercep - $brNomDescto;
-            $sheet->setCellValue("A{$r}", 'Neto nómina (percepciones − descuentos NOI)');
-            $sheet->setCellValue("B{$r}", $brNomNetoDisplay);
+            $sheet->setCellValue("A{$r}", 'Total Nómina y Capital Humano');
+            $sheet->setCellValue("B{$r}", $brNomTotal);
             $this->totalsRow($sheet, "A{$r}:C{$r}");
             $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
             $r += 2;
@@ -1362,7 +1371,7 @@ class RadiographyWorkbookBuilder
             // 7. Análisis de Tendencias
             $this->sectionHeader($sheet, "A{$r}:C{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES');
             $r++;
-            $brGastosTotal    = $gopTotal + $brNomNeto;
+            $brGastosTotal    = $gopTotal + $brNomTotal;
             $brUtilidad       = $recB - $colB - $brGastosTotal;
             $brFondeoB        = $calc ? (float)$calc['prestamos_fondea'] : $fondeoCalc;
             $brExcedCalc      = $calc ? (float)$calc['excedentes']       : $excedCalc;
@@ -1405,7 +1414,7 @@ class RadiographyWorkbookBuilder
                 ['Menos: Otorgamientos',               $colB,          'currency'],
                 ['Menos: Gastos Totales',              $brGastosTotal, 'currency'],
                 ['  Gastos operativos',                $gopTotal,      'currency'],
-                ['  Nómina neta',                      $brNomNeto,     'currency'],
+                ['  Nómina y Capital Humano',           $brNomTotal,    'currency'],
                 ['= EBITDA / Utilidad disponible',     $brUtilidad,    'currency'],
                 ['Envío utilidad a corporativo',       $brExcedCalc,   'currency'],
                 ['Diferencia / sobrante',              $brDiferencia,  'currency'],
@@ -2968,29 +2977,22 @@ class RadiographyWorkbookBuilder
     }
 
     /**
-     * Computes nómina neta (true company cost) from BranchRadiographyCalculator data.
-     * percepciones (P001+P002+bonos+vacac+prima) + expense_detalle_items − NOI_deductions
+     * Total Nómina y Capital Humano = suma de todos los conceptos configurados (todos positivos).
+     * Regla contable: las D de NOI que aparecen en la radiografía se suman, no se restan.
      */
-    private function calcNomNeto(array $calc): float
+    private function calcNomTotal(array $calc): float
     {
-        $percep = (float)($calc['nomina_total'] ?? 0)
-                + (float)($calc['comisiones']   ?? 0)
-                + (float)($calc['bonos']         ?? 0)
-                + (float)($calc['vacaciones']    ?? 0)
-                + (float)($calc['prima_vacacional'] ?? 0);
+        $total = (float)($calc['nomina_total']      ?? 0)
+               + (float)($calc['comisiones']        ?? 0)
+               + (float)($calc['bonos']             ?? 0)
+               + (float)($calc['vacaciones']        ?? 0)
+               + (float)($calc['prima_vacacional']  ?? 0);
 
-        $detalle   = (array)($calc['nomina_detalle'] ?? []);
-        $expItems  = 0.0;
-        $desctos   = 0.0;
-        foreach ($detalle as $key => $val) {
-            if (in_array($key, self::NOI_DEDUCTION_LABELS, true)) {
-                $desctos += (float)$val;
-            } else {
-                $expItems += (float)$val;
-            }
+        foreach ((array)($calc['nomina_detalle'] ?? []) as $val) {
+            $total += (float)$val;
         }
 
-        return $percep + $expItems - $desctos;
+        return $total;
     }
 
     // ── Style helpers ─────────────────────────────────────────────────────────

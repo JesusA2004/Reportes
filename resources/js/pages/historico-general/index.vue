@@ -30,8 +30,8 @@ const props = defineProps<{
 
 const OPERATIVE_BRANCH_NAMES_INIT = new Set([
     'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
-    'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN LUIS POTOSI',
-    'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
+    'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN JUAN DEL RÍO',
+    'SAN LUIS POTOSI', 'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
 ])
 
 const selectedPeriodId    = ref<number | null>(props.currentPeriodId ?? null)

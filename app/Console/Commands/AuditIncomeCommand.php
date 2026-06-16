@@ -205,10 +205,10 @@ class AuditIncomeCommand extends Command
             );
         }
 
-        // ── Por sucursal (filtrado a 12 sucursales operativas) ───────────────
+        // ── Por sucursal (filtrado a 13 sucursales operativas) ───────────────
         if ($this->option('by-branch')) {
             $this->line('');
-            $this->info('════ DESGLOSE POR SUCURSAL (12 sucursales operativas, PAGO + DESCUENTO depurado) ════');
+            $this->info('════ DESGLOSE POR SUCURSAL (13 sucursales operativas, PAGO + DESCUENTO depurado) ════');
 
             $resolver    = app(BranchResolverService::class);
             $allBranches = DB::table('branches')->get();
@@ -288,7 +288,7 @@ class AuditIncomeCommand extends Command
                 $grandDesc  += $d['descuento'];
             }
             $this->line(str_repeat('─', 135));
-            $this->info(str_pad('TOTAL (12 sucursales)', 22) . str_pad('', 110) . '$' . number_format($grandTotal, 2));
+            $this->info(str_pad('TOTAL (13 sucursales)', 22) . str_pad('', 110) . '$' . number_format($grandTotal, 2));
             $this->line('  PAGO: $' . number_format($grandPago, 2) . '   DESCUENTO: $' . number_format($grandDesc, 2));
 
             // Orphan rows (branches not in operative map)
@@ -639,7 +639,7 @@ class AuditIncomeCommand extends Command
 
         // ── C. REGLA PROVISIONAL: PAGO + DESCUENTO válido (12 suc operativas) ─
         $this->line('');
-        $this->info('════ C. REGLA PROVISIONAL — PAGO + DESCUENTO (12 sucursales operativas) ════');
+        $this->info('════ C. REGLA PROVISIONAL — PAGO + DESCUENTO (13 sucursales operativas) ════');
         $this->line('  DESCUENTO = refinanciamiento: el cliente paga su contrato anterior al recibir uno nuevo.');
         $this->line('  No es efectivo nuevo, pero sí recuperación contable del crédito vigente.');
         $this->line('  CONDONACION = monto perdonado → EXCLUIDA (no es recuperación real).');
@@ -671,7 +671,7 @@ class AuditIncomeCommand extends Command
 
         $this->line(str_pad('Componente', 46) . str_pad('Monto', 18) . 'Decisión');
         $this->line(str_repeat('─', 80));
-        $this->line(str_pad('PAGO (12 sucursales operativas)', 46) .
+        $this->line(str_pad('PAGO (13 sucursales operativas)', 46) .
                     str_pad('$' . number_format($pagoBr, 2), 18) . '✓ INCLUIR');
         $this->info(str_pad('+ DESCUENTO válido (refinanciamiento, 12 suc)', 46) .
                     str_pad('+$' . number_format($descBr, 2), 18) . '✓ INCLUIR (decisión provisional)');

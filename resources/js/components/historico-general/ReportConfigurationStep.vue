@@ -38,8 +38,8 @@ const comparablePeriods = computed(() =>
 
 const OPERATIVE_BRANCH_NAMES = new Set([
     'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
-    'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN LUIS POTOSI',
-    'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
+    'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN JUAN DEL RÍO',
+    'SAN LUIS POTOSI', 'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
 ])
 
 const FORBIDDEN_BRANCH_LIKE_ROUTES = new Set([
@@ -243,7 +243,7 @@ const SCOPES = [
                             Excluidas para este reporte:
                             <span v-for="(b, i) in excludedBranches" :key="b.id">{{ b.name }}<span v-if="i < excludedBranches.length - 1">, </span></span>
                         </p>
-                        <p>Siempre excluidas: <span class="font-bold text-rose-700">SAN JUAN DEL RÍO</span> (cerrada) · <span class="font-bold text-rose-700">CORPORATIVO</span> (no operativo)</p>
+                        <p>Siempre excluida: <span class="font-bold text-rose-700">CORPORATIVO</span> (no operativo) · SAN JUAN DEL RÍO se incluye si tiene movimiento en el periodo.</p>
                     </div>
 
                     <p v-if="includedCount === 0" class="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">

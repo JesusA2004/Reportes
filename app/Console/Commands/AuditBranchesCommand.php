@@ -12,7 +12,8 @@ class AuditBranchesCommand extends Command
     protected $signature   = 'reportes:audit-branches {--json : Output as JSON}';
     protected $description = 'Classify every branch record as SUCURSAL_OFICIAL / EXCLUIDA / RUTA_ALIAS / DESCONOCIDA and show fact-table row counts.';
 
-    private const EXCLUDED = ['SAN JUAN DEL RÍO', 'SAN JUAN DEL RIO', 'CORPORATIVO'];
+    // Only CORPORATIVO is always excluded from operations — SJR is now an official branch.
+    private const EXCLUDED = ['CORPORATIVO'];
 
     private BranchResolverService $resolver;
 

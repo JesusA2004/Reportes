@@ -6,8 +6,9 @@ use App\Models\Branch;
 use Illuminate\Database\Seeder;
 
 /**
- * Guarantees the 12 operative financial branches always exist in the DB.
+ * Guarantees the 13 operative financial branches always exist in the DB.
  * Safe to run multiple times — uses firstOrCreate.
+ * SAN JUAN DEL RÍO is period-aware: included when it has movement in a period.
  */
 class BranchSeeder extends Seeder
 {
@@ -20,6 +21,7 @@ class BranchSeeder extends Seeder
         'IXTLAHUACA',
         'MIACATLAN',
         'ORIZABA',
+        'SAN JUAN DEL RÍO',
         'SAN LUIS POTOSI',
         'TENANGO DEL VALLE',
         'TLAXCALA',

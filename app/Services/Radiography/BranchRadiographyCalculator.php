@@ -179,6 +179,44 @@ class BranchRadiographyCalculator
         return $global;
     }
 
+    /**
+     * Unified payroll data for ALL outputs: UI, Excel GLOBAL, hojas sucursal, NÓMINA, PDF.
+     *
+     * Returns a flat list of rows: [sucursal, concepto, monto, fuente, empleados].
+     * "GLOBAL" row is the sum of branches + unassigned bucket.
+     * All concepts (including D-codes shown in the report) are returned as positive amounts.
+     */
+    public function buildPayrollByBranchForRadiography(Period $period, array $dataIds): array
+    {
+        ['branches' => $branches, 'unassigned' => $unassigned] = $this->buildBranches($period, $dataIds);
+        $global = $this->sumGlobal($branches, $unassigned);
+
+        $rows    = [];
+        $sources = [
+            'nomina_total'     => ['label' => 'Nómina',           'fuente' => 'NOI P001+D111-D137'],
+            'comisiones'       => ['label' => 'Comisiones',        'fuente' => 'NOI P002'],
+            'bonos'            => ['label' => 'Bonos',             'fuente' => 'NOI P108/109/120/123'],
+            'vacaciones'       => ['label' => 'Vacaciones',        'fuente' => 'NOI P009'],
+            'prima_vacacional' => ['label' => 'Prima vacacional',  'fuente' => 'NOI P010'],
+        ];
+
+        $allBranches = array_merge($branches, ['GLOBAL' => $global, 'SIN ASIGNAR' => $unassigned]);
+
+        foreach ($allBranches as $suc => $calc) {
+            foreach ($sources as $key => ['label' => $label, 'fuente' => $fuente]) {
+                $monto = (float) ($calc[$key] ?? 0);
+                if ($monto == 0.0) continue;
+                $rows[] = ['sucursal' => $suc, 'concepto' => $label, 'monto' => $monto, 'fuente' => $fuente, 'empleados' => 0];
+            }
+            foreach ($calc['nomina_detalle'] ?? [] as $label => $monto) {
+                if ((float) $monto == 0.0) continue;
+                $rows[] = ['sucursal' => $suc, 'concepto' => $label, 'monto' => (float) $monto, 'fuente' => 'fact_expenses / NOI D', 'empleados' => 0];
+            }
+        }
+
+        return $rows;
+    }
+
     // ── Cartera ──────────────────────────────────────────────────────────────
 
     private function accumulateCartera(array $dataIds, array $branchIds, array $operativeMap, array &$summaries): void
@@ -576,12 +614,14 @@ class BranchRadiographyCalculator
             }
         }
 
-        // ── Deducciones NOI: al empleado — NO costo adicional de la empresa
+        // ── Deducciones NOI relevantes para nómina
+        // D111 (Subsidio APL) y D137 (Diferencia NF) ajustan nomina_total, no se muestran por separado.
+        // D004 (Préstamo Personal) y D010 (Pensión Alimenticia) se excluyen del total de Capital Humano.
         $dedRows = DB::table('fact_noi_movements as n')
             ->leftJoin('employee_branch_assignments as eba', 'n.employee_id', '=', 'eba.employee_id')
             ->whereIn('n.period_id', $dataIds)
             ->where('n.concept_type', 'deduccion')
-            ->whereRaw("n.concept REGEXP '^D(094|010|113|123|004|111)'")
+            ->whereRaw("n.concept REGEXP '^D(094|010|113|123|111|137)'")
             ->selectRaw("COALESCE(eba.branch_id, -1) AS assigned_branch_id, n.concept, SUM(n.amount) AS total")
             ->groupByRaw("COALESCE(eba.branch_id, -1), n.concept")
             ->get();
@@ -591,13 +631,28 @@ class BranchRadiographyCalculator
             $concept  = (string) $row->concept;
             $amount   = (float) $row->total;
 
+            // D111: Subsidio APL se integra en nomina_total (fórmula: P001 + D111 − D137)
+            // D137: Diferencia NF reduce nomina_total
+            if (str_starts_with($concept, 'D111') || str_starts_with($concept, 'D137')) {
+                $adjust = str_starts_with($concept, 'D111') ? $amount : -$amount;
+                if ($branchId === -1) {
+                    $unassigned['nomina_total'] += $adjust;
+                } else {
+                    $suc = $operativeMap[$branchId] ?? null;
+                    if ($suc && isset($summaries[$suc])) {
+                        $summaries[$suc]['nomina_total'] += $adjust;
+                    } else {
+                        $unassigned['nomina_total'] += $adjust;
+                    }
+                }
+                continue;
+            }
+
             $label = match (true) {
                 str_starts_with($concept, 'D094') => 'Descuentos Infonavit',
                 str_starts_with($concept, 'D010') => 'Pensión Alimenticia',
                 str_starts_with($concept, 'D113') => 'Descuento Servicios Moto',
-                str_starts_with($concept, 'D123') => 'Financiamiento de Motos (desc.)',
-                str_starts_with($concept, 'D004') => 'Préstamo Personal',
-                str_starts_with($concept, 'D111') => 'Subsidio para el Empleo APL',
+                str_starts_with($concept, 'D123') => 'Financiamiento de Motos',
                 default                           => 'Otros descuentos NOI',
             };
 
@@ -614,8 +669,8 @@ class BranchRadiographyCalculator
             }
         }
 
-        // ── Gastos de nómina desde fact_expenses: Gasolina, Financiamiento Celular,
-        //    IMSS, Cascos, Gastos Médicos, Finiquito, Financiamiento Moto (por concepto)
+        // ── Gastos de nómina desde fact_expenses (por sucursal): Gasolina, Finiquito,
+        //    Gastos Médicos, etc. PAGO DE IMSS excluido (no es gasto operativo del período).
         if (!empty($operativeIds)) {
             $sourceIds = DB::table('data_sources')
                 ->whereIn('code', ['gastos_lendus', 'gastos_erp'])
@@ -630,7 +685,10 @@ class BranchRadiographyCalculator
                     $q->whereIn('e.category', ['Gasolina', 'Financiamiento Celular'])
                       ->orWhere(function ($q2) {
                           $q2->whereIn('e.category', ['Nómina y Capital Humano', 'Nomina y Capital Humano'])
-                             ->whereNotIn('e.concept', ['NOMINA', 'DEDUCCIONES', 'DEDUCCIONES GENERALES', 'GASTOS EMERGENTES', 'GASTOS POR TRANSPORTE']);
+                             ->whereNotIn('e.concept', [
+                                 'NOMINA', 'DEDUCCIONES', 'DEDUCCIONES GENERALES',
+                                 'PAGO DE IMSS', 'GASTOS EMERGENTES', 'GASTOS POR TRANSPORTE',
+                             ]);
                       });
                 })
                 ->selectRaw("e.branch_id, e.category, COALESCE(e.concept,'') as concept, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
@@ -650,6 +708,45 @@ class BranchRadiographyCalculator
                     $summaries[$suc]['nomina_detalle'][$label] = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amount;
                 } else {
                     $unassigned['nomina_detalle'][$label] = ($unassigned['nomina_detalle'][$label] ?? 0.0) + $amount;
+                }
+            }
+
+            // ── Conceptos gastos_lendus_excel (PAGO FINANCIAMIENTO MOTO, COMPRA DE CASCOS):
+            //    Con branch_id asignado → van al bucket de su sucursal.
+            //    Sin branch_id (NULL) → van al bucket global (unassigned).
+            $lendusExcelId = DB::table('data_sources')->where('code', 'gastos_lendus_excel')->value('id');
+            if ($lendusExcelId) {
+                $lendusRows = DB::table('fact_expenses as e')
+                    ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+                    ->whereIn('e.period_id', $dataIds)
+                    ->where('ru.data_source_id', $lendusExcelId)
+                    ->whereIn('e.category', ['Nómina y Capital Humano', 'Nomina y Capital Humano'])
+                    ->whereIn(DB::raw('UPPER(TRIM(COALESCE(e.concept,\'\')))'), ['PAGO FINANCIAMIENTO MOTO', 'COMPRA DE CASCOS'])
+                    ->selectRaw("e.branch_id, UPPER(TRIM(COALESCE(e.concept,''))) as concept, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
+                    ->groupBy('e.branch_id', 'e.concept')
+                    ->get();
+
+                foreach ($lendusRows as $row) {
+                    $con    = (string) $row->concept;
+                    $label  = match (true) {
+                        str_contains($con, 'FINANCIAMIENTO MOTO') => 'Financiamiento de Motos',
+                        str_contains($con, 'CASCO')               => 'Cascos',
+                        default                                   => null,
+                    };
+                    if ($label === null) continue;
+                    $amt = (float) $row->total;
+
+                    if ($row->branch_id === null) {
+                        $unassigned['nomina_detalle'][$label] = ($unassigned['nomina_detalle'][$label] ?? 0.0) + $amt;
+                    } else {
+                        $brId = (int) $row->branch_id;
+                        $suc  = $operativeMap[$brId] ?? null;
+                        if ($suc && isset($summaries[$suc])) {
+                            $summaries[$suc]['nomina_detalle'][$label] = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amt;
+                        } else {
+                            $unassigned['nomina_detalle'][$label] = ($unassigned['nomina_detalle'][$label] ?? 0.0) + $amt;
+                        }
+                    }
                 }
             }
         }

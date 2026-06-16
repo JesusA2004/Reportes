@@ -64,7 +64,7 @@ class DebugBranchScopeCommand extends Command
         $operative    = $this->resolver->operativeFinancialBranches();
         $operativeSet = array_map('strtoupper', $operative);
 
-        $counts = ['operative' => 0, 'closed' => 0, 'corporativo' => 0, 'out_of_scope' => 0, 'unresolved' => 0];
+        $counts = ['operative' => 0, 'corporativo' => 0, 'out_of_scope' => 0, 'unresolved' => 0];
 
         foreach ($branches as $b) {
             $real  = $this->resolver->resolveRealBranchFromRoute($b->name);
@@ -73,9 +73,6 @@ class DebugBranchScopeCommand extends Command
             if ($upper && in_array($upper, $operativeSet, true)) {
                 $tag = '<fg=green>OPERATIVA    </>';
                 $counts['operative']++;
-            } elseif ($upper === 'SAN JUAN DEL RÍO' || $upper === 'SAN JUAN DEL RIO') {
-                $tag = '<fg=yellow>CERRADA      </>';
-                $counts['closed']++;
             } elseif ($upper === 'CORPORATIVO') {
                 $tag = '<fg=cyan>CORPORATIVO  </>';
                 $counts['corporativo']++;
@@ -101,17 +98,16 @@ class DebugBranchScopeCommand extends Command
 
         $this->line('');
         $this->info('── Resumen ──────────────────────────────────────────────────────────');
-        $this->line(sprintf('  <fg=green>Operativas     :</> %d (de 12 esperadas)', $counts['operative']));
-        $this->line(sprintf('  <fg=yellow>Cerradas       :</> %d', $counts['closed']));
+        $this->line(sprintf('  <fg=green>Operativas     :</> %d (de 13 esperadas)', $counts['operative']));
         $this->line(sprintf('  <fg=cyan>Corporativo    :</> %d', $counts['corporativo']));
         $this->line(sprintf('  <fg=magenta>Fuera de alcance:</> %d', $counts['out_of_scope']));
         $this->line(sprintf('  <fg=red>Sin resolver   :</> %d', $counts['unresolved']));
         $this->line('');
 
-        if ($counts['operative'] !== 12) {
-            $this->warn("⚠  Se esperaban 12 sucursales operativas, se encontraron {$counts['operative']}.");
+        if ($counts['operative'] !== 13) {
+            $this->warn("⚠  Se esperaban 13 sucursales operativas, se encontraron {$counts['operative']}.");
         } else {
-            $this->info('<fg=green>✓ Las 12 sucursales operativas están correctamente resueltas.</>');
+            $this->info('<fg=green>✓ Las 13 sucursales operativas están correctamente resueltas.</>');
         }
 
         $this->line('');

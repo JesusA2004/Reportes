@@ -86,7 +86,9 @@
       "Bash(findstr /i \"descuento\")",
       "Bash(findstr /i \"exact\")",
       "Bash(Select-String -Pattern \"descuento\")",
-      "Bash(Select-String -Pattern \"exact\")"
+      "Bash(Select-String -Pattern \"exact\")",
+      "Bash(python -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(r['name'], r['classification']\\) for r in data if r['classification'] not in \\('SUCURSAL_OFICIAL',\\)]\")",
+      "Bash(Select-Object FullName, Length, LastWriteTime)"
     ]
   }
 }

@@ -20,10 +20,12 @@ class CleanupBranchesCommand extends Command
         'fact_placements',
         'fact_portfolios',
         'fact_expenses',
+        'fact_period_employee_summary',
         'employee_branch_assignments',
     ];
 
-    private const EXCLUDED_NAMES = ['SAN JUAN DEL RÍO', 'SAN JUAN DEL RIO', 'CORPORATIVO'];
+    // Only CORPORATIVO is excluded from cleanup — SJR is now an official branch.
+    private const EXCLUDED_NAMES = ['CORPORATIVO'];
 
     private BranchResolverService $resolver;
 
