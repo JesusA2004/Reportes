@@ -118,8 +118,8 @@ class RadiographySnapshotBuilder
         $cv = (float)($gm['cartera_vencida_total'] ?? 0);
         $gm['mora_porcentaje'] = $ct > 0 ? round($cv / $ct * 100, 2) : 0;
 
-        // Colocación: usa amount_monto53 (monto autorizado face-value) en lugar de amount (desembolso neto).
-        // Excluye Norte + Corporativo + reestructuras.
+        // Colocación = SUM(Monto desembolsado) donde credit_origin IN (DESEMBOLSO, REFINANCIAMIENTO).
+        // Excluye Norte + Corporativo. No filtrar por product_name; el filtro correcto es credit_origin.
         $filteredColocacion = (float)(DB::table('fact_placements as p')
             ->leftJoin('branches as b', 'p.branch_id', '=', 'b.id')
             ->whereIn('p.period_id', $this->dataIds)
@@ -129,10 +129,7 @@ class RadiographySnapshotBuilder
             })
             ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
             ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
-            ->where(function ($q) {
-                $q->whereNull('p.product_name')
-                  ->orWhereRaw("p.product_name NOT REGEXP ?", ['REESTRUCTURA|UNIFICACION|UNIFICACIÓN|RECURSOS PROPIOS']);
-            })
+            ->whereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.credit_origin'))) IN ('DESEMBOLSO', 'REFINANCIAMIENTO')")
             ->selectRaw("SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.amount_monto53')) AS DECIMAL(14,2))) as tot")
             ->value('tot') ?? 0);
         if ($filteredColocacion > 0) {
@@ -140,6 +137,7 @@ class RadiographySnapshotBuilder
         } elseif (($gm['colocacion_total'] ?? 0) == 0) {
             $gm['colocacion_total'] = (float)(DB::table('fact_placements as p')
                 ->whereIn('p.period_id', $this->dataIds)
+                ->whereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.credit_origin'))) IN ('DESEMBOLSO', 'REFINANCIAMIENTO')")
                 ->selectRaw("SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.amount_monto53')) AS DECIMAL(14,2))) as tot")
                 ->value('tot') ?? 0);
         }
@@ -250,6 +248,7 @@ class RadiographySnapshotBuilder
                 'end_date'   => optional($period->end_date)->format('d/m/Y'),
             ],
             'saldo_inicial_caja' => (float) ($period->saldo_inicial_caja ?? 0),
+            'saldo_final_caja'   => ($period->saldo_final_caja !== null) ? (float) $period->saldo_final_caja : null,
             'generated_at' => now('America/Mexico_City')->format('d/m/Y H:i'),
             'version'      => $summary->version ?? 1,
             'branch_radiography' => [
@@ -289,6 +288,7 @@ class RadiographySnapshotBuilder
                 'mora_by_branch_product'     => $this->buildMoraByBranchProduct($period),
                 'corporate_funding'          => $this->buildCorporateFunding($period),
                 'placement_by_branch_product'=> $this->buildPlacementByBranchProduct($period),
+                'rotation'                   => $this->buildRotationData($period),
             ],
             'charts' => [
                 'recovery_by_branch'      => $this->chartByBranch($period, 'recuperacion'),
@@ -2160,6 +2160,64 @@ class RadiographySnapshotBuilder
             'monto'    => (float)$r->monto,
             'apertura' => 0.0,
         ])->values()->all();
+    }
+
+    // ── ROTACIÓN DE PERSONAL ─────────────────────────────────────────────────
+
+    private function buildRotationData(Period $period): array
+    {
+        $allPeriods = Period::all();
+
+        // Active employees in current period (NOI movements)
+        $currentEmps = DB::table('fact_noi_movements')
+            ->whereIn('period_id', $this->dataIds)
+            ->whereNotNull('employee_id')
+            ->distinct()
+            ->pluck('employee_id')
+            ->toArray();
+        $currentCount = count($currentEmps);
+
+        // Previous period: highest id strictly less than current period id
+        $prevPeriod = $allPeriods
+            ->filter(fn ($p) => $p->id < $period->id)
+            ->sortByDesc('id')
+            ->first();
+
+        $bajas     = 0;
+        $prevCount = 0;
+
+        if ($prevPeriod) {
+            $prevWeeklyIds = $prevPeriod->resolveBaseWeeklyIds($allPeriods);
+            $prevDataIds   = array_values(array_unique(array_merge(
+                empty($prevWeeklyIds) ? [] : $prevWeeklyIds,
+                [$prevPeriod->id]
+            )));
+
+            $prevEmps = DB::table('fact_noi_movements')
+                ->whereIn('period_id', $prevDataIds)
+                ->whereNotNull('employee_id')
+                ->distinct()
+                ->pluck('employee_id')
+                ->toArray();
+            $prevCount  = count($prevEmps);
+            $currentSet = array_flip($currentEmps);
+            foreach ($prevEmps as $emp) {
+                if (!isset($currentSet[$emp])) {
+                    $bajas++;
+                }
+            }
+        }
+
+        $promedio = $prevCount > 0 ? (int) round(($prevCount + $currentCount) / 2) : $currentCount;
+        $indice   = $promedio > 0 ? round($bajas / $promedio * 100, 2) : 0.0;
+
+        return [
+            'bajas'         => $bajas,
+            'promedio'      => $promedio,
+            'indice'        => $indice,
+            'current_count' => $currentCount,
+            'prev_count'    => $prevCount,
+        ];
     }
 
     // ── HELPERS ──────────────────────────────────────────────────────────────

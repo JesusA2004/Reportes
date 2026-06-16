@@ -74,18 +74,23 @@ class LendusMinistracionesImportService
                 $amountDesemb = $this->toDecimal($this->valueFromRow($row, $map, 'amount_disbursed'));
                 $creditOrigin = $this->clean($this->valueFromRow($row, $map, 'credit_origin'));
 
-                // Rule: REFINANCIAMIENTO → use "$ Desembolsado" (efectivo entregado).
-                //       DESEMBOLSO/otros → use "Monto desembolsado" (total crédito).
-                $isRefi = $creditOrigin !== null &&
-                          str_contains(strtoupper($creditOrigin), 'REFINANCIAMIENTO');
-                $amount = ($isRefi && $amountDesemb !== null && $amountDesemb > 0)
-                    ? $amountDesemb
-                    : $amountMonto;
+                // Otorgamientos = Monto desembolsado SIEMPRE (col 53).
+                // $ Desembolsado (col 54) se guarda solo para auditoría, nunca para calcular colocación.
+                $amount = $amountMonto;
 
                 if (($amount ?? 0) <= 0) {
                     $stats['rows_skipped']++;
                     continue;
                 }
+
+                $cuotaTotal  = $this->toDecimal($this->valueFromRow($row, $map, 'cuota_total'));
+                $interes     = $this->toDecimal($this->valueFromRow($row, $map, 'interes_total'));
+                $impuesto    = $this->toDecimal($this->valueFromRow($row, $map, 'impuesto_total'));
+                $adeudoTotal = $this->toDecimal($this->valueFromRow($row, $map, 'adeudo_total'));
+                $seguro      = $this->toDecimal($this->valueFromRow($row, $map, 'seguro'));
+                $apertura    = $this->toDecimal($this->valueFromRow($row, $map, 'apertura'));
+                $descRefi    = $this->toDecimal($this->valueFromRow($row, $map, 'descuento_refinanciamiento'));
+                $descSubprod = $this->toDecimal($this->valueFromRow($row, $map, 'descuento_subproductos'));
 
                 $promoterName = $this->clean($this->valueFromRow($row, $map, 'promoter_name'));
                 $promoterCode = $this->clean($this->valueFromRow($row, $map, 'promoter_code'));
@@ -130,11 +135,21 @@ class LendusMinistracionesImportService
                     'amount'                  => $amount,
                     'operation_date'          => $this->toDate($this->valueFromRow($row, $map, 'operation_date')),
                     'raw_payload'             => json_encode([
-                        'credit_origin'   => $creditOrigin,
-                        'amount_monto53'  => $amountMonto,
-                        'amount_desemb54' => $amountDesemb,
-                        'amount_used'     => $amount,
-                        'is_refi'         => $isRefi,
+                        'credit_origin'              => $creditOrigin,
+                        'monto_desembolsado'         => $amountMonto,
+                        'efectivo_desembolsado'      => $amountDesemb,
+                        'cuota_total'                => $cuotaTotal,
+                        'interes_total'              => $interes,
+                        'impuesto_total'             => $impuesto,
+                        'adeudo_total'               => $adeudoTotal,
+                        'seguro'                     => $seguro,
+                        'apertura'                   => $apertura,
+                        'descuento_refinanciamiento' => $descRefi,
+                        'descuento_subproductos'     => $descSubprod,
+                        // backward-compat
+                        'amount_monto53'             => $amountMonto,
+                        'amount_desemb54'            => $amountDesemb,
+                        'amount_used'                => $amount,
                     ]),
                 ]);
 

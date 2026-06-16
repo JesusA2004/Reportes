@@ -176,6 +176,62 @@ class ColumnMapService
                 'internal'    => true,
                 'description' => 'Plazo/duración del crédito en pagos o días. Alternativa a num_payments.',
             ],
+            'cuota_total' => [
+                'aliases'     => ['cuota_total', 'cuota'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Cuota total periódica del cliente (diaria/semanal). NO usar para colocación.',
+            ],
+            'interes_total' => [
+                'aliases'     => ['interes', 'interes_total', 'interes_credito', 'total_interes', 'interes_del_credito'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Interés total del crédito. NO usar para colocación.',
+            ],
+            'impuesto_total' => [
+                'aliases'     => ['impuesto', 'impuesto_total', 'iva_total', 'total_impuesto'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Impuesto total del crédito. NO usar para colocación.',
+            ],
+            'adeudo_total' => [
+                'aliases'     => ['adeudo_total', 'adeudo', 'total_adeudo', 'saldo_total'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Adeudo total del crédito. NO usar para colocación.',
+            ],
+            'seguro' => [
+                'aliases'     => ['seguro', 'seguro_de_vida', 'cobertura_seguro', 'seguro_credito'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Seguro del crédito. Solo auditoría.',
+            ],
+            'apertura' => [
+                'aliases'     => ['apertura', 'comision_apertura', 'comision_por_apertura', 'comision_de_apertura'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Comisión de apertura. Solo auditoría.',
+            ],
+            'descuento_refinanciamiento' => [
+                'aliases'     => ['descuentos_por_refinanciamiento', 'descuento_refinanciamiento', 'desc_refinanciamiento', 'descuento_por_refinanciamiento'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Descuentos por refinanciamiento. Solo auditoría.',
+            ],
+            'descuento_subproductos' => [
+                'aliases'     => ['descuentos_por_subproductos', 'descuento_subproductos', 'desc_subproductos', 'descuento_por_subproductos'],
+                'required'    => false,
+                'metric'      => false,
+                'internal'    => true,
+                'description' => 'Descuentos por subproductos. Solo auditoría.',
+            ],
         ];
     }
 

@@ -242,16 +242,13 @@ class BranchRadiographyCalculator
 
     private function accumulateColocacion(array $dataIds, array $branchIds, array $operativeMap, array &$summaries): void
     {
-        // Usa amount_monto53 (monto autorizado face-value) en lugar de amount (desembolso neto).
-        // En refinanciamientos el desembolso < monto autorizado, así que monto53 cuadra con la referencia.
+        // Otorgamientos = SUM(amount) donde credit_origin IN ('DESEMBOLSO','REFINANCIAMIENTO').
+        // amount siempre = Monto desembolsado (col 53). Excluir REESTRUCTURACIÓN y UNIFICACIÓN por credit_origin.
         $rows = DB::table('fact_placements')
             ->whereIn('period_id', $dataIds)
             ->whereIn('branch_id', $branchIds)
-            ->where(function ($q) {
-                $q->whereNull('product_name')
-                  ->orWhereRaw("product_name NOT REGEXP ?", ['REESTRUCTURA|UNIFICACION|UNIFICACIONES|RECURSOS PROPIOS']);
-            })
-            ->selectRaw('branch_id, SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(raw_payload), \'$.amount_monto53\')) AS DECIMAL(14,2))) as colocacion, COUNT(*) as creditos')
+            ->whereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(raw_payload), '$.credit_origin'))) IN ('DESEMBOLSO', 'REFINANCIAMIENTO')")
+            ->selectRaw('branch_id, SUM(amount) as colocacion, COUNT(*) as creditos')
             ->groupBy('branch_id')
             ->get();
 

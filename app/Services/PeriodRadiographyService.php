@@ -265,7 +265,7 @@ class PeriodRadiographyService
 
         $colocacionQuery = DB::table('fact_placements as p')
             ->whereIn('p.period_id', $dataIds)
-            ->where(function ($q) { $q->whereNull('p.product_name')->orWhereRaw("p.product_name NOT REGEXP ?", ['REESTRUCTURA|UNIFICACION|RECURSOS PROPIOS']); });
+            ->whereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.credit_origin'))) IN ('DESEMBOLSO', 'REFINANCIAMIENTO')");
         if (!empty($includedBranchIds)) {
             $colocacionQuery->whereIn('p.branch_id', $includedBranchIds);
         }

@@ -345,31 +345,35 @@ class RadiographyWorkbookBuilder
         $r++;
         $loanTotal = (float)($loans['total'] ?? 0);
         $brGlobalFondea = $brCalcGlobal ? (float)$brCalcGlobal['prestamos_fondea'] : $loanTotal;
+        $brGlobalRecibe = (float) array_sum(array_column($loans['recibe'] ?? [], 'total'));
+        $brLoanNeto     = $brGlobalFondea - $brGlobalRecibe;
         $r = $writeRows($r, [
             ['Activos (fondea)',  $brGlobalFondea, 'currency', ''],
-            ['Pasivos (recibe)',  $brGlobalFondea, 'currency', ''],
-            ['Total',            $brGlobalFondea, 'currency', ''],
+            ['Pasivos (recibe)',  $brGlobalRecibe, 'currency', ''],
+            ['Total neto',       $brLoanNeto,      'currency', ''],
         ]);
         $r++;
 
         // ── 6. Índice de rotación de personal ────────────────────────────────
         $this->sectionHeader($sheet, "A{$r}:C{$r}", '6. ÍNDICE DE ROTACIÓN DE PERSONAL');
         $r++;
+        $rotation = $snap['sections']['rotation'] ?? [];
         $r = $writeRows($r, [
-            ['N° de personas que dejaron la empresa', 0, 'integer', ''],
-            ['Promedio de personas en el periodo',    0, 'integer', ''],
-            ['Índice de rotación',                   0, 'percent',  ''],
+            ['N° de personas que dejaron la empresa', (int)($rotation['bajas']    ?? 0),   'integer', ''],
+            ['Promedio de personas en el periodo',    (int)($rotation['promedio'] ?? 0),   'integer', ''],
+            ['Índice de rotación',                   (float)($rotation['indice'] ?? 0.0), 'percent',  ''],
         ]);
         $r++;
 
         // ── 7. Análisis de Tendencias y Proyecciones ──────────────────────────
         $this->sectionHeader($sheet, "A{$r}:C{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES');
         $r++;
-        // EBITDA = Ingresos − Otorgamientos − Gastos Totales
-        // Gastos Totales = gastosOp + Total Nómina y Capital Humano (suma de todos los conceptos)
+        // Utilidad = Saldo inicial + Ingresos − Otorgamientos − Gastos Totales
+        $saldoInicial   = (float)($snap['saldo_inicial_caja'] ?? 0);
+        $saldoFinal     = $snap['saldo_final_caja'] ?? null;  // null = no configurado
         $excGlobal      = $brCalcGlobal ? (float)$brCalcGlobal['excedentes'] : $excedentes;
         $gastosTotal    = $gastosOpTotal + $nomTotal;
-        $utilidad       = $recTotal - $colTotal - $gastosTotal;
+        $utilidad       = $saldoInicial + $recTotal - $colTotal - $gastosTotal;
         // Validación: el envío corporativo no puede superar la utilidad disponible
         $inconsistencia = $excGlobal > $utilidad;
         $diferencia     = $inconsistencia ? 0.0 : ($utilidad - $excGlobal);
@@ -379,15 +383,15 @@ class RadiographyWorkbookBuilder
         $mora91_120g  = $brCalcGlobal ? (float)$brCalcGlobal['mora_91_120']  : $mora91_120;
         $mora120pg    = $brCalcGlobal ? (float)$brCalcGlobal['mora_120_plus'] : $mora120p;
         $r = $writeRows($r, [
-            ['Saldo inicial en caja',              0,              'currency', ''],
-            ['Ingresos Totales',                   $recTotal,      'currency', ''],
-            ['Otorgamientos',                      $colTotal,      'currency', ''],
-            ['Gastos Totales',                     $gastosTotal,   'currency', ''],
-            ['EBITDA',                             $utilidad,      'currency', ''],
-            ['Saldo final en caja',                0,              'currency', ''],
-            ['Préstamos inter sucursales',         $brGlobalFondea,'currency', ''],
-            ['Envío de utilidad a corporativo',    $excGlobal,     'currency', ''],
-            ['Diferencia / sobrante',              $diferencia,    'currency', ''],
+            ['Saldo inicial en caja',              $saldoInicial,         'currency', ''],
+            ['Ingresos Totales',                   $recTotal,             'currency', ''],
+            ['Otorgamientos',                      $colTotal,             'currency', ''],
+            ['Gastos Totales',                     $gastosTotal,          'currency', ''],
+            ['Utilidad',                           $utilidad,             'currency', ''],
+            ['Saldo final en caja',                $saldoFinal ?? 0.0,    'currency', ''],
+            ['Total neto préstamos inter suc.',    $brLoanNeto,           'currency', ''],
+            ['Envío de utilidad a corporativo',    $excGlobal,            'currency', ''],
+            ['Diferencia / sobrante',              $diferencia,           'currency', ''],
             ['Mora de 0 a 30 días',                $mora0_30g,     'currency', ''],
             ['Mora de 31 a 60 días',               $mora31_60g,    'currency', ''],
             ['Mora de 61 a 90 días',               $mora61_90g,    'currency', ''],

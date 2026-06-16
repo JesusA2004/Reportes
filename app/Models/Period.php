@@ -18,6 +18,7 @@ class Period extends Model {
         'start_date',
         'end_date',
         'saldo_inicial_caja',
+        'saldo_final_caja',
         'component_period_ids',
         'is_closed',
     ];
