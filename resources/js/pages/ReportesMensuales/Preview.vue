@@ -157,15 +157,13 @@ onMounted(() => {
     }
 })
 
-type TabKey = 'resumen' | 'radiografia' | 'productos' | 'sucursales' | 'empleados' | 'cartera' | 'gastos' | 'incidencias'
+type TabKey = 'resumen' | 'radiografia' | 'productos' | 'sucursales' | 'empleados' | 'cartera' | 'gastos'
 const activeTab = ref<TabKey>('resumen')
 
 const snap    = computed(() => props.snapshot)
 const sum     = computed(() => snap.value?.summary ?? {})
 const pay     = computed(() => snap.value?.sections?.payroll ?? {})
-const inc     = computed(() => snap.value?.sections?.incidents ?? [])
 const charts  = computed(() => snap.value?.charts ?? {})
-const highInc = computed(() => inc.value.filter((i: any) => i.severity === 'high').length)
 
 // Gastos: nuevo formato expandido
 const gastos  = computed(() => snap.value?.sections?.expenses_detail ?? {})
@@ -341,7 +339,6 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
     { key: 'empleados',    label: 'Empleados / Gestores' },
     { key: 'cartera',      label: 'Cartera y mora' },
     { key: 'gastos',       label: 'Gastos' },
-    { key: 'incidencias',  label: 'Incidencias' },
 ]
 </script>
 
@@ -613,8 +610,6 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                         class="relative px-4 py-2.5 text-sm font-bold transition border-b-2"
                         :class="activeTab === t.key ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-800'">
                         {{ t.label }}
-                        <span v-if="t.key === 'incidencias' && highInc > 0"
-                              class="ml-1.5 rounded-full bg-red-100 px-1.5 py-0.5 text-xs font-black text-red-700">{{ highInc }}</span>
                     </button>
                 </div>
 
@@ -1346,23 +1341,6 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                             </table>
                         </div>
 
-                    </div>
-                </div>
-
-                <!-- ══════════ INCIDENCIAS ══════════ -->
-                <div v-show="activeTab === 'incidencias'">
-                    <div v-if="!inc.length" class="rounded-2xl border bg-white p-10 text-center text-sm text-slate-400">Sin incidencias registradas.</div>
-                    <div v-else class="space-y-3">
-                        <div v-for="i in inc" :key="i.type + i.message"
-                             class="rounded-2xl border p-4"
-                             :class="i.severity === 'high' ? 'border-red-200 bg-red-50' : 'border-amber-200 bg-amber-50'">
-                            <div class="flex items-center gap-2">
-                                <span class="rounded-full px-2 py-0.5 text-xs font-black uppercase"
-                                      :class="i.severity === 'high' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'">{{ i.severity }}</span>
-                                <span class="text-xs font-bold text-slate-500">{{ i.type }}</span>
-                            </div>
-                            <p class="mt-1.5 text-sm font-semibold" :class="i.severity === 'high' ? 'text-red-800' : 'text-amber-800'">{{ i.message }}</p>
-                        </div>
                     </div>
                 </div>
 

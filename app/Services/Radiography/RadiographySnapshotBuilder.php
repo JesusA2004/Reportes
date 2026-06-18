@@ -205,6 +205,7 @@ class RadiographySnapshotBuilder
                 'corporate_funding'          => $this->buildCorporateFunding($period),
                 'placement_by_branch_product'=> $this->buildPlacementByBranchProduct($period),
                 'rotation'                   => $this->buildRotationData($period),
+                'active_loans'               => $this->buildActiveLoans($period),
             ],
             'charts' => [
                 'recovery_by_branch'      => $this->chartByBranch($period, 'recuperacion'),
@@ -1926,6 +1927,69 @@ class RadiographySnapshotBuilder
             'vencida'   => (float) $r->vencida,
             'mora'      => (float) $r->cartera > 0 ? round((float) $r->vencida / (float) $r->cartera * 100, 2) : 0.0,
         ])->values()->all();
+    }
+
+    /**
+     * One row per active loan/contract (fact_portfolios), for the PRESTAMOS
+     * ACTIVOS Excel sheet. Only real fact_portfolios columns are used — there
+     * is no fecha_otorgamiento/fecha_vencimiento anywhere in the schema, so
+     * those are intentionally not included. Bucketing reuses moraBucketDefs()
+     * so it is identical to every other mora bucket in the workbook.
+     */
+    private function buildActiveLoans(Period $period): array
+    {
+        $realBranchNames = $this->resolveRealBranchNormalizedNames();
+        $defs = $this->moraBucketDefs();
+
+        $rows = DB::table('fact_portfolios as po')
+            ->join('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $this->dataIds)
+            ->when(!empty($realBranchNames), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNames))
+            ->selectRaw("
+                b.name as branch,
+                po.client_name,
+                po.contract,
+                po.product_name,
+                COALESCE(NULLIF(po.promoter_name,''), NULLIF(po.promoter_code,''), 'Sin gestor') as gestor,
+                po.route_name,
+                po.periodicity,
+                po.days_past_due,
+                po.balance,
+                po.capital_activo,
+                po.past_due_balance,
+                po.capital_due
+            ")
+            ->orderBy('b.name')
+            ->orderByDesc('po.days_past_due')
+            ->orderByDesc('po.balance')
+            ->get();
+
+        return $rows->map(function ($r) use ($defs) {
+            $dpd    = (int) $r->days_past_due;
+            $bucket = 'Al corriente';
+            foreach ($defs as $d) {
+                if ($dpd >= $d['min'] && $dpd <= $d['max']) {
+                    $bucket = $d['label'];
+                    break;
+                }
+            }
+            return [
+                'sucursal'        => $r->branch,
+                'cliente'         => $r->client_name,
+                'contrato'        => $r->contract,
+                'producto'        => $r->product_name,
+                'gestor'          => $r->gestor,
+                'ruta'            => $r->route_name,
+                'periodicidad'    => $r->periodicity,
+                'dias_vencidos'   => $dpd,
+                'bucket_mora'     => $bucket,
+                'saldo_activo'    => (float) $r->balance,
+                'capital_activo'  => (float) ($r->capital_activo ?? 0),
+                'vencido'         => (float) ($r->past_due_balance ?? 0),
+                'capital_vencido' => (float) ($r->capital_due ?? 0),
+                'estado'          => $dpd === 0 ? 'Al corriente' : 'En mora',
+            ];
+        })->values()->all();
     }
 
     /**

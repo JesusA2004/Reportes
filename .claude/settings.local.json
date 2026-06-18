@@ -88,7 +88,10 @@
       "Bash(Select-String -Pattern \"descuento\")",
       "Bash(Select-String -Pattern \"exact\")",
       "Bash(python -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(r['name'], r['classification']\\) for r in data if r['classification'] not in \\('SUCURSAL_OFICIAL',\\)]\")",
-      "Bash(Select-Object FullName, Length, LastWriteTime)"
+      "Bash(Select-Object FullName, Length, LastWriteTime)",
+      "Bash(echo \"EXIT_CODE=$?\")",
+      "Bash(unzip -l \"storage/app/radiografias/radiografia_M-2026-04_20260618_150004.xlsx\")",
+      "Bash(unzip -l \"storage/app/radiografias/radiografia_M-2026-04_20260618_162408.xlsx\")"
     ]
   }
 }

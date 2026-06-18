@@ -33,6 +33,7 @@ class RadiografiaExportService
 
         $writer = IOFactory::createWriter($spreadsheet, 'Xlsx');
         $writer->setPreCalculateFormulas(false);
+        $writer->setIncludeCharts(true);
         $writer->save($outputPath);
 
         $spreadsheet->disconnectWorksheets();
@@ -118,6 +119,7 @@ class RadiografiaExportService
 
         $writer = IOFactory::createWriter($spreadsheet, 'Xlsx');
         $writer->setPreCalculateFormulas(false);
+        $writer->setIncludeCharts(true);
         $writer->save($outputPath);
 
         $spreadsheet->disconnectWorksheets();

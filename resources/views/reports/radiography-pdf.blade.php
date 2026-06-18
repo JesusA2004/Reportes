@@ -8,52 +8,52 @@
 body { font-family: Helvetica, Arial, sans-serif; font-size: 9pt; color: #1e293b; background: #fff; }
 @page { margin: 14mm 12mm 14mm 12mm; }
 
-.cover { background: #0f172a; color: #fff; padding: 18px 20px 14px; margin-bottom: 16px; }
-.cover-eye  { font-size: 7pt; color: #818cf8; letter-spacing: 2px; text-transform: uppercase; font-weight: bold; }
+.cover { background: #106A59; color: #fff; padding: 18px 20px 14px; margin-bottom: 16px; }
+.cover-eye  { font-size: 7pt; color: #1DC1A2; letter-spacing: 2px; text-transform: uppercase; font-weight: bold; }
 .cover-title { font-size: 18pt; font-weight: bold; margin-top: 4px; }
-.cover-sub  { font-size: 9pt; color: #94a3b8; margin-top: 6px; line-height: 1.6; }
+.cover-sub  { font-size: 9pt; color: #d7f5ee; margin-top: 6px; line-height: 1.6; }
 
 .section-title {
-    background: #1d4ed8; color: #fff;
+    background: #5B9BD5; color: #fff;
     padding: 5px 10px; font-size: 9pt; font-weight: bold;
     margin-top: 14px; margin-bottom: 0;
 }
 .section-sub {
-    background: #334155; color: #cbd5e1;
+    background: #F2F2F2; color: #1F2937;
     padding: 3px 10px; font-size: 8pt;
     margin-top: 8px; margin-bottom: 0;
 }
-.section-green { background: #065f46; color: #fff; padding: 5px 10px; font-size: 9pt; font-weight: bold; margin-top: 14px; }
+.section-green { background: #106A59; color: #fff; padding: 5px 10px; font-size: 9pt; font-weight: bold; margin-top: 14px; }
 
 .cards { width: 100%; margin: 10px 0; border-collapse: collapse; }
-.card  { width: 25%; padding: 8px 10px; border: 1px solid #e2e8f0; background: #f8fafc; vertical-align: top; }
+.card  { width: 25%; padding: 8px 10px; border: 1px solid #E3EFFF; background: #F2F2F2; vertical-align: top; }
 .card-label { font-size: 7pt; color: #64748b; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
-.card-value { font-size: 13pt; font-weight: bold; color: #0f172a; margin-top: 3px; }
+.card-value { font-size: 13pt; font-weight: bold; color: #106A59; margin-top: 3px; }
 .card-red   { color: #b91c1c !important; }
 
 table.data { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
-table.data th { background: #dbeafe; color: #1e3a8a; font-weight: bold; text-align: left; padding: 5px 7px; border-bottom: 1.5px solid #93c5fd; }
-table.data td { padding: 4px 7px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
-table.data tr:nth-child(even) td { background: #f8fafc; }
+table.data th { background: #E3EFFF; color: #1F2937; font-weight: bold; text-align: left; padding: 5px 7px; border-bottom: 1.5px solid #5B9BD5; }
+table.data td { padding: 4px 7px; border-bottom: 1px solid #E3EFFF; vertical-align: top; }
+table.data tr:nth-child(even) td { background: #F2F2F2; }
 table.data .r { text-align: right; }
 table.data .c { text-align: center; }
 table.data .b { font-weight: bold; }
-table.data th.green { background: #065f46; color: #fff; }
-.totals-row td { background: #334155 !important; color: #fff !important; font-weight: bold !important; }
+table.data th.green { background: #106A59; color: #fff; }
+.totals-row td { background: #106A59 !important; color: #fff !important; font-weight: bold !important; }
 
 table.metric { width: 100%; border-collapse: collapse; font-size: 9pt; }
-table.metric td { padding: 5px 8px; border-bottom: 1px solid #e2e8f0; }
-table.metric tr:nth-child(even) td { background: #f8fafc; }
+table.metric td { padding: 5px 8px; border-bottom: 1px solid #E3EFFF; }
+table.metric tr:nth-child(even) td { background: #F2F2F2; }
 table.metric td:first-child { font-weight: bold; width: 60%; }
 table.metric td:last-child  { text-align: right; }
 
 .bar-chart { width: 100%; margin: 6px 0; }
 .bar-row { margin-bottom: 5px; }
 .bar-label { font-size: 8pt; color: #334155; margin-bottom: 2px; white-space: nowrap; overflow: hidden; }
-.bar-track { background: #e2e8f0; width: 100%; height: 12px; border-radius: 2px; }
-.bar-fill  { background: #1d4ed8; height: 12px; border-radius: 2px; display: block; min-width: 2px; }
+.bar-track { background: #E3EFFF; width: 100%; height: 12px; border-radius: 2px; }
+.bar-fill  { background: #1DC1A2; height: 12px; border-radius: 2px; display: block; min-width: 2px; }
 .bar-fill-red   { background: #b91c1c; }
-.bar-fill-green { background: #15803d; }
+.bar-fill-green { background: #106A59; }
 .bar-value { font-size: 7.5pt; color: #475569; margin-top: 1px; text-align: right; }
 
 .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 7.5pt; font-weight: bold; }
@@ -129,6 +129,15 @@ foreach ($nomDetalle as $dk => $dv) {
     if (!isset($nomDisplay[$dk]) && $dv > 0) $nomDisplay[$dk] = $dv;
 }
 $nomTotal = array_sum(array_filter($nomDisplay, fn($v) => $v > 0));
+// Real NOI concept codes, confirmed against BranchRadiographyCalculator::accumulateNomina().
+$nomCodeLabels = [
+    'Nómina'           => 'P001 SUELDO',
+    'Comisiones'       => 'P002 COMISIONES',
+    'Vacaciones'       => 'P009 VACACIONES',
+    'Prima vacacional' => 'P010 PRIMA VACACIONAL',
+    'Bonos'            => 'P1XX BONOS (CATEGORÍA / PRODUCTIVIDAD)',
+];
+$nomIsDeduction = fn($label) => (bool) preg_match('/Descuento|Pensión Alimenticia|Anticipo/i', $label);
 
 // ── Préstamos intersucursales (sección 5) ────────────────────────────────────
 $fondeoTotal = (float)($brGlobal['prestamos_fondea'] ?? ($snap['sections']['interbranch_loans']['total'] ?? 0));
@@ -256,11 +265,16 @@ foreach ($brBranches as $b) {
 <table class="metric">
     @foreach($nomDisplay as $nomLabel => $nomVal)
     @if((float)$nomVal > 0)
-    <tr><td>{{ $nomLabel }}</td><td>{{ $fmt((float)$nomVal) }}</td></tr>
+    @php $nomIsDed = $nomIsDeduction($nomLabel); @endphp
+    <tr>
+        <td>{{ $nomCodeLabels[$nomLabel] ?? $nomLabel }}</td>
+        <td style="@if($nomIsDed) color:#b91c1c; @endif">{{ $nomIsDed ? '-' . $fmt((float)$nomVal) : $fmt((float)$nomVal) }}</td>
+    </tr>
     @endif
     @endforeach
     <tr class="totals-row"><td>Total Nómina y Capital Humano</td><td style="text-align:right;">{{ $fmt($nomTotal) }}</td></tr>
 </table>
+<div style="font-size:7.5pt;color:#64748b;margin-top:2px;">* Descuentos en rojo solo a modo informativo; el total es el monto bruto registrado (no resta descuentos).</div>
 
 <!-- ═══════════════════════════════════════════════════════════════════ -->
 <!-- 5. PRÉSTAMOS INTERSUCURSALES                                       -->
@@ -434,6 +448,34 @@ foreach ($brBranches as $b) {
 </div>
 @endif
 
+<!-- ═══ MORA POR BUCKET ══════════════════════════════════════════════ -->
+@if(!empty($snap['charts']['mora_by_bucket']))
+<div class="section-title">MORA POR BUCKET</div>
+<div class="bar-chart">
+    @foreach($snap['charts']['mora_by_bucket'] as $row)
+    <div class="bar-row">
+        <div class="bar-label">{{ mb_strimwidth($row['label'], 0, 50, '...') }}</div>
+        <div class="bar-track"><span class="bar-fill bar-fill-red" style="width:{{ $row['pct'] }}%;"></span></div>
+        <div class="bar-value">{{ $fmt($row['value']) }}</div>
+    </div>
+    @endforeach
+</div>
+@endif
+
+<!-- ═══ RANKING DE SUCURSALES POR CARTERA ════════════════════════════ -->
+@if(!empty($snap['charts']['portfolio_by_branch']))
+<div class="section-title">RANKING DE SUCURSALES POR CARTERA</div>
+<div class="bar-chart">
+    @foreach($snap['charts']['portfolio_by_branch'] as $row)
+    <div class="bar-row">
+        <div class="bar-label">{{ mb_strimwidth($row['label'], 0, 50, '...') }}</div>
+        <div class="bar-track"><span class="bar-fill" style="width:{{ $row['pct'] }}%;"></span></div>
+        <div class="bar-value">{{ $fmt($row['value']) }}</div>
+    </div>
+    @endforeach
+</div>
+@endif
+
 <!-- ═══ PRODUCTOS ════════════════════════════════════════════════════ -->
 @if(!empty($snap['sections']['products']))
 <div class="pb"></div>
@@ -450,44 +492,10 @@ foreach ($brBranches as $b) {
 </table>
 @endif
 
-<!-- ═══ RECUPERACIÓN ════════════════════════════════════════════════ -->
-@php $recDetail = $snap['sections']['recovery_detail'] ?? []; @endphp
-@if(!empty($recDetail['by_branch']))
-<div class="pb"></div>
-<div class="section-green">RECUPERACIÓN — {{ strtoupper($period->label) }}</div>
-<table class="data">
-    <tr>
-        <th class="green">Sucursal</th>
-        <th class="r green">Capital</th>
-        <th class="r green">Interés</th>
-        <th class="r green">Impuesto</th>
-        <th class="r green">Cargos</th>
-        <th class="r green">Total</th>
-    </tr>
-    @php $rTot = ['capital'=>0,'interest'=>0,'tax'=>0,'charges'=>0,'total'=>0]; @endphp
-    @foreach(array_slice($recDetail['by_branch'], 0, 25) as $rb)
-    @php foreach(['capital','interest','tax','charges','total'] as $k) $rTot[$k] += $rb[$k]; @endphp
-    <tr>
-        <td class="b">{{ $rb['branch'] }}</td>
-        <td class="r">{{ $fmt($rb['capital']) }}</td>
-        <td class="r">{{ $fmt($rb['interest']) }}</td>
-        <td class="r">{{ $fmt($rb['tax']) }}</td>
-        <td class="r">{{ $fmt($rb['charges']) }}</td>
-        <td class="r b">{{ $fmt($rb['total']) }}</td>
-    </tr>
-    @endforeach
-    <tr class="totals-row">
-        <td>TOTAL</td>
-        <td class="r">{{ $fmt($rTot['capital']) }}</td>
-        <td class="r">{{ $fmt($rTot['interest']) }}</td>
-        <td class="r">{{ $fmt($rTot['tax']) }}</td>
-        <td class="r">{{ $fmt($rTot['charges']) }}</td>
-        <td class="r">{{ $fmt($rTot['total']) }}</td>
-    </tr>
-</table>
-@endif
-
 <!-- ═══ MORA POR SUCURSAL ════════════════════════════════════════════ -->
+<!-- Nota: la recuperación por componente (capital/interés/impuesto) ya se
+     muestra en la sección 2. INGRESOS, fuente única (branch_radiography) —
+     no se duplica aquí con la fuente legacy (sections.recovery_detail). -->
 @if(!empty($snap['sections']['mora_by_branch']))
 <div class="section-green">MORAS — {{ strtoupper($period->label) }}</div>
 <table class="data">
