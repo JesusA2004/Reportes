@@ -25,8 +25,10 @@ use Illuminate\Support\Facades\DB;
  */
 class RadiographySnapshotBuilder
 {
-    private array $branchCache = [];
-    private array $dataIds     = [];
+    private array $branchCache        = [];
+    private array $dataIds            = [];
+    private array $branchCalcGlobal   = [];
+    private array $branchCalcBranches = [];
 
     public function __construct(
         private readonly EmployeeNameCanonicalizer $canonicalizer,
@@ -41,106 +43,18 @@ class RadiographySnapshotBuilder
 
         $gm = $summary->global_metrics ?? [];
 
-        // If global_metrics has zero overdue but days_past_due > 0 data exists, recalculate
-        if (($gm['cartera_vencida_total'] ?? 0) == 0 && ($gm['valor_cartera_total'] ?? 0) > 0) {
-            $hasOverdueDays = \App\Models\Portfolio::query()
-                ->whereIn('period_id', $this->dataIds)
-                ->where('days_past_due', '>', 0)
-                ->exists();
-            if ($hasOverdueDays) {
-                // Use past_due_balance (total_atrasado) for overdue metric
-                $vencidaFallback = (float) \App\Models\Portfolio::query()
-                    ->whereIn('period_id', $this->dataIds)
-                    ->where('days_past_due', '>', 0)
-                    ->sum('past_due_balance');
-                if ($vencidaFallback === 0.0) {
-                    $vencidaFallback = (float) \App\Models\Portfolio::query()
-                        ->whereIn('period_id', $this->dataIds)
-                        ->where('days_past_due', '>', 0)
-                        ->sum('balance');
-                }
-                $carteraTotal = (float) ($gm['valor_cartera_total'] ?? 0);
-                $gm['cartera_vencida_total'] = $vencidaFallback;
-                $gm['mora_porcentaje'] = $carteraTotal > 0 ? round($vencidaFallback / $carteraTotal * 100, 2) : 0;
-            }
-        }
+        // Cartera, mora (por bucket) y colocación se recalculan más abajo a partir de
+        // BranchRadiographyCalculator::sumGlobal() — ÚNICA fuente para estas métricas
+        // (cartera total, mora total, buckets, mora%, por sucursal, Excel, PDF, dashboard).
+        // No se ejecutan queries propias aquí para evitar dos lógicas distintas.
 
-        // Recalculate cartera/vencida/colocación from operative branches only.
-        // Exclude: Región Norte (by unambiguous name) + Corporativo/Falso/Inactiva/Vacante.
-        $norteNames = RegionNorteFilter::names();
-        $opExclNames = OperationalExclusion::names();
-        $excludeNames = array_merge($norteNames, $opExclNames);
-
-        $filteredCartera = (float) DB::table('fact_portfolios as po')
-            ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
-            ->whereIn('po.period_id', $this->dataIds)
-            ->where(function ($q) use ($excludeNames) {
-                $q->whereNull('b.name')
-                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $excludeNames);
-            })
-            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
-            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
-            ->sum('po.balance');
-        if ($filteredCartera > 0) {
-            $gm['valor_cartera_total'] = $filteredCartera;
-        }
-        if (($gm['valor_cartera_total'] ?? 0) == 0) {
-            $gm['valor_cartera_total']   = (float) DB::table('fact_portfolios')->whereIn('period_id', $this->dataIds)->sum('balance');
-        }
-        $filteredVencida = (float) DB::table('fact_portfolios as po')
-            ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
-            ->whereIn('po.period_id', $this->dataIds)
-            ->where(function ($q) use ($excludeNames) {
-                $q->whereNull('b.name')
-                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $excludeNames);
-            })
-            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
-            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
-            ->where('po.days_past_due', '>', 0)
-            ->sum('po.past_due_balance');
-        if ($filteredVencida === 0.0) {
-            $filteredVencida = (float) DB::table('fact_portfolios as po')
-                ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
-                ->whereIn('po.period_id', $this->dataIds)
-                ->where(function ($q) use ($excludeNames) {
-                    $q->whereNull('b.name')
-                      ->orWhereNotIn(DB::raw('LOWER(b.name)'), $excludeNames);
-                })
-                ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
-                ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
-                ->where('po.days_past_due', '>', 0)
-                ->sum('po.balance');
-        }
-        if ($filteredVencida > 0) {
-            $gm['cartera_vencida_total'] = $filteredVencida;
-        }
-        $ct = (float)($gm['valor_cartera_total'] ?? 0);
-        $cv = (float)($gm['cartera_vencida_total'] ?? 0);
-        $gm['mora_porcentaje'] = $ct > 0 ? round($cv / $ct * 100, 2) : 0;
-
-        // Colocación = SUM(Monto desembolsado) donde credit_origin IN (DESEMBOLSO, REFINANCIAMIENTO).
-        // Excluye Norte + Corporativo. No filtrar por product_name; el filtro correcto es credit_origin.
-        $filteredColocacion = (float)(DB::table('fact_placements as p')
-            ->leftJoin('branches as b', 'p.branch_id', '=', 'b.id')
+        // Seguro CRECE/COMADRES — informativo, NO se resta de colocacion_total.
+        $gm['seguro_crece_comadres_informativo'] = (float)(DB::table('fact_placements as p')
             ->whereIn('p.period_id', $this->dataIds)
-            ->where(function ($q) use ($excludeNames) {
-                $q->whereNull('b.name')
-                  ->orWhereNotIn(DB::raw('LOWER(b.name)'), $excludeNames);
-            })
-            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
-            ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
             ->whereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.credit_origin'))) IN ('DESEMBOLSO', 'REFINANCIAMIENTO')")
-            ->selectRaw("SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.amount_monto53')) AS DECIMAL(14,2))) as tot")
+            ->whereRaw("UPPER(COALESCE(p.product_name,'')) LIKE '%CRECE%' OR UPPER(COALESCE(p.product_name,'')) LIKE '%COMADRES%'")
+            ->selectRaw("SUM(COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.seguro')) AS DECIMAL(14,2)), 0)) as tot")
             ->value('tot') ?? 0);
-        if ($filteredColocacion > 0) {
-            $gm['colocacion_total'] = $filteredColocacion;
-        } elseif (($gm['colocacion_total'] ?? 0) == 0) {
-            $gm['colocacion_total'] = (float)(DB::table('fact_placements as p')
-                ->whereIn('p.period_id', $this->dataIds)
-                ->whereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.credit_origin'))) IN ('DESEMBOLSO', 'REFINANCIAMIENTO')")
-                ->selectRaw("SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.amount_monto53')) AS DECIMAL(14,2))) as tot")
-                ->value('tot') ?? 0);
-        }
 
         // Recuperación: precise Norte filter (accredited prefix + zone + unambiguous names)
         // + Corporativo/Falso/Inactiva operational exclusion (separate from Norte).
@@ -218,6 +132,8 @@ class RadiographySnapshotBuilder
         $branchCalcBranches = $branchCalcResult['branches'];
         $branchCalcUnassigned = $branchCalcResult['unassigned'];
         $branchCalcGlobal   = $this->branchCalculator->sumGlobal($branchCalcBranches, $branchCalcUnassigned);
+        $this->branchCalcGlobal   = $branchCalcGlobal;   // fuente única (global) para cartera/mora
+        $this->branchCalcBranches = $branchCalcBranches; // fuente única (por sucursal) para cartera/mora
 
         // Prefer BranchRadiographyCalculator totals for the primary summary metrics
         $calcCartera     = (float) $branchCalcGlobal['valor_cartera'];
@@ -798,61 +714,54 @@ class RadiographySnapshotBuilder
 
     // ── PORTFOLIO BUCKETS ────────────────────────────────────────────────────
 
+    // Fuente ÚNICA de cartera/mora: deriva de BranchRadiographyCalculator::sumGlobal()
+    // (mismo cálculo que alimenta cartera total, mora total, mora%, por sucursal, Excel y PDF).
+    // No ejecuta una query propia — evita que buckets y totales salgan de filtros distintos.
     private function buildPortfolioBuckets(Period $period): array
     {
+        $g = $this->branchCalcGlobal;
+        if (empty($g)) {
+            return [];
+        }
+
         $defs = [
-            ['label' => 'Al corriente',  'min' => 0,   'max' => 0     ],
-            ['label' => 'Mora 1-30',     'min' => 1,   'max' => 30    ],
-            ['label' => 'Mora 31-60',    'min' => 31,  'max' => 60    ],
-            ['label' => 'Mora 61-90',    'min' => 61,  'max' => 90    ],
-            ['label' => 'Mora 91-120',   'min' => 91,  'max' => 120   ],
-            ['label' => 'Mora 120+',     'min' => 121, 'max' => 99999 ],
+            ['key' => 'mora_0_30',     'label' => 'Mora 1-30'],
+            ['key' => 'mora_31_60',    'label' => 'Mora 31-60'],
+            ['key' => 'mora_61_90',    'label' => 'Mora 61-90'],
+            ['key' => 'mora_91_120',   'label' => 'Mora 91-120'],
+            ['key' => 'mora_120_plus', 'label' => 'Mora 120+'],
         ];
 
-        $excludeNames = array_merge(RegionNorteFilter::names(), OperationalExclusion::names());
+        $carteraTotal = (float) ($g['valor_cartera'] ?? 0);
+        $moraTotal    = 0.0;
+        $cntMoraTotal = 0;
+        $results      = [];
 
-        $results = [];
         foreach ($defs as $d) {
-            $rows = DB::table('fact_portfolios as po')
-                ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
-                ->whereIn('po.period_id', $this->dataIds)
-                ->where(function ($q) use ($excludeNames) {
-                    $q->whereNull('b.name')
-                      ->orWhereNotIn(DB::raw('LOWER(b.name)'), $excludeNames);
-                })
-                ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%inactiva%'])
-                ->whereRaw("(b.name IS NULL OR LOWER(b.name) NOT LIKE ?)", ['%vacante%'])
-                ->where('po.days_past_due', '>=', $d['min'])
-                ->where('po.days_past_due', '<=', $d['max'])
-                ->selectRaw('
-                    COUNT(*) as contratos,
-                    SUM(po.balance) as balance,
-                    SUM(COALESCE(po.past_due_balance, 0)) as past_due,
-                    SUM(COALESCE(po.capital_due, 0)) as capital_due_sum
-                ')
-                ->first();
-
-            $contratos = (int)($rows?->contratos ?? 0);
-            if ($contratos === 0) {
+            $balance = (float) ($g[$d['key']] ?? 0);
+            $cnt     = (int) ($g["{$d['key']}_cnt"] ?? 0);
+            $moraTotal    += $balance;
+            $cntMoraTotal += $cnt;
+            if ($cnt === 0) {
                 continue;
             }
-
-            $balance    = (float)($rows?->balance ?? 0);
-            $pastDue    = (float)($rows?->past_due ?? 0);
-            $capitalDue = (float)($rows?->capital_due_sum ?? 0);
-
-            // Prefer total_atrasado (past_due_balance) over capital_atrasado (capital_due)
-            $vencida = $pastDue > 0 ? $pastDue : ($capitalDue > 0 ? $capitalDue : 0);
-            if ($vencida === 0.0 && $d['min'] > 0 && $balance > 0) {
-                $vencida = $balance;
-            }
-
             $results[] = [
                 'label'     => $d['label'],
-                'contratos' => $contratos,
+                'contratos' => $cnt,
                 'balance'   => $balance,
-                'vencida'   => $vencida,
+                'vencida'   => $balance, // el contrato completo (Saldo actual) se bucketiza según días vencido
             ];
+        }
+
+        $cntAlCorriente = (int) ($g['contratos'] ?? 0) - $cntMoraTotal;
+        $balAlCorriente = $carteraTotal - $moraTotal;
+        if ($cntAlCorriente > 0) {
+            array_unshift($results, [
+                'label'     => 'Al corriente',
+                'contratos' => $cntAlCorriente,
+                'balance'   => $balAlCorriente,
+                'vencida'   => 0.0,
+            ]);
         }
 
         return $results;
@@ -2023,58 +1932,33 @@ class RadiographySnapshotBuilder
      * Portfolio mora buckets broken down per real branch.
      * Used for the MORA Excel tab.
      */
+    // Fuente ÚNICA: deriva de BranchRadiographyCalculator (mismas 13 sucursales,
+    // mismo balance/Saldo actual, mismos buckets que cartera total y mora total).
     private function buildMoraByBranch(Period $period): array
     {
-        $realBranchNames = $this->resolveRealBranchNormalizedNames();
-
-        $defs = [
-            ['label' => 'al_corriente', 'min' => 0,   'max' => 0     ],
-            ['label' => 'mora_1_30',    'min' => 1,   'max' => 30    ],
-            ['label' => 'mora_31_60',   'min' => 31,  'max' => 60    ],
-            ['label' => 'mora_61_90',   'min' => 61,  'max' => 90    ],
-            ['label' => 'mora_91_120',  'min' => 91,  'max' => 120   ],
-            ['label' => 'mora_120_plus', 'min' => 121, 'max' => 99999 ],
-        ];
-
-        $rows = DB::table('fact_portfolios as po')
-            ->join('branches as b', 'po.branch_id', '=', 'b.id')
-            ->whereIn('po.period_id', $this->dataIds)
-            ->when(!empty($realBranchNames), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNames))
-            ->selectRaw('
-                b.name as branch,
-                po.days_past_due,
-                SUM(po.balance) as balance,
-                SUM(COALESCE(po.past_due_balance, 0)) as past_due_balance
-            ')
-            ->groupBy('po.branch_id', 'b.name', 'po.days_past_due')
-            ->get();
-
-        $byBranch = [];
-        foreach ($rows as $row) {
-            $branch = $row->branch;
-            $dpd    = (int) $row->days_past_due;
-            $bal    = (float) $row->balance;
-            $pdb    = (float) $row->past_due_balance;
-
-            foreach ($defs as $def) {
-                if ($dpd >= $def['min'] && $dpd <= $def['max']) {
-                    // al_corriente uses full balance; overdue buckets use past_due_balance
-                    $amount = $def['label'] === 'al_corriente' ? $bal : ($pdb > 0 ? $pdb : $bal);
-                    $byBranch[$branch][$def['label']] = ($byBranch[$branch][$def['label']] ?? 0.0) + $amount;
-                    break;
-                }
-            }
-        }
+        $defs = ['mora_0_30', 'mora_31_60', 'mora_61_90', 'mora_91_120', 'mora_120_plus'];
 
         $result = [];
-        foreach ($byBranch as $branch => $buckets) {
-            $cartera = array_sum($buckets);
-            $vencida = array_sum(array_filter($buckets, fn ($v, $k) => $k !== 'al_corriente', ARRAY_FILTER_USE_BOTH));
-            $row = ['branch' => $branch, 'cartera_total' => $cartera, 'vencida_total' => $vencida];
-            foreach ($defs as $def) {
-                $row[$def['label']] = $buckets[$def['label']] ?? 0.0;
+        foreach ($this->branchCalcBranches as $branch) {
+            $vencida = 0.0;
+            foreach ($defs as $key) {
+                $vencida += (float) ($branch[$key] ?? 0);
             }
-            $result[] = $row;
+            $cartera = (float) ($branch['valor_cartera'] ?? 0);
+            if ($cartera == 0.0 && $vencida == 0.0) {
+                continue;
+            }
+            $result[] = [
+                'branch'         => $branch['sucursal'],
+                'cartera_total'  => $cartera,
+                'vencida_total'  => $vencida,
+                'al_corriente'   => $cartera - $vencida,
+                'mora_1_30'      => (float) ($branch['mora_0_30'] ?? 0),
+                'mora_31_60'     => (float) ($branch['mora_31_60'] ?? 0),
+                'mora_61_90'     => (float) ($branch['mora_61_90'] ?? 0),
+                'mora_91_120'    => (float) ($branch['mora_91_120'] ?? 0),
+                'mora_120_plus'  => (float) ($branch['mora_120_plus'] ?? 0),
+            ];
         }
 
         usort($result, fn ($a, $b) => $b['cartera_total'] <=> $a['cartera_total']);

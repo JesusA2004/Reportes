@@ -4,7 +4,6 @@ namespace App\Services\Radiography;
 
 use App\Models\Period;
 use App\Services\BranchResolverService;
-use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -116,8 +115,7 @@ class BranchRadiographyCalculator
         $this->accumulateCartera($dataIds, $operativeIds, $operativeMap, $summaries);
         $this->accumulateColocacion($dataIds, $operativeIds, $operativeMap, $summaries);
         $this->accumulateRecuperacion($dataIds, $operativeIds, $operativeMap, $summaries, $corporativoIds);
-        $daysDelta = $this->computeDpdDelta($period, $dataIds);
-        $this->accumulateMora($dataIds, $operativeIds, $operativeMap, $summaries, $daysDelta);
+        $this->accumulateMora($dataIds, $operativeIds, $operativeMap, $summaries);
 
         // Gastos: branch_id de Lendus/ERP; Corporativo → unassigned; Norte → excluido
         $this->accumulateGastos($dataIds, $operativeIds, $operativeMap, $summaries, $corporativoIds, $unassigned);
@@ -242,13 +240,19 @@ class BranchRadiographyCalculator
 
     private function accumulateColocacion(array $dataIds, array $branchIds, array $operativeMap, array &$summaries): void
     {
-        // Otorgamientos = SUM(amount) donde credit_origin IN ('DESEMBOLSO','REFINANCIAMIENTO').
+        // Otorgamientos = SUM(Monto desembolsado) donde credit_origin IN ('DESEMBOLSO','REFINANCIAMIENTO').
         // amount siempre = Monto desembolsado (col 53). Excluir REESTRUCTURACIÓN y UNIFICACIÓN por credit_origin.
+        // El Seguro CRECE/COMADRES NO se resta del KPI de colocación — se calcula aparte, solo informativo.
         $rows = DB::table('fact_placements')
             ->whereIn('period_id', $dataIds)
             ->whereIn('branch_id', $branchIds)
             ->whereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(raw_payload), '$.credit_origin'))) IN ('DESEMBOLSO', 'REFINANCIAMIENTO')")
-            ->selectRaw('branch_id, SUM(amount) as colocacion, COUNT(*) as creditos')
+            ->selectRaw("branch_id, SUM(amount) as colocacion, COUNT(*) as creditos,
+                SUM(CASE
+                    WHEN UPPER(COALESCE(product_name,'')) LIKE '%CRECE%' OR UPPER(COALESCE(product_name,'')) LIKE '%COMADRES%'
+                    THEN COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(raw_payload), '$.seguro')) AS DECIMAL(14,2)), 0)
+                    ELSE 0
+                END) as seguro_informativo")
             ->groupBy('branch_id')
             ->get();
 
@@ -259,6 +263,7 @@ class BranchRadiographyCalculator
             }
             $summaries[$suc]['colocacion']         += (float) $row->colocacion;
             $summaries[$suc]['creditos_colocados'] += (int)   $row->creditos;
+            $summaries[$suc]['seguro_crece_comadres_informativo'] += (float) $row->seguro_informativo;
         }
     }
 
@@ -382,20 +387,20 @@ class BranchRadiographyCalculator
         }
     }
 
-    // ── Mora por bucket ──────────────────────────────────────────────────────
+    // ── Mora por bucket — FUENTE ÚNICA para cartera/mora (UI, Excel, PDF, dashboard) ──
     //
-    // days_past_due in fact_portfolios reflects the DPD at the time the
-    // Lendus saldos file was uploaded, which is typically 13-16 days after
-    // the period's end_date. We subtract $daysDelta to get the DPD at
-    // period-end, and skip contracts that were current at that cutoff.
+    // Columna de días: days_past_due (= "Días Vencido"). Sin ajustes/deltas de ningún tipo.
+    // Monto: balance ("Saldo actual") — el contrato completo se bucketiza según su días vencido,
+    // NO solo la porción atrasada. 0 días = al corriente (excluido de mora).
+    // Buckets: 1-30 / 31-60 / 61-90 / 91-120 / 120+ (sin contaminar entre sí).
 
-    private function accumulateMora(array $dataIds, array $branchIds, array $operativeMap, array &$summaries, int $daysDelta = 0): void
+    private function accumulateMora(array $dataIds, array $branchIds, array $operativeMap, array &$summaries): void
     {
         $rows = DB::table('fact_portfolios')
             ->whereIn('period_id', $dataIds)
             ->whereIn('branch_id', $branchIds)
             ->where('days_past_due', '>', 0)
-            ->selectRaw('branch_id, days_past_due, SUM(COALESCE(past_due_balance, 0)) as mora, SUM(balance) as balance')
+            ->selectRaw('branch_id, days_past_due, SUM(balance) as balance, COUNT(*) as cnt')
             ->groupBy('branch_id', 'days_past_due')
             ->get();
 
@@ -405,50 +410,20 @@ class BranchRadiographyCalculator
                 continue;
             }
 
-            $adjDpd = max(0, (int) $row->days_past_due - $daysDelta);
-
-            if ($adjDpd === 0) {
-                continue; // current at period-end cutoff
-            }
-
-            // Prefer past_due_balance; fall back to full balance when not populated
-            $mora = (float) $row->mora > 0 ? (float) $row->mora : (float) $row->balance;
+            $dpd     = (int) $row->days_past_due;
+            $balance = (float) $row->balance;
 
             $bucket = match (true) {
-                $adjDpd <= 30  => 'mora_0_30',
-                $adjDpd <= 60  => 'mora_31_60',
-                $adjDpd <= 90  => 'mora_61_90',
-                $adjDpd <= 120 => 'mora_91_120',
-                default        => 'mora_120_plus',
+                $dpd <= 30  => 'mora_0_30',
+                $dpd <= 60  => 'mora_31_60',
+                $dpd <= 90  => 'mora_61_90',
+                $dpd <= 120 => 'mora_91_120',
+                default     => 'mora_120_plus',
             };
 
-            $summaries[$suc][$bucket] += $mora;
+            $summaries[$suc][$bucket]            += $balance;
+            $summaries[$suc]["{$bucket}_cnt"]    += (int) $row->cnt;
         }
-    }
-
-    // Returns the number of days between the period's end_date and the
-    // lendus_saldos_cliente upload date. Returns 0 when data is unavailable.
-    private function computeDpdDelta(Period $period, array $dataIds): int
-    {
-        if (!$period->end_date) {
-            return 0;
-        }
-
-        $uploadedAt = DB::table('report_uploads as ru')
-            ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
-            ->whereIn('ru.period_id', $dataIds)
-            ->where('ds.code', 'lendus_saldos_cliente')
-            ->orderByDesc('ru.uploaded_at')
-            ->value('ru.uploaded_at');
-
-        if (!$uploadedAt) {
-            return 0;
-        }
-
-        $endDate    = Carbon::parse($period->end_date)->startOfDay();
-        $uploadDate = Carbon::parse($uploadedAt)->startOfDay();
-
-        return max(0, (int) $endDate->diffInDays($uploadDate));
     }
 
     // ── Gastos por categoría (excedentes, fondeo, gastos_op) ────────────────
@@ -817,6 +792,7 @@ class BranchRadiographyCalculator
             'contratos'           => 0,
             'colocacion'          => 0.0,
             'creditos_colocados'  => 0,
+            'seguro_crece_comadres_informativo' => 0.0,
             'capital_recuperado'  => 0.0,
             'interes_recuperado'  => 0.0,
             'impuesto_recuperado' => 0.0,
@@ -829,6 +805,11 @@ class BranchRadiographyCalculator
             'mora_61_90'          => 0.0,
             'mora_91_120'         => 0.0,
             'mora_120_plus'       => 0.0,
+            'mora_0_30_cnt'       => 0,
+            'mora_31_60_cnt'      => 0,
+            'mora_61_90_cnt'      => 0,
+            'mora_91_120_cnt'     => 0,
+            'mora_120_plus_cnt'   => 0,
             'gastos_operativos'   => 0.0,
             'gastos_detalle'      => [],   // canonical_concept => amount (summed from source data)
             'nomina_total'        => 0.0,

@@ -109,7 +109,7 @@ class AuditUtilidadCommand extends Command
 
         // ── B. OTORGAMIENTOS ──────────────────────────────────────────────────
         $this->line('');
-        $this->info('════ B. OTORGAMIENTOS (amount_monto53, 12 sucursales) ════');
+        $this->info('════ B. OTORGAMIENTOS / COLOCACIÓN (KPI = Monto desembolsado, Seguro CRECE/COMADRES solo informativo) ════');
 
         $otorgamientos = (float) $global['colocacion'];
         $otorgRegs     = DB::table('fact_placements')
@@ -219,7 +219,7 @@ class AuditUtilidadCommand extends Command
         $this->line(str_repeat('─', 65));
         $label = $utilidad >= 0 ? '= Utilidad disponible' : '= Utilidad (NEGATIVA)';
         $this->line(str_pad($label, 48) . '$' . number_format($utilidad, 2));
-        $this->line(str_pad('  Referencia:', 48) . '$1,217,542.57');
+        $this->line(str_pad('  Referencia:', 48) . '$2,404,894.57');
         if ($utilidad < 0) {
             $this->warn('  ⚠ Utilidad negativa — puede reflejar diferencia en datos de ingresos.');
         }
@@ -284,13 +284,13 @@ class AuditUtilidadCommand extends Command
         $rows = [
             ['Saldo inicial en caja',    $saldoInicial,  646_672.52],
             ['Ingresos Totales',         $ingresos,     18_332_149.55],
-            ['Otorgamientos (monto53)',  $otorgamientos, 14_538_964.00],
+            ['Otorgamientos (colocación, KPI bruto)', $otorgamientos, 13_351_612.00],
             ['Gastos Operativos',        $gastosOp,         837_384.28],
             ['Nómina neta',             $nomNeto,        2_501_589.43],
             ['Gastos Totales',          $gastosTotal,    3_222_315.50],
-            ['Utilidad disponible',     $utilidad,       1_217_542.57],
+            ['Utilidad disponible',     $utilidad,       2_404_894.57],
             ['Envío corporativo',       $excedentes,     3_076_800.00],
-            ['Diferencia / sobrante',   $diferencia,     -1_859_257.43],
+            ['Diferencia / sobrante',   $diferencia,       -671_905.43],
         ];
 
         foreach ($rows as [$lbl, $sys, $ref]) {
@@ -407,8 +407,8 @@ class AuditUtilidadCommand extends Command
         // ── OTORGAMIENTOS ──
         $this->line('');
         $this->line('  ── BLOQUE OTORGAMIENTOS ──');
-        $e = $autoStatus($otorgamientos, 14_538_964.00);
-        $pr($e, $row('OTORG', 'Otorgamientos (monto53)', 14_538_964.00, $otorgamientos, $e, 'fact_placements.amount_monto53', '—'));
+        $e = $autoStatus($otorgamientos, 13_351_612.00);
+        $pr($e, $row('OTORG', 'Otorgamientos (colocación, KPI bruto)', 13_351_612.00, $otorgamientos, $e, 'fact_placements.amount (Monto desembolsado)', 'Seguro CRECE/COMADRES NO se resta — solo informativo'));
 
         // ── GASTOS OPERATIVOS ──
         $this->line('');
@@ -452,8 +452,8 @@ class AuditUtilidadCommand extends Command
         // ── UTILIDAD ──
         $this->line('');
         $this->line('  ── BLOQUE UTILIDAD ──');
-        $e = $autoStatus($utilidad, 1_217_542.57);
-        $pr($e, $row('UTIL', '► Utilidad disponible', 1_217_542.57, $utilidad, $e, 'saldoIni+ingr−otorg−gastosT', 'Negativa por brecha -$1.45M en ingresos'));
+        $e = $autoStatus($utilidad, 2_404_894.57);
+        $pr($e, $row('UTIL', '► Utilidad disponible', 2_404_894.57, $utilidad, $e, 'saldoIni+ingr−otorg−gastosT', '—'));
 
         // ── ENVÍO CORPORATIVO ──
         $this->line('');
@@ -465,7 +465,8 @@ class AuditUtilidadCommand extends Command
         $this->line('');
         $this->line('  ── BLOQUE DIFERENCIA / SOBRANTE ──');
         // Two references: hardcoded vs Excel Análisis Tendencias
-        $pr('FÓRMULA DISTINTA', $row('DIFER', 'Dif. (utilidad − envío)',  -1_859_257.43, $diferencia, 'FÓRMULA DISTINTA', 'utilidad − excedentes', 'Ref. principal=-$1,859,257 | AnálTend=-$2,022,234'));
+        $eDif = $autoStatus($diferencia, -671_905.43);
+        $pr($eDif, $row('DIFER', 'Dif. (utilidad − envío)',  -671_905.43, $diferencia, $eDif, 'utilidad − excedentes', '—'));
 
         // ── SALDO FINAL EN CAJA ──
         $this->line('');

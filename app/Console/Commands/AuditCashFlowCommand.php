@@ -18,9 +18,9 @@ class AuditCashFlowCommand extends Command
     private const REF = [
         'saldo_inicial'       => 646_672.52,
         'ingresos_totales'    => 18_332_149.55,
-        'otorgamientos'       => 14_538_964.00,
+        'otorgamientos'       => 13_351_612.00,
         'gastos_totales'      => 3_222_315.50,
-        'utilidad'            => 1_217_542.57,
+        'utilidad'            => 2_404_894.57,
         'saldo_final'         => 494_827.52,
         'envio_corporativo'   => 3_076_800.00,
     ];
@@ -65,7 +65,7 @@ class AuditCashFlowCommand extends Command
 
         $ingresosTotal = $ingresos + $comisionApertura;
 
-        // ── Otorgamientos ─────────────────────────────────────────────────────
+        // ── Otorgamientos (colocación, KPI = Monto desembolsado; Seguro CRECE/COMADRES NO se resta) ──
         $otorgamientos = (float) DB::table('fact_placements')
             ->whereIn('period_id', $dataIds)
             ->whereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(raw_payload), '$.credit_origin'))) IN ('DESEMBOLSO', 'REFINANCIAMIENTO')")

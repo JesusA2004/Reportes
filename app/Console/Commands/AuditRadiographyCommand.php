@@ -18,17 +18,18 @@ class AuditRadiographyCommand extends Command
     // ── Referencias Abril 2026 ────────────────────────────────────────────────
     private const REF = [
         'valor_cartera'         => 39_130_054.53,
-        'otorgamientos'         => 14_538_964.00,
+        'otorgamientos'         => 13_351_612.00,
         'recuperacion'          => 18_323_749.55,
         'mora_0_30'             => 1_057_765.00,
         'mora_31_60'            => 926_001.80,
         'mora_61_90'            => 913_414.71,
         'mora_91_120'           => 816_584.91,
+        'mora_120_plus'         => 9_919_472.02,
         'envio_corporativo'     => 3_076_800.00,
         'gastos_operativos'     => 837_384.28,
         'nomina'                => 2_501_589.43,
         'gastos_totales'        => 3_222_315.50,
-        'utilidad'              => 1_217_542.57,
+        'utilidad'              => 2_404_894.57,
         'saldo_inicial'         => 646_672.52,
         'saldo_final'           => 494_827.52,
         'interbranch_activos'   => 449_425.00,
@@ -70,9 +71,9 @@ class AuditRadiographyCommand extends Command
         if ($this->option('full')) {
             $subCommands = [
                 ['reportes:audit-income',             [$period->id, '--compare-reference' => true, '--by-concept' => true]],
-                ['reportes:audit-placements',         [$period->id, '--compare-reference' => true, '--by-branch' => true, '--by-origin' => true]],
-                ['reportes:audit-portfolio',          [$period->id]],
-                ['reportes:audit-mora',               [$period->id, '--compare-reference' => true]],
+                ['reportes:audit-placements',         [$period->id, '--compare-reference' => true, '--by-branch' => true, '--by-origin' => true, '--by-product' => true]],
+                ['reportes:audit-portfolio',          [$period->id, '--compare-reference' => true, '--by-branch' => true]],
+                ['reportes:audit-moras',               [$period->id, '--compare-reference' => true, '--by-branch' => true, '--by-bucket' => true]],
                 ['reportes:audit-expenses',           [$period->id, '--compare-reference' => true, '--by-concept' => true]],
                 ['reportes:audit-payroll',            [$period->id, '--compare-reference' => true, '--by-branch' => true]],
                 ['reportes:audit-payroll-employees',  [$period->id, '--compare-reference' => true]],
@@ -111,6 +112,7 @@ class AuditRadiographyCommand extends Command
             ['Mora 31-60 días',        $m['mora_31_60'],         'mora_31_60',          null, null],
             ['Mora 61-90 días',        $m['mora_61_90'],         'mora_61_90',          null, null],
             ['Mora 91-120 días',       $m['mora_91_120'],        'mora_91_120',         null, null],
+            ['Mora 120+ días',         $m['mora_120_plus'],      'mora_120_plus',       null, null],
             ['Envío corporativo',      $m['envio_corporativo'],  'envio_corporativo',   null, null],
             ['Gastos operativos',      $m['gastos_operativos'],  'gastos_operativos',   null, null],
             ['Nómina y Capital Humano',$m['nomina'],             'nomina',              null, null],
@@ -188,57 +190,50 @@ class AuditRadiographyCommand extends Command
 
     private function computeMetrics(Period $period, array $dataIds, $allPeriods): array
     {
+        // FUENTE ÚNICA para cartera/mora/colocación/recuperación: BranchRadiographyCalculator
+        // (las mismas 13 sucursales oficiales que usan audit-utilidad, audit-moras, Excel y PDF).
+        $calc   = app(\App\Services\Radiography\BranchRadiographyCalculator::class);
+        $result = $calc->buildBranches($period, $dataIds, []);
+        $global = $calc->sumGlobal($result['branches'], $result['unassigned']);
+
         // Valor cartera
-        $valorCartera = (float) DB::table('fact_portfolios')
-            ->whereIn('period_id', $dataIds)
-            ->sum('total_balance');
+        $valorCartera = (float) $global['valor_cartera'];
 
-        // Otorgamientos
-        $otorgamientos = (float) DB::table('fact_placements')
-            ->whereIn('period_id', $dataIds)
-            ->whereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(raw_payload), '$.credit_origin'))) IN ('DESEMBOLSO', 'REFINANCIAMIENTO')")
-            ->sum('amount');
+        // Otorgamientos: colocación = SUM(Monto desembolsado). El Seguro CRECE/COMADRES NO se resta (solo informativo).
+        $otorgamientos = (float) $global['colocacion'];
 
-        // Recuperación
-        $recuperacion = (float) DB::table('fact_recoveries')
-            ->whereIn('period_id', $dataIds)
-            ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
-            ->whereRaw("UPPER(COALESCE(concept,'')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
-            ->sum('total_amount');
+        // Recuperación = PAGO + DESCUENTO depurado (excluye Cobertura Savehearts y Comisión por apertura)
+        $recuperacion = (float) $global['recuperacion_total'];
 
-        // Mora buckets
-        $moraBuckets = DB::table('fact_portfolios')
-            ->whereIn('period_id', $dataIds)
-            ->whereNotNull('days_overdue')
-            ->where('days_overdue', '>', 0)
-            ->select(
-                DB::raw('SUM(CASE WHEN days_overdue BETWEEN 1  AND  30 THEN overdue_balance ELSE 0 END) as b0'),
-                DB::raw('SUM(CASE WHEN days_overdue BETWEEN 31 AND  60 THEN overdue_balance ELSE 0 END) as b1'),
-                DB::raw('SUM(CASE WHEN days_overdue BETWEEN 61 AND  90 THEN overdue_balance ELSE 0 END) as b2'),
-                DB::raw('SUM(CASE WHEN days_overdue BETWEEN 91 AND 120 THEN overdue_balance ELSE 0 END) as b3')
-            )
-            ->first();
+        // Mora buckets — mismos campos que alimentan cartera total (sin ajustes de días)
+        $moraBuckets = (object) [
+            'b0' => $global['mora_0_30'],
+            'b1' => $global['mora_31_60'],
+            'b2' => $global['mora_61_90'],
+            'b3' => $global['mora_91_120'],
+            'b4' => $global['mora_120_plus'],
+        ];
 
-        // Envío corporativo
+        // Envío corporativo (global, incluye Corporativo — no pasa por BranchCalc de 12 suc)
         $envio = (float) DB::table('fact_expenses as fe')
             ->join('report_uploads as ru', 'fe.report_upload_id', '=', 'ru.id')
             ->whereIn('fe.period_id', $dataIds)
             ->where('fe.category', 'Envío de utilidad a corporativo')
             ->sum(DB::raw('COALESCE(NULLIF(fe.paid_amount,0),fe.amount)'));
 
-        // Gastos operativos
-        $gastosOp = (float) DB::table('fact_expenses as fe')
-            ->join('report_uploads as ru', 'fe.report_upload_id', '=', 'ru.id')
-            ->whereIn('fe.period_id', $dataIds)
-            ->whereNotIn('fe.category', self::EXCL_CATS)
-            ->sum(DB::raw('COALESCE(NULLIF(fe.paid_amount,0),fe.amount)'));
+        // Gastos operativos (BranchCalc — misma fuente que audit-utilidad)
+        $gastosOp = (float) $global['gastos_operativos'];
 
-        // Nómina
-        $nomina = (float) DB::table('fact_noi_movements')
-            ->whereIn('period_id', $dataIds)
-            ->whereNotNull('employee_id')
-            ->whereRaw("LOWER(COALESCE(concept_type,'')) = 'percepcion'")
-            ->sum('amount');
+        // Nómina neta (percepciones NOI + items detalle, excl. Préstamo Personal y Subsidio APL)
+        $nomPercep = (float) $global['nomina_total'] + (float) $global['comisiones'] + (float) $global['bonos']
+            + (float) $global['vacaciones'] + (float) $global['prima_vacacional'];
+        $nomExtra = 0.0;
+        foreach ($global['nomina_detalle'] ?? [] as $lbl => $amt) {
+            if (!in_array($lbl, ['Préstamo Personal', 'Subsidio para el Empleo APL'], true)) {
+                $nomExtra += $amt;
+            }
+        }
+        $nomina = $nomPercep + $nomExtra;
 
         $gastosTotal = $gastosOp + $nomina;
 
@@ -285,6 +280,7 @@ class AuditRadiographyCommand extends Command
             'mora_31_60'           => (float)($moraBuckets->b1 ?? 0),
             'mora_61_90'           => (float)($moraBuckets->b2 ?? 0),
             'mora_91_120'          => (float)($moraBuckets->b3 ?? 0),
+            'mora_120_plus'        => (float)($moraBuckets->b4 ?? 0),
             'envio_corporativo'    => $envio,
             'gastos_operativos'    => $gastosOp,
             'nomina'               => $nomina,
@@ -314,7 +310,7 @@ class AuditRadiographyCommand extends Command
 
         // Tolerancias y causas conocidas por módulo
         $knownArchiveIssues = ['otorgamientos'];
-        $knownMappingIssues = ['gastos_operativos', 'mora_0_30', 'mora_31_60', 'mora_61_90', 'mora_91_120'];
+        $knownMappingIssues = ['gastos_operativos', 'mora_0_30', 'mora_31_60', 'mora_61_90', 'mora_91_120', 'mora_120_plus'];
         $knownMissingSource = ['saldo_inicial', 'saldo_final'];
         $knownFormula       = ['utilidad', 'gastos_totales'];
         $knownManual        = ['envio_corporativo', 'rotacion_bajas', 'rotacion_promedio', 'rotacion_indice'];
@@ -353,7 +349,7 @@ class AuditRadiographyCommand extends Command
             $actions[] = "Configurar saldo_final_caja en el periodo (ref: \$" . number_format($ref['saldo_final'], 2) . ")";
         }
         if (abs($m['otorgamientos'] - $ref['otorgamientos']) > 1_000) {
-            $actions[] = "Re-importar Ministraciones con archivo que totalice \$14,670,661.24 en columna 'Monto desembolsado'";
+            $actions[] = "Revisar colocación: ejecutar reportes:audit-placements {period_id} --compare-reference --by-product --by-branch";
         }
         if (abs($m['gastos_operativos'] - $ref['gastos_operativos']) > 1_000) {
             $actions[] = "Revisar categorización de gastos: Renta Oficina (\$" . number_format($ref['gastos_operativos'], 2) . " ref). Posible exclusión por LENDUS_PRESENT_CATS";

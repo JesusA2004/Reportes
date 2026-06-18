@@ -16,6 +16,7 @@ use App\Models\Recovery;
 use App\Models\ReportUpload;
 use App\Models\MonthlyEmployeeSummary;
 use App\Models\NoiMovement;
+use App\Services\Radiography\BranchRadiographyCalculator;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -23,6 +24,7 @@ class PeriodRadiographyService
 {
     public function __construct(
         protected ReportAnalysisService $reportAnalysisService,
+        protected BranchRadiographyCalculator $branchCalculator,
     ) {
     }
 
@@ -214,25 +216,20 @@ class PeriodRadiographyService
 
     private function globalMetrics(Period $period, array $dataIds, array $includedBranchIds = []): array
     {
-        $branchFilter = fn ($q) => !empty($includedBranchIds)
-            ? $q->whereIn('branch_id', $includedBranchIds)
-            : $q;
+        // Cartera, mora (por bucket), colocación y recuperación: FUENTE ÚNICA
+        // BranchRadiographyCalculator (13 sucursales oficiales). Esta es la misma
+        // fuente que usa RadiographySnapshotBuilder para Excel/PDF/web preview —
+        // garantiza que dashboard, UI, Excel y PDF muestren siempre el mismo número.
+        $branchCalcResult = $this->branchCalculator->buildBranches($period, $dataIds, $includedBranchIds);
+        $branchCalcGlobal = $this->branchCalculator->sumGlobal($branchCalcResult['branches'], $branchCalcResult['unassigned']);
 
-        $valorCartera = (float) $branchFilter(Portfolio::query()
-            ->whereIn('period_id', $dataIds))
-            ->sum('balance');
-
-        $carteraVencida = (float) $branchFilter(Portfolio::query()
-            ->whereIn('period_id', $dataIds))
-            ->sum('past_due_balance');
-
-        // Fallback: if past_due_balance is all zero but days_past_due > 0 exists, use balance of overdue records
-        if ($carteraVencida === 0.0 && $valorCartera > 0) {
-            $hasOverdueDays = $branchFilter(Portfolio::query()->whereIn('period_id', $dataIds))->where('days_past_due', '>', 0)->exists();
-            if ($hasOverdueDays) {
-                $carteraVencida = (float) $branchFilter(Portfolio::query()->whereIn('period_id', $dataIds))->where('days_past_due', '>', 0)->sum('balance');
-            }
-        }
+        $valorCartera   = (float) $branchCalcGlobal['valor_cartera'];
+        $carteraVencida = (float) $branchCalcGlobal['mora_0_30'] + (float) $branchCalcGlobal['mora_31_60']
+                         + (float) $branchCalcGlobal['mora_61_90'] + (float) $branchCalcGlobal['mora_91_120']
+                         + (float) $branchCalcGlobal['mora_120_plus'];
+        $colocacionTotal = (float) $branchCalcGlobal['colocacion'];
+        $seguroCreceComadresInformativo = (float) $branchCalcGlobal['seguro_crece_comadres_informativo'];
+        $recoveryBase = (float) $branchCalcGlobal['recuperacion_total'];
 
         $polizasCrece30 = (float) DB::table('fact_recoveries')
             ->whereIn('period_id', $dataIds)
@@ -241,14 +238,6 @@ class PeriodRadiographyService
 
         // ── Payroll aggregates (for preview cards) ──
         $payroll = $this->payrollMetrics($period, $dataIds);
-
-        $recoveryBase = (float) $branchFilter(
-            Recovery::query()
-                ->whereIn('period_id', $dataIds)
-                ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
-                ->whereRaw("UPPER(COALESCE(concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
-                ->whereRaw("UPPER(COALESCE(operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
-        )->sum('total_amount');
 
         $gastoSourceIds = DB::table('data_sources')
             ->whereIn('code', ['gastos_lendus', 'gastos_erp'])
@@ -263,20 +252,11 @@ class PeriodRadiographyService
         }
         $gastoTotal = (float) $gastoTotalQuery->selectRaw('SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as t')->value('t');
 
-        $colocacionQuery = DB::table('fact_placements as p')
-            ->whereIn('p.period_id', $dataIds)
-            ->whereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.credit_origin'))) IN ('DESEMBOLSO', 'REFINANCIAMIENTO')");
-        if (!empty($includedBranchIds)) {
-            $colocacionQuery->whereIn('p.branch_id', $includedBranchIds);
-        }
-        $colocacionTotal = (float)($colocacionQuery
-            ->selectRaw("SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.amount_monto53')) AS DECIMAL(14,2))) as tot")
-            ->value('tot') ?? 0);
-
         return [
             'gasto_total'           => $gastoTotal,
             'recuperacion_total'    => $recoveryBase,
             'colocacion_total'      => $colocacionTotal,
+            'seguro_crece_comadres_informativo' => $seguroCreceComadresInformativo,
             'polizas_crece_30'      => $polizasCrece30,
             'valor_cartera_total'   => $valorCartera,
             'cartera_vencida_total' => $carteraVencida,

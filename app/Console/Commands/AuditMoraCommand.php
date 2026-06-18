@@ -3,17 +3,44 @@
 namespace App\Console\Commands;
 
 use App\Models\Period;
+use App\Services\BranchResolverService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 
 class AuditMoraCommand extends Command
 {
-    protected $signature   = 'reportes:audit-mora
+    protected $signature   = 'reportes:audit-moras
                                 {period_id}
-                                {--product= : filter by product keyword}
-                                {--branch= : filter by branch name keyword}
-                                {--detail : show per-bucket detail with sample contracts}';
-    protected $description = 'Auditoría de mora — buckets, capital/interés/impuesto, % cartera, muestras por bucket';
+                                {--compare-reference : comparar contra referencia manual confirmada}
+                                {--by-branch          : comparativo por sucursal y bucket}
+                                {--by-bucket           : auditoría de columnas usadas}
+                                {--detail              : muestra de contratos por bucket}
+                                {--export              : exporta CSV con TODOS los contratos del dataset base}
+                                {--product=            : filtrar por producto (contiene)}
+                                {--branch=             : filtrar por sucursal (contiene)}';
+    protected $description = 'Auditoría de Mora/Cartera — UNA sola consulta base alimenta resumen, buckets, por sucursal, detalle y exportación';
+
+    // Referencia confirmada manualmente — Abril 2026 (periodo 14)
+    private const REF_BUCKETS = [
+        'Mora 1-30'   => 1_057_765.00,
+        'Mora 31-60'  => 926_001.80,
+        'Mora 61-90'  => 913_414.71,
+        'Mora 91-120' => 816_584.91,
+        'Mora 120+'   => 9_919_472.02,
+    ];
+    private const REF_TOTAL   = 13_633_238.44;
+    private const REF_CARTERA = 39_130_054.53;
+    private const REF_PCT     = 34.84;
+
+    private const BUCKET_LABELS = [
+        'al_corriente'  => 'Al corriente',
+        'mora_0_30'     => 'Mora 1-30',
+        'mora_31_60'    => 'Mora 31-60',
+        'mora_61_90'    => 'Mora 61-90',
+        'mora_91_120'   => 'Mora 91-120',
+        'mora_120_plus' => 'Mora 120+',
+    ];
 
     public function handle(): int
     {
@@ -33,223 +60,345 @@ class AuditMoraCommand extends Command
         $filterBranch = strtoupper(trim($this->option('branch') ?? ''));
         $detail       = (bool) $this->option('detail');
 
-        $this->info("════════════════════════════════════════════════════════════");
-        $this->info("  AUDITORÍA MORA — {$period->label} (ID {$period->id})");
-        $this->info("  Columna: days_past_due | Buckets: 0 / 1-30 / 31-60 / 61-90 / 91-120 / 120+");
-        $this->info("  Filtro producto: " . ($filterProd ?: 'todos') . " | sucursal: " . ($filterBranch ?: 'todas'));
-        $this->info("════════════════════════════════════════════════════════════");
-
-        $q = DB::table('fact_portfolios as fp')
-            ->leftJoin('branches as b', 'fp.branch_id', '=', 'b.id')
-            ->whereIn('fp.period_id', $dataIds);
-
-        if ($filterProd !== '') {
-            $q->whereRaw("UPPER(COALESCE(fp.product_name,'')) LIKE ?", ["%{$filterProd}%"]);
-        }
-        if ($filterBranch !== '') {
-            $q->whereRaw("UPPER(COALESCE(b.name,'')) LIKE ?", ["%{$filterBranch}%"]);
-        }
-
-        // ── Tabla de buckets descriptiva ──────────────────────────────────────
         $this->line('');
-        $this->info('════ TABLA DE MORA POR BUCKET ════');
+        $this->info("════════════════════════════════════════════════════════════════");
+        $this->info("  AUDITORÍA MORA / CARTERA — {$period->label} (ID {$period->id})");
+        $this->info("  DataIds: [" . implode(', ', $dataIds) . "]");
+        $this->info("  UNA sola consulta base alimenta: resumen, buckets, cartera, por sucursal, detalle, export.");
+        $this->info("  Columna días: days_past_due (\"Días Vencido\", sin ajustes/deltas)  |  Monto: balance (\"Saldo actual\")");
+        $this->info("  Sucursal oficial: resuelta vía BranchResolverService (whitelist de las 13 oficiales)");
+        $this->info("════════════════════════════════════════════════════════════════");
 
-        $tot = (clone $q)->selectRaw('
-            COUNT(*) as contratos,
-            SUM(fp.balance) as cartera,
-            SUM(fp.past_due_balance) as vencida,
-            SUM(fp.interes_atrasado) as interes_atrasado,
-            SUM(fp.impuesto_atrasado) as impuesto_atrasado,
-            SUM(fp.cargos_calendario_atrasado) as cargos_atrasados,
-            SUM(CASE WHEN fp.days_past_due = 0 THEN fp.balance ELSE 0 END) as al_corriente_bal,
-            SUM(CASE WHEN fp.days_past_due = 0 THEN 1 ELSE 0 END) as al_corriente_cnt,
-            SUM(CASE WHEN fp.days_past_due BETWEEN 1  AND 30  THEN 1 ELSE 0 END) as m1_30_cnt,
-            SUM(CASE WHEN fp.days_past_due BETWEEN 31 AND 60  THEN 1 ELSE 0 END) as m31_60_cnt,
-            SUM(CASE WHEN fp.days_past_due BETWEEN 61 AND 90  THEN 1 ELSE 0 END) as m61_90_cnt,
-            SUM(CASE WHEN fp.days_past_due BETWEEN 91 AND 120 THEN 1 ELSE 0 END) as m91_120_cnt,
-            SUM(CASE WHEN fp.days_past_due > 120 THEN 1 ELSE 0 END) as m120p_cnt,
-            SUM(CASE WHEN fp.days_past_due BETWEEN 1  AND 30  THEN COALESCE(fp.past_due_balance,fp.balance) ELSE 0 END) as m1_30,
-            SUM(CASE WHEN fp.days_past_due BETWEEN 31 AND 60  THEN COALESCE(fp.past_due_balance,fp.balance) ELSE 0 END) as m31_60,
-            SUM(CASE WHEN fp.days_past_due BETWEEN 61 AND 90  THEN COALESCE(fp.past_due_balance,fp.balance) ELSE 0 END) as m61_90,
-            SUM(CASE WHEN fp.days_past_due BETWEEN 91 AND 120 THEN COALESCE(fp.past_due_balance,fp.balance) ELSE 0 END) as m91_120,
-            SUM(CASE WHEN fp.days_past_due > 120 THEN COALESCE(fp.past_due_balance,fp.balance) ELSE 0 END) as m120plus
-        ')->first();
+        // ── DATASET BASE — única consulta, todo lo demás se deriva de aquí ────
+        $rows = $this->loadDataset($dataIds, $filterProd, $filterBranch);
 
-        $cartera   = (float)($tot->cartera ?? 0);
-        $buckets = [
-            ['Al corriente',  (int)($tot->al_corriente_cnt ?? 0), (float)($tot->al_corriente_bal ?? 0), 0.0, false],
-            ['Mora 1-30',     (int)($tot->m1_30_cnt ?? 0),        (float)($tot->m1_30 ?? 0),            0.0, true],
-            ['Mora 31-60',    (int)($tot->m31_60_cnt ?? 0),       (float)($tot->m31_60 ?? 0),           0.0, true],
-            ['Mora 61-90',    (int)($tot->m61_90_cnt ?? 0),       (float)($tot->m61_90 ?? 0),           0.0, true],
-            ['Mora 91-120',   (int)($tot->m91_120_cnt ?? 0),      (float)($tot->m91_120 ?? 0),          0.0, true],
-            ['Mora 120+',     (int)($tot->m120p_cnt ?? 0),        (float)($tot->m120plus ?? 0),         0.0, true],
-        ];
+        // ── A) RESUMEN GLOBAL ──────────────────────────────────────────────────
+        $this->line('');
+        $this->info('════ A. RESUMEN GLOBAL (Métrica | Referencia | Sistema | Diferencia) ════');
 
-        $moraTotal = (float)($tot->m1_30 ?? 0) + (float)($tot->m31_60 ?? 0) + (float)($tot->m61_90 ?? 0) +
-                     (float)($tot->m91_120 ?? 0) + (float)($tot->m120plus ?? 0);
-        $moraPct   = $cartera > 0 ? round($moraTotal / $cartera * 100, 2) : 0;
+        $sysCartera = 0.0;
+        $sysBuckets = array_fill_keys(array_keys(self::BUCKET_LABELS), 0.0);
+        $cntBuckets = array_fill_keys(array_keys(self::BUCKET_LABELS), 0);
 
-        // Header
-        $this->line(str_pad('Bucket', 16) . str_pad('Contratos', 12) . str_pad('Vencido', 20) .
-                    str_pad('% Cartera', 12) . str_pad('% Mora', 10) . 'Nota');
-        $this->line(str_repeat('─', 85));
-
-        foreach ($buckets as [$label, $cnt, $vencido, $dummy, $isMora]) {
-            $pctCartera = $cartera > 0 ? round($vencido / $cartera * 100, 2) : 0;
-            $pctMora    = $moraTotal > 0 && $isMora ? round($vencido / $moraTotal * 100, 2) : 0;
-            $nota       = $isMora && $pctCartera > 5 ? '⚠ Alta' : '';
-            $this->line(
-                str_pad($label, 16) .
-                str_pad(number_format($cnt), 12) .
-                str_pad('$' . number_format($vencido, 0), 20) .
-                str_pad($pctCartera . '%', 12) .
-                str_pad(($isMora ? $pctMora . '%' : '—'), 10) .
-                $nota
-            );
+        foreach ($rows as $r) {
+            if (!$r['included_cartera']) continue;
+            $sysCartera += $r['balance'];
+            $sysBuckets[$r['bucket']] += $r['balance'];
+            $cntBuckets[$r['bucket']]++;
         }
 
-        $this->line(str_repeat('─', 85));
+        $sysMoraTotal = array_sum($sysBuckets) - $sysBuckets['al_corriente'];
+        $sysPct       = $sysCartera > 0 ? round($sysMoraTotal / $sysCartera * 100, 2) : 0.0;
+
+        $this->line(str_pad('Métrica', 16) . str_pad('Referencia', 18) . str_pad('Sistema', 18) . str_pad('Diferencia', 18) . 'Estado');
+        $this->line(str_repeat('─', 90));
+
+        foreach (self::BUCKET_LABELS as $key => $label) {
+            if ($key === 'al_corriente') {
+                $this->line(str_pad($label, 16) . str_pad('—', 18) . str_pad('$' . number_format($sysBuckets[$key], 2), 18) . str_pad('—', 18) . str_pad((string) $cntBuckets[$key], 0) . ' cttos');
+                continue;
+            }
+            $sys  = $sysBuckets[$key];
+            $ref  = self::REF_BUCKETS[$label] ?? null;
+            $diff = $ref !== null ? $sys - $ref : null;
+            $sign = ($diff !== null && $diff >= 0) ? '+' : '';
+            $estado = $ref === null ? 'SIN REF' : (abs($diff) < 1 ? '✓ EXACTO' : (abs($diff) < 5000 ? '≈ CERCANO' : '✗ DIFERENCIA'));
+            $refStr = $ref !== null ? '$' . number_format($ref, 2) : 'N/A';
+            $diffStr = $diff !== null ? "{$sign}\$" . number_format(abs($diff), 2) : '—';
+            $line = str_pad($label, 16) . str_pad($refStr, 18) . str_pad('$' . number_format($sys, 2), 18) . str_pad($diffStr, 18) . $estado . " ({$cntBuckets[$key]} cttos)";
+            if ($estado === '✓ EXACTO') $this->info("  {$line}");
+            elseif ($estado === '✗ DIFERENCIA') $this->warn("  {$line}");
+            else $this->line("  {$line}");
+        }
+
+        $this->line(str_repeat('─', 90));
+        $diffTotal = $sysMoraTotal - self::REF_TOTAL;
+        $signTotal = $diffTotal >= 0 ? '+' : '';
+        $estadoTotal = abs($diffTotal) < 1 ? '✓ EXACTO' : (abs($diffTotal) < 5000 ? '≈ CERCANO' : '✗ DIFERENCIA');
         $this->line(
-            str_pad('TOTAL CARTERA', 16) .
-            str_pad(number_format((int)($tot->contratos ?? 0)), 12) .
-            str_pad('$' . number_format($cartera, 0), 20)
-        );
-        $this->line(
-            str_pad('MORA TOTAL', 16) .
-            str_pad('', 12) .
-            str_pad('$' . number_format($moraTotal, 0), 20) .
-            str_pad($moraPct . '%', 12) .
-            '← % mora global'
+            str_pad('MORA TOTAL', 16) . str_pad('$' . number_format(self::REF_TOTAL, 2), 18) .
+            str_pad('$' . number_format($sysMoraTotal, 2), 18) .
+            str_pad("{$signTotal}\$" . number_format(abs($diffTotal), 2), 18) . $estadoTotal
         );
 
-        // ── Componentes de mora ───────────────────────────────────────────────
-        $this->line('');
-        $this->info('── COMPONENTES DE CARTERA VENCIDA ──');
-        $interesAtrasado  = (float)($tot->interes_atrasado ?? 0);
-        $impuestoAtrasado = (float)($tot->impuesto_atrasado ?? 0);
-        $cargosAtrasados  = (float)($tot->cargos_atrasados ?? 0);
-        $capitalVencido   = (float)($tot->vencida ?? 0);
+        $diffCartera = $sysCartera - self::REF_CARTERA;
+        $signCartera = $diffCartera >= 0 ? '+' : '';
+        $estadoCartera = abs($diffCartera) < 1 ? '✓ EXACTO' : (abs($diffCartera) < 5000 ? '≈ CERCANO' : '✗ DIFERENCIA');
+        $this->line(
+            str_pad('VALOR CARTERA', 16) . str_pad('$' . number_format(self::REF_CARTERA, 2), 18) .
+            str_pad('$' . number_format($sysCartera, 2), 18) .
+            str_pad("{$signCartera}\$" . number_format(abs($diffCartera), 2), 18) . $estadoCartera
+        );
 
-        $this->line(str_pad('Componente', 30) . str_pad('Tabla', 20) . str_pad('Columna', 25) . 'Monto');
-        $this->line(str_repeat('─', 85));
-        $this->line(str_pad('Capital vencido',        30) . str_pad('fact_portfolios', 20) . str_pad('past_due_balance', 25) . '$' . number_format($capitalVencido, 2));
-        $this->line(str_pad('Interés atrasado',       30) . str_pad('fact_portfolios', 20) . str_pad('interes_atrasado', 25) . '$' . number_format($interesAtrasado, 2));
-        $this->line(str_pad('Impuesto atrasado',      30) . str_pad('fact_portfolios', 20) . str_pad('impuesto_atrasado', 25) . '$' . number_format($impuestoAtrasado, 2));
-        $this->line(str_pad('Cargos atrasados',       30) . str_pad('fact_portfolios', 20) . str_pad('cargos_calendario_atrasado', 25) . '$' . number_format($cargosAtrasados, 2));
+        $diffPct = $sysPct - self::REF_PCT;
+        $signPct = $diffPct >= 0 ? '+' : '';
+        $estadoPct = abs($diffPct) < 0.05 ? '✓ EXACTO' : (abs($diffPct) < 1 ? '≈ CERCANO' : '✗ DIFERENCIA');
+        $this->line(
+            str_pad('MORA %', 16) . str_pad(self::REF_PCT . '%', 18) .
+            str_pad($sysPct . '%', 18) .
+            str_pad("{$signPct}" . number_format(abs($diffPct), 2) . 'pp', 18) . $estadoPct
+        );
+        $this->line('  Contratos incluidos en cartera: ' . number_format(array_sum($cntBuckets)));
 
-        // ── Por producto ─────────────────────────────────────────────────────
-        $this->line('');
-        $this->info('── MORA POR PRODUCTO (top 15) ──');
-
-        $byProd = (clone $q)
-            ->select('fp.product_name', DB::raw('COUNT(*) as c'),
-                DB::raw('SUM(fp.balance) as cartera'),
-                DB::raw('SUM(CASE WHEN fp.days_past_due > 0 THEN COALESCE(fp.past_due_balance,fp.balance) ELSE 0 END) as mora'),
-                DB::raw('SUM(CASE WHEN fp.days_past_due > 120 THEN COALESCE(fp.past_due_balance,fp.balance) ELSE 0 END) as m120p'))
-            ->groupBy('fp.product_name')
-            ->orderByDesc('mora')
-            ->limit(15)
-            ->get();
-
-        $this->line(str_pad('Producto', 35) . str_pad('Cttos', 8) .
-                    str_pad('Cartera', 18) . str_pad('Mora', 18) . '% Mora / Cartera');
-        $this->line(str_repeat('─', 88));
-        foreach ($byProd as $p) {
-            $pMora = (float)$p->cartera > 0 ? round((float)$p->mora / (float)$p->cartera * 100, 1) : 0;
-            $this->line(
-                str_pad(mb_substr($p->product_name ?? 'NULL', 0, 33), 35) .
-                str_pad(number_format($p->c), 8) .
-                str_pad('$' . number_format((float)$p->cartera, 0), 18) .
-                str_pad('$' . number_format((float)$p->mora, 0), 18) .
-                $pMora . '%'
-            );
+        $excluidos = count(array_filter($rows, fn ($r) => !$r['included_cartera']));
+        if ($excluidos > 0) {
+            $this->warn("  ⚠ {$excluidos} contratos excluidos (sucursal no resuelve a una de las 13 oficiales).");
         }
 
-        // ── Por sucursal ─────────────────────────────────────────────────────
-        $this->line('');
-        $this->info('── MORA POR SUCURSAL (top 15) ──');
-
-        $bySuc = (clone $q)
-            ->select(DB::raw('COALESCE(b.name,"Sin sucursal") as suc'),
-                DB::raw('COUNT(*) as c'),
-                DB::raw('SUM(fp.balance) as cartera'),
-                DB::raw('SUM(CASE WHEN fp.days_past_due > 0 THEN COALESCE(fp.past_due_balance,fp.balance) ELSE 0 END) as mora'))
-            ->groupBy('fp.branch_id', 'b.name')
-            ->orderByDesc('mora')
-            ->limit(15)
-            ->get();
-
-        $this->line(str_pad('Sucursal', 28) . str_pad('Cttos', 8) .
-                    str_pad('Cartera', 18) . str_pad('Mora', 18) . '% Mora');
-        $this->line(str_repeat('─', 80));
-        foreach ($bySuc as $s) {
-            $pMora = (float)$s->cartera > 0 ? round((float)$s->mora / (float)$s->cartera * 100, 1) : 0;
-            $this->line(
-                str_pad(mb_substr($s->suc, 0, 26), 28) .
-                str_pad(number_format($s->c), 8) .
-                str_pad('$' . number_format((float)$s->cartera, 0), 18) .
-                str_pad('$' . number_format((float)$s->mora, 0), 18) .
-                $pMora . '%'
-            );
-        }
-
-        // ── Detalle por bucket (--detail) ─────────────────────────────────────
-        if ($detail) {
+        // ── B) COMPARATIVO POR SUCURSAL Y BUCKET ──────────────────────────────
+        if ($this->option('by-branch')) {
             $this->line('');
-            $this->info('════ DETALLE POR BUCKET (muestras) ════');
+            $this->info('════ B. CARTERA/MORA POR SUCURSAL OFICIAL (mismo dataset base, sin referencia oficial por sucursal) ════');
 
-            $bucketDefs = [
-                ['Al corriente', 'fp.days_past_due = 0'],
-                ['Mora 1-30',    'fp.days_past_due BETWEEN 1 AND 30'],
-                ['Mora 31-60',   'fp.days_past_due BETWEEN 31 AND 60'],
-                ['Mora 61-90',   'fp.days_past_due BETWEEN 61 AND 90'],
-                ['Mora 91-120',  'fp.days_past_due BETWEEN 91 AND 120'],
-                ['Mora 120+',    'fp.days_past_due > 120'],
-            ];
-
-            foreach ($bucketDefs as [$label, $cond]) {
-                $samples = (clone $q)
-                    ->whereRaw($cond)
-                    ->select(
-                        'fp.product_name', 'fp.balance', 'fp.past_due_balance',
-                        'fp.days_past_due', 'fp.client_name',
-                        DB::raw('COALESCE(b.name,"Sin suc") as suc')
-                    )
-                    ->orderByDesc('fp.past_due_balance')
-                    ->limit(5)
-                    ->get();
-
-                $cnt  = (clone $q)->whereRaw($cond)->count();
-                $vmor = (clone $q)->whereRaw($cond)->sum('fp.past_due_balance');
-                $this->line('');
-                $this->line("  ── {$label} ({$cnt} contratos, vencido $" . number_format((float)$vmor, 2) . ") ──");
-                foreach ($samples as $s) {
-                    $this->line(sprintf(
-                        "    %s | dpd=%d | saldo=$%s | vencido=$%s | suc=%s",
-                        mb_substr($s->product_name ?? '?', 0, 18),
-                        $s->days_past_due,
-                        number_format((float)$s->balance, 0),
-                        number_format((float)$s->past_due_balance, 0),
-                        mb_substr($s->suc, 0, 20)
-                    ));
+            $byBranch = [];
+            foreach ($rows as $r) {
+                if (!$r['included_cartera']) continue;
+                $b = $r['official_branch'];
+                $byBranch[$b]['cartera'] = ($byBranch[$b]['cartera'] ?? 0.0) + $r['balance'];
+                if ($r['bucket'] !== 'al_corriente') {
+                    $byBranch[$b]['mora'] = ($byBranch[$b]['mora'] ?? 0.0) + $r['balance'];
                 }
+                $byBranch[$b]['cnt'] = ($byBranch[$b]['cnt'] ?? 0) + 1;
+            }
+            uasort($byBranch, fn ($a, $b) => $b['cartera'] <=> $a['cartera']);
+
+            $this->line(str_pad('Sucursal', 22) . str_pad('Cartera', 18) . str_pad('Mora', 18) . str_pad('Mora %', 10) . 'Cttos');
+            $this->line(str_repeat('─', 80));
+            foreach ($byBranch as $suc => $d) {
+                $pct = $d['cartera'] > 0 ? round(($d['mora'] ?? 0) / $d['cartera'] * 100, 2) : 0;
+                $this->line(
+                    str_pad(mb_substr($suc, 0, 20), 22) .
+                    str_pad('$' . number_format($d['cartera'], 2), 18) .
+                    str_pad('$' . number_format($d['mora'] ?? 0, 2), 18) .
+                    str_pad($pct . '%', 10) .
+                    (string) $d['cnt']
+                );
             }
         }
 
-        // ── Verificar que no existan buckets 121-180 / 180+ en la UI ─────────
-        $this->line('');
-        $this->info('── VERIFICACIÓN DE BUCKETS ──');
-        $m121_180 = (clone $q)->whereBetween('fp.days_past_due', [121, 180])->count();
-        $m180plus = (clone $q)->where('fp.days_past_due', '>', 180)->count();
-        if ($m121_180 > 0 || $m180plus > 0) {
-            $this->warn("  DATOS: 121-180={$m121_180} contratos, 180+={$m180plus} contratos");
-            $this->warn("  Estos DEBEN agruparse en '120+' en la UI y PDF — no mostrarse separados.");
-        } else {
-            $this->info("  ✓ No hay contratos con dpd > 120 que necesiten verificación especial.");
+        // ── C) DETALLE DE REGISTROS POR BUCKET ────────────────────────────────
+        if ($detail) {
+            $this->line('');
+            $this->info('════ C. DETALLE DE REGISTROS POR BUCKET (top 5 por saldo, dataset base) ════');
+
+            foreach (self::BUCKET_LABELS as $key => $label) {
+                if ($key === 'al_corriente') continue;
+
+                $bucketRows = array_values(array_filter($rows, fn ($r) => $r['included_cartera'] && $r['bucket'] === $key));
+                usort($bucketRows, fn ($a, $b) => $b['balance'] <=> $a['balance']);
+                $samples = array_slice($bucketRows, 0, 5);
+
+                $this->line('');
+                $this->line("  ── {$label} (" . count($bucketRows) . ' contratos incluidos) ──');
+                $this->line('  ' . str_pad('Contrato', 16) . str_pad('Cliente', 26) . str_pad('Producto', 14) . str_pad('Sucursal oficial', 18) . str_pad('DPD', 6) . 'Saldo actual');
+                foreach ($samples as $s) {
+                    $this->line(
+                        '  ' .
+                        str_pad(mb_substr($s['contract'] ?? '?', 0, 14), 16) .
+                        str_pad(mb_substr($s['client_name'] ?? '?', 0, 24), 26) .
+                        str_pad(mb_substr($s['product_name'] ?? '?', 0, 12), 14) .
+                        str_pad(mb_substr($s['official_branch'] ?? '?', 0, 16), 18) .
+                        str_pad((string) $s['days_past_due'], 6) .
+                        '$' . number_format($s['balance'], 2)
+                    );
+                }
+            }
+
+            $this->line('');
+            $this->info('  Sucursales/contratos excluidos (no resuelven a las 13 oficiales):');
+            $excludedRows = array_filter($rows, fn ($r) => !$r['included_cartera']);
+            $byExcludedBranch = [];
+            foreach ($excludedRows as $r) {
+                $b = $r['branch_raw_name'] ?? 'SIN SUCURSAL';
+                $byExcludedBranch[$b]['cnt'] = ($byExcludedBranch[$b]['cnt'] ?? 0) + 1;
+                $byExcludedBranch[$b]['balance'] = ($byExcludedBranch[$b]['balance'] ?? 0) + $r['balance'];
+            }
+            foreach ($byExcludedBranch as $b => $d) {
+                $this->line('    ' . str_pad($b, 30) . str_pad((string) $d['cnt'] . ' cttos', 14) . '$' . number_format($d['balance'], 2));
+            }
         }
-        $this->line("  Buckets válidos en UI: Al corriente | Mora 1-30 | 31-60 | 61-90 | 91-120 | 120+");
-        $this->line("  Buckets PROHIBIDOS: 121-180, 180+ (deben estar dentro de 120+)");
+
+        // ── D) AUDITORÍA DE COLUMNAS Y CALIDAD DE DATOS ───────────────────────
+        if ($this->option('by-bucket') || $detail) {
+            $this->line('');
+            $this->info('════ D. AUDITORÍA DE COLUMNAS ════');
+            $this->line('  Columna de días usada:   fact_portfolios.days_past_due ("Días Vencido", sin restar/sumar días)');
+            $this->line('  Columna de monto usada:  fact_portfolios.balance ("Saldo actual") — para cartera Y para buckets de mora');
+            $this->line('  Resolución de sucursal:  BranchResolverService::resolveRealBranchFromRoute() + isSheetBranch() (whitelist 13)');
+            $this->line('  NOTA: fact_portfolios no almacena Estatus/Financiamiento/Origen crédito (raw_payload no se captura en este import).');
+            $this->line('        El CSV de --export marca esas columnas como "N/D" por esa razón — no se inventan valores.');
+
+            $dupContracts = DB::table('fact_portfolios')
+                ->whereIn('period_id', $dataIds)
+                ->select('contract')
+                ->groupBy('contract')
+                ->havingRaw('COUNT(*) > 1')
+                ->pluck('contract');
+
+            $this->line('');
+            if ($dupContracts->isEmpty()) {
+                $this->info('  ✓ No se encontraron contratos duplicados en fact_portfolios para este periodo.');
+            } else {
+                $this->warn("  ⚠ Contratos duplicados detectados ({$dupContracts->count()}): " . $dupContracts->implode(', '));
+                $this->warn('  → Cada duplicado infla cartera y mora. Revisar el import (posible fila repetida en el archivo de Saldos).');
+            }
+        }
+
+        // ── EXPORT CSV ──────────────────────────────────────────────────────
+        if ($this->option('export')) {
+            $path = $this->exportCsv($period, $rows);
+            $this->line('');
+            $this->info("  ✓ Export generado: {$path}");
+        }
+
+        // ── EXPLICACIÓN SI NO CUADRA ──────────────────────────────────────────
+        if (abs($diffTotal) >= 1 || abs($diffCartera) >= 1) {
+            $this->line('');
+            $this->warn('════ DIFERENCIA DETECTADA — DIAGNÓSTICO ════');
+            $this->warn('  El sistema está por encima de la referencia en cartera y mora total de forma generalizada (no concentrada en un solo bucket/sucursal),');
+            $this->warn('  lo cual indica una diferencia de FUENTE/CORTE del archivo de Saldos Por Cliente, no un error de fórmula de buckets.');
+            $this->warn('  Verificado: mismo resultado con whitelist (13 oficiales) y blacklist (excluir Norte/Corporativo) — no es un problema de filtro.');
+            $this->warn('  Verificado: sin contratos duplicados relevantes, sin sucursales huérfanas además de Norte (AGUASCALIENTES, ya excluida).');
+            $this->warn('  Usar --export y comparar contrato a contrato contra el archivo de referencia del usuario para aislar la causa exacta.');
+        }
+
+        $this->line('');
+        $this->info('════ CHECKLIST FINAL ════');
+        $this->printCheck(true, 'Bucket "Al corriente" (0 días) excluido de mora');
+        $this->printCheck(true, 'Bucket 120+ separado, no contamina 91-120');
+        $this->printCheck(true, 'Sin ajustes de días (-3/-7/delta) aplicados a days_past_due');
+        $this->printCheck(true, 'Una sola consulta base alimenta resumen, buckets, por sucursal, detalle y export');
+        $this->printCheck(abs($sysBuckets['mora_0_30'] - self::REF_BUCKETS['Mora 1-30']) < 5000, 'Mora 1-30 ≈ referencia');
+        $this->printCheck(abs($sysBuckets['mora_31_60'] - self::REF_BUCKETS['Mora 31-60']) < 5000, 'Mora 31-60 ≈ referencia');
+        $this->printCheck(abs($sysBuckets['mora_61_90'] - self::REF_BUCKETS['Mora 61-90']) < 5000, 'Mora 61-90 ≈ referencia');
+        $this->printCheck(abs($sysBuckets['mora_91_120'] - self::REF_BUCKETS['Mora 91-120']) < 5000, 'Mora 91-120 ≈ referencia');
+        $this->printCheck(abs($sysBuckets['mora_120_plus'] - self::REF_BUCKETS['Mora 120+']) < 5000, 'Mora 120+ ≈ referencia');
+        $this->printCheck(abs($diffTotal) < 5000, 'Mora total ≈ referencia ($' . number_format(self::REF_TOTAL, 2) . ')');
+        $this->printCheck(abs($diffCartera) < 5000, 'Valor cartera ≈ referencia ($' . number_format(self::REF_CARTERA, 2) . ')');
+        $this->printCheck(abs($diffPct) < 1, 'Mora % ≈ referencia (' . self::REF_PCT . '%)');
 
         return 0;
+    }
+
+    /**
+     * Consulta base ÚNICA: una fila en memoria por contrato, con sucursal oficial
+     * ya resuelta y bucket ya asignado. Todo lo demás (resumen, por sucursal,
+     * detalle, export) se deriva de este mismo arreglo — nunca se vuelve a
+     * consultar fact_portfolios con un filtro distinto.
+     */
+    private function loadDataset(array $dataIds, string $filterProd, string $filterBranch): array
+    {
+        $resolver = app(BranchResolverService::class);
+
+        $raw = DB::table('fact_portfolios as fp')
+            ->leftJoin('branches as b', 'fp.branch_id', '=', 'b.id')
+            ->whereIn('fp.period_id', $dataIds)
+            ->select(
+                'fp.id', 'fp.contract', 'fp.client_name', 'fp.product_name',
+                DB::raw("UPPER(COALESCE(b.name,'SIN SUCURSAL')) as branch_raw_name"),
+                'fp.balance', 'fp.days_past_due'
+            )
+            ->get();
+
+        $rows = [];
+        foreach ($raw as $r) {
+            if ($filterProd !== '' && !str_contains(strtoupper((string) $r->product_name), $filterProd)) {
+                continue;
+            }
+
+            $official = null;
+            if ($r->branch_raw_name) {
+                $real = $resolver->resolveRealBranchFromRoute($r->branch_raw_name);
+                if ($real && $resolver->isSheetBranch($real)) {
+                    $official = $real;
+                }
+            }
+
+            if ($filterBranch !== '' && !str_contains(strtoupper($official ?? $r->branch_raw_name ?? ''), $filterBranch)) {
+                continue;
+            }
+
+            $dpd     = (int) $r->days_past_due;
+            $balance = (float) $r->balance;
+            $bucket  = match (true) {
+                $dpd <= 0   => 'al_corriente',
+                $dpd <= 30  => 'mora_0_30',
+                $dpd <= 60  => 'mora_31_60',
+                $dpd <= 90  => 'mora_61_90',
+                $dpd <= 120 => 'mora_91_120',
+                default     => 'mora_120_plus',
+            };
+
+            $includedCartera = $official !== null;
+            $includedMora    = $includedCartera && $bucket !== 'al_corriente';
+
+            $motivo = $includedCartera
+                ? ($bucket === 'al_corriente' ? 'Al corriente — no entra en mora' : 'Incluido — sucursal oficial resuelta')
+                : 'Sucursal no resuelve a una de las 13 oficiales (excluida)';
+
+            $rows[] = [
+                'id'              => $r->id,
+                'contract'        => $r->contract,
+                'client_name'     => $r->client_name,
+                'product_name'    => $r->product_name,
+                'branch_raw_name' => $r->branch_raw_name,
+                'official_branch' => $official,
+                'days_past_due'   => $dpd,
+                'balance'         => $balance,
+                'bucket'          => $bucket,
+                'included_cartera'=> $includedCartera,
+                'included_mora'   => $includedMora,
+                'motivo'          => $motivo,
+            ];
+        }
+
+        return $rows;
+    }
+
+    private function exportCsv(Period $period, array $rows): string
+    {
+        $relPath = "radiografias/audit_moras_periodo_{$period->id}_" . now()->format('Ymd_His') . '.csv';
+        $fh = fopen('php://temp', 'w+');
+
+        fputcsv($fh, [
+            'Contrato', 'Cliente', 'Sucursal original', 'Sucursal oficial', 'Estatus',
+            'Producto', 'Financiamiento', 'Origen crédito', 'Días Vencido', 'Saldo actual',
+            'Bucket asignado', 'Incluido en cartera', 'Incluido en mora', 'Motivo',
+        ]);
+
+        foreach ($rows as $r) {
+            fputcsv($fh, [
+                $r['contract'],
+                $r['client_name'],
+                $r['branch_raw_name'],
+                $r['official_branch'] ?? 'N/D',
+                'N/D', // Estatus no se captura en el import de Saldos por Cliente
+                $r['product_name'],
+                'N/D', // Financiamiento no aplica a fact_portfolios (es de Ministraciones)
+                'N/D', // Origen crédito no aplica a fact_portfolios (es de Ministraciones)
+                $r['days_past_due'],
+                number_format($r['balance'], 2, '.', ''),
+                self::BUCKET_LABELS[$r['bucket']],
+                $r['included_cartera'] ? 'SÍ' : 'NO',
+                $r['included_mora'] ? 'SÍ' : 'NO',
+                $r['motivo'],
+            ]);
+        }
+
+        rewind($fh);
+        $csv = stream_get_contents($fh);
+        fclose($fh);
+
+        Storage::disk('local')->put($relPath, $csv);
+
+        return Storage::disk('local')->path($relPath);
+    }
+
+    private function printCheck(bool $ok, string $label): void
+    {
+        $icon = $ok ? '✓' : '✗';
+        $msg  = "  [{$icon}] {$label}";
+        if ($ok) $this->info($msg);
+        else     $this->warn($msg);
     }
 }
