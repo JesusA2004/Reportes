@@ -91,7 +91,30 @@
       "Bash(Select-Object FullName, Length, LastWriteTime)",
       "Bash(echo \"EXIT_CODE=$?\")",
       "Bash(unzip -l \"storage/app/radiografias/radiografia_M-2026-04_20260618_150004.xlsx\")",
-      "Bash(unzip -l \"storage/app/radiografias/radiografia_M-2026-04_20260618_162408.xlsx\")"
+      "Bash(unzip -l \"storage/app/radiografias/radiografia_M-2026-04_20260618_162408.xlsx\")",
+      "Bash(awk 'NR==3283,NR==4207' app/Services/Radiography/RadiographyWorkbookBuilder.php)",
+      "Bash(awk -F: '$1>=3283')",
+      "Bash(composer run-script *)",
+      "Bash(composer test *)",
+      "Bash(find public *)",
+      "Bash(find resources *)",
+      "Bash(pdftotext -layout storage/app/radiografias/radiografia_M-2026-04_20260619_105208.pdf -)",
+      "Bash(python3 -c \"import fitz; print\\('fitz ok'\\)\")",
+      "Bash(python -c \"import fitz; print\\('fitz ok'\\)\")",
+      "Bash(pdftotext -layout storage/app/radiografias/radiografia_M-2026-04_20260619_110112.pdf -)",
+      "Bash(pdftotext -layout storage/app/radiografias/radiografia_M-2026-04_20260619_101912.pdf -)",
+      "Bash(pdftotext -layout storage/app/radiografias/radiografia_M-2026-04_20260619_101912.pdf /tmp/old.txt)",
+      "Read(//tmp/**)",
+      "Bash(npm install *)",
+      "Bash(npm audit *)",
+      "Skill(run)",
+      "Bash(xargs -I{} sh -c 'echo \"=== {} ===\"; head -5 \"{}\"')",
+      "Bash(npx --no-install playwright --version)",
+      "Bash(curl -s -D - -o /dev/null http://127.0.0.1:8077/reportes-mensuales/14/preview)",
+      "Bash(taskkill //F //IM php.exe //FI \"WINDOWTITLE eq*\")",
+      "Bash(netstat -ano)",
+      "Bash(taskkill *)",
+      "Bash(xxd)"
     ]
   }
 }

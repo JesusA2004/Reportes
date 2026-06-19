@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\Period;
+use App\Models\PeriodRadiographyExport;
 use App\Services\EmployeeBranchAutoMatchService;
 use App\Services\PeriodConsolidationService;
 use App\Services\PeriodDerivedDataCleaner;
@@ -77,6 +78,31 @@ class GenerarRadiografiaCommand extends Command
             $this->warn("  ⚠ PDF falló (no crítico): " . mb_strimwidth($e->getMessage(), 0, 120));
             $pdfPath = null;
         }
+
+        // ── 7. Registrar exportaciones (habilita los botones de descarga en el preview) ──
+        // Sin este registro, MonthlyReportController::previewPage() nunca encuentra un
+        // PeriodRadiographyExport y los botones de Excel/PDF quedan deshabilitados aunque
+        // el archivo ya exista en disco — igual que hace GenerateRadiographyJob.
+        $this->line('  7. Registrando exportaciones...');
+        PeriodRadiographyExport::query()->create([
+            'period_summary_id' => $summary->id,
+            'export_path'       => $path,
+            'file_type'         => 'excel',
+            'template_version'  => config('app.version'),
+            'metadata'          => ['period_id' => $period->id, 'period_label' => $period->label],
+            'exported_at'       => now(),
+        ]);
+        if ($pdfPath !== null) {
+            PeriodRadiographyExport::query()->create([
+                'period_summary_id' => $summary->id,
+                'export_path'       => $pdfPath,
+                'file_type'         => 'pdf',
+                'template_version'  => config('app.version'),
+                'metadata'          => ['period_id' => $period->id, 'period_label' => $period->label],
+                'exported_at'       => now(),
+            ]);
+        }
+        $this->line('  <fg=green>✓ Exportaciones registradas — botones de descarga habilitados en el preview.</>');
 
         $this->line('');
         $this->info("══════ RADIOGRAFÍA GENERADA ══════");

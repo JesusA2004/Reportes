@@ -224,6 +224,7 @@ class MonthlyReportController extends Controller {
             'filteredExcelBaseUrl' => route('reportes-mensuales.export-filtered-radiography', $period->id),
             'filteredPdfBaseUrl'   => route('reportes-mensuales.export-filtered-radiography-pdf', $period->id),
             'filteredDataUrl'      => route('reportes-mensuales.filtered-preview-data', $period->id),
+            'updateSaldoInicialUrl' => route('reportes-mensuales.update-saldo-inicial', $period->id),
         ]);
     }
 
@@ -239,6 +240,26 @@ class MonthlyReportController extends Controller {
         }
         $service->generate($period, auth()->id());
         return back()->with('success', 'Radiografía consolidada correctamente.');
+    }
+
+    /**
+     * Captura/actualiza el saldo inicial en caja del periodo — único insumo del cálculo de
+     * EBITDA que no viene de ninguna fuente importada. Sin este dato el sistema no debe asumir
+     * $0 en silencio; este endpoint permite capturarlo desde el preview de la radiografía.
+     */
+    public function updateSaldoInicial(Period $period, Request $request): JsonResponse|RedirectResponse
+    {
+        $validated = $request->validate([
+            'saldo_inicial_caja' => ['required', 'numeric'],
+        ]);
+
+        $period->update(['saldo_inicial_caja' => $validated['saldo_inicial_caja']]);
+
+        if ($request->wantsJson()) {
+            return response()->json(['ok' => true, 'saldo_inicial_caja' => (float) $period->saldo_inicial_caja]);
+        }
+
+        return back()->with('success', 'Saldo inicial en caja actualizado.');
     }
 
     public function exportSummary(Period $period): StreamedResponse

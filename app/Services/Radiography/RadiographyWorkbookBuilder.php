@@ -75,6 +75,7 @@ class RadiographyWorkbookBuilder
             ['buildEmpleadosSheet',        'EMPLEADOS'],
             ['buildNominaGestorSheet',     'NÓMINA POR GESTOR'],
             ['buildMoraDetalleSheet',      'MORA DETALLE'],
+            ['buildCategoriaEbitdaSheet',  'CATEGORÍA EBITDA'],
         ];
         // Deliberately NOT wired in (business decision, avoid duplicate/confusing tabs):
         // - FOND CORP / SIN ASIGNAR / INCIDENCIAS / METADATA: out of scope for Excel/PDF/UI.
@@ -135,6 +136,7 @@ class RadiographyWorkbookBuilder
 
         // Prefer BranchRadiographyCalculator (GLOBAL = suma de sucursales) over legacy summary
         $brCalcGlobal = $snap['branch_radiography']['global'] ?? null;
+        $branchesList = $snap['branch_radiography']['branches'] ?? [];
 
         $carteraTotal = $brCalcGlobal ? (float)$brCalcGlobal['valor_cartera'] : (float)$sum['portfolio_total'];
         $recTotal     = $brCalcGlobal ? (float)$brCalcGlobal['recuperacion_total'] : (float)$sum['recovery_total'];
@@ -266,9 +268,12 @@ class RadiographyWorkbookBuilder
         $excGlobal      = $brCalcGlobal ? (float)$brCalcGlobal['excedentes'] : $excedentes;
         $gastosTotal    = $gastosOpTotal + $nomTotal;
         $utilidad       = $saldoInicial + $recTotal - $colTotal - $gastosTotal;
-        // Validación: el envío corporativo no puede superar la utilidad disponible
+        // Diferencia = EBITDA − Envío de utilidad a corporativo. Se muestra siempre el valor
+        // real (puede ser negativo si el envío corporativo supera el EBITDA disponible) — ese
+        // saldo es justamente lo que se lleva como saldo inicial del siguiente periodo.
+        // $inconsistencia solo se usa para resaltar visualmente, no para forzar la diferencia a 0.
         $inconsistencia = $excGlobal > $utilidad;
-        $diferencia     = $inconsistencia ? 0.0 : ($utilidad - $excGlobal);
+        $diferencia     = $utilidad - $excGlobal;
 
         // ════════════════════════════════════════════════════════════════════
         // Layout: título(1) · subtítulo(2) · meta(3) · KPI band(4-7) · blank(8)
@@ -297,7 +302,7 @@ class RadiographyWorkbookBuilder
             ['Valor cartera global', $carteraTotal, 'currency', 'Recuperación total',          $recTotal,   'currency'],
             ['Otorgamientos',        $colTotal,     'currency', 'Mora total',                  $moraTotal,  'currency'],
             ['Mora %',               $moraPct,      'percent',  'Gastos totales',               $gastosTotal,'currency'],
-            ['Nómina y Capital Humano', $nomTotal,  'currency', 'EBITDA / Utilidad disponible', $utilidad,   'currency'],
+            ['Nómina y Capital Humano', $nomTotal,  'currency', 'EBITDA', $utilidad,   'currency'],
         ];
         $kpiRow = 4;
         $kpiCardBorder = ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => RadiographyStyleHelper::BG_ACCENT]];
@@ -327,26 +332,78 @@ class RadiographyWorkbookBuilder
             $kpiRow++;
         }
 
-        // ── Datos fuente para las gráficas del KPI band (rango limpio, sin merges) ──
-        RadiographyStyleHelper::setCellValueSafe($sheet, 'H4', 'Recuperación');
-        $sheet->setCellValue('I4', $recTotal);
-        RadiographyStyleHelper::setCellValueSafe($sheet, 'H5', 'Colocación');
-        $sheet->setCellValue('I5', $colTotal);
-        RadiographyStyleHelper::setCellValueSafe($sheet, 'H7', 'Cartera');
-        $sheet->setCellValue('I7', $carteraTotal);
-        RadiographyStyleHelper::setCellValueSafe($sheet, 'H8', 'Cartera vencida');
-        $sheet->setCellValue('I8', $moraTotal);
-        foreach (['I4', 'I5', 'I7', 'I8'] as $cell) {
-            RadiographyStyleHelper::applyCurrencyFormat($sheet, $cell);
+        // ── Dashboard visual (columnas F:G) — Data Bars nativas de Excel en vez de
+        // gráficas de barra por defecto. PhpSpreadsheet siempre dibuja sus charts
+        // con el cromado "Office" plano (ejes, cuadrícula, leyenda "Series1"); las
+        // Data Bars son una función nativa de Excel (degradado pintado dentro de
+        // la celda, editable) y dan el look de dashboard ejecutivo sin ese riesgo.
+        $sheet->getColumnDimension('F')->setWidth(24);
+        $sheet->getColumnDimension('G')->setWidth(30);
+
+        $dashRow = 4;
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'RECUPERACIÓN VS COLOCACIÓN');
+        $dashRow++;
+        $recColMax = max($recTotal, $colTotal, 1.0);
+        RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", 'Recuperación');
+        $sheet->setCellValue("G{$dashRow}", $recTotal);
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+        RadiographyStyleHelper::addDataBar($sheet, "G{$dashRow}", RadiographyStyleHelper::BG_ACCENT, true, 0.0, $recColMax);
+        $dashRow++;
+        RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", 'Colocación');
+        $sheet->setCellValue("G{$dashRow}", $colTotal);
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+        RadiographyStyleHelper::addDataBar($sheet, "G{$dashRow}", RadiographyStyleHelper::BG_PRIMARY_DARK, true, 0.0, $recColMax);
+        $dashRow += 2;
+
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'CARTERA VS CARTERA VENCIDA');
+        $dashRow++;
+        $carteraMoraMax = max($carteraTotal, $moraTotal, 1.0);
+        RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", 'Cartera');
+        $sheet->setCellValue("G{$dashRow}", $carteraTotal);
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+        RadiographyStyleHelper::addDataBar($sheet, "G{$dashRow}", RadiographyStyleHelper::BG_PRIMARY_DARK, true, 0.0, $carteraMoraMax);
+        $dashRow++;
+        RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", 'Cartera vencida');
+        $sheet->setCellValue("G{$dashRow}", $moraTotal);
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+        RadiographyStyleHelper::addDataBar($sheet, "G{$dashRow}", RadiographyStyleHelper::FG_RED, true, 0.0, $carteraMoraMax);
+        $dashRow += 2;
+
+        // Mini ranking de sucursales por cartera (top 8 — "mini", no la tabla completa)
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'TOP SUCURSALES POR CARTERA');
+        $dashRow++;
+        $rankBranches = $branchesList;
+        usort($rankBranches, fn ($a, $b) => (float)($b['valor_cartera'] ?? 0) <=> (float)($a['valor_cartera'] ?? 0));
+        $rankBranches = array_slice($rankBranches, 0, 8);
+        if (!empty($rankBranches)) {
+            $rankStart = $dashRow;
+            foreach ($rankBranches as $rb) {
+                RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $rb['sucursal']);
+                $sheet->setCellValue("G{$dashRow}", (float)($rb['valor_cartera'] ?? 0));
+                RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+                $dashRow++;
+            }
+            RadiographyStyleHelper::addDataBar($sheet, "G{$rankStart}:G" . ($dashRow - 1), RadiographyStyleHelper::BG_ACCENT);
         }
-        RadiographyStyleHelper::addBarChart(
-            $sheet, 'Recuperación vs Colocación', '$H$4:$H$5', '$I$4:$I$5', 2, 'K4', 'P12',
-            [RadiographyStyleHelper::BG_ACCENT, RadiographyStyleHelper::BG_PRIMARY_DARK]
-        );
-        RadiographyStyleHelper::addBarChart(
-            $sheet, 'Cartera vs Cartera vencida', '$H$7:$H$8', '$I$7:$I$8', 2, 'Q4', 'V12',
-            [RadiographyStyleHelper::BG_PRIMARY_DARK, RadiographyStyleHelper::BG_ALERT_RED]
-        );
+        $dashRow++;
+
+        // Mini mora por bucket
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'MORA POR BUCKET');
+        $dashRow++;
+        $moraBucketStart = $dashRow;
+        foreach ([
+            ['Mora 1-30',   $mora0_30],
+            ['Mora 31-60',  $mora31_60],
+            ['Mora 61-90',  $mora61_90],
+            ['Mora 91-120', $mora91_120],
+            ['Mora 120+',   $mora120p],
+        ] as [$bLabel, $bVal]) {
+            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $bLabel);
+            $sheet->setCellValue("G{$dashRow}", $bVal);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+            $dashRow++;
+        }
+        RadiographyStyleHelper::addDataBar($sheet, "G{$moraBucketStart}:G" . ($dashRow - 1), RadiographyStyleHelper::FG_RED);
 
         // ── Navegación: acceso directo a cada hoja del workbook ──────────────
         $r = $kpiRow + 1;
@@ -356,6 +413,7 @@ class RadiographyWorkbookBuilder
             'VALOR CARTERA', 'MORAS', 'INGRESOS', 'GASTOS', 'NÓMINA',
             'PRÉSTAMOS ACTIVOS', 'VAL. CART', 'COLOCACIÓN',
             'P. INTERSUC.', 'PRODUCTOS', 'EMPLEADOS', 'NÓMINA POR GESTOR', 'MORA DETALLE',
+            'CATEGORÍA EBITDA',
         ];
         $navCols = ['A', 'B', 'C', 'D'];
         foreach (array_chunk($navTargets, 4) as $rowTargets) {
@@ -397,7 +455,6 @@ class RadiographyWorkbookBuilder
         $r++;
 
         RadiographyStyleHelper::applyTableHeaderStyle($sheet, $r, ['A' => 'MÉTRICA', 'B' => 'VALOR', 'C' => '%', 'D' => 'NOTA']);
-        $freezeRow = $r + 1;
         $r++;
 
         // Helper: write a section block; returns next row. Flags D with a warning
@@ -529,7 +586,7 @@ class RadiographyWorkbookBuilder
             ['Ingresos Totales',                   $recTotal,             'currency', ''],
             ['Otorgamientos',                      $colTotal,             'currency', ''],
             ['Gastos Totales',                     $gastosTotal,          'currency', ''],
-            ['Utilidad',                           $utilidad,             'currency', ''],
+            ['EBITDA',                             $utilidad,             'currency', ''],
             ['Saldo final en caja',                $saldoFinal ?? 0.0,    'currency', ''],
             ['Total neto préstamos inter suc.',    $brLoanNeto,           'currency', ''],
             ['Envío de utilidad a corporativo',    $excGlobal,            'currency', ''],
@@ -548,24 +605,62 @@ class RadiographyWorkbookBuilder
         $r++;
 
         // ── 8. EBITDA ─────────────────────────────────────────────────────────
-        // EBITDA = Ingresos Totales − Otorgamientos − Gastos Totales
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '8. EBITDA / Utilidad disponible');
+        // EBITDA = Saldo inicial en caja + Recuperación total − Colocación − Gastos Totales
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '8. EBITDA');
         $r++;
         $r = $writeRows($r, [
-            ['Ingresos Totales',                    $recTotal,      'currency', ''],
-            ['Menos: Otorgamientos',                $colTotal,      'currency', ''],
+            ['Saldo inicial en caja',               $saldoInicial,  'currency', ''],
+            ['Recuperación total / Cobranza',       $recTotal,      'currency', ''],
+            ['Menos: Colocación',                   $colTotal,      'currency', ''],
             ['Menos: Gastos Totales',               $gastosTotal,   'currency', ''],
             ['  Gastos operativos',                 $gastosOpTotal, 'currency', ''],
             ['  Nómina y Capital Humano',            $nomTotal,      'currency', ''],
-            ['EBITDA / Utilidad disponible',        $utilidad,      'currency', ''],
-            ['Envío utilidad a corporativo',        $excGlobal,     'currency', ''],
-            ['Diferencia / sobrante',               $diferencia,    'currency', ''],
+            ['EBITDA',                              $utilidad,      'currency', ''],
+            ['Envío de utilidad a corporativo',     $excGlobal,     'currency', ''],
+            ['Diferencia',                          $diferencia,    'currency', ''],
         ]);
         if ($inconsistencia) {
             $this->writeInconsistenciaRow($sheet, $r, 'D');
             $r++;
         }
         $r++;
+
+        // ── CATEGORÍA POR EBITDA (por sucursal) — visible aquí en GLOBAL, no
+        // escondida en una hoja aparte. Misma fórmula que usa el PDF, centralizada
+        // en RadiographyStyleHelper::branchEbitdaEstimate()/ebitdaCategory() para
+        // que ambos documentos coincidan siempre. Detalle completo (Recuperación/
+        // Gastos/Nómina por sucursal) en la hoja CATEGORÍA EBITDA.
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", 'CATEGORÍA POR EBITDA (POR SUCURSAL)');
+        $r++;
+        RadiographyStyleHelper::applyTableHeaderStyle($sheet, $r, ['A' => 'SUCURSAL', 'B' => 'EBITDA ESTIMADO', 'C' => 'CATEGORÍA', 'D' => '']);
+        $r++;
+        $catRankedBranches = $branchesList;
+        usort($catRankedBranches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+        $catIdx = 0;
+        foreach ($catRankedBranches as $cb) {
+            $cbUtil   = RadiographyStyleHelper::branchEbitdaEstimate($cb);
+            $cbCat    = RadiographyStyleHelper::ebitdaCategory($cbUtil);
+            $cbColors = RadiographyStyleHelper::categoryColors($cbCat);
+            RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", $cb['sucursal']);
+            $sheet->setCellValue("B{$r}", $cbUtil);
+            $sheet->setCellValue("C{$r}", $cbCat);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $catIdx % 2 === 0);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$r}");
+            $sheet->getStyle("C{$r}")->applyFromArray([
+                'font'      => ['bold' => true, 'size' => 9, 'color' => ['argb' => $cbColors['fg']]],
+                'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $cbColors['bg']]],
+                'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
+            ]);
+            $catIdx++;
+            $r++;
+        }
+        RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'EBITDA estimado = Recuperación − Gastos − Nómina completa estimada por sucursal.');
+        RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:D{$r}");
+        $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(8)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
+        $r += 2;
+        RadiographyStyleHelper::applyHyperlinkStyle($sheet, "A{$r}", '→ Ver detalle completo en hoja CATEGORÍA EBITDA', 'CATEGORÍA EBITDA');
+        $sheet->getStyle("A{$r}")->getFont()->setSize(9);
+        $r += 2;
 
         // ── 9. Saldo Total Acumulado Cuentas ──────────────────────────────────
         RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '9. SALDO TOTAL ACUMULADO CUENTAS');
@@ -593,23 +688,13 @@ class RadiographyWorkbookBuilder
         }
         $r++;
 
-        $sheet->freezePane("A{$freezeRow}");
-
-        // ── 11. Detalle por sucursal — accesos directos a cada hoja de sucursal ──
-        $r += 2;
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '11. DETALLE POR SUCURSAL');
-        $r++;
-        $operativeSucursales = [
-            'ATLACOMULCO','ATLIXCO','CORDOBA','CUERNAVACA','HUAMANTLA',
-            'IXTLAHUACA','MIACATLAN','ORIZABA','SAN JUAN DEL RÍO',
-            'SAN LUIS POTOSI','TENANGO DEL VALLE','TLAXCALA','TULA',
-        ];
-        foreach ($operativeSucursales as $i => $suc) {
-            $tabName = RadiographyStyleHelper::safeSheetName($suc);
-            RadiographyStyleHelper::applyHyperlinkStyle($sheet, "A{$r}", $suc, $tabName);
-            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
-            $r++;
-        }
+        // Freeze mínimo: solo título/subtítulo/meta (filas 1-3). Antes se congelaba
+        // hasta la fila del encabezado de tabla (~21), dejando muy poco espacio
+        // visible para navegar hacia las secciones inferiores.
+        $sheet->freezePane('A4');
+        // Nota: los accesos directos a cada sucursal ya están en el panel de filtros
+        // (filas 16-19, junto a NAVEGACIÓN); no se repiten aquí para evitar duplicar
+        // el mismo enlace dos veces en la misma hoja.
     }
 
     // ── VALOR CARTERA ────────────────────────────────────────────────────────
@@ -1060,7 +1145,11 @@ class RadiographyWorkbookBuilder
             $sheet->getColumnDimension($col)->setWidth(16);
         }
         $sheet->setAutoFilter("A{$vista2HeaderRow}:{$lastCol}{$vista2HeaderRow}");
-        $sheet->freezePane('B' . ($vista2HeaderRow + 1));
+        // Freeze simple: solo el título/hipervínculo (filas 1-3). Antes se congelaba
+        // en "B{$vista2HeaderRow+1}", una fila que cae muy abajo (después de toda la
+        // Vista 1 jerárquica por sucursal) — eso bloqueaba decenas de filas como panel
+        // fijo y dejaba el scroll real apretado fuera de la pantalla visible.
+        $sheet->freezePane('A4');
 
         // ── Top 10 gastos por concepto (GLOBAL) — tabla limpia + gráfica ────────
         $r += 2;
@@ -1152,8 +1241,7 @@ class RadiographyWorkbookBuilder
             'IMSS', 'Descuentos Infonavit', 'Finiquito', 'Gastos médicos',
             'Gasolina', 'Financiamiento de Motos', 'Cascos',
             'Descuento Servicios Moto', 'Financiamiento Celular',
-            'Descuento de uniformes', 'Anticipo de nómina', 'Pensión Alimenticia',
-            'Otros conceptos nómina', 'Otros descuentos NOI',
+            'Descuento de uniformes', 'Anticipo de nómina', 'Pensión Alimenticia', 'Préstamo Personal',
         ];
         $isDeduction = fn (string $label) => (bool) preg_match('/Descuento|Pensión Alimenticia|Anticipo/i', $label);
         $branchTotal = fn (array $b) => (float)($b['nomina_total'] ?? 0) + (float)($b['comisiones'] ?? 0)
@@ -1675,7 +1763,7 @@ class RadiographyWorkbookBuilder
             $brFondeoB        = $calc ? (float)$calc['prestamos_fondea'] : $fondeoCalc;
             $brExcedCalc      = $calc ? (float)$calc['excedentes']       : $excedCalc;
             $brInconsistencia = $brExcedCalc > $brUtilidad;
-            $brDiferencia     = $brInconsistencia ? 0.0 : ($brUtilidad - $brExcedCalc);
+            $brDiferencia     = $brUtilidad - $brExcedCalc;
             foreach ([
                 ['Saldo inicial en caja',              0,              'currency'],
                 ['Ingresos Totales',                   $recB,          'currency'],
@@ -1706,7 +1794,7 @@ class RadiographyWorkbookBuilder
             $r++;
 
             // 8. EBITDA = Ingresos − Otorgamientos − Gastos Totales
-            $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. EBITDA / Utilidad disponible');
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. EBITDA');
             $r++;
             foreach ([
                 ['Ingresos Totales',                   $recB,          'currency'],
@@ -1714,7 +1802,7 @@ class RadiographyWorkbookBuilder
                 ['Menos: Gastos Totales',              $brGastosTotal, 'currency'],
                 ['  Gastos operativos',                $gopTotal,      'currency'],
                 ['  Nómina y Capital Humano',           $brNomTotal,    'currency'],
-                ['= EBITDA / Utilidad disponible',     $brUtilidad,    'currency'],
+                ['= EBITDA',     $brUtilidad,    'currency'],
                 ['Envío utilidad a corporativo',       $brExcedCalc,   'currency'],
                 ['Diferencia / sobrante',              $brDiferencia,  'currency'],
             ] as $i => [$label, $val, $fmt]) {
@@ -3100,67 +3188,71 @@ class RadiographyWorkbookBuilder
 
     // ── Categorías ────────────────────────────────────────────────────────────
 
-    private function buildCategoriesSheet(Spreadsheet $ss, Period $period, array $snap): void
+    /**
+     * Detalle completo de CATEGORÍA POR EBITDA por sucursal. Misma fuente y
+     * misma fórmula que la sección compacta en GLOBAL y que la tabla del PDF
+     * ("CATEGORÍA GESTORES POR EBITDA") — centralizada en
+     * RadiographyStyleHelper::branchEbitdaEstimate()/ebitdaCategory(), nunca
+     * recalculada de forma distinta aquí.
+     */
+    private function buildCategoriaEbitdaSheet(Spreadsheet $ss, Period $period, array $snap): void
     {
-        $sheet    = $ss->createSheet()->setTitle('Categorías');
-        $branches = $snap['sections']['branches'] ?? [];
-        $empRows  = $snap['sections']['employees_gestores'] ?? [];
+        $sheet    = $ss->createSheet()->setTitle('CATEGORÍA EBITDA');
+        $branches = $snap['branch_radiography']['branches'] ?? [];
+        $label    = strtoupper($period->label);
 
-        $this->sheetTitle($sheet, 'A1:C1', 'CATEGORIA GESTORES — ' . strtoupper($period->label));
-        $this->colHeaders($sheet, 2, ['A' => 'SUCURSAL', 'B' => 'EBITDA', 'C' => 'CATEGORÍA']);
+        $this->sheetTitle($sheet, 'A1:F1', 'CATEGORÍA POR EBITDA — ' . $label);
+        RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
 
         if (empty($branches)) {
             $sheet->setCellValue('A3', 'Sin datos por sucursal para calcular categorías.');
-            $this->setColWidths($sheet, ['A' => 28, 'B' => 20, 'C' => 16]);
+            $this->setColWidths($sheet, ['A' => 28, 'B' => 18, 'C' => 18, 'D' => 18, 'E' => 20, 'F' => 16]);
             return;
         }
 
-        // Aggregate net payroll per branch from employees_gestores
-        $payrollByBranch = [];
-        foreach ($empRows as $emp) {
-            $br = strtoupper(trim($emp['branch'] ?? ''));
-            if ($br === '' || $br === 'SIN SUCURSAL') continue;
-            $payrollByBranch[$br] = ($payrollByBranch[$br] ?? 0.0) + (float)($emp['neto'] ?? 0);
-        }
+        usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
 
-        $r = 3;
-        foreach ($branches as $branch) {
-            $brName   = $branch['nombre'] ?? ($branch['name'] ?? '');
-            $rec      = (float)($branch['recuperacion'] ?? 0);
-            $gastos   = (float)($branch['gastos'] ?? 0);
-            $nomina   = $payrollByBranch[strtoupper(trim($brName))] ?? 0.0;
-            $coloc    = (float)($branch['colocacion'] ?? 0);
-            $utilidad = $rec - $coloc - ($gastos + $nomina);
+        $this->colHeaders($sheet, 4, [
+            'A' => 'SUCURSAL', 'B' => 'RECUPERACIÓN', 'C' => 'GASTOS', 'D' => 'NÓMINA',
+            'E' => 'EBITDA ESTIMADO', 'F' => 'CATEGORÍA',
+        ]);
+        $r = 5;
+        foreach ($branches as $i => $b) {
+            $nomina = (float)($b['nomina_total'] ?? 0) + (float)($b['comisiones'] ?? 0) + (float)($b['bonos'] ?? 0)
+                + (float)($b['vacaciones'] ?? 0) + (float)($b['prima_vacacional'] ?? 0)
+                + array_sum((array)($b['nomina_detalle'] ?? []));
+            $rec       = (float)($b['recuperacion_total'] ?? 0);
+            $gastos    = (float)($b['gastos_operativos'] ?? 0);
+            $utilidad  = RadiographyStyleHelper::branchEbitdaEstimate($b);
+            $categoria = RadiographyStyleHelper::ebitdaCategory($utilidad);
+            $colors    = RadiographyStyleHelper::categoryColors($categoria);
 
-            $categoria = match(true) {
-                $utilidad >= 300_000 => 'SENIOR',
-                $utilidad >= 100_000 => 'JUNIOR',
-                default              => 'MANTENIDO',
-            };
-
-            $bgRow = $utilidad >= 0 ? 'FFECFDF5' : 'FFFEF2F2';
-
-            $sheet->setCellValue("A{$r}", $brName);
-            $sheet->setCellValue("B{$r}", $utilidad);
-            $sheet->setCellValue("C{$r}", $categoria);
-            $sheet->getStyle("A{$r}:C{$r}")->applyFromArray([
-                'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $bgRow]],
-                'borders'   => ['bottom' => ['borderStyle' => Border::BORDER_HAIR, 'color' => ['argb' => self::BORDER_LT]]],
-                'alignment' => ['vertical' => Alignment::VERTICAL_CENTER],
+            $sheet->setCellValue("A{$r}", $b['sucursal']);
+            $sheet->setCellValue("B{$r}", $rec);
+            $sheet->setCellValue("C{$r}", $gastos);
+            $sheet->setCellValue("D{$r}", $nomina);
+            $sheet->setCellValue("E{$r}", $utilidad);
+            $sheet->setCellValue("F{$r}", $categoria);
+            $this->dataRow($sheet, "A{$r}:F{$r}", $i % 2 === 0);
+            foreach (['B', 'C', 'D', 'E'] as $col) {
+                RadiographyStyleHelper::applyCurrencyFormat($sheet, "{$col}{$r}");
+            }
+            $sheet->getStyle("F{$r}")->applyFromArray([
+                'font'      => ['bold' => true, 'size' => 9.5, 'color' => ['argb' => $colors['fg']]],
+                'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $colors['bg']]],
+                'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
             ]);
-            $sheet->getStyle("A{$r}")->getFont()->setBold(true)->setSize(9);
-            $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
-            $sheet->getStyle("B{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-            $sheet->getStyle("B{$r}")->getFont()->setSize(9)->getColor()->setARGB($utilidad >= 0 ? 'FF065F46' : 'FFB91C1C');
-            $sheet->getStyle("C{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-            $sheet->getStyle("C{$r}")->getFont()->setBold(true)->setSize(9);
-            $sheet->getRowDimension($r)->setRowHeight(17);
+            $sheet->getRowDimension($r)->setRowHeight(18);
             $r++;
         }
 
-        $this->setColWidths($sheet, ['A' => 28, 'B' => 20, 'C' => 16]);
-        $sheet->setAutoFilter("A2:C2");
-        $sheet->freezePane('A3');
+        $sheet->setCellValue("A{$r}", 'EBITDA estimado = Recuperación − Gastos − Nómina completa estimada por sucursal.');
+        RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:F{$r}");
+        $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(8)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
+
+        $this->setColWidths($sheet, ['A' => 26, 'B' => 18, 'C' => 16, 'D' => 16, 'E' => 18, 'F' => 14]);
+        $sheet->setAutoFilter('A4:F4');
+        $sheet->freezePane('A5');
     }
 
     // ── EBITDA helpers ────────────────────────────────────────────────────────

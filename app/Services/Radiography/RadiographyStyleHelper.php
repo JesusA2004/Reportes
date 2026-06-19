@@ -11,6 +11,9 @@ use PhpOffice\PhpSpreadsheet\Chart\PlotArea;
 use PhpOffice\PhpSpreadsheet\Chart\Title;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
 use PhpOffice\PhpSpreadsheet\Style\Border;
+use PhpOffice\PhpSpreadsheet\Style\Conditional;
+use PhpOffice\PhpSpreadsheet\Style\ConditionalFormatting\ConditionalDataBar;
+use PhpOffice\PhpSpreadsheet\Style\ConditionalFormatting\ConditionalFormatValueObject;
 use PhpOffice\PhpSpreadsheet\Style\Fill;
 use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
@@ -35,8 +38,14 @@ final class RadiographyStyleHelper
     public const FG_DARK_TEXT    = 'FF1F2937';
     public const FG_WHITE        = 'FFFFFFFF';
     public const FG_RED          = 'FFB91C1C';
+    public const FG_AMBER        = 'FF92400E';
+    public const BG_AMBER        = 'FFFEF3C7';
     public const HYPERLINK_BLUE  = 'FF1D4ED8';
     public const BORDER_LT       = 'FFD9E2EC';
+
+    // EBITDA category thresholds — single source of truth shared by PDF and Excel.
+    public const EBITDA_SENIOR_MIN = 300_000.0;
+    public const EBITDA_JUNIOR_MIN = 100_000.0;
 
     public const CURRENCY = '"$"#,##0.00';
     public const PERCENT  = '0.00"%"';
@@ -397,8 +406,9 @@ final class RadiographyStyleHelper
         $chart = new Chart(uniqid('chart_', true), $title, null, $plotArea);
         $chart->setTopLeftPosition($topLeftCell);
         $chart->setBottomRightPosition($bottomRightCell);
-        // Compact value-axis labels ($39,200 instead of $39,200,570.57).
-        $chart->getChartAxisY()->setAxisNumberProperties('"$"#,##0,', true, false);
+        // Full-magnitude axis labels, no thousands-scaling (no "$39,200" standing in for
+        // $39,200,570.57) — only decimals are dropped, which is normal for a chart axis tick.
+        $chart->getChartAxisY()->setAxisNumberProperties('"$"#,##0', true, false);
 
         $sheet->addChart($chart);
     }
@@ -406,5 +416,96 @@ final class RadiographyStyleHelper
     private static function stripAlpha(string $argb): string
     {
         return mb_strlen($argb) === 8 ? mb_substr($argb, 2) : $argb;
+    }
+
+    /**
+     * Applies a native Excel "Data Bar" conditional format to a range — a real,
+     * editable Excel feature (gradient bar painted inside the cell, scaled to
+     * the min/max of the range), not an image or a chart object. Used for the
+     * GLOBAL dashboard instead of native bar charts: PhpSpreadsheet's chart
+     * writer can't produce a modern/flat look (always renders with Office's
+     * default axis/gridlines/border chrome), while data bars look clean and
+     * "dashboard-like" out of the box and can never corrupt the workbook the
+     * way a bad merge or freeze pane can.
+     */
+    /**
+     * @param float|null $min explicit scale minimum (type "num"); null = auto ("min" of the range)
+     * @param float|null $max explicit scale maximum (type "num"); null = auto ("max" of the range).
+     *                        Pass an explicit shared $max across two single-cell ranges to make two
+     *                        differently-colored bars visually comparable (e.g. Recuperación vs Colocación).
+     */
+    public static function addDataBar(
+        Worksheet $sheet,
+        string $range,
+        string $colorArgb,
+        bool $showValue = true,
+        ?float $min = null,
+        ?float $max = null
+    ): void {
+        $dataBar = new ConditionalDataBar();
+        $dataBar->setMinimumConditionalFormatValueObject(
+            $min !== null ? new ConditionalFormatValueObject('num', $min) : new ConditionalFormatValueObject('min')
+        );
+        $dataBar->setMaximumConditionalFormatValueObject(
+            $max !== null ? new ConditionalFormatValueObject('num', $max) : new ConditionalFormatValueObject('max')
+        );
+        $dataBar->setColor(self::stripAlpha($colorArgb));
+        $dataBar->setShowValue($showValue);
+
+        $conditional = new Conditional();
+        $conditional->setConditionType(Conditional::CONDITION_DATABAR);
+        $conditional->setDataBar($dataBar);
+
+        $sheet->getStyle($range)->setConditionalStyles([$conditional]);
+    }
+
+    /**
+     * EBITDA estimado por sucursal — ÚNICA fórmula, compartida por PDF y Excel.
+     * Recuperación − Gastos operativos − Nómina completa estimada (nómina +
+     * comisiones + bonos + vacaciones + prima vacacional + detalle NOI), igual
+     * que BranchRadiographyCalculator reporta cada concepto. No es la utilidad
+     * canónica del negocio (esa resta también colocación, ver GLOBAL sección 8):
+     * es una estimación rápida por sucursal usada únicamente para categorizar.
+     *
+     * @param array<string,mixed> $branch fila de branch_radiography.branches
+     */
+    public static function branchEbitdaEstimate(array $branch): float
+    {
+        $nomina = (float)($branch['nomina_total'] ?? 0)
+            + (float)($branch['comisiones'] ?? 0)
+            + (float)($branch['bonos'] ?? 0)
+            + (float)($branch['vacaciones'] ?? 0)
+            + (float)($branch['prima_vacacional'] ?? 0)
+            + array_sum((array)($branch['nomina_detalle'] ?? []));
+
+        return (float)($branch['recuperacion_total'] ?? 0) - (float)($branch['gastos_operativos'] ?? 0) - $nomina;
+    }
+
+    /**
+     * Categoría de desempeño a partir del EBITDA estimado (ver branchEbitdaEstimate).
+     * Umbrales centralizados en EBITDA_SENIOR_MIN / EBITDA_JUNIOR_MIN.
+     */
+    public static function ebitdaCategory(float $ebitdaEstimado): string
+    {
+        if ($ebitdaEstimado >= self::EBITDA_SENIOR_MIN) {
+            return 'SENIOR';
+        }
+        if ($ebitdaEstimado >= self::EBITDA_JUNIOR_MIN) {
+            return 'JUNIOR';
+        }
+
+        return 'MANTENIDO';
+    }
+
+    /**
+     * @return array{bg:string,fg:string} fill/font ARGB pair for a category badge
+     */
+    public static function categoryColors(string $categoria): array
+    {
+        return match ($categoria) {
+            'SENIOR' => ['bg' => self::BG_POSITIVE, 'fg' => self::FG_STRONG_GREEN],
+            'JUNIOR' => ['bg' => self::BG_AMBER, 'fg' => self::FG_AMBER],
+            default  => ['bg' => self::BG_ALERT_RED, 'fg' => self::FG_RED],
+        };
     }
 }

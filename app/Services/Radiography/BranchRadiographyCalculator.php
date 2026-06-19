@@ -588,12 +588,14 @@ class BranchRadiographyCalculator
 
         // ── Deducciones NOI relevantes para nómina
         // D111 (Subsidio APL) y D137 (Diferencia NF) ajustan nomina_total, no se muestran por separado.
-        // D004 (Préstamo Personal) y D010 (Pensión Alimenticia) se excluyen del total de Capital Humano.
+        // D004 (Préstamo Personal) se muestra como su propia línea (positiva, sumada al total
+        // bruto de Nómina y Capital Humano, igual que D094/D113/D010/D123); el neto por
+        // gestor/empleado es donde realmente se resta — ver NOI_DEDUCTION_LABELS en Excel/PDF/UI.
         $dedRows = DB::table('fact_noi_movements as n')
             ->leftJoin('employee_branch_assignments as eba', 'n.employee_id', '=', 'eba.employee_id')
             ->whereIn('n.period_id', $dataIds)
             ->where('n.concept_type', 'deduccion')
-            ->whereRaw("n.concept REGEXP '^D(094|010|113|123|111|137)'")
+            ->whereRaw("n.concept REGEXP '^D(094|010|113|123|111|137|004)'")
             ->selectRaw("COALESCE(eba.branch_id, -1) AS assigned_branch_id, n.concept, SUM(n.amount) AS total")
             ->groupByRaw("COALESCE(eba.branch_id, -1), n.concept")
             ->get();
@@ -625,7 +627,12 @@ class BranchRadiographyCalculator
                 str_starts_with($concept, 'D010') => 'Pensión Alimenticia',
                 str_starts_with($concept, 'D113') => 'Descuento Servicios Moto',
                 str_starts_with($concept, 'D123') => 'Financiamiento de Motos',
-                default                           => 'Otros descuentos NOI',
+                str_starts_with($concept, 'D004') => 'Préstamo Personal',
+                // Código NOI fuera del whitelist de arriba — no debería ocurrir porque la
+                // query ya filtra por REGEXP, pero si algún día se agrega un código nuevo al
+                // REGEXP sin agregar su línea aquí, lo identificamos por su propio código en
+                // vez de esconderlo bajo una etiqueta genérica "Otros".
+                default                           => "Deducción NOI {$concept}",
             };
 
             if ($branchId === -1) {
@@ -651,7 +658,13 @@ class BranchRadiographyCalculator
             $expRows = DB::table('fact_expenses as e')
                 ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
                 ->whereIn('e.period_id', $dataIds)
-                ->whereIn('e.branch_id', $operativeIds)
+                // Antes restringía a whereIn('e.branch_id', $operativeIds), lo que excluía por
+                // completo (ni siquiera a "unassigned") los gastos de nómina sin sucursal
+                // asignada — se perdía el monto en silencio. Ahora se incluyen también las filas
+                // sin sucursal; el loop de abajo ya las enruta a unassigned correctamente.
+                ->where(function ($q) use ($operativeIds) {
+                    $q->whereIn('e.branch_id', $operativeIds)->orWhereNull('e.branch_id');
+                })
                 ->whereIn('ru.data_source_id', $sourceIds)
                 ->where(function ($q) {
                     $q->whereIn('e.category', ['Gasolina', 'Financiamiento Celular'])
@@ -683,7 +696,11 @@ class BranchRadiographyCalculator
                 }
             }
 
-            // ── Conceptos gastos_lendus_excel (PAGO FINANCIAMIENTO MOTO, COMPRA DE CASCOS):
+            // ── Conceptos gastos_lendus_excel (PAGO FINANCIAMIENTO MOTO, COMPRA DE CASCOS,
+            //    PAGO FINANCIAMIENTO CELULAR): estos 3 son el ÚNICO detalle por sucursal/global
+            //    de este archivo que no es un resumen duplicado de otra fuente — el resto de sus
+            //    filas (NOMINA, IMSS, FINIQUITO, etc.) sí son resúmenes ya cubiertos por NOI o por
+            //    gastos_lendus/gastos_erp y se excluyen a propósito (ver canonicalNominaExpense()).
             //    Con branch_id asignado → van al bucket de su sucursal.
             //    Sin branch_id (NULL) → van al bucket global (unassigned).
             $lendusExcelId = DB::table('data_sources')->where('code', 'gastos_lendus_excel')->value('id');
@@ -692,8 +709,8 @@ class BranchRadiographyCalculator
                     ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
                     ->whereIn('e.period_id', $dataIds)
                     ->where('ru.data_source_id', $lendusExcelId)
-                    ->whereIn('e.category', ['Nómina y Capital Humano', 'Nomina y Capital Humano'])
-                    ->whereIn(DB::raw('UPPER(TRIM(COALESCE(e.concept,\'\')))'), ['PAGO FINANCIAMIENTO MOTO', 'COMPRA DE CASCOS'])
+                    ->whereIn('e.category', ['Nómina y Capital Humano', 'Nomina y Capital Humano', 'Financiamiento Celular'])
+                    ->whereIn(DB::raw('UPPER(TRIM(COALESCE(e.concept,\'\')))'), ['PAGO FINANCIAMIENTO MOTO', 'COMPRA DE CASCOS', 'PAGO FINANCIAMIENTO CELULAR'])
                     ->selectRaw("e.branch_id, UPPER(TRIM(COALESCE(e.concept,''))) as concept, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
                     ->groupBy('e.branch_id', 'e.concept')
                     ->get();
@@ -701,9 +718,10 @@ class BranchRadiographyCalculator
                 foreach ($lendusRows as $row) {
                     $con    = (string) $row->concept;
                     $label  = match (true) {
-                        str_contains($con, 'FINANCIAMIENTO MOTO') => 'Financiamiento de Motos',
-                        str_contains($con, 'CASCO')               => 'Cascos',
-                        default                                   => null,
+                        str_contains($con, 'FINANCIAMIENTO MOTO')    => 'Financiamiento de Motos',
+                        str_contains($con, 'CASCO')                  => 'Cascos',
+                        str_contains($con, 'FINANCIAMIENTO CELULAR') => 'Financiamiento Celular',
+                        default                                       => null,
                     };
                     if ($label === null) continue;
                     $amt = (float) $row->total;
@@ -827,10 +845,17 @@ class BranchRadiographyCalculator
     /**
      * Maps a fact_expenses category + concept to a canonical nómina display label.
      */
+    /**
+     * Maps a raw fact_expenses category/concept (Nómina y Capital Humano) to its canonical
+     * display label. Never falls back to a generic "Otros conceptos nómina" bucket — an
+     * unmapped concept is identified by its own real name (visible in
+     * RadiographyCalculator::AuditNominaMapeoCommand) instead of being hidden under a vague
+     * label, per the rule that every peso must be traceable to its source concept.
+     */
     private function canonicalNominaExpense(string $category, string $concept): string
     {
-        $cat = strtoupper(trim($category));
-        $con = strtoupper(trim($concept));
+        $cat = $this->normalizeConceptText($category);
+        $con = $this->normalizeConceptText($concept);
 
         if ($cat === 'GASOLINA') {
             return 'Gasolina';
@@ -843,14 +868,44 @@ class BranchRadiographyCalculator
             str_contains($con, 'CASCO')                                                             => 'Cascos',
             str_contains($con, 'MEDICO') || str_contains($con, 'MÉDICO')                           => 'Gastos médicos',
             str_contains($con, 'FINIQUITO')                                                         => 'Finiquito',
+            str_contains($con, 'FORMATERIA') || str_contains($con, 'FORMATERÍA')                   => 'Formatería',
             str_contains($con, 'FINANCIAMIENTO MOTO') || str_contains($con, 'MOTO')                => 'Financiamiento de Motos',
             str_contains($con, 'UNIFORME')                                                          => 'Descuento de uniformes',
             str_contains($con, 'INFONAVIT')                                                         => 'Descuentos Infonavit',
             str_contains($con, 'PENSION') || str_contains($con, 'PENSIÓN')                         => 'Pensión Alimenticia',
             str_contains($con, 'MR LANA') || str_contains($con, 'TIENDA')                          => 'Descuentos Tienda Mr Lana',
             str_contains($con, 'PRESTAMO Z') || str_contains($con, 'PRÉSTAMO Z')                   => 'Anticipo de nómina',
-            default                                                                                 => 'Otros conceptos nómina',
+            default => $this->unmappedNominaLabel($category, $concept),
         };
+    }
+
+    /**
+     * Collapses any whitespace variant (regular space, non-breaking space \u{00A0}, tabs) to a
+     * single space before matching. Source files (Lendus exports) sometimes encode the spaces
+     * between words as non-breaking spaces, which silently breaks str_contains() matching and
+     * was the root cause of legitimate concepts (e.g. "PAGO·PRESTAMO·Z" with NBSPs) falling into
+     * an unmapped/"Otros" bucket instead of their real label.
+     */
+    private function normalizeConceptText(string $text): string
+    {
+        return trim(preg_replace('/[\s\x{00A0}]+/u', ' ', strtoupper($text)) ?? '');
+    }
+
+    /**
+     * An expense concept under "Nómina y Capital Humano" that doesn't match any known label.
+     * Logged for audit (see reportes:audit-nomina-mapeo) and shown in the report under its own
+     * real concept name — never silently merged into a generic "Otros" line.
+     */
+    private function unmappedNominaLabel(string $category, string $concept): string
+    {
+        \Illuminate\Support\Facades\Log::warning('Concepto de nómina sin mapeo canónico — revisar canonicalNominaExpense().', [
+            'category' => $category,
+            'concept'  => $concept,
+        ]);
+
+        $clean = trim($concept) !== '' ? trim($concept) : trim($category);
+
+        return 'Sin clasificar: ' . $clean;
     }
 
     /**

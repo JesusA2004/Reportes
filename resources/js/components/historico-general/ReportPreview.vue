@@ -41,9 +41,9 @@ watch(
 // ── Labels ───────────────────────────────────────────────────────────────────
 const scopeLabel = computed(() => {
     const s = props.config?.scope
-    if (s === 'branch')   return filteredData.value?.label ? `Sucursal: ${filteredData.value.label}` : 'Por sucursal'
-    if (s === 'employee') return filteredData.value?.label ? `Gestor: ${filteredData.value.label}`   : 'Por gestor'
-    return 'General'
+    if (s === 'branch')   return filteredData.value?.label ? `Sucursal: ${filteredData.value.label}` : null
+    if (s === 'employee') return filteredData.value?.label ? `Gestor: ${filteredData.value.label}`   : null
+    return null
 })
 
 // ── Metric cards ─────────────────────────────────────────────────────────────
@@ -108,13 +108,10 @@ const previewUrl = computed(() => {
             <div class="overflow-hidden rounded-2xl bg-slate-950 p-5 text-white">
                 <p class="text-xs font-black uppercase tracking-widest text-indigo-200">Radiografía generada</p>
                 <h3 class="mt-1 text-xl font-black">{{ period.label }}</h3>
-                <p class="mt-1 text-xs text-slate-400">
-                    Tipo: {{ config?.report_type === 'simple' ? 'Radiografía simple' : 'Comparativo' }}
-                    &nbsp;·&nbsp;
-                    Alcance: {{ scopeLabel }}
-                    <span v-if="period.preview_summary?.generated_at">
-                        &nbsp;·&nbsp; {{ period.preview_summary.generated_at }}
-                    </span>
+                <p v-if="scopeLabel || period.preview_summary?.generated_at" class="mt-1 text-xs text-slate-400">
+                    <span v-if="scopeLabel">{{ scopeLabel }}</span>
+                    <span v-if="scopeLabel && period.preview_summary?.generated_at">&nbsp;·&nbsp;</span>
+                    <span v-if="period.preview_summary?.generated_at">{{ period.preview_summary.generated_at }}</span>
                 </p>
             </div>
 

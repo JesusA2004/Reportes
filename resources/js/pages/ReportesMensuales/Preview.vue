@@ -1,7 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ArrowLeft, AlertTriangle, FileSpreadsheet, FileText, Search, ChevronDown, ChevronUp, Download } from 'lucide-vue-next'
+import { router } from '@inertiajs/vue3'
+import {
+    ArrowLeft, AlertTriangle, FileSpreadsheet, FileText, Search, ChevronDown, ChevronUp, Download,
+    HandCoins, TrendingUp, Landmark, Percent, Receipt, Wallet, Gauge, Building2, Banknote, CheckCircle2,
+} from 'lucide-vue-next'
 import AppLayout from '@/layouts/AppLayout.vue'
+import KpiCard from '@/components/radiography/KpiCard.vue'
+import ChartCard from '@/components/radiography/ChartCard.vue'
+import EbitdaBadge from '@/components/radiography/EbitdaBadge.vue'
+import EmptyState from '@/components/radiography/EmptyState.vue'
+import FilterBar from '@/components/radiography/FilterBar.vue'
+import { money, percent as fmtPercent, num } from '@/lib/format'
+import { chartColors, horizontalBarOptions, columnOptions, stackedBarOptions, donutOptions } from '@/lib/chart-theme'
 
 defineOptions({ layout: AppLayout })
 
@@ -19,9 +30,10 @@ const props = defineProps<{
     filteredExcelBaseUrl: string
     filteredPdfBaseUrl: string
     filteredDataUrl: string
+    updateSaldoInicialUrl: string
 }>()
 
-// ── Filtered export config ───────────────────────────────────────────────────
+// ── Filtered export config (genera Excel/PDF por sucursal, gestor o comparativo) ──
 const showFilteredPanel = ref(false)
 const filteredScope      = ref<'general' | 'branch' | 'employee'>('general')
 const filteredType       = ref<'simple' | 'month_vs_month' | 'bimester_vs_bimester' | 'quarter_vs_quarter'>('simple')
@@ -136,7 +148,6 @@ async function fetchFilteredPreview() {
 
 watch([filteredScope, filteredBranchId, filteredEmployeeId], fetchFilteredPreview)
 
-// Pre-populate filter from URL query params (e.g. from "Ver reporte completo" with scope)
 onMounted(() => {
     const params = new URLSearchParams(window.location.search)
     const scope  = params.get('scope')
@@ -157,189 +168,464 @@ onMounted(() => {
     }
 })
 
-type TabKey = 'resumen' | 'radiografia' | 'productos' | 'sucursales' | 'empleados' | 'cartera' | 'gastos'
+// ════════════════════════════════════════════════════════════════════════════
+// DASHBOARD DATA LAYER — todo derivado del snapshot ya cargado, sin recálculos
+// distintos a Excel/PDF. EBITDA usa los mismos umbrales que
+// RadiographyStyleHelper::ebitdaCategory() (300,000 / 100,000).
+// ════════════════════════════════════════════════════════════════════════════
+type TabKey = 'resumen' | 'sucursales' | 'ingresos' | 'gastos' | 'nomina' | 'mora' | 'productos' | 'prestamos' | 'categoria' | 'gestores'
 const activeTab = ref<TabKey>('resumen')
 
-const snap    = computed(() => props.snapshot)
-const sum     = computed(() => snap.value?.summary ?? {})
-const pay     = computed(() => snap.value?.sections?.payroll ?? {})
-const charts  = computed(() => snap.value?.charts ?? {})
+const snap   = computed(() => props.snapshot)
+const sum    = computed(() => snap.value?.summary ?? {})
+const charts = computed(() => snap.value?.charts ?? {})
 
-// Gastos: nuevo formato expandido
-const gastos  = computed(() => snap.value?.sections?.expenses_detail ?? {})
-const gastosTotal      = computed(() => gastos.value?.total ?? sum.value?.expenses_total ?? 0)
-const gastosByCategory = computed(() => gastos.value?.byCategory ?? [])
-const gastosByConcept  = computed(() => gastos.value?.byConcept ?? [])
-const gastosByBranch   = computed(() => gastos.value?.byBranch ?? [])
-const gastosByEmployee = computed(() => gastos.value?.byEmployee ?? [])
-const gastosBySource   = computed(() => gastos.value?.bySource ?? [])
-
-// Branch radiography — calculator-sourced, same source as Excel
 const branchRadiography = computed(() => snap.value?.branch_radiography ?? null)
-const brGlobal = computed(() => branchRadiography.value?.global ?? null)
+const brGlobal  = computed(() => branchRadiography.value?.global ?? null)
+const brRaw     = computed(() => (branchRadiography.value?.branches ?? []) as any[])
 
-// ── Sección 2: Ingresos ──────────────────────────────────────────────────────
+function ebitdaCategoryOf(value: number): 'SENIOR' | 'JUNIOR' | 'MANTENIDO' {
+    if (value >= 300_000) return 'SENIOR'
+    if (value >= 100_000) return 'JUNIOR'
+    return 'MANTENIDO'
+}
+
+// ── Ingresos / Cobranza ───────────────────────────────────────────────────────
 const ingrCapital   = computed(() => Number(brGlobal.value?.capital_recuperado)  || 0)
 const ingrInteres   = computed(() => Number(brGlobal.value?.interes_recuperado)  || 0)
 const ingrImpuesto  = computed(() => Number(brGlobal.value?.impuesto_recuperado) || 0)
 const ingrMultas    = computed(() => Number(brGlobal.value?.charges)             || 0)
 const ingrCargosIni = computed(() => Number(brGlobal.value?.cargos_inicio)       || 0)
 const ingrComAper   = computed(() => Number(brGlobal.value?.comision_apertura)   || 0)
-const ingrTotal     = computed(() => ingrCapital.value + ingrInteres.value + ingrImpuesto.value + ingrMultas.value + ingrCargosIni.value + ingrComAper.value)
 
-// ── Sección 4: Nómina ────────────────────────────────────────────────────────
+// ── Nómina ─────────────────────────────────────────────────────────────────────
 const nomNomina   = computed(() => Number(brGlobal.value?.nomina_total)    || 0)
 const nomComis    = computed(() => Number(brGlobal.value?.comisiones)      || 0)
 const nomVac      = computed(() => Number(brGlobal.value?.vacaciones)      || 0)
 const nomPrimaVac = computed(() => Number(brGlobal.value?.prima_vacacional)|| 0)
 const nomBonos    = computed(() => Number(brGlobal.value?.bonos)           || 0)
 
-const NOM_DETALLE_ORDER = ['IMSS','Descuentos Infonavit','Finiquito','Gastos médicos','Gasolina','Financiamiento de Motos','Financiamiento de Motos (desc.)','Descuento Servicios Moto','Financiamiento Celular','Cascos','Descuento de uniformes','Pensión Alimenticia','Préstamo Personal','Anticipo de nómina','Otros conceptos nómina','Otros descuentos NOI']
+const NOI_DEDUCTION_LABELS = new Set(['Descuentos Infonavit', 'Pensión Alimenticia', 'Descuento Servicios Moto',
+    'Financiamiento de Motos (desc.)', 'Préstamo Personal', 'Subsidio para el Empleo APL',
+    'Otros descuentos NOI', 'Descuento de uniformes'])
 
 const nomDetalle = computed<{ label: string; value: number }[]>(() => {
     const det = brGlobal.value?.nomina_detalle as Record<string, number> | undefined
     if (!det) return []
-    const rows: { label: string; value: number }[] = []
-    const seen = new Set<string>()
-    for (const label of NOM_DETALLE_ORDER) {
-        const v = Number(det[label]) || 0
-        if (v > 0) { rows.push({ label, value: v }); seen.add(label) }
+    return Object.entries(det).filter(([, v]) => Number(v) > 0).map(([label, v]) => ({ label, value: Number(v) }))
+})
+const nomTotal = computed(() => nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value + nomDetalle.value.reduce((s, r) => s + r.value, 0))
+const nomDescuentosNOI = computed(() => nomDetalle.value.filter(r => NOI_DEDUCTION_LABELS.has(r.label)).reduce((s, r) => s + r.value, 0))
+const nomNeto = computed(() => nomTotal.value - nomDescuentosNOI.value)
+
+// ── Préstamos intersucursales ─────────────────────────────────────────────────
+const fondeoGlobal = computed(() => Number(brGlobal.value?.prestamos_fondea) || 0)
+
+// ── Cartera / mora global ──────────────────────────────────────────────────────
+const recGlobal     = computed(() => Number(brGlobal.value?.recuperacion_total) || 0)
+const colGlobal     = computed(() => Number(brGlobal.value?.colocacion)         || 0)
+const carteraGlobal = computed(() => Number(brGlobal.value?.valor_cartera)      || 0)
+const excGlobal     = computed(() => Number(brGlobal.value?.excedentes)         || 0)
+const mora0_30g    = computed(() => Number(brGlobal.value?.mora_0_30)     || 0)
+const mora31_60g   = computed(() => Number(brGlobal.value?.mora_31_60)    || 0)
+const mora61_90g   = computed(() => Number(brGlobal.value?.mora_61_90)    || 0)
+const mora91_120g  = computed(() => Number(brGlobal.value?.mora_91_120)   || 0)
+const mora120plusG = computed(() => Number(brGlobal.value?.mora_120_plus) || 0)
+const moraTotalGlobal = computed(() => mora0_30g.value + mora31_60g.value + mora61_90g.value + mora91_120g.value + mora120plusG.value)
+
+const moraBucketsGlobal = computed(() => [
+    { label: 'Mora 1-30',   value: mora0_30g.value },
+    { label: 'Mora 31-60',  value: mora31_60g.value },
+    { label: 'Mora 61-90',  value: mora61_90g.value },
+    { label: 'Mora 91-120', value: mora91_120g.value },
+    { label: 'Mora 120+',   value: mora120plusG.value },
+])
+
+// ── Gastos ─────────────────────────────────────────────────────────────────────
+const brGlobalGastos = computed(() => {
+    const det = brGlobal.value?.gastos_detalle as Record<string, number> | undefined
+    if (!det) return []
+    return Object.entries(det).map(([concepto, total]) => ({ concepto, total: Number(total) })).filter(c => c.total > 0).sort((a, b) => b.total - a.total)
+})
+const brGlobalGastosTotal = computed(() => Number(brGlobal.value?.gastos_operativos) || 0)
+
+// Desglose bruto (fuente legacy fact_expenses) — complementa la vista canónica
+const gastosDetail     = computed(() => snap.value?.sections?.expenses_detail ?? {})
+const gastosByCategory = computed(() => gastosDetail.value?.byCategory ?? [])
+const gastosByConcept  = computed(() => gastosDetail.value?.byConcept ?? [])
+const gastosByEmployee = computed(() => gastosDetail.value?.byEmployee ?? [])
+const gastosBySource   = computed(() => gastosDetail.value?.bySource ?? [])
+
+// ── EBITDA global ──────────────────────────────────────────────────────────────
+// EBITDA = Saldo inicial en caja + Ingresos totales (Recuperación/Cobranza) − Colocación
+// − Gastos totales (operativos + Nómina y Capital Humano). Misma fórmula que Excel/PDF
+// (RadiographyWorkbookBuilder::buildGlobalSheet / radiography-pdf.blade.php).
+const saldoInicialCaja  = computed(() => Number(snap.value?.saldo_inicial_caja) || 0)
+const saldoFinalCaja    = computed(() => snap.value?.saldo_final_caja !== null && snap.value?.saldo_final_caja !== undefined ? Number(snap.value.saldo_final_caja) : null)
+const gastosEbitdaTotal = computed(() => brGlobalGastosTotal.value + nomNeto.value)
+const utilidadGlobal    = computed(() => saldoInicialCaja.value + recGlobal.value - colGlobal.value - gastosEbitdaTotal.value)
+// Diferencia = EBITDA − Envío de utilidad a corporativo. Puede ser negativa — no se fuerza a 0;
+// ese es justamente el saldo a llevar como saldo inicial del siguiente periodo.
+const diferencia        = computed(() => utilidadGlobal.value - excGlobal.value)
+const enConciliacion    = computed(() => brGlobal.value === null)
+
+// ── Captura de saldo inicial en caja (único insumo que no viene de ninguna fuente importada) ──
+const saldoInicialEditing = ref(false)
+const saldoInicialInput   = ref('')
+const saldoInicialSaving  = ref(false)
+
+function startEditSaldoInicial() {
+    saldoInicialInput.value = saldoInicialCaja.value ? String(saldoInicialCaja.value) : ''
+    saldoInicialEditing.value = true
+}
+
+function saveSaldoInicial() {
+    const value = Number(saldoInicialInput.value)
+    if (Number.isNaN(value)) return
+    saldoInicialSaving.value = true
+    router.post(props.updateSaldoInicialUrl, { saldo_inicial_caja: value }, {
+        preserveScroll: true,
+        onFinish: () => { saldoInicialSaving.value = false; saldoInicialEditing.value = false },
+    })
+}
+
+// ── Sucursales — fuente canónica única (branch_radiography.branches) ─────────
+// nominaFull replica exactamente RadiographyStyleHelper::branchEbitdaEstimate():
+// nomina_total + comisiones + bonos + vacaciones + prima_vacacional + detalle.
+// Así el EBITDA/categoría por sucursal coincide siempre con Excel y PDF.
+const branchesFull = computed(() => {
+    return brRaw.value.map((b: any) => {
+        const moraSum = (Number(b.mora_0_30) || 0) + (Number(b.mora_31_60) || 0) + (Number(b.mora_61_90) || 0) + (Number(b.mora_91_120) || 0) + (Number(b.mora_120_plus) || 0)
+        const cartera = Number(b.valor_cartera) || 0
+        const nominaFull = (Number(b.nomina_total) || 0) + (Number(b.comisiones) || 0) + (Number(b.bonos) || 0)
+            + (Number(b.vacaciones) || 0) + (Number(b.prima_vacacional) || 0)
+            + Object.values((b.nomina_detalle ?? {}) as Record<string, number>).reduce((s: number, v: any) => s + (Number(v) || 0), 0)
+        const recuperacion = Number(b.recuperacion_total) || 0
+        const gastos = Number(b.gastos_operativos) || 0
+        const ebitda = recuperacion - gastos - nominaFull
+        return {
+            nombre: b.sucursal,
+            recuperacion,
+            colocacion: Number(b.colocacion) || 0,
+            cartera,
+            vencida: moraSum,
+            mora: cartera > 0 ? (moraSum / cartera) * 100 : 0,
+            gastos,
+            nomina: nominaFull,
+            ebitda,
+            categoria: ebitdaCategoryOf(ebitda),
+            mora_0_30: Number(b.mora_0_30) || 0,
+            mora_31_60: Number(b.mora_31_60) || 0,
+            mora_61_90: Number(b.mora_61_90) || 0,
+            mora_91_120: Number(b.mora_91_120) || 0,
+            mora_120_plus: Number(b.mora_120_plus) || 0,
+        }
+    }).sort((a, b) => a.nombre.localeCompare(b.nombre))
+})
+
+const categoriaCounts = computed(() => {
+    const counts: Record<string, number> = { SENIOR: 0, JUNIOR: 0, MANTENIDO: 0 }
+    for (const b of branchesFull.value) counts[b.categoria] = (counts[b.categoria] ?? 0) + 1
+    return counts
+})
+
+// ── Empleados / Gestores fusionados ───────────────────────────────────────────
+const empGest = computed(() => snap.value?.sections?.employees_gestores ?? [])
+
+// ── Préstamos activos — agregado por sucursal (misma lógica que Excel/PDF) ───
+const activeLoansByBranch = computed(() => {
+    const rows = (snap.value?.sections?.active_loans ?? []) as any[]
+    const map = new Map<string, { sucursal: string; count: number; saldo: number; vencido: number }>()
+    for (const al of rows) {
+        const key = al.sucursal ?? 'Sin sucursal'
+        if (!map.has(key)) map.set(key, { sucursal: key, count: 0, saldo: 0, vencido: 0 })
+        const entry = map.get(key)!
+        entry.count++
+        entry.saldo += Number(al.saldo_activo) || 0
+        entry.vencido += Number(al.vencido) || 0
     }
-    for (const [label, raw] of Object.entries(det)) {
-        if (!seen.has(label) && Number(raw) > 0) rows.push({ label, value: Number(raw) })
-    }
+    return Array.from(map.values())
+        .map(e => ({ ...e, pct: e.saldo > 0 ? (e.vencido / e.saldo) * 100 : 0 }))
+        .sort((a, b) => a.sucursal.localeCompare(b.sucursal))
+})
+const activeLoansTotals = computed(() => {
+    const rows = activeLoansByBranch.value
+    const count = rows.reduce((s, r) => s + r.count, 0)
+    const saldo = rows.reduce((s, r) => s + r.saldo, 0)
+    const vencido = rows.reduce((s, r) => s + r.vencido, 0)
+    return { count, saldo, vencido, pct: saldo > 0 ? (vencido / saldo) * 100 : 0 }
+})
+
+// ── Productos ──────────────────────────────────────────────────────────────────
+const productosRows = computed(() => snap.value?.sections?.products ?? [])
+
+// ════════════════════════════════════════════════════════════════════════════
+// FILTROS DE VISTA EN VIVO — sucursal / producto / mora / gestor / categoría
+// ════════════════════════════════════════════════════════════════════════════
+const vfBranch    = ref('')
+const vfProduct   = ref('')
+const vfBucket    = ref('')
+const vfGestor    = ref('')
+const vfCategoria = ref('')
+
+const vfBranchOptions    = computed(() => branchesFull.value.map(b => b.nombre))
+const vfProductOptions   = computed(() => productosRows.value.map((p: any) => p.producto))
+const vfBucketOptions    = computed(() => moraBucketsGlobal.value.map(b => b.label))
+const vfGestorOptions    = computed(() => (empGest.value as any[]).map(e => e.name).sort())
+const vfCategoriaOptions = ['SENIOR', 'JUNIOR', 'MANTENIDO']
+
+const vfBranchRow  = computed(() => vfBranch.value ? branchesFull.value.find(b => b.nombre === vfBranch.value) ?? null : null)
+const vfGestorRow  = computed(() => vfGestor.value ? (empGest.value as any[]).find(e => e.name === vfGestor.value) ?? null : null)
+const vfProductRow = computed(() => vfProduct.value ? productosRows.value.find((p: any) => p.producto === vfProduct.value) ?? null : null)
+
+const MORA_BUCKET_FIELD: Record<string, string> = {
+    'Mora 1-30': 'mora_0_30', 'Mora 31-60': 'mora_31_60', 'Mora 61-90': 'mora_61_90',
+    'Mora 91-120': 'mora_91_120', 'Mora 120+': 'mora_120_plus',
+}
+const vfBucketValue = computed<number | null>(() => {
+    if (!vfBucket.value) return null
+    const field = MORA_BUCKET_FIELD[vfBucket.value]
+    if (!field) return null
+    const source = vfBranchRow.value ?? { [field]: (moraBucketsGlobal.value.find(b => b.label === vfBucket.value)?.value ?? 0) }
+    return Number((source as any)[field]) || 0
+})
+
+const vfHasFilters = computed(() => !!(vfBranch.value || vfProduct.value || vfBucket.value || vfGestor.value || vfCategoria.value))
+function vfClearAll() {
+    vfBranch.value = ''; vfProduct.value = ''; vfBucket.value = ''; vfGestor.value = ''; vfCategoria.value = ''
+}
+
+// Sucursales visibles tras filtro de categoría (afecta tablas/gráficas por sucursal)
+const branchesFiltered = computed(() => {
+    let rows = branchesFull.value
+    if (vfCategoria.value) rows = rows.filter(b => b.categoria === vfCategoria.value)
     return rows
 })
 
-// All items summed (for display in section 4)
-const nomTotal = computed(() => {
-    const base = nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value
-    return base + nomDetalle.value.reduce((s, r) => s + r.value, 0)
+// ── KPIs principales (recalculados con el filtro de sucursal activo) ─────────
+const kpiRec     = computed(() => vfBranchRow.value ? vfBranchRow.value.recuperacion : recGlobal.value)
+const kpiCol     = computed(() => vfBranchRow.value ? vfBranchRow.value.colocacion   : colGlobal.value)
+const kpiCartera = computed(() => vfBranchRow.value ? vfBranchRow.value.cartera      : carteraGlobal.value)
+const kpiMora = computed(() => {
+    if (vfBucketValue.value !== null) return vfBucketValue.value
+    if (vfBranchRow.value) return vfBranchRow.value.vencida
+    return moraTotalGlobal.value
+})
+const kpiMoraPct = computed(() => {
+    if (vfBucketValue.value !== null) return kpiCartera.value > 0 ? (vfBucketValue.value / kpiCartera.value) * 100 : 0
+    if (vfBranchRow.value) return vfBranchRow.value.mora
+    return kpiCartera.value > 0 ? (kpiMora.value / kpiCartera.value) * 100 : 0
+})
+const kpiGastos = computed(() => vfBranchRow.value ? vfBranchRow.value.gastos : brGlobalGastosTotal.value)
+const kpiNomina = computed(() => vfBranchRow.value ? vfBranchRow.value.nomina : nomTotal.value)
+const kpiUtil = computed(() => vfBranchRow.value ? vfBranchRow.value.ebitda : (brGlobal.value ? utilidadGlobal.value : 0))
+
+const kpiMoraLabel = computed(() => vfBucket.value ? `Mora · ${vfBucket.value}` : 'Mora total')
+const kpiUtilLabel = computed(() => vfBranchRow.value ? 'EBITDA estimado' : 'EBITDA')
+const vfActiveBadge = computed(() => vfBranchRow.value ? `Vista filtrada · ${vfBranch.value}` : null)
+
+// ── Alertas (Resumen) ─────────────────────────────────────────────────────────
+const alertas = computed(() => {
+    const list: { text: string; tone: 'red' | 'amber' }[] = []
+    if (kpiMoraPct.value > 25) list.push({ text: `Índice de mora alto: ${fmtPercent(kpiMoraPct.value)} de la cartera.`, tone: 'red' })
+    if (kpiUtil.value < 0) list.push({ text: `EBITDA negativo: ${money(kpiUtil.value)}.`, tone: 'red' })
+    const mantenidos = branchesFull.value.filter(b => b.categoria === 'MANTENIDO')
+    if (mantenidos.length > 0) list.push({ text: `${mantenidos.length} sucursal(es) en categoría MANTENIDO: ${mantenidos.map(b => b.nombre).join(', ')}.`, tone: 'amber' })
+    return list
 })
 
-// Only Préstamo Personal and Subsidio APL are excluded from nomNeto (shown separately)
-const NOMINA_EXCLUDED_LABELS = new Set(['Préstamo Personal', 'Subsidio para el Empleo APL'])
-// nomNeto = todas las percepciones + todos los ítems de detalle, excepto los dos excluidos
-const nomNeto = computed(() => {
-    const percep  = nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value
-    const detalle = nomDetalle.value.filter(r => !NOMINA_EXCLUDED_LABELS.has(r.label)).reduce((s, r) => s + r.value, 0)
-    return percep + detalle
-})
-// Ítems excluidos del total (Préstamo Personal + Subsidio APL) — mostrados aparte
-const nomDescuentosNOI = computed(() =>
-    nomDetalle.value.filter(r => NOMINA_EXCLUDED_LABELS.has(r.label)).reduce((s, r) => s + r.value, 0)
-)
-
-// ── Sección 5: Préstamos intersucursales ─────────────────────────────────────
-const fondeoGlobal = computed(() => Number(brGlobal.value?.prestamos_fondea) || 0)
-
-// ── Sección 7: Análisis ──────────────────────────────────────────────────────
-const recGlobal   = computed(() => Number(brGlobal.value?.recuperacion_total) || 0)
-const colGlobal   = computed(() => Number(brGlobal.value?.colocacion)         || 0)
-const carteraGlobal = computed(() => Number(brGlobal.value?.valor_cartera)    || 0)
-const excGlobal   = computed(() => Number(brGlobal.value?.excedentes)         || 0)
-const mora0_30g   = computed(() => Number(brGlobal.value?.mora_0_30)          || 0)
-const mora31_60g  = computed(() => Number(brGlobal.value?.mora_31_60)         || 0)
-const mora61_90g  = computed(() => Number(brGlobal.value?.mora_61_90)         || 0)
-const mora91_120g = computed(() => Number(brGlobal.value?.mora_91_120)        || 0)
-
-const mora120plusG  = computed(() => Number(brGlobal.value?.mora_120_plus)       || 0)
-const moraTotalGlobal = computed(() => mora0_30g.value + mora31_60g.value + mora61_90g.value + mora91_120g.value + mora120plusG.value)
-
-// ── Sección 8: Utilidad = Saldo inicial + Ingresos − Otorgamientos − Gastos Totales ───
-// Gastos Totales = gastosOp + nómina neta
-const saldoInicialCaja     = computed(() => Number(snap.value?.saldo_inicial_caja) || 0)
-const gastosEbitdaTotal    = computed(() => brGlobalGastosTotal.value + nomNeto.value)
-const utilidadGlobal       = computed(() => saldoInicialCaja.value + ingrTotal.value - colGlobal.value - gastosEbitdaTotal.value)
-// Diferencia puede ser negativa — no forzar a 0
-const diferencia           = computed(() => utilidadGlobal.value - excGlobal.value)
-// Ya no hay concepto de "inconsistencia" — la diferencia puede ser negativa
-const ebitdaInconsistencia = computed(() => false)
-// Conciliación solo si no hay datos (brGlobal null), no por utilidad negativa
-const enConciliacion       = computed(() => brGlobal.value === null)
-
-// ── KPI primario (branch_radiography → fallback summary) ─────────────────────
-const kpiRec     = computed(() => brGlobal.value ? recGlobal.value     : Number(snap.value?.summary?.recovery_total ?? 0))
-const kpiCol     = computed(() => brGlobal.value ? colGlobal.value     : Number(snap.value?.summary?.placement_total ?? 0))
-const kpiCartera = computed(() => brGlobal.value ? carteraGlobal.value : Number(snap.value?.summary?.portfolio_total ?? 0))
-const kpiMora    = computed(() => brGlobal.value ? moraTotalGlobal.value : Number(snap.value?.summary?.overdue_portfolio ?? 0))
-const kpiMoraPct = computed(() => kpiCartera.value > 0 ? kpiMora.value / kpiCartera.value * 100 : Number(snap.value?.summary?.mora_index ?? 0))
-const kpiGastos  = computed(() => brGlobal.value ? brGlobalGastosTotal.value : Number(snap.value?.summary?.expenses_total ?? 0))
-const kpiNomina  = computed(() => nomTotal.value || Number(snap.value?.summary?.net_payroll ?? 0))
-const kpiUtil    = computed(() => brGlobal.value ? utilidadGlobal.value : 0)
-const kpiEmp     = computed(() => Number(snap.value?.summary?.employees_count ?? 0))
-
-const sucursalesRows = computed(() => {
-    const branches = branchRadiography.value?.branches
-    if (branches?.length) {
-        return (branches as any[]).map(b => {
-            const moraSum = (Number(b.mora_0_30)||0) + (Number(b.mora_31_60)||0) + (Number(b.mora_61_90)||0) + (Number(b.mora_91_120)||0) + (Number(b.mora_120_plus)||0)
-            const cartVal = Number(b.valor_cartera) || 0
-            return {
-                nombre: b.sucursal,
-                recuperacion: b.recuperacion_total,
-                colocacion: b.colocacion,
-                cartera: cartVal,
-                vencida: moraSum,
-                mora: cartVal > 0 ? moraSum / cartVal * 100 : 0,
-                gastos: b.gastos_operativos,
-                nomina: (Number(b.nomina_total)||0) + (Number(b.comisiones)||0) + (Number(b.bonos)||0),
-            }
-        })
-    }
-    return (snap.value?.sections?.branches ?? []) as any[]
-})
-
-const brGlobalGastos = computed(() => {
-    const det = branchRadiography.value?.global?.gastos_detalle as Record<string, number> | undefined
-    if (!det) return []
-    return Object.entries(det)
-        .map(([concepto, total]) => ({ concepto, total: Number(total) }))
-        .filter(c => c.total > 0)
-        .sort((a, b) => b.total - a.total)
-})
-const brGlobalGastosTotal = computed(() => Number(branchRadiography.value?.global?.gastos_operativos) || 0)
-
-// Empleados/Gestores fusionados
-const empGest = computed(() => snap.value?.sections?.employees_gestores ?? [])
-
-// Filtros empleados
+// ── Filtros de tabla Empleados / Gestores ─────────────────────────────────────
 const searchEmp     = ref('')
 const filterBranch  = ref('')
 const branchOptions = computed(() => props.branches.map(b => b.name).sort())
 const filteredEmp = computed(() => {
-    let rows = empGest.value
+    let rows = empGest.value as any[]
     if (searchEmp.value.trim()) {
         const q = searchEmp.value.trim().toLowerCase()
-        rows = rows.filter((r: any) =>
-            (r.name ?? '').toLowerCase().includes(q) ||
-            (r.branch ?? '').toLowerCase().includes(q)
-        )
+        rows = rows.filter((r: any) => (r.name ?? '').toLowerCase().includes(q) || (r.branch ?? '').toLowerCase().includes(q))
     }
-    if (filterBranch.value) {
-        rows = rows.filter((r: any) => r.branch === filterBranch.value)
-    }
+    if (filterBranch.value) rows = rows.filter((r: any) => r.branch === filterBranch.value)
+    if (vfGestor.value) rows = rows.filter((r: any) => r.name === vfGestor.value)
     return rows
 })
 const showAllEmp = ref(false)
 const empVisible = computed(() => showAllEmp.value ? filteredEmp.value : filteredEmp.value.slice(0, 15))
 
-const money = (v: number) =>
-    new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(Number(v || 0))
-const moneyFull = (v: number) =>
-    new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(Number(v || 0))
-const pct  = (v: number) => Number(v || 0).toFixed(2) + '%'
-const num  = (v: number) => new Intl.NumberFormat('es-MX').format(Number(v || 0))
+const topGestoresColocacion = computed(() => [...(empGest.value as any[])].filter(e => (e.colocacion ?? 0) > 0).sort((a, b) => b.colocacion - a.colocacion).slice(0, 10))
 
-const tabs: { key: TabKey; label: string; badge?: string }[] = [
-    { key: 'resumen',      label: 'Resumen' },
-    { key: 'radiografia',  label: 'Radiografía' },
-    { key: 'productos',    label: 'Productos' },
-    { key: 'sucursales',   label: 'Sucursales' },
-    { key: 'empleados',    label: 'Empleados / Gestores' },
-    { key: 'cartera',      label: 'Cartera y mora' },
-    { key: 'gastos',       label: 'Gastos' },
+// ── Gastos: tabla jerárquica (sucursal padre + conceptos hijos) ──────────────
+const gastosSearch = ref('')
+const gastosTreeAll = computed(() => {
+    return branchesFull.value.map(b => {
+        const raw = brRaw.value.find((r: any) => r.sucursal === b.nombre)
+        const det = (raw?.gastos_detalle ?? {}) as Record<string, number>
+        const conceptos = Object.entries(det).filter(([, v]) => Number(v) > 0).map(([concepto, total]) => ({ concepto, total: Number(total) })).sort((a, b) => b.total - a.total)
+        return { sucursal: b.nombre, total: b.gastos, conceptos }
+    }).filter(g => g.total > 0)
+})
+const gastosTree = computed(() => {
+    const q = gastosSearch.value.trim().toLowerCase()
+    if (!q) return gastosTreeAll.value
+    return gastosTreeAll.value
+        .map(g => ({ ...g, conceptos: g.conceptos.filter(c => c.concepto.toLowerCase().includes(q)) }))
+        .filter(g => g.sucursal.toLowerCase().includes(q) || g.conceptos.length > 0)
+})
+const expandedGastosBranch = ref<string | null>(null)
+
+// ── Nómina: tabla jerárquica (sucursal padre + conceptos hijos) ──────────────
+const nominaTree = computed(() => {
+    return branchesFull.value.map(b => {
+        const raw = brRaw.value.find((r: any) => r.sucursal === b.nombre)
+        const det = (raw?.nomina_detalle ?? {}) as Record<string, number>
+        const base = [
+            { concepto: 'Sueldos',          total: Number(raw?.nomina_total) || 0 },
+            { concepto: 'Comisiones',       total: Number(raw?.comisiones) || 0 },
+            { concepto: 'Bonos',            total: Number(raw?.bonos) || 0 },
+            { concepto: 'Vacaciones',       total: Number(raw?.vacaciones) || 0 },
+            { concepto: 'Prima vacacional', total: Number(raw?.prima_vacacional) || 0 },
+            ...Object.entries(det).filter(([, v]) => Number(v) > 0).map(([concepto, total]) => ({ concepto, total: Number(total) })),
+        ].filter(c => c.total > 0)
+        const descuentos = base.filter(c => NOI_DEDUCTION_LABELS.has(c.concepto)).reduce((s, c) => s + c.total, 0)
+        return { sucursal: b.nombre, total: b.nomina, neto: b.nomina - descuentos, descuentos, conceptos: base }
+    }).filter(n => n.total > 0)
+})
+const expandedNominaBranch = ref<string | null>(null)
+
+const pct = fmtPercent
+
+const tabs: { key: TabKey; label: string }[] = [
+    { key: 'resumen',    label: 'Resumen' },
+    { key: 'sucursales', label: 'Sucursales' },
+    { key: 'ingresos',   label: 'Ingresos / Cobranza' },
+    { key: 'gastos',     label: 'Gastos' },
+    { key: 'nomina',     label: 'Nómina' },
+    { key: 'mora',       label: 'Mora / Cartera' },
+    { key: 'productos',  label: 'Productos' },
+    { key: 'prestamos',  label: 'Préstamos activos' },
+    { key: 'categoria',  label: 'Categoría EBITDA' },
+    { key: 'gestores',   label: 'Gestores' },
 ]
+
+// ════════════════════════════════════════════════════════════════════════════
+// GRÁFICAS — ApexCharts. Reactivas a los filtros de vista vía computed.
+// ════════════════════════════════════════════════════════════════════════════
+function dimColors(labels: string[], selected: string, base: string | string[]): string[] {
+    const baseArr = Array.isArray(base) ? base : labels.map(() => base)
+    if (!selected) return baseArr
+    return labels.map((l, i) => (l === selected ? baseArr[i % baseArr.length] : '#cbd5e1'))
+}
+
+// Resumen: Recuperación vs Colocación
+const recColSeries = computed(() => [{ name: 'Monto', data: [kpiRec.value, kpiCol.value] }])
+const recColOptions = computed(() => ({
+    ...columnOptions(['Recuperación / Cobranza', 'Colocación']),
+    colors: [chartColors.teal, chartColors.blue],
+}))
+
+// Resumen: Cartera vs Vencida (donut)
+const carteraDonutSeries = computed(() => {
+    const sana = Math.max(0, kpiCartera.value - kpiMora.value)
+    return [sana, kpiMora.value]
+})
+const carteraDonutOptions = computed(() => donutOptions(['Cartera sana', 'Cartera vencida'], [chartColors.teal, chartColors.red]))
+
+// Mora por bucket (stacked/column)
+const moraBucketSeries = computed(() => [{ name: 'Mora', data: moraBucketsGlobal.value.map(b => b.value) }])
+const moraBucketOptions = computed(() => ({
+    ...stackedBarOptions(moraBucketsGlobal.value.map(b => b.label), [chartColors.red]),
+    colors: dimColors(moraBucketsGlobal.value.map(b => b.label), vfBucket.value, chartColors.red),
+}))
+
+// Sucursales: ranking por recuperación / cartera / EBITDA
+function rankingSeries(field: 'recuperacion' | 'cartera' | 'ebitda', limit = 13) {
+    return [...branchesFiltered.value].sort((a, b) => b[field] - a[field]).slice(0, limit)
+}
+const rankingRecuperacion = computed(() => rankingSeries('recuperacion'))
+const rankingRecuperacionOptions = computed(() => ({
+    ...horizontalBarOptions(rankingRecuperacion.value.map(b => b.nombre)),
+    colors: dimColors(rankingRecuperacion.value.map(b => b.nombre), vfBranch.value, chartColors.teal),
+}))
+const rankingRecuperacionSeries = computed(() => [{ name: 'Recuperación', data: rankingRecuperacion.value.map(b => b.recuperacion) }])
+
+const rankingCartera = computed(() => rankingSeries('cartera'))
+const rankingCarteraOptions = computed(() => ({
+    ...horizontalBarOptions(rankingCartera.value.map(b => b.nombre)),
+    colors: dimColors(rankingCartera.value.map(b => b.nombre), vfBranch.value, chartColors.blue),
+}))
+const rankingCarteraSeries = computed(() => [{ name: 'Cartera', data: rankingCartera.value.map(b => b.cartera) }])
+
+const rankingEbitda = computed(() => rankingSeries('ebitda'))
+const rankingEbitdaOptions = computed(() => ({
+    ...horizontalBarOptions(rankingEbitda.value.map(b => b.nombre)),
+    colors: rankingEbitda.value.map(b => (b.ebitda < 0 ? chartColors.red : chartColors.green)),
+}))
+const rankingEbitdaSeries = computed(() => [{ name: 'EBITDA', data: rankingEbitda.value.map(b => b.ebitda) }])
+
+// Categoría EBITDA: distribución (donut) + EBITDA por sucursal coloreado por categoría
+const categoriaDonutOptions = computed(() => donutOptions(['SENIOR', 'JUNIOR', 'MANTENIDO'], [chartColors.green, chartColors.amber, chartColors.red]))
+const categoriaDonutSeries = computed(() => [categoriaCounts.value.SENIOR, categoriaCounts.value.JUNIOR, categoriaCounts.value.MANTENIDO])
+
+const categoriaColorMap: Record<string, string> = { SENIOR: chartColors.green, JUNIOR: chartColors.amber, MANTENIDO: chartColors.red }
+const ebitdaPorSucursal = computed(() => [...branchesFiltered.value].sort((a, b) => b.ebitda - a.ebitda))
+const ebitdaPorSucursalOptions = computed(() => ({
+    ...horizontalBarOptions(ebitdaPorSucursal.value.map(b => b.nombre)),
+    colors: ebitdaPorSucursal.value.map(b => categoriaColorMap[b.categoria]),
+}))
+const ebitdaPorSucursalSeries = computed(() => [{ name: 'EBITDA', data: ebitdaPorSucursal.value.map(b => b.ebitda) }])
+
+// Ingresos / Cobranza: colocación por producto
+const productosSorted = computed(() => [...productosRows.value].sort((a: any, b: any) => (b.colocacion ?? 0) - (a.colocacion ?? 0)))
+const colocacionProductoOptions = computed(() => ({
+    ...horizontalBarOptions(productosSorted.value.map((p: any) => p.producto)),
+    colors: dimColors(productosSorted.value.map((p: any) => p.producto), vfProduct.value, chartColors.teal),
+}))
+const colocacionProductoSeries = computed(() => [{ name: 'Colocación', data: productosSorted.value.map((p: any) => p.colocacion ?? 0) }])
+
+// Ingresos / Cobranza: ranking por sucursal (colocación)
+const colocacionSucursalOptions = computed(() => ({
+    ...horizontalBarOptions(branchesFiltered.value.map(b => b.nombre)),
+    colors: dimColors(branchesFiltered.value.map(b => b.nombre), vfBranch.value, chartColors.blue),
+}))
+const colocacionSucursalSeries = computed(() => [{ name: 'Colocación', data: [...branchesFiltered.value].map(b => b.colocacion) }])
+
+// Gastos: por sucursal / por categoría
+const gastosPorSucursalSorted = computed(() => [...branchesFiltered.value].filter(b => b.gastos > 0).sort((a, b) => b.gastos - a.gastos))
+const gastosPorSucursalOptions = computed(() => ({
+    ...horizontalBarOptions(gastosPorSucursalSorted.value.map(b => b.nombre)),
+    colors: dimColors(gastosPorSucursalSorted.value.map(b => b.nombre), vfBranch.value, chartColors.amber),
+}))
+const gastosPorSucursalSeries = computed(() => [{ name: 'Gastos', data: gastosPorSucursalSorted.value.map(b => b.gastos) }])
+
+const gastosPorCategoriaOptions = computed(() => horizontalBarOptions(brGlobalGastos.value.slice(0, 10).map(g => g.concepto), [chartColors.teal]))
+const gastosPorCategoriaSeries = computed(() => [{ name: 'Monto', data: brGlobalGastos.value.slice(0, 10).map(g => g.total) }])
+
+// Nómina por sucursal
+const nominaPorSucursalSorted = computed(() => [...branchesFiltered.value].filter(b => b.nomina > 0).sort((a, b) => b.nomina - a.nomina))
+const nominaPorSucursalOptions = computed(() => ({
+    ...horizontalBarOptions(nominaPorSucursalSorted.value.map(b => b.nombre)),
+    colors: dimColors(nominaPorSucursalSorted.value.map(b => b.nombre), vfBranch.value, chartColors.teal),
+}))
+const nominaPorSucursalSeries = computed(() => [{ name: 'Nómina', data: nominaPorSucursalSorted.value.map(b => b.nomina) }])
+
+// Mora / Cartera: top sucursales con más vencida
+const topVencidaBranches = computed(() => [...branchesFiltered.value].filter(b => b.vencida > 0).sort((a, b) => b.vencida - a.vencida).slice(0, 10))
+const topVencidaOptions = computed(() => horizontalBarOptions(topVencidaBranches.value.map(b => b.nombre), [chartColors.red]))
+const topVencidaSeries = computed(() => [{ name: 'Vencida', data: topVencidaBranches.value.map(b => b.vencida) }])
+
+// Préstamos activos: saldo / vencido por sucursal
+const prestamosFiltered = computed(() => {
+    let rows = activeLoansByBranch.value
+    if (vfBranch.value) rows = rows.filter(r => r.sucursal === vfBranch.value)
+    return rows
+})
+const prestamosSaldoOptions = computed(() => horizontalBarOptions(prestamosFiltered.value.map(r => r.sucursal), [chartColors.blue]))
+const prestamosSaldoSeries = computed(() => [{ name: 'Saldo activo', data: prestamosFiltered.value.map(r => r.saldo) }])
+const prestamosVencidoOptions = computed(() => horizontalBarOptions(prestamosFiltered.value.map(r => r.sucursal), [chartColors.red]))
+const prestamosVencidoSeries = computed(() => [{ name: 'Vencido', data: prestamosFiltered.value.map(r => r.vencido) }])
+
+// Gestores: ranking por colocación
+const rankingGestoresOptions = computed(() => horizontalBarOptions(topGestoresColocacion.value.map((e: any) => e.name), [chartColors.teal]))
+const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGestoresColocacion.value.map((e: any) => e.colocacion) }])
 </script>
 
 <template>
@@ -353,7 +639,7 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                         <p class="text-xs font-bold uppercase tracking-widest text-indigo-400">Radiografía Financiera</p>
                         <h1 class="mt-1 text-2xl font-black">{{ period.label }}</h1>
                         <p class="mt-1 text-sm text-slate-400">
-                            <span v-if="snap && enConciliacion" class="inline-flex items-center gap-1.5 rounded-full bg-amber-400/20 px-2.5 py-0.5 text-xs font-black text-amber-300 mr-2">
+                            <span v-if="snap && enConciliacion" class="mr-2 inline-flex items-center gap-1.5 rounded-full bg-amber-400/20 px-2.5 py-0.5 text-xs font-black text-amber-300">
                                 EN CONCILIACIÓN
                             </span>
                             <span v-if="snap">Generado {{ snap.generated_at }} · v{{ snap.version }}</span>
@@ -381,155 +667,132 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
         </div>
 
         <!-- Sin snapshot -->
-        <div v-if="!snap" class="mx-auto max-w-screen-2xl px-6 py-20 text-center">
-            <AlertTriangle class="mx-auto mb-4 size-12 text-amber-500" />
-            <h2 class="text-xl font-black text-slate-800">Sin radiografía generada</h2>
-            <p class="mt-2 text-sm text-slate-500">Genera la radiografía en Histórico General para ver el reporte completo.</p>
+        <div v-if="!snap" class="mx-auto max-w-screen-2xl px-6 py-20">
+            <EmptyState title="Sin radiografía generada" description="Genera la radiografía en Histórico General para ver el dashboard completo." />
         </div>
 
         <template v-else>
-
             <!-- BANNER CONCILIACIÓN -->
             <div v-if="enConciliacion" class="bg-amber-400 px-6 py-3">
                 <div class="mx-auto max-w-screen-2xl flex flex-wrap items-center gap-3">
                     <AlertTriangle class="size-5 shrink-0 text-amber-900" />
-                    <div class="flex-1 min-w-0">
-                        <span class="font-black text-amber-950 text-sm tracking-wide">
-                            REPORTE EN CONCILIACIÓN — NO CIERRE FINAL
-                        </span>
-                        <span class="ml-3 text-xs text-amber-900">
-                            Inconsistencia detectada:
-                            <template v-if="utilidadGlobal < 0">EBITDA negativo ({{ moneyFull(utilidadGlobal) }}).</template>
-                            <template v-else-if="ebitdaInconsistencia">Envío corporativo ({{ moneyFull(excGlobal) }}) supera el EBITDA ({{ moneyFull(utilidadGlobal) }}).</template>
-                            Regla de ingresos y gastos pendiente de confirmar.
-                        </span>
-                    </div>
+                    <span class="font-black text-amber-950 text-sm tracking-wide">REPORTE EN CONCILIACIÓN — NO CIERRE FINAL</span>
                 </div>
             </div>
 
-            <!-- KPI CARDS -->
-            <div class="mx-auto max-w-screen-2xl px-6 py-5">
-                <div class="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
-                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Empleados</p>
-                        <p class="mt-1 text-xl font-black text-slate-950">{{ num(kpiEmp) }}</p>
-                    </div>
-                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Recuperación</p>
-                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(kpiRec) }}</p>
-                    </div>
-                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Colocación</p>
-                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(kpiCol) }}</p>
-                    </div>
-                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition"
-                         :class="kpiMoraPct > 25 ? 'border-red-200 bg-red-50' : ''">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Mora %</p>
-                        <p class="mt-1 text-xl font-black" :class="kpiMoraPct > 25 ? 'text-red-700' : 'text-slate-950'">{{ pct(kpiMoraPct) }}</p>
-                    </div>
-                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Cartera</p>
-                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(kpiCartera) }}</p>
-                    </div>
-                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition"
-                         :class="kpiMora > 0 ? 'border-red-200 bg-red-50' : ''">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Mora total</p>
-                        <p class="mt-1 text-xl font-black" :class="kpiMora > 0 ? 'text-red-700' : 'text-slate-950'">{{ money(kpiMora) }}</p>
-                    </div>
-                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Nómina</p>
-                        <p class="mt-1 text-xl font-black text-slate-950">{{ money(kpiNomina) }}</p>
-                    </div>
-                    <div class="rounded-2xl border bg-white p-4 shadow-sm hover:shadow-md transition"
-                         :class="kpiUtil < 0 ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50'">
-                        <p class="text-xs font-bold uppercase tracking-wider text-slate-400">EBITDA</p>
-                        <p class="mt-1 text-xl font-black" :class="kpiUtil < 0 ? 'text-red-700' : 'text-emerald-800'">{{ money(kpiUtil) }}</p>
+            <div class="mx-auto max-w-screen-2xl space-y-5 px-6 py-5">
+
+                <!-- KPI CARDS -->
+                <div>
+                    <p v-if="vfActiveBadge" class="mb-3 inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-3 py-1 text-xs font-black text-indigo-700">
+                        {{ vfActiveBadge }}
+                    </p>
+                    <div class="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
+                        <KpiCard label="Recuperación / Cobranza" :value="money(kpiRec)" :icon="HandCoins" tone="teal" />
+                        <KpiCard label="Colocación" :value="money(kpiCol)" :icon="TrendingUp" tone="blue" />
+                        <KpiCard label="Cartera" :value="money(kpiCartera)" :icon="Landmark" tone="teal" />
+                        <KpiCard label="Cartera vencida" :value="money(kpiMora)" :icon="AlertTriangle" :tone="kpiMoraPct > 25 ? 'red' : 'amber'" />
+                        <KpiCard label="Mora %" :value="pct(kpiMoraPct)" :icon="Percent" :tone="kpiMoraPct > 25 ? 'red' : 'teal'" />
+                        <KpiCard label="Gastos operativos" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
+                        <KpiCard label="Nómina" :value="money(kpiNomina)" :icon="Wallet" tone="blue" />
+                        <KpiCard :label="kpiUtilLabel" :value="money(kpiUtil)" :icon="Gauge" :tone="kpiUtil < 0 ? 'red' : 'green'" />
                     </div>
                 </div>
-            </div>
 
-            <!-- FILTERED EXPORT PANEL -->
-            <div class="mx-auto max-w-screen-2xl px-6 pb-2">
+                <!-- FILTROS DE VISTA EN VIVO -->
+                <FilterBar
+                    v-model:branch="vfBranch"
+                    v-model:product="vfProduct"
+                    v-model:bucket="vfBucket"
+                    v-model:gestor="vfGestor"
+                    v-model:categoria="vfCategoria"
+                    :branch-options="vfBranchOptions"
+                    :product-options="vfProductOptions"
+                    :bucket-options="vfBucketOptions"
+                    :gestor-options="vfGestorOptions"
+                    :categoria-options="vfCategoriaOptions"
+                />
+
+                <!-- Ficha gestor / producto seleccionados -->
+                <div v-if="vfGestor || vfProduct" class="rounded-2xl border bg-white p-4 shadow-sm">
+                    <div v-if="vfGestor" class="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4 lg:grid-cols-7">
+                        <template v-if="vfGestorRow">
+                            <div><p class="text-xs text-slate-400">Gestor</p><p class="font-black text-slate-900 truncate">{{ vfGestorRow.name }}</p></div>
+                            <div><p class="text-xs text-slate-400">Sucursal</p><p class="font-bold text-slate-700">{{ vfGestorRow.branch }}</p></div>
+                            <div><p class="text-xs text-slate-400">Colocación</p><p class="font-bold text-indigo-700">{{ vfGestorRow.colocacion > 0 ? money(vfGestorRow.colocacion) : '—' }}</p></div>
+                            <div><p class="text-xs text-slate-400">Recuperación</p><p class="font-bold">{{ vfGestorRow.recuperacion > 0 ? money(vfGestorRow.recuperacion) : '—' }}</p></div>
+                            <div><p class="text-xs text-slate-400">Cartera</p><p class="font-bold">{{ vfGestorRow.cartera > 0 ? money(vfGestorRow.cartera) : '—' }}</p></div>
+                            <div><p class="text-xs text-slate-400">Mora %</p><p class="font-bold" :class="vfGestorRow.mora > 25 ? 'text-red-700' : ''">{{ vfGestorRow.cartera > 0 ? pct(vfGestorRow.mora) : '—' }}</p></div>
+                            <div><p class="text-xs text-slate-400">Neto nómina</p><p class="font-bold">{{ vfGestorRow.neto > 0 ? money(vfGestorRow.neto) : '—' }}</p></div>
+                        </template>
+                        <p v-else class="text-sm text-slate-400 italic">Sin información disponible para este gestor.</p>
+                    </div>
+                    <div v-if="vfProduct" class="mt-3 border-t pt-3" :class="!vfGestor ? 'mt-0 border-t-0 pt-0' : ''">
+                        <div v-if="vfProductRow" class="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
+                            <div><p class="text-xs text-slate-400">Producto</p><p class="font-black text-slate-900 truncate">{{ vfProductRow.producto }}</p></div>
+                            <div><p class="text-xs text-slate-400">Colocación</p><p class="font-bold text-indigo-700">{{ money(vfProductRow.colocacion) }}</p></div>
+                            <div><p class="text-xs text-slate-400">Operaciones</p><p class="font-bold">{{ num(vfProductRow.operaciones) }}</p></div>
+                            <div><p class="text-xs text-slate-400">Cartera</p><p class="font-bold">{{ money(vfProductRow.cartera ?? 0) }}</p></div>
+                        </div>
+                        <p v-else class="text-sm text-slate-400 italic">Sin información disponible para este producto.</p>
+                    </div>
+                </div>
+
+                <!-- EXPORTACIÓN FILTRADA (Excel/PDF por sucursal, gestor o comparativo) -->
                 <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
                     <button @click="showFilteredPanel = !showFilteredPanel"
                             class="flex w-full items-center justify-between px-5 py-3.5 text-sm font-bold text-slate-700 hover:bg-slate-50 transition">
-                        <span class="flex items-center gap-2">
-                            <Download class="size-4 text-indigo-500" />
-                            Reportes filtrados (por sucursal, gestor o comparativo)
-                        </span>
+                        <span class="flex items-center gap-2"><Download class="size-4 text-indigo-500" /> Reportes filtrados (por sucursal, gestor o comparativo)</span>
                         <ChevronDown v-if="!showFilteredPanel" class="size-4 text-slate-400" />
                         <ChevronUp v-else class="size-4 text-slate-400" />
                     </button>
 
                     <div v-if="showFilteredPanel" class="border-t px-5 py-4 space-y-4">
                         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-
-                            <!-- Tipo de reporte -->
                             <div>
-                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Tipo de reporte</label>
-                                <select v-model="filteredType"
-                                        class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
-                                    <option value="simple">Simple</option>
+                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Tipo de comparación</label>
+                                <select v-model="filteredType" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                                    <option value="simple">Simple (este periodo)</option>
                                     <option value="month_vs_month">Mes vs Mes</option>
                                     <option value="bimester_vs_bimester">Bimestre vs Bimestre</option>
                                     <option value="quarter_vs_quarter">Trimestre vs Trimestre</option>
                                 </select>
                             </div>
-
-                            <!-- Alcance (solo simple) -->
                             <div>
-                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Alcance</label>
-                                <select v-model="filteredScope"
-                                        class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Alcance del archivo</label>
+                                <select v-model="filteredScope" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
                                     <option value="general">General</option>
                                     <option value="branch">Por sucursal</option>
                                     <option value="employee">Por gestor</option>
                                 </select>
                             </div>
-
-                            <!-- Periodo a comparar (comparativos) -->
                             <div v-if="isComparative">
                                 <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Periodo a comparar</label>
-                                <select v-model="filteredComparePeriodId"
-                                        class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                                <select v-model="filteredComparePeriodId" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
                                     <option :value="null">— Seleccionar —</option>
-                                    <option v-for="p in comparePeriodOptions" :key="p.id" :value="p.id" :disabled="!p.has_snapshot">
-                                        {{ p.label }}{{ !p.has_snapshot ? ' (sin radiografía)' : '' }}
-                                    </option>
+                                    <option v-for="p in comparePeriodOptions" :key="p.id" :value="p.id" :disabled="!p.has_snapshot">{{ p.label }}{{ !p.has_snapshot ? ' (sin radiografía)' : '' }}</option>
                                 </select>
-                                <p v-if="comparePeriodOptions.length === 0" class="mt-1 text-xs text-amber-600">
-                                    No hay periodos del mismo tipo disponibles para comparar.
-                                </p>
                             </div>
-
-                            <!-- Sucursal -->
                             <div v-if="filteredScope === 'branch'">
                                 <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Sucursal</label>
-                                <select v-model="filteredBranchId"
-                                        class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                                <select v-model="filteredBranchId" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
                                     <option :value="null">— Seleccionar —</option>
                                     <option v-for="b in branches" :key="b.id" :value="b.id">{{ b.name }}</option>
                                 </select>
                             </div>
-
-                            <!-- Gestor -->
                             <div v-if="filteredScope === 'employee'">
                                 <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Gestor / Empleado</label>
-                                <select v-model="filteredEmployeeId"
-                                        class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                                <select v-model="filteredEmployeeId" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
                                     <option :value="null">— Seleccionar —</option>
                                     <option v-for="e in employees" :key="e.id" :value="e.id">{{ e.name }}</option>
                                 </select>
                             </div>
-
                         </div>
 
-                        <!-- Gasto extra (solo empleado) -->
                         <div v-if="filteredScope === 'employee'" class="grid gap-4 sm:grid-cols-2">
                             <div>
                                 <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Gasto general asignado ($)</label>
-                                <input v-model="filteredExtraAmount" type="number" min="0" step="0.01"
-                                       placeholder="0.00"
+                                <input v-model="filteredExtraAmount" type="number" min="0" step="0.01" placeholder="0.00"
                                        class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100" />
                             </div>
                             <div>
@@ -539,7 +802,6 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                             </div>
                         </div>
 
-                        <!-- Buttons -->
                         <div class="flex flex-wrap gap-2 pt-1">
                             <a :href="canDownloadFiltered ? filteredXlsxUrl : '#'"
                                :class="canDownloadFiltered ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-slate-300 pointer-events-none opacity-50'"
@@ -553,61 +815,20 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                             </a>
                             <p v-if="!canDownloadFiltered" class="self-center text-xs text-amber-600 font-semibold">
                                 <span v-if="isComparative && !filteredComparePeriodId">Selecciona un periodo a comparar.</span>
-                                <span v-else-if="isComparative && filteredComparePeriodId && !allPeriods.find((p: any) => p.id === filteredComparePeriodId)?.has_snapshot">El periodo seleccionado no tiene radiografía generada.</span>
                                 <span v-else-if="filteredScope === 'branch'">Selecciona una sucursal.</span>
                                 <span v-else-if="filteredScope === 'employee'">Selecciona un gestor.</span>
                             </p>
                         </div>
 
-                        <!-- Filtered preview panel -->
-                        <div v-if="filteredLoading" class="mt-3 text-xs text-slate-500 italic">Cargando datos…</div>
-                        <div v-else-if="filteredFetchError" class="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-                            {{ filteredFetchError }}
-                        </div>
-                        <div v-else-if="filteredPreview?.data" class="mt-3 rounded-xl border bg-slate-50 px-4 py-3">
-                            <p class="mb-2 text-xs font-black uppercase tracking-wider text-slate-500">
-                                {{ filteredPreview.scope === 'employee' ? 'Gestor' : 'Sucursal' }}:
-                                {{ filteredPreview.label }}
-                                <span v-if="filteredPreview.data.branch" class="font-normal text-slate-400"> · {{ filteredPreview.data.branch }}</span>
-                                <span v-if="filteredPreview.data.route" class="font-normal text-slate-400"> · {{ filteredPreview.data.route }}</span>
-                            </p>
-                            <div class="grid grid-cols-2 gap-x-8 gap-y-1 text-sm sm:grid-cols-3 lg:grid-cols-6">
-                                <div v-for="(row, i) in (filteredPreview.scope === 'employee' ? [
-                                    ['Recuperación',   money(filteredPreview.data.recuperacion)],
-                                    ['Colocación',     money(filteredPreview.data.colocacion)],
-                                    ['Operaciones',    num(filteredPreview.data.operaciones ?? 0)],
-                                    ['Cartera',        money(filteredPreview.data.cartera)],
-                                    ['Mora total',     money(filteredPreview.data.mora_total)],
-                                    ['Mora %',         pct(filteredPreview.data.mora_pct)],
-                                    ['Nómina (pagos)', money(filteredPreview.data.pagos)],
-                                    ['Bonos',          money(filteredPreview.data.bonos)],
-                                    ['Descuentos',     money(filteredPreview.data.descuentos)],
-                                    ['Neto nómina',    money(filteredPreview.data.neto)],
-                                ] : [
-                                    ['Recuperación',   money(filteredPreview.data.recuperacion)],
-                                    ['Colocación',     money(filteredPreview.data.colocacion)],
-                                    ['Cartera',        money(filteredPreview.data.cartera)],
-                                    ['Mora total',     money(filteredPreview.data.mora_total)],
-                                    ['Mora %',         pct(filteredPreview.data.mora_pct)],
-                                    ['Gastos Op.',     money(filteredPreview.data.gastos)],
-                                    ['Nómina',         money(filteredPreview.data.nomina)],
-                                ])" :key="i">
-                                    <div class="text-xs text-slate-500">{{ row[0] }}</div>
-                                    <div class="font-black text-slate-900">{{ row[1] }}</div>
-                                </div>
-                            </div>
-                        </div>
+                        <div v-if="filteredLoading" class="text-xs text-slate-500 italic">Cargando datos…</div>
+                        <div v-else-if="filteredFetchError" class="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">{{ filteredFetchError }}</div>
                     </div>
                 </div>
-            </div>
 
-            <!-- TABS + CONTENT -->
-            <div class="mx-auto max-w-screen-2xl px-6 pb-12">
-
-                <!-- Tab bar -->
-                <div class="mb-5 flex flex-wrap gap-1 border-b border-slate-200">
+                <!-- TABS -->
+                <div class="flex flex-wrap gap-1 border-b border-slate-200">
                     <button v-for="t in tabs" :key="t.key" @click="activeTab = t.key"
-                        class="relative px-4 py-2.5 text-sm font-bold transition border-b-2"
+                        class="relative px-3.5 py-2.5 text-xs font-bold transition border-b-2 whitespace-nowrap"
                         :class="activeTab === t.key ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-800'">
                         {{ t.label }}
                     </button>
@@ -615,462 +836,99 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
 
                 <!-- ══════════ RESUMEN ══════════ -->
                 <div v-show="activeTab === 'resumen'" class="space-y-5">
+                    <div v-if="alertas.length" class="space-y-2">
+                        <div v-for="(a, i) in alertas" :key="i" class="flex items-center gap-2 rounded-2xl border px-4 py-2.5 text-sm font-bold"
+                             :class="a.tone === 'red' ? 'border-red-200 bg-red-50 text-red-700' : 'border-amber-200 bg-amber-50 text-amber-700'">
+                            <AlertTriangle class="size-4 shrink-0" /> {{ a.text }}
+                        </div>
+                    </div>
+
+                    <!-- RESUMEN FINANCIERO GENERAL -->
+                    <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                        <div class="border-b bg-slate-50 px-5 py-3">
+                            <h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Resumen financiero general</h3>
+                        </div>
+                        <table class="w-full text-sm">
+                            <tbody>
+                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Recuperación total</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(recGlobal) }}</td></tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Colocación total</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(colGlobal) }}</td></tr>
+                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Cartera total</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(carteraGlobal) }}</td></tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Cartera vencida / Mora total</td><td class="px-5 py-2.5 text-right font-black" :class="moraTotalGlobal > 0 ? 'text-red-700' : 'text-slate-950'">{{ money(moraTotalGlobal) }}</td></tr>
+                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Índice de mora</td><td class="px-5 py-2.5 text-right font-black" :class="kpiMoraPct > 25 ? 'text-red-700' : 'text-slate-950'">{{ pct(kpiMoraPct) }}</td></tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Gastos operativos</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(brGlobalGastosTotal) }}</td></tr>
+                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Nómina y Capital Humano</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(nomTotal) }}</td></tr>
+                                <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">EBITDA</td><td class="px-5 py-2.5 text-right font-black text-lg" :class="utilidadGlobal < 0 ? 'text-red-700' : 'text-indigo-900'">{{ money(utilidadGlobal) }}</td></tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Envío de utilidad a corporativo</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(excGlobal) }}</td></tr>
+                                <tr class="border-b"><td class="px-5 py-2.5 font-black text-slate-800">Diferencia</td><td class="px-5 py-2.5 text-right font-black" :class="diferencia < 0 ? 'text-red-700' : 'text-emerald-700'">{{ money(diferencia) }}</td></tr>
+                                <tr class="border-b bg-slate-50/60">
+                                    <td class="px-5 py-2.5 text-slate-600 font-medium">Saldo inicial en caja</td>
+                                    <td class="px-5 py-2.5 text-right">
+                                        <span v-if="!saldoInicialEditing" class="inline-flex items-center gap-2">
+                                            <span class="font-black text-slate-950">{{ money(saldoInicialCaja) }}</span>
+                                            <button type="button" class="text-xs font-bold text-indigo-600 hover:text-indigo-800" @click="startEditSaldoInicial">Editar</button>
+                                        </span>
+                                        <span v-else class="inline-flex items-center gap-2">
+                                            <input v-model="saldoInicialInput" type="number" step="0.01"
+                                                   class="w-36 rounded-lg border border-slate-200 px-2 py-1 text-right text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100" />
+                                            <button type="button" :disabled="saldoInicialSaving" class="rounded-lg bg-indigo-600 px-3 py-1 text-xs font-bold text-white hover:bg-indigo-500 disabled:opacity-50" @click="saveSaldoInicial">Guardar</button>
+                                            <button type="button" class="text-xs font-bold text-slate-400 hover:text-slate-600" @click="saldoInicialEditing = false">Cancelar</button>
+                                        </span>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td class="px-5 py-2.5 text-slate-600 font-medium">Saldo final / saldo para siguiente periodo</td>
+                                    <td class="px-5 py-2.5 text-right font-black" :class="(saldoFinalCaja ?? diferencia) < 0 ? 'text-red-700' : 'text-slate-950'">
+                                        {{ saldoFinalCaja !== null ? money(saldoFinalCaja) : money(diferencia) }}
+                                        <span v-if="saldoFinalCaja === null" class="ml-1 text-[10.5px] font-normal text-slate-400">(= Diferencia, no configurado manualmente)</span>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <p v-if="saldoInicialCaja === 0" class="border-t bg-amber-50 px-5 py-2.5 text-xs font-semibold text-amber-700">
+                            ⚠ Este periodo no tiene saldo inicial en caja capturado — el EBITDA se está calculando con $0.00. Captúralo arriba para un cálculo correcto.
+                        </p>
+                    </div>
 
                     <div class="grid gap-4 lg:grid-cols-2">
-                        <div class="rounded-2xl border bg-white p-5 shadow-sm">
-                            <h3 class="mb-3 text-xs font-black uppercase tracking-wider text-slate-500">Métricas financieras</h3>
-                            <table class="w-full text-sm">
-                                <tr v-for="row in [
-                                    ['Recuperación total',   money(kpiRec)],
-                                    ['Colocación total',     money(kpiCol)],
-                                    ['Cartera total',        money(kpiCartera)],
-                                    ['Mora total',           money(kpiMora)],
-                                    ['Índice de mora',       pct(kpiMoraPct)],
-                                    ['Gastos operativos',    money(kpiGastos)],
-                                    ['EBITDA del periodo', money(kpiUtil)],
-                                ]" :key="row[0]" class="border-b last:border-0">
-                                    <td class="py-2 text-slate-600 font-medium">{{ row[0] }}</td>
-                                    <td class="py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
-                                </tr>
-                            </table>
-                        </div>
-                        <div class="rounded-2xl border bg-white p-5 shadow-sm">
-                            <h3 class="mb-3 text-xs font-black uppercase tracking-wider text-slate-500">Nómina y capital humano</h3>
-                            <table class="w-full text-sm">
-                                <tr v-for="row in [
-                                    ['Total empleados',       num(kpiEmp)],
-                                    ['Nómina (sueldos)',      money(nomNomina)],
-                                    ['Comisiones',            money(nomComis)],
-                                    ['Vacaciones',            money(nomVac)],
-                                    ['Prima vacacional',      money(nomPrimaVac)],
-                                    ['Bonos',                 money(nomBonos)],
-                                    ['Total nómina completa', money(nomTotal)],
-                                ]" :key="row[0]" class="border-b last:border-0">
-                                    <td class="py-2 text-slate-600 font-medium">{{ row[0] }}</td>
-                                    <td class="py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
-                                </tr>
-                            </table>
-                        </div>
+                        <ChartCard title="Recuperación vs Colocación" :series="recColSeries" :options="recColOptions" type="bar" :height="240" />
+                        <ChartCard title="Cartera vs Cartera vencida" :series="carteraDonutSeries" :options="carteraDonutOptions" type="donut" :height="240" />
                     </div>
+                    <ChartCard title="Mora por bucket" :series="moraBucketSeries" :options="moraBucketOptions" type="bar" :height="260" />
 
-                    <!-- Gráficas resumen -->
                     <div class="grid gap-4 lg:grid-cols-2">
-
-                        <!-- Colocación por producto -->
-                        <div v-if="charts.placement_by_product?.length" class="rounded-2xl border bg-white p-5 shadow-sm">
-                            <h3 class="mb-4 text-xs font-black uppercase tracking-wider text-slate-500">Colocación por producto</h3>
-                            <div class="space-y-2">
-                                <div v-for="bar in charts.placement_by_product" :key="bar.label" class="flex items-center gap-3 text-sm">
-                                    <div class="w-24 shrink-0 truncate text-xs font-semibold text-slate-600">{{ bar.label }}</div>
-                                    <div class="flex-1 rounded-full bg-slate-100 h-4 overflow-hidden">
-                                        <div class="h-full rounded-full bg-indigo-500 transition-all" :style="{ width: bar.pct + '%' }"></div>
-                                    </div>
-                                    <div class="w-24 shrink-0 text-right text-xs font-black text-slate-800">{{ money(bar.value) }}</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Top gestores por colocación -->
-                        <div v-if="charts.top_promoters_placement?.length" class="rounded-2xl border bg-white p-5 shadow-sm">
-                            <h3 class="mb-4 text-xs font-black uppercase tracking-wider text-slate-500">Top gestores · Colocación</h3>
-                            <div class="space-y-2">
-                                <div v-for="bar in charts.top_promoters_placement" :key="bar.label" class="flex items-center gap-3 text-sm">
-                                    <div class="w-28 shrink-0 truncate text-xs font-semibold text-slate-600">{{ bar.label }}</div>
-                                    <div class="flex-1 rounded-full bg-slate-100 h-4 overflow-hidden">
-                                        <div class="h-full rounded-full bg-emerald-500 transition-all" :style="{ width: bar.pct + '%' }"></div>
-                                    </div>
-                                    <div class="w-24 shrink-0 text-right text-xs font-black text-slate-800">{{ money(bar.value) }}</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Cartera vencida por sucursal -->
-                        <div v-if="charts.portfolio_by_branch?.length" class="rounded-2xl border bg-white p-5 shadow-sm">
-                            <h3 class="mb-4 text-xs font-black uppercase tracking-wider text-slate-500">Cartera por sucursal</h3>
-                            <div class="space-y-2">
-                                <div v-for="bar in charts.portfolio_by_branch" :key="bar.label" class="flex items-center gap-3 text-sm">
-                                    <div class="w-24 shrink-0 truncate text-xs font-semibold text-slate-600">{{ bar.label }}</div>
-                                    <div class="flex-1 rounded-full bg-slate-100 h-4 overflow-hidden">
-                                        <div class="h-full rounded-full bg-sky-500 transition-all" :style="{ width: bar.pct + '%' }"></div>
-                                    </div>
-                                    <div class="w-24 shrink-0 text-right text-xs font-black text-slate-800">{{ money(bar.value) }}</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Mora por bucket -->
-                        <div v-if="charts.mora_by_bucket?.length" class="rounded-2xl border bg-white p-5 shadow-sm">
-                            <h3 class="mb-4 text-xs font-black uppercase tracking-wider text-slate-500">Mora por días vencidos</h3>
-                            <div class="space-y-2">
-                                <div v-for="bar in charts.mora_by_bucket" :key="bar.label" class="flex items-center gap-3 text-sm">
-                                    <div class="w-24 shrink-0 truncate text-xs font-semibold text-slate-600">{{ bar.label }}</div>
-                                    <div class="flex-1 rounded-full bg-slate-100 h-4 overflow-hidden">
-                                        <div class="h-full rounded-full transition-all"
-                                             :class="bar.label === 'Al corriente' ? 'bg-emerald-400' : 'bg-red-500'"
-                                             :style="{ width: bar.pct + '%' }"></div>
-                                    </div>
-                                    <div class="w-24 shrink-0 text-right text-xs font-black text-slate-800">{{ money(bar.value) }}</div>
-                                </div>
-                            </div>
-                        </div>
-
-                    </div>
-                </div>
-
-                <!-- ══════════ RADIOGRAFÍA ══════════ -->
-                <div v-show="activeTab === 'radiografia'" class="space-y-5">
-
-                    <div v-if="!brGlobal" class="rounded-2xl border bg-amber-50 p-6 text-sm text-amber-700">
-                        Sin datos de radiografía. Genera el informe primero.
-                    </div>
-
-                    <template v-else>
-
-                        <!-- 1. MÉTRICAS GENERALES -->
                         <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
-                            <div class="bg-indigo-700 px-5 py-2.5">
-                                <span class="text-xs font-black uppercase tracking-wider text-white">1. Métricas Generales</span>
-                            </div>
-                            <table class="w-full text-sm">
+                            <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Top sucursales por cartera</h3></div>
+                            <table v-if="branchesFull.length" class="w-full text-sm">
                                 <tbody>
-                                    <tr v-for="(row, i) in [
-                                        ['Valor de cartera',               moneyFull(carteraGlobal)],
-                                        ['Otorgamientos',                   moneyFull(colGlobal)],
-                                        ['Recuperación total',              moneyFull(recGlobal)],
-                                        ['Mora 0 – 30 días',               moneyFull(mora0_30g)],
-                                        ['Mora 31 – 60 días',              moneyFull(mora31_60g)],
-                                        ['Mora 61 – 90 días',              moneyFull(mora61_90g)],
-                                        ['Mora 91 – 120 días',             moneyFull(mora91_120g)],
-                                        ['Mora total',                     moneyFull(mora0_30g + mora31_60g + mora61_90g + mora91_120g)],
-                                        ['Envío de utilidad a corporativo', moneyFull(excGlobal)],
-                                    ]" :key="row[0]"
-                                        class="border-b last:border-0"
-                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
+                                    <tr v-for="b in [...branchesFull].sort((a,b)=>b.cartera-a.cartera).slice(0,6)" :key="b.nombre" class="border-b last:border-0 hover:bg-slate-50">
+                                        <td class="px-4 py-2 font-bold">{{ b.nombre }}</td>
+                                        <td class="px-4 py-2 text-right">{{ money(b.cartera) }}</td>
+                                        <td class="px-4 py-2 text-right"><EbitdaBadge :categoria="b.categoria" /></td>
                                     </tr>
                                 </tbody>
                             </table>
+                            <EmptyState v-else class="m-4" title="Sin datos de sucursales" />
                         </div>
-
-                        <!-- 2. INGRESOS -->
                         <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
-                            <div class="bg-indigo-700 px-5 py-2.5">
-                                <span class="text-xs font-black uppercase tracking-wider text-white">2. Ingresos</span>
+                            <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Categoría por EBITDA</h3></div>
+                            <div v-if="branchesFull.length" class="flex flex-wrap gap-2 p-4">
+                                <span v-for="b in branchesFull" :key="b.nombre" class="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-2.5 py-1.5 text-xs font-bold text-slate-700">
+                                    {{ b.nombre }} <EbitdaBadge :categoria="b.categoria" />
+                                </span>
                             </div>
-                            <table class="w-full text-sm">
-                                <tbody>
-                                    <tr v-for="(row, i) in ([
-                                        ['Capital recuperado',     ingrCapital,   ingrCapital > 0],
-                                        ['Intereses recuperados',  ingrInteres,   ingrInteres > 0],
-                                        ['Impuestos recuperados',  ingrImpuesto,  ingrImpuesto > 0],
-                                        ['Multas / cargos',        ingrMultas,    ingrMultas > 0],
-                                        ['Cargos al inicio',       ingrCargosIni, ingrCargosIni > 0],
-                                        ['Comisión apertura',      ingrComAper,   ingrComAper > 0],
-                                    ] as [string, number, boolean][]).filter(r => r[2])"
-                                        :key="row[0]"
-                                        class="border-b last:border-0"
-                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(row[1]) }}</td>
-                                    </tr>
-                                    <tr class="bg-indigo-50 border-t-2 border-indigo-200">
-                                        <td class="px-5 py-2 font-black text-indigo-900">Total ingresos</td>
-                                        <td class="px-5 py-2 text-right font-black text-indigo-900">{{ moneyFull(ingrTotal) }}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <!-- 3. GASTOS OPERATIVOS -->
-                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
-                            <div class="bg-indigo-700 px-5 py-2.5">
-                                <span class="text-xs font-black uppercase tracking-wider text-white">3. Gastos Operativos</span>
-                            </div>
-                            <div v-if="!brGlobalGastos.length" class="px-5 py-4 text-sm text-slate-400">Sin gastos registrados.</div>
-                            <table v-else class="w-full text-sm">
-                                <tbody>
-                                    <tr v-for="(c, i) in brGlobalGastos" :key="c.concepto"
-                                        class="border-b last:border-0"
-                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ c.concepto }}</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(c.total) }}</td>
-                                    </tr>
-                                    <tr class="bg-indigo-50 border-t-2 border-indigo-200">
-                                        <td class="px-5 py-2 font-black text-indigo-900">Total gastos operativos</td>
-                                        <td class="px-5 py-2 text-right font-black text-indigo-900">{{ moneyFull(brGlobalGastosTotal) }}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <!-- 4. NÓMINA Y CAPITAL HUMANO -->
-                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
-                            <div class="bg-indigo-700 px-5 py-2.5">
-                                <span class="text-xs font-black uppercase tracking-wider text-white">4. Nómina y Capital Humano</span>
-                            </div>
-                            <table class="w-full text-sm">
-                                <tbody>
-                                    <!-- Percepciones -->
-                                    <tr v-for="(row, i) in ([
-                                        ['Nómina',           nomNomina,   nomNomina > 0],
-                                        ['Comisiones',       nomComis,    nomComis > 0],
-                                        ['Vacaciones',       nomVac,      nomVac > 0],
-                                        ['Prima vacacional', nomPrimaVac, nomPrimaVac > 0],
-                                        ['Bonos',            nomBonos,    nomBonos > 0],
-                                    ] as [string, number, boolean][]).filter(r => r[2])"
-                                        :key="row[0]"
-                                        class="border-b last:border-0"
-                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(row[1]) }}</td>
-                                    </tr>
-                                    <!-- Ítems de detalle incluidos en el total (IMSS, Infonavit, Gasolina, etc.) -->
-                                    <tr v-for="(d, j) in nomDetalle.filter(r => !NOMINA_EXCLUDED_LABELS.has(r.label))"
-                                        :key="d.label"
-                                        class="border-b last:border-0"
-                                        :class="j % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
-                                        <td class="px-5 py-2 text-slate-600 font-medium pl-8">{{ d.label }}</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(d.value) }}</td>
-                                    </tr>
-                                    <!-- Ítems excluidos del total (solo para revisión) -->
-                                    <template v-if="nomDescuentosNOI > 0">
-                                        <tr class="bg-amber-50 border-b border-amber-100">
-                                            <td colspan="2" class="px-5 py-1.5 text-xs font-bold text-amber-700 uppercase tracking-wider">Revisión aparte (no suman al total)</td>
-                                        </tr>
-                                        <tr v-for="(d, j) in nomDetalle.filter(r => NOMINA_EXCLUDED_LABELS.has(r.label))"
-                                            :key="d.label"
-                                            class="border-b border-amber-100 bg-amber-50">
-                                            <td class="px-5 py-2 text-amber-700 font-medium pl-8">{{ d.label }}</td>
-                                            <td class="px-5 py-2 text-right font-black text-amber-700">{{ moneyFull(d.value) }}</td>
-                                        </tr>
-                                    </template>
-                                    <!-- Neto nómina -->
-                                    <tr class="bg-indigo-50 border-t-2 border-indigo-200">
-                                        <td class="px-5 py-2 font-black text-indigo-900">Total Nómina y Capital Humano</td>
-                                        <td class="px-5 py-2 text-right font-black text-indigo-900">{{ moneyFull(nomNeto) }}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <!-- 5. PRÉSTAMOS INTERSUCURSALES -->
-                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
-                            <div class="bg-indigo-700 px-5 py-2.5">
-                                <span class="text-xs font-black uppercase tracking-wider text-white">5. Préstamos Intersucursales</span>
-                            </div>
-                            <table class="w-full text-sm">
-                                <tbody>
-                                    <tr v-for="(row, i) in [
-                                        ['Activos (fondea)',  moneyFull(fondeoGlobal)],
-                                        ['Pasivos (recibe)', moneyFull(fondeoGlobal)],
-                                        ['Total',            moneyFull(fondeoGlobal)],
-                                    ]" :key="row[0]"
-                                        class="border-b last:border-0"
-                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <!-- 6. ÍNDICE DE ROTACIÓN -->
-                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
-                            <div class="bg-indigo-700 px-5 py-2.5">
-                                <span class="text-xs font-black uppercase tracking-wider text-white">6. Índice de Rotación de Personal</span>
-                            </div>
-                            <table class="w-full text-sm">
-                                <tbody>
-                                    <tr v-for="(row, i) in [
-                                        ['N° de personas que dejaron la empresa', '—'],
-                                        ['Promedio de personas en el periodo',    num(snap?.summary?.employees_count ?? 0)],
-                                        ['Índice de rotación',                   '—'],
-                                    ]" :key="row[0]"
-                                        class="border-b last:border-0"
-                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <!-- 7. ANÁLISIS DE TENDENCIAS -->
-                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
-                            <div class="bg-indigo-700 px-5 py-2.5">
-                                <span class="text-xs font-black uppercase tracking-wider text-white">7. Análisis de Tendencias y Proyecciones</span>
-                            </div>
-                            <table class="w-full text-sm">
-                                <tbody>
-                                    <tr v-for="(row, i) in [
-                                        ['Saldo inicial en caja',             moneyFull(0)],
-                                        ['Ingresos totales',                  moneyFull(recGlobal)],
-                                        ['Otorgamientos',                     moneyFull(colGlobal)],
-                                        ['Gastos Totales',                    moneyFull(gastosEbitdaTotal)],
-                                        ['EBITDA',                            moneyFull(utilidadGlobal)],
-                                        ['Saldo final en caja',               moneyFull(0)],
-                                        ['Préstamos inter sucursales',        moneyFull(fondeoGlobal)],
-                                        ['Envío de utilidad a corporativo',   moneyFull(excGlobal)],
-                                        ['Diferencia / sobrante',             ebitdaInconsistencia ? '⚠ INCONSISTENCIA' : moneyFull(diferencia)],
-                                        ['Mora de 0 a 30 días',               moneyFull(mora0_30g)],
-                                        ['Mora de 31 a 60 días',              moneyFull(mora31_60g)],
-                                        ['Mora de 61 a 90 días',              moneyFull(mora61_90g)],
-                                        ['Mora de 91 a 120 días',             moneyFull(mora91_120g)],
-                                        ['Mora 120+ días',                    moneyFull(mora120plusG)],
-                                        ['Valor cartera',                     moneyFull(carteraGlobal)],
-                                    ]" :key="row[0]"
-                                        class="border-b last:border-0"
-                                        :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50'">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">{{ row[0] }}</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ row[1] }}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <!-- 8. EBITDA = Ingresos − Otorgamientos − Gastos Totales -->
-                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
-                            <div class="bg-indigo-700 px-5 py-2.5">
-                                <span class="text-xs font-black uppercase tracking-wider text-white">8. EBITDA / Utilidad</span>
-                            </div>
-                            <table class="w-full text-sm">
-                                <tbody>
-                                    <tr class="bg-indigo-50 border-b">
-                                        <td class="px-5 py-2 text-indigo-700 font-medium">Saldo inicial en caja</td>
-                                        <td class="px-5 py-2 text-right font-black text-indigo-700">{{ moneyFull(saldoInicialCaja) }}</td>
-                                    </tr>
-                                    <tr class="bg-white border-b">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">Ingresos Totales</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(ingrTotal) }}</td>
-                                    </tr>
-                                    <tr class="bg-slate-50 border-b">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">Menos: Otorgamientos</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(colGlobal) }}</td>
-                                    </tr>
-                                    <tr class="bg-white border-b">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">Menos: Gastos Totales</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(gastosEbitdaTotal) }}</td>
-                                    </tr>
-                                    <tr class="bg-slate-50 border-b">
-                                        <td class="px-5 py-2 pl-10 text-slate-500 text-xs">Gastos operativos</td>
-                                        <td class="px-5 py-2 text-right text-slate-500 text-xs">{{ moneyFull(brGlobalGastosTotal) }}</td>
-                                    </tr>
-                                    <tr class="bg-white border-b">
-                                        <td class="px-5 py-2 pl-10 text-slate-500 text-xs">Nómina neta</td>
-                                        <td class="px-5 py-2 text-right text-slate-500 text-xs">{{ moneyFull(nomNeto) }}</td>
-                                    </tr>
-                                    <tr :class="utilidadGlobal >= 0 ? 'bg-emerald-50 border-t-2 border-emerald-300' : 'bg-red-50 border-t-2 border-red-300'">
-                                        <td class="px-5 py-2 font-black" :class="utilidadGlobal >= 0 ? 'text-emerald-900' : 'text-red-900'">= EBITDA / Utilidad disponible</td>
-                                        <td class="px-5 py-2 text-right font-black text-xl" :class="utilidadGlobal >= 0 ? 'text-emerald-900' : 'text-red-900'">{{ moneyFull(utilidadGlobal) }}</td>
-                                    </tr>
-                                    <tr class="bg-slate-100 border-b">
-                                        <td class="px-5 py-2 text-slate-600 font-medium">Envío utilidad a corporativo</td>
-                                        <td class="px-5 py-2 text-right font-black text-slate-950">{{ moneyFull(excGlobal) }}</td>
-                                    </tr>
-                                    <tr :class="diferencia >= 0 ? 'bg-sky-50' : 'bg-red-50'">
-                                        <td class="px-5 py-2 font-black" :class="diferencia >= 0 ? 'text-sky-800' : 'text-red-800'">Diferencia / sobrante</td>
-                                        <td class="px-5 py-2 text-right font-black" :class="diferencia >= 0 ? 'text-sky-800' : 'text-red-800'">{{ moneyFull(diferencia) }}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <!-- 9. SALDO TOTAL ACUMULADO -->
-                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
-                            <div class="bg-indigo-700 px-5 py-2.5">
-                                <span class="text-xs font-black uppercase tracking-wider text-white">9. Saldo Total Acumulado Cuentas</span>
-                            </div>
-                            <div class="px-5 py-4 text-sm text-slate-400 italic">Sin fuente de caja en BD — dato a llenar manualmente.</div>
-                        </div>
-
-                        <!-- 10. OBSERVACIONES -->
-                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
-                            <div class="bg-indigo-700 px-5 py-2.5">
-                                <span class="text-xs font-black uppercase tracking-wider text-white">10. Observaciones y Notas</span>
-                            </div>
-                            <div class="px-5 py-4 space-y-3">
-                                <div class="h-8 rounded border border-dashed border-slate-200 bg-slate-50"></div>
-                                <div class="h-8 rounded border border-dashed border-slate-200 bg-slate-50"></div>
-                                <div class="h-8 rounded border border-dashed border-slate-200 bg-slate-50"></div>
-                            </div>
-                        </div>
-
-                    </template>
-                </div>
-
-                <!-- ══════════ PRODUCTOS ══════════ -->
-                <div v-show="activeTab === 'productos'">
-                    <div v-if="!snap.sections?.products?.length" class="rounded-2xl border bg-white p-10 text-center text-sm text-slate-400">
-                        Sin datos de producto. Verifica que el archivo de ministraciones incluya la columna de producto financiero.
-                    </div>
-                    <div v-else class="space-y-4">
-                        <!-- Barras de colocación por producto -->
-                        <div class="rounded-2xl border bg-white p-5 shadow-sm">
-                            <h3 class="mb-4 text-xs font-black uppercase tracking-wider text-slate-500">Colocación por producto</h3>
-                            <div class="space-y-3">
-                                <div v-for="p in snap.sections.products" :key="p.producto" class="grid grid-cols-[1fr_auto] items-center gap-3">
-                                    <div>
-                                        <div class="mb-1 flex items-center justify-between text-xs">
-                                            <span class="font-bold text-slate-800">{{ p.producto }}</span>
-                                            <span class="text-slate-500">{{ p.pct }}% · {{ num(p.operaciones) }} ops</span>
-                                        </div>
-                                        <div class="h-3 w-full overflow-hidden rounded-full bg-slate-100">
-                                            <div class="h-full rounded-full bg-indigo-500 transition-all" :style="{ width: p.pct + '%' }"></div>
-                                        </div>
-                                    </div>
-                                    <div class="text-right text-sm font-black text-slate-950 w-28">{{ money(p.colocacion) }}</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Tabla detalle -->
-                        <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
-                            <table class="w-full text-sm">
-                                <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
-                                    <tr>
-                                        <th class="px-4 py-3 text-left">Producto</th>
-                                        <th class="px-4 py-3 text-right">Operaciones</th>
-                                        <th class="px-4 py-3 text-right">Colocación</th>
-                                        <th class="px-4 py-3 text-right">Recuperación</th>
-                                        <th class="px-4 py-3 text-right">Cartera</th>
-                                        <th class="px-4 py-3 text-right">Contratos</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr v-for="p in snap.sections.products" :key="p.producto" class="border-t hover:bg-slate-50">
-                                        <td class="px-4 py-2.5 font-bold">{{ p.producto }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ num(p.operaciones) }}</td>
-                                        <td class="px-4 py-2.5 text-right font-black">{{ moneyFull(p.colocacion) }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ moneyFull(p.recuperacion) }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ moneyFull(p.cartera) }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ num(p.contratos) }}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
+                            <EmptyState v-else class="m-4" title="Sin datos de categoría EBITDA" />
                         </div>
                     </div>
                 </div>
 
                 <!-- ══════════ SUCURSALES ══════════ -->
-                <div v-show="activeTab === 'sucursales'">
-                    <div v-if="!sucursalesRows.length" class="rounded-2xl border bg-white p-10 text-center text-sm text-slate-400">Sin datos por sucursal.</div>
-                    <div v-else class="space-y-4">
-                        <!-- Gráfica cartera por sucursal -->
-                        <div class="rounded-2xl border bg-white p-5 shadow-sm">
-                            <h3 class="mb-4 text-xs font-black uppercase tracking-wider text-slate-500">Cartera por sucursal</h3>
-                            <div class="space-y-2">
-                                <div v-for="b in sucursalesRows" :key="b.nombre" class="flex items-center gap-3">
-                                    <div class="w-28 shrink-0 truncate text-xs font-semibold text-slate-700">{{ b.nombre }}</div>
-                                    <div class="flex-1 rounded-full bg-slate-100 h-4 overflow-hidden">
-                                        <div class="h-full rounded-full bg-sky-500 transition-all"
-                                             :style="{ width: (sucursalesRows[0]?.cartera > 0 ? Math.min(100, b.cartera / sucursalesRows[0].cartera * 100) : 0) + '%' }"></div>
-                                    </div>
-                                    <div class="w-24 shrink-0 text-right text-xs font-black text-slate-800">{{ money(b.cartera) }}</div>
-                                </div>
-                            </div>
+                <div v-show="activeTab === 'sucursales'" class="space-y-5">
+                    <template v-if="branchesFiltered.length">
+                        <div class="grid gap-4 lg:grid-cols-3">
+                            <ChartCard title="Ranking por recuperación" :series="rankingRecuperacionSeries" :options="rankingRecuperacionOptions" type="bar" :height="320" />
+                            <ChartCard title="Ranking por cartera" :series="rankingCarteraSeries" :options="rankingCarteraOptions" type="bar" :height="320" />
+                            <ChartCard title="EBITDA por sucursal" :series="rankingEbitdaSeries" :options="rankingEbitdaOptions" type="bar" :height="320" />
                         </div>
-
                         <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
                             <table class="w-full text-sm">
                                 <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
@@ -1079,269 +937,328 @@ const tabs: { key: TabKey; label: string; badge?: string }[] = [
                                         <th class="px-4 py-3 text-right">Recuperación</th>
                                         <th class="px-4 py-3 text-right">Colocación</th>
                                         <th class="px-4 py-3 text-right">Cartera</th>
-                                        <th class="px-4 py-3 text-right">Mora $</th>
+                                        <th class="px-4 py-3 text-right">Vencida</th>
                                         <th class="px-4 py-3 text-right">Mora %</th>
-                                        <th class="px-4 py-3 text-right">Gastos Op.</th>
+                                        <th class="px-4 py-3 text-right">Gastos</th>
                                         <th class="px-4 py-3 text-right">Nómina</th>
+                                        <th class="px-4 py-3 text-right">EBITDA</th>
+                                        <th class="px-4 py-3 text-center">Categoría</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <tr v-for="b in sucursalesRows" :key="b.nombre" class="border-t hover:bg-slate-50">
+                                    <tr v-for="b in branchesFiltered" :key="b.nombre" class="cursor-pointer border-t hover:bg-slate-50"
+                                        :class="vfBranch === b.nombre ? 'bg-indigo-50' : ''" @click="vfBranch = vfBranch === b.nombre ? '' : b.nombre">
                                         <td class="px-4 py-2.5 font-bold">{{ b.nombre }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ moneyFull(b.recuperacion) }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ moneyFull(b.colocacion) }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ moneyFull(b.cartera) }}</td>
-                                        <td class="px-4 py-2.5 text-right font-bold" :class="b.vencida > 0 ? 'text-red-700' : ''">{{ moneyFull(b.vencida) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(b.recuperacion) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(b.colocacion) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(b.cartera) }}</td>
+                                        <td class="px-4 py-2.5 text-right" :class="b.vencida > 0 ? 'font-bold text-red-700' : ''">{{ money(b.vencida) }}</td>
                                         <td class="px-4 py-2.5 text-right font-bold" :class="b.mora > 25 ? 'text-red-700' : ''">{{ pct(b.mora) }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ moneyFull(b.gastos) }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ b.nomina != null ? moneyFull(b.nomina) : '—' }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(b.gastos) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(b.nomina) }}</td>
+                                        <td class="px-4 py-2.5 text-right font-bold" :class="b.ebitda < 0 ? 'text-red-700' : 'text-emerald-700'">{{ money(b.ebitda) }}</td>
+                                        <td class="px-4 py-2.5 text-center"><EbitdaBadge :categoria="b.categoria" /></td>
                                     </tr>
                                 </tbody>
                             </table>
                         </div>
+                    </template>
+                    <EmptyState v-else title="Sin sucursales para este filtro" description="Ajusta o limpia los filtros para ver datos por sucursal." />
+                </div>
+
+                <!-- ══════════ INGRESOS / COBRANZA ══════════ -->
+                <div v-show="activeTab === 'ingresos'" class="space-y-5">
+                    <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <KpiCard label="Cobranza total" :value="money(recGlobal)" :icon="HandCoins" tone="teal" />
+                        <KpiCard label="Colocación total" :value="money(colGlobal)" :icon="TrendingUp" tone="blue" />
+                        <KpiCard label="Capital recuperado" :value="money(ingrCapital)" :icon="Banknote" tone="teal" />
+                        <KpiCard label="Intereses recuperados" :value="money(ingrInteres)" :icon="Percent" tone="blue" />
+                    </div>
+                    <div class="grid gap-4 lg:grid-cols-2">
+                        <ChartCard title="Colocación por producto" :series="colocacionProductoSeries" :options="colocacionProductoOptions" type="bar" :height="280" />
+                        <ChartCard title="Colocación por sucursal" :series="colocacionSucursalSeries" :options="colocacionSucursalOptions" type="bar" :height="280" />
+                    </div>
+                    <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                        <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Ranking por producto</h3></div>
+                        <table v-if="productosSorted.length" class="w-full text-sm">
+                            <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
+                                <tr><th class="px-4 py-3 text-left">Producto</th><th class="px-4 py-3 text-right">Operaciones</th><th class="px-4 py-3 text-right">Colocación</th><th class="px-4 py-3 text-right">Recuperación</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="p in productosSorted" :key="p.producto" class="cursor-pointer border-t hover:bg-slate-50"
+                                    :class="vfProduct === p.producto ? 'bg-indigo-50' : ''" @click="vfProduct = vfProduct === p.producto ? '' : p.producto">
+                                    <td class="px-4 py-2.5 font-bold">{{ p.producto }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ num(p.operaciones) }}</td>
+                                    <td class="px-4 py-2.5 text-right font-black">{{ money(p.colocacion) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(p.recuperacion ?? 0) }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <EmptyState v-else class="m-4" title="Sin datos de producto" description="Verifica que el archivo de ministraciones incluya la columna de producto financiero." />
                     </div>
                 </div>
 
-                <!-- ══════════ EMPLEADOS / GESTORES ══════════ -->
-                <div v-show="activeTab === 'empleados'">
-
-                    <!-- Filtros -->
-                    <div class="mb-4 flex flex-wrap gap-3">
-                        <div class="relative flex-1 min-w-52">
-                            <Search class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-slate-400" />
-                            <input v-model="searchEmp" type="text" placeholder="Buscar por nombre, código o sucursal…"
-                                   class="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-4 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100" />
-                        </div>
-                        <select v-model="filterBranch"
-                                class="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
-                            <option value="">Todas las sucursales</option>
-                            <option v-for="b in branchOptions" :key="b" :value="b">{{ b }}</option>
-                        </select>
+                <!-- ══════════ GASTOS ══════════ -->
+                <div v-show="activeTab === 'gastos'" class="space-y-5">
+                    <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <KpiCard label="Gastos operativos" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
+                        <KpiCard v-for="s in gastosBySource" :key="s.fuente" :label="`Fuente: ${s.fuente}`" :value="money(s.total)" tone="neutral" />
+                    </div>
+                    <div class="grid gap-4 lg:grid-cols-2">
+                        <ChartCard title="Gastos por sucursal" :series="gastosPorSucursalSeries" :options="gastosPorSucursalOptions" type="bar" :height="300" />
+                        <ChartCard title="Top categorías de gasto" :series="gastosPorCategoriaSeries" :options="gastosPorCategoriaOptions" type="bar" :height="300" />
                     </div>
 
-                    <div v-if="!empGest.length" class="rounded-2xl border bg-amber-50 p-6 text-sm text-amber-700">
-                        Sin datos de empleados/gestores para este periodo. Verifica que el archivo NOI fue procesado y que hay colocación o cartera en el periodo.
-                    </div>
-                    <div v-else>
-                        <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
-                            <table class="w-full text-xs">
-                                <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
-                                    <tr>
-                                        <th class="px-3 py-3 text-left sticky left-0 bg-slate-50">Empleado / Gestor</th>
-                                        <th class="px-3 py-3 text-left">Sucursal</th>
-                                        <th class="px-3 py-3 text-right">Pagos</th>
-                                        <th class="px-3 py-3 text-right">Bonos</th>
-                                        <th class="px-3 py-3 text-right">Descuentos</th>
-                                        <th class="px-3 py-3 text-right">Neto nómina</th>
-                                        <th class="px-3 py-3 text-right">Colocación</th>
-                                        <th class="px-3 py-3 text-right">Ops</th>
-                                        <th class="px-3 py-3 text-right">Recuperación</th>
-                                        <th class="px-3 py-3 text-right">Cartera</th>
-                                        <th class="px-3 py-3 text-right">C. Vencida</th>
-                                        <th class="px-3 py-3 text-right">Mora %</th>
-                                        <th class="px-3 py-3 text-right">Gastos</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr v-for="e in empVisible" :key="e.name + e.branch" class="border-t hover:bg-slate-50">
-                                        <td class="px-3 py-2 font-bold sticky left-0 bg-white whitespace-nowrap">{{ e.name }}</td>
-                                        <td class="px-3 py-2 text-slate-600 whitespace-nowrap">
-                                            <span :class="e.branch === 'Sin sucursal' ? 'text-amber-600 font-semibold' : ''">{{ e.branch }}</span>
-                                        </td>
-                                        <td class="px-3 py-2 text-right">{{ e.pagos > 0 ? moneyFull(e.pagos) : '—' }}</td>
-                                        <td class="px-3 py-2 text-right">{{ e.bonos > 0 ? moneyFull(e.bonos) : '—' }}</td>
-                                        <td class="px-3 py-2 text-right">{{ e.descuentos > 0 ? moneyFull(e.descuentos) : '—' }}</td>
-                                        <td class="px-3 py-2 text-right font-bold">{{ e.neto > 0 ? moneyFull(e.neto) : '—' }}</td>
-                                        <td class="px-3 py-2 text-right font-bold text-indigo-700">{{ e.colocacion > 0 ? moneyFull(e.colocacion) : '—' }}</td>
-                                        <td class="px-3 py-2 text-right">{{ e.operaciones > 0 ? num(e.operaciones) : '—' }}</td>
-                                        <td class="px-3 py-2 text-right">{{ e.recuperacion > 0 ? moneyFull(e.recuperacion) : '—' }}</td>
-                                        <td class="px-3 py-2 text-right">{{ e.cartera > 0 ? moneyFull(e.cartera) : '—' }}</td>
-                                        <td class="px-3 py-2 text-right" :class="e.vencida > 0 ? 'font-bold text-red-700' : ''">{{ e.vencida > 0 ? moneyFull(e.vencida) : '—' }}</td>
-                                        <td class="px-3 py-2 text-right" :class="e.mora > 25 ? 'font-bold text-red-700' : ''">{{ e.cartera > 0 ? pct(e.mora) : '—' }}</td>
-                                        <td class="px-3 py-2 text-right">{{ e.gastos > 0 ? moneyFull(e.gastos) : '—' }}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                        <div v-if="filteredEmp.length > 15" class="mt-3 text-center">
-                            <button @click="showAllEmp = !showAllEmp"
-                                    class="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-5 py-2 text-sm font-bold text-slate-600 shadow-sm hover:bg-slate-50 transition">
-                                {{ showAllEmp ? 'Ver menos' : `Ver todos (${filteredEmp.length})` }}
-                            </button>
-                        </div>
-                        <p class="mt-2 text-xs text-slate-400">
-                            Mostrando {{ empVisible.length }} de {{ filteredEmp.length }} registros.
-                            Un gestor y un empleado son la misma persona si comparten nombre.
-                        </p>
-                    </div>
-                </div>
-
-                <!-- ══════════ CARTERA Y MORA ══════════ -->
-                <div v-show="activeTab === 'cartera'" class="space-y-4">
-                    <div class="grid grid-cols-3 gap-3">
-                        <div class="rounded-2xl border bg-white p-4 shadow-sm">
-                            <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Cartera total</p>
-                            <p class="mt-1 text-xl font-black">{{ moneyFull(kpiCartera) }}</p>
-                        </div>
-                        <div class="rounded-2xl border bg-white p-4 shadow-sm" :class="kpiMora > 0 ? 'border-red-200' : ''">
-                            <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Mora total</p>
-                            <p class="mt-1 text-xl font-black" :class="kpiMora > 0 ? 'text-red-700' : ''">{{ moneyFull(kpiMora) }}</p>
-                        </div>
-                        <div class="rounded-2xl border bg-white p-4 shadow-sm" :class="kpiMoraPct > 25 ? 'border-red-200' : ''">
-                            <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Índice mora</p>
-                            <p class="mt-1 text-xl font-black" :class="kpiMoraPct > 25 ? 'text-red-700' : ''">{{ pct(kpiMoraPct) }}</p>
-                        </div>
-                    </div>
-
-                    <!-- Gráfica mora por bucket -->
-                    <div v-if="charts.mora_by_bucket?.length" class="rounded-2xl border bg-white p-5 shadow-sm">
-                        <h3 class="mb-4 text-xs font-black uppercase tracking-wider text-slate-500">Vencido por bucket</h3>
-                        <div class="space-y-2">
-                            <div v-for="bar in charts.mora_by_bucket" :key="bar.label" class="flex items-center gap-3">
-                                <div class="w-28 shrink-0 text-xs font-semibold text-slate-600">{{ bar.label }}</div>
-                                <div class="flex-1 rounded-full bg-slate-100 h-5 overflow-hidden">
-                                    <div class="h-full rounded-full transition-all flex items-center pl-2"
-                                         :class="bar.label === 'Al corriente' ? 'bg-emerald-400' : 'bg-red-500'"
-                                         :style="{ width: Math.max(bar.pct, 1) + '%' }">
-                                    </div>
-                                </div>
-                                <div class="w-28 shrink-0 text-right text-xs font-black text-slate-800">{{ moneyFull(bar.value) }}</div>
+                    <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                        <div class="flex items-center justify-between border-b bg-slate-50 px-5 py-3">
+                            <h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Gastos por sucursal — detalle</h3>
+                            <div class="relative">
+                                <Search class="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-slate-400" />
+                                <input v-model="gastosSearch" type="text" placeholder="Buscar sucursal o concepto…"
+                                       class="w-56 rounded-xl border border-slate-200 bg-white py-1.5 pl-8 pr-2 text-xs focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100" />
                             </div>
                         </div>
+                        <div v-if="gastosTree.length">
+                            <div v-for="g in gastosTree" :key="g.sucursal" class="border-b last:border-0">
+                                <button @click="expandedGastosBranch = expandedGastosBranch === g.sucursal ? null : g.sucursal"
+                                        class="flex w-full items-center justify-between px-5 py-2.5 text-sm font-bold text-slate-800 hover:bg-slate-50 transition">
+                                    <span class="flex items-center gap-2"><Building2 class="size-3.5 text-slate-400" /> {{ g.sucursal }}</span>
+                                    <span class="flex items-center gap-3">
+                                        {{ money(g.total) }}
+                                        <ChevronDown v-if="expandedGastosBranch !== g.sucursal" class="size-3.5 text-slate-400" />
+                                        <ChevronUp v-else class="size-3.5 text-slate-400" />
+                                    </span>
+                                </button>
+                                <table v-if="expandedGastosBranch === g.sucursal && g.conceptos.length" class="w-full text-xs">
+                                    <tbody>
+                                        <tr v-for="c in g.conceptos" :key="c.concepto" class="border-t bg-slate-50/60">
+                                            <td class="px-8 py-1.5 text-slate-600">{{ c.concepto }}</td>
+                                            <td class="px-5 py-1.5 text-right font-semibold text-slate-700">{{ money(c.total) }}</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <EmptyState v-else class="m-4" title="Sin gastos para este filtro" />
                     </div>
+                </div>
 
-                    <div v-if="!snap.sections?.portfolio_buckets?.length" class="rounded-2xl border bg-amber-50 p-4 text-sm text-amber-700">
-                        Sin datos de días vencidos. Verifica que el archivo "Lendus Saldos por Cliente" incluya la columna "días_mora" o "días_vencidos".
+                <!-- ══════════ NÓMINA ══════════ -->
+                <div v-show="activeTab === 'nomina'" class="space-y-5">
+                    <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <KpiCard label="Nómina total" :value="money(kpiNomina)" :icon="Wallet" tone="blue" />
+                        <KpiCard label="Sueldos" :value="money(nomNomina)" tone="teal" />
+                        <KpiCard label="Comisiones" :value="money(nomComis)" tone="teal" />
+                        <KpiCard label="Bonos" :value="money(nomBonos)" tone="teal" />
                     </div>
-                    <div v-else class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
-                        <table class="w-full text-sm">
+                    <ChartCard title="Nómina por sucursal" :series="nominaPorSucursalSeries" :options="nominaPorSucursalOptions" type="bar" :height="320" />
+
+                    <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                        <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Nómina por sucursal — detalle</h3></div>
+                        <div v-if="nominaTree.length">
+                            <div v-for="n in nominaTree" :key="n.sucursal" class="border-b last:border-0">
+                                <button @click="expandedNominaBranch = expandedNominaBranch === n.sucursal ? null : n.sucursal"
+                                        class="flex w-full items-center justify-between px-5 py-2.5 text-sm font-bold text-slate-800 hover:bg-slate-50 transition">
+                                    <span class="flex items-center gap-2"><Building2 class="size-3.5 text-slate-400" /> {{ n.sucursal }}</span>
+                                    <span class="flex items-center gap-3 text-right">
+                                        <span class="text-xs text-slate-400">Neto {{ money(n.neto) }}</span>
+                                        {{ money(n.total) }}
+                                        <ChevronDown v-if="expandedNominaBranch !== n.sucursal" class="size-3.5 text-slate-400" />
+                                        <ChevronUp v-else class="size-3.5 text-slate-400" />
+                                    </span>
+                                </button>
+                                <table v-if="expandedNominaBranch === n.sucursal" class="w-full text-xs">
+                                    <tbody>
+                                        <tr v-for="c in n.conceptos" :key="c.concepto" class="border-t bg-slate-50/60">
+                                            <td class="px-8 py-1.5 text-slate-600">{{ c.concepto }}</td>
+                                            <td class="px-5 py-1.5 text-right font-semibold" :class="NOI_DEDUCTION_LABELS.has(c.concepto) ? 'text-red-600' : 'text-slate-700'">
+                                                {{ NOI_DEDUCTION_LABELS.has(c.concepto) ? '-' + money(c.total) : money(c.total) }}
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <EmptyState v-else class="m-4" title="Sin datos de nómina por sucursal" />
+                    </div>
+                </div>
+
+                <!-- ══════════ MORA / CARTERA ══════════ -->
+                <div v-show="activeTab === 'mora'" class="space-y-5">
+                    <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <KpiCard label="Cartera total" :value="money(kpiCartera)" :icon="Landmark" tone="teal" />
+                        <KpiCard :label="kpiMoraLabel" :value="money(kpiMora)" :icon="AlertTriangle" :tone="kpiMoraPct > 25 ? 'red' : 'amber'" />
+                        <KpiCard label="Mora %" :value="pct(kpiMoraPct)" :icon="Percent" :tone="kpiMoraPct > 25 ? 'red' : 'teal'" />
+                        <KpiCard label="Cartera sana" :value="money(Math.max(0, kpiCartera - kpiMora))" :icon="CheckCircle2" tone="green" />
+                    </div>
+                    <div class="grid gap-4 lg:grid-cols-2">
+                        <ChartCard title="Cartera sana vs vencida" :series="carteraDonutSeries" :options="carteraDonutOptions" type="donut" :height="260" />
+                        <ChartCard title="Mora por bucket" :series="moraBucketSeries" :options="moraBucketOptions" type="bar" :height="260" />
+                    </div>
+                    <ChartCard title="Top sucursales con más cartera vencida" :series="topVencidaSeries" :options="topVencidaOptions" type="bar" :height="300" />
+
+                    <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                        <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Distribución por días vencidos</h3></div>
+                        <table v-if="snap.sections?.portfolio_buckets?.length" class="w-full text-sm">
                             <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
-                                <tr>
-                                    <th class="px-4 py-3 text-left">Bucket</th>
-                                    <th class="px-4 py-3 text-right">Contratos</th>
-                                    <th class="px-4 py-3 text-right">Balance</th>
-                                    <th class="px-4 py-3 text-right">Vencido</th>
-                                </tr>
+                                <tr><th class="px-4 py-3 text-left">Bucket</th><th class="px-4 py-3 text-right">Contratos</th><th class="px-4 py-3 text-right">Balance</th><th class="px-4 py-3 text-right">Vencido</th></tr>
                             </thead>
                             <tbody>
                                 <tr v-for="b in snap.sections.portfolio_buckets" :key="b.label" class="border-t hover:bg-slate-50">
                                     <td class="px-4 py-2.5 font-semibold">{{ b.label }}</td>
                                     <td class="px-4 py-2.5 text-right">{{ num(b.contratos) }}</td>
-                                    <td class="px-4 py-2.5 text-right">{{ moneyFull(b.balance) }}</td>
-                                    <td class="px-4 py-2.5 text-right font-bold" :class="b.vencida > 0 && b.label !== 'Al corriente' ? 'text-red-700' : ''">{{ moneyFull(b.vencida) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(b.balance) }}</td>
+                                    <td class="px-4 py-2.5 text-right font-bold" :class="b.vencida > 0 && b.label !== 'Al corriente' ? 'text-red-700' : ''">{{ money(b.vencida) }}</td>
                                 </tr>
                             </tbody>
                         </table>
+                        <EmptyState v-else class="m-4" title="Sin datos de días vencidos" />
                     </div>
                 </div>
 
-                <!-- ══════════ GASTOS ══════════ -->
-                <div v-show="activeTab === 'gastos'" class="space-y-4">
-
-                    <!-- KPI total -->
-                    <div class="rounded-2xl border bg-white p-5 shadow-sm">
-                        <div class="flex items-center justify-between">
-                            <div>
-                                <p class="text-xs font-bold uppercase tracking-wider text-slate-400">Gastos operativos del periodo</p>
-                                <p class="mt-1 text-3xl font-black text-slate-950">{{ moneyFull(kpiGastos) }}</p>
-                            </div>
-                            <div class="flex gap-3">
-                                <div v-for="s in gastosBySource" :key="s.fuente" class="rounded-xl bg-slate-50 border px-4 py-2 text-center">
-                                    <p class="text-xs text-slate-500 font-semibold">{{ s.fuente }}</p>
-                                    <p class="text-sm font-black text-slate-900">{{ moneyFull(s.total) }}</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div v-if="!gastosByCategory.length && !brGlobalGastos.length" class="rounded-2xl border bg-white p-10 text-center text-sm text-slate-400">Sin gastos registrados para este periodo.</div>
-
-                    <!-- Gastos operativos canónicos (fuente: branch_radiography) -->
-                    <div v-if="brGlobalGastos.length" class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
-                        <div class="bg-slate-50 border-b px-4 py-2 flex items-center justify-between">
-                            <span class="text-xs font-bold uppercase tracking-wider text-slate-500">Gastos operativos por concepto</span>
-                            <span class="text-xs font-black text-slate-800">Total: {{ moneyFull(brGlobalGastosTotal) }}</span>
-                        </div>
-                        <table class="w-full text-xs">
-                            <tbody>
-                                <tr v-for="c in brGlobalGastos" :key="c.concepto" class="border-b last:border-0 hover:bg-slate-50">
-                                    <td class="px-4 py-2 font-semibold text-slate-700">{{ c.concepto }}</td>
-                                    <td class="px-4 py-2 text-right font-black">{{ moneyFull(c.total) }}</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-
-                    <div v-if="gastosByCategory.length" class="grid gap-4 lg:grid-cols-2">
-
-                        <!-- Por categoría -->
-                        <div class="rounded-2xl border bg-white p-5 shadow-sm">
-                            <h3 class="mb-4 text-xs font-black uppercase tracking-wider text-slate-500">Por categoría (fuente bruta)</h3>
-                            <div class="space-y-2">
-                                <div v-for="c in gastosByCategory" :key="c.categoria" class="flex items-center gap-3">
-                                    <div class="flex-1 min-w-0">
-                                        <div class="flex justify-between text-xs mb-1">
-                                            <span class="font-semibold text-slate-700 truncate">{{ c.categoria }}</span>
-                                            <span class="text-slate-400 ml-2">{{ c.count }} regs</span>
-                                        </div>
-                                        <div class="h-3 w-full overflow-hidden rounded-full bg-slate-100">
-                                            <div class="h-full rounded-full bg-violet-500 transition-all"
-                                                 :style="{ width: (gastosTotal > 0 ? Math.min(100, c.total / gastosTotal * 100) : 0) + '%' }"></div>
-                                        </div>
-                                    </div>
-                                    <div class="w-24 shrink-0 text-right text-xs font-black text-slate-800">{{ moneyFull(c.total) }}</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Por sucursal -->
-                        <div class="rounded-2xl border bg-white p-5 shadow-sm">
-                            <h3 class="mb-4 text-xs font-black uppercase tracking-wider text-slate-500">Por sucursal</h3>
-                            <div class="space-y-2">
-                                <div v-for="b in gastosByBranch" :key="b.sucursal" class="flex items-center gap-3">
-                                    <div class="flex-1 min-w-0">
-                                        <div class="flex justify-between text-xs mb-1">
-                                            <span class="font-semibold text-slate-700 truncate">{{ b.sucursal }}</span>
-                                            <span class="text-slate-400 ml-2">{{ b.count }} regs</span>
-                                        </div>
-                                        <div class="h-3 w-full overflow-hidden rounded-full bg-slate-100">
-                                            <div class="h-full rounded-full bg-amber-500 transition-all"
-                                                 :style="{ width: (gastosTotal > 0 ? Math.min(100, b.total / gastosTotal * 100) : 0) + '%' }"></div>
-                                        </div>
-                                    </div>
-                                    <div class="w-24 shrink-0 text-right text-xs font-black text-slate-800">{{ moneyFull(b.total) }}</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Por concepto -->
-                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
-                            <div class="bg-slate-50 border-b px-4 py-2 text-xs font-bold uppercase tracking-wider text-slate-500">Por concepto</div>
-                            <table class="w-full text-xs">
+                <!-- ══════════ PRODUCTOS ══════════ -->
+                <div v-show="activeTab === 'productos'" class="space-y-5">
+                    <template v-if="productosRows.length">
+                        <ChartCard title="Colocación por producto" :series="colocacionProductoSeries" :options="colocacionProductoOptions" type="bar" :height="300" />
+                        <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                            <table class="w-full text-sm">
+                                <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
+                                    <tr><th class="px-4 py-3 text-left">Producto</th><th class="px-4 py-3 text-right">Operaciones</th><th class="px-4 py-3 text-right">Colocación</th><th class="px-4 py-3 text-right">Recuperación</th><th class="px-4 py-3 text-right">Cartera</th></tr>
+                                </thead>
                                 <tbody>
-                                    <tr v-for="c in gastosByConcept" :key="c.concepto" class="border-b last:border-0 hover:bg-slate-50">
-                                        <td class="px-4 py-2 font-semibold text-slate-700">{{ c.concepto }}</td>
-                                        <td class="px-4 py-2 text-right text-slate-500">{{ c.count }} regs</td>
-                                        <td class="px-4 py-2 text-right font-black">{{ moneyFull(c.total) }}</td>
+                                    <tr v-for="p in productosSorted" :key="p.producto" class="cursor-pointer border-t hover:bg-slate-50"
+                                        :class="vfProduct === p.producto ? 'bg-indigo-50' : ''" @click="vfProduct = vfProduct === p.producto ? '' : p.producto">
+                                        <td class="px-4 py-2.5 font-bold">{{ p.producto }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ num(p.operaciones) }}</td>
+                                        <td class="px-4 py-2.5 text-right font-black">{{ money(p.colocacion) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(p.recuperacion ?? 0) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(p.cartera ?? 0) }}</td>
                                     </tr>
                                 </tbody>
                             </table>
                         </div>
+                    </template>
+                    <EmptyState v-else title="Sin datos de producto" description="Verifica que el archivo de ministraciones incluya la columna de producto financiero." />
+                </div>
 
-                        <!-- Por empleado -->
-                        <div v-if="gastosByEmployee.length" class="rounded-2xl border bg-white shadow-sm overflow-hidden">
-                            <div class="bg-slate-50 border-b px-4 py-2 text-xs font-bold uppercase tracking-wider text-slate-500">Por empleado / gestor</div>
-                            <table class="w-full text-xs">
+                <!-- ══════════ PRÉSTAMOS ACTIVOS ══════════ -->
+                <div v-show="activeTab === 'prestamos'" class="space-y-5">
+                    <template v-if="activeLoansByBranch.length">
+                        <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                            <KpiCard label="Créditos activos" :value="num(activeLoansTotals.count)" :icon="Banknote" tone="teal" />
+                            <KpiCard label="Saldo activo" :value="money(activeLoansTotals.saldo)" :icon="Wallet" tone="blue" />
+                            <KpiCard label="Vencido" :value="money(activeLoansTotals.vencido)" :icon="AlertTriangle" :tone="activeLoansTotals.pct > 25 ? 'red' : 'amber'" />
+                            <KpiCard label="% Vencido" :value="pct(activeLoansTotals.pct)" :icon="Percent" :tone="activeLoansTotals.pct > 25 ? 'red' : 'teal'" />
+                        </div>
+                        <div class="grid gap-4 lg:grid-cols-2">
+                            <ChartCard title="Saldo activo por sucursal" :series="prestamosSaldoSeries" :options="prestamosSaldoOptions" type="bar" :height="300" />
+                            <ChartCard title="Vencido por sucursal" :series="prestamosVencidoSeries" :options="prestamosVencidoOptions" type="bar" :height="300" />
+                        </div>
+                        <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                            <table class="w-full text-sm">
+                                <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
+                                    <tr><th class="px-4 py-3 text-left">Sucursal</th><th class="px-4 py-3 text-right">Créditos activos</th><th class="px-4 py-3 text-right">Saldo activo</th><th class="px-4 py-3 text-right">Vencido</th><th class="px-4 py-3 text-right">% Vencido</th></tr>
+                                </thead>
                                 <tbody>
-                                    <tr v-for="e in gastosByEmployee" :key="e.empleado" class="border-b last:border-0 hover:bg-slate-50">
-                                        <td class="px-4 py-2 font-semibold text-slate-700">{{ e.empleado }}</td>
-                                        <td class="px-4 py-2 text-right font-black">{{ moneyFull(e.total) }}</td>
+                                    <tr v-for="r in prestamosFiltered" :key="r.sucursal" class="cursor-pointer border-t hover:bg-slate-50"
+                                        :class="vfBranch === r.sucursal ? 'bg-indigo-50' : ''" @click="vfBranch = vfBranch === r.sucursal ? '' : r.sucursal">
+                                        <td class="px-4 py-2.5 font-bold">{{ r.sucursal }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ num(r.count) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(r.saldo) }}</td>
+                                        <td class="px-4 py-2.5 text-right" :class="r.vencido > 0 ? 'font-bold text-red-700' : ''">{{ money(r.vencido) }}</td>
+                                        <td class="px-4 py-2.5 text-right font-bold" :class="r.pct > 25 ? 'text-red-700' : ''">{{ pct(r.pct) }}</td>
                                     </tr>
                                 </tbody>
                             </table>
                         </div>
+                    </template>
+                    <EmptyState v-else title="Sin préstamos activos registrados" description="No hay créditos activos para este periodo." />
+                </div>
 
-                    </div>
+                <!-- ══════════ CATEGORÍA EBITDA ══════════ -->
+                <div v-show="activeTab === 'categoria'" class="space-y-5">
+                    <template v-if="branchesFull.length">
+                        <div class="grid gap-4 lg:grid-cols-3">
+                            <ChartCard title="Distribución por categoría" :series="categoriaDonutSeries" :options="categoriaDonutOptions" type="donut" :height="280" class="lg:col-span-1" />
+                            <ChartCard title="EBITDA por sucursal" :series="ebitdaPorSucursalSeries" :options="ebitdaPorSucursalOptions" type="bar" :height="280" class="lg:col-span-2" />
+                        </div>
+                        <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                            <table class="w-full text-sm">
+                                <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
+                                    <tr><th class="px-4 py-3 text-left">Sucursal</th><th class="px-4 py-3 text-right">Recuperación</th><th class="px-4 py-3 text-right">Gastos</th><th class="px-4 py-3 text-right">Nómina</th><th class="px-4 py-3 text-right">EBITDA estimado</th><th class="px-4 py-3 text-center">Categoría</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="b in branchesFiltered" :key="b.nombre" class="cursor-pointer border-t hover:bg-slate-50"
+                                        :class="vfBranch === b.nombre ? 'bg-indigo-50' : ''" @click="vfBranch = vfBranch === b.nombre ? '' : b.nombre">
+                                        <td class="px-4 py-2.5 font-bold">{{ b.nombre }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(b.recuperacion) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(b.gastos) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(b.nomina) }}</td>
+                                        <td class="px-4 py-2.5 text-right font-black" :class="b.ebitda < 0 ? 'text-red-700' : 'text-emerald-700'">{{ money(b.ebitda) }}</td>
+                                        <td class="px-4 py-2.5 text-center"><EbitdaBadge :categoria="b.categoria" /></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <p class="text-xs italic text-slate-400">EBITDA = Recuperación − Gastos − Nómina completa estimada por sucursal.</p>
+                    </template>
+                    <EmptyState v-else title="Sin datos para calcular categoría EBITDA" />
+                </div>
+
+                <!-- ══════════ GESTORES ══════════ -->
+                <div v-show="activeTab === 'gestores'" class="space-y-5">
+                    <template v-if="empGest.length">
+                        <ChartCard v-if="topGestoresColocacion.length" title="Ranking de gestores por colocación" :series="rankingGestoresSeries" :options="rankingGestoresOptions" type="bar" :height="280" />
+
+                        <div class="flex flex-wrap gap-3">
+                            <div class="relative flex-1 min-w-52">
+                                <Search class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-slate-400" />
+                                <input v-model="searchEmp" type="text" placeholder="Buscar por nombre o sucursal…"
+                                       class="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-4 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100" />
+                            </div>
+                            <select v-model="filterBranch" class="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                                <option value="">Todas las sucursales</option>
+                                <option v-for="b in branchOptions" :key="b" :value="b">{{ b }}</option>
+                            </select>
+                        </div>
+
+                        <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                            <table class="w-full text-xs">
+                                <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
+                                    <tr>
+                                        <th class="px-3 py-3 text-left sticky left-0 bg-slate-50">Gestor</th>
+                                        <th class="px-3 py-3 text-left">Sucursal</th>
+                                        <th class="px-3 py-3 text-right">Colocación</th>
+                                        <th class="px-3 py-3 text-right">Recuperación</th>
+                                        <th class="px-3 py-3 text-right">Cartera</th>
+                                        <th class="px-3 py-3 text-right">Mora %</th>
+                                        <th class="px-3 py-3 text-right">Neto nómina</th>
+                                        <th class="px-3 py-3 text-right">Gastos</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="e in empVisible" :key="e.name + e.branch" class="cursor-pointer border-t hover:bg-slate-50"
+                                        :class="vfGestor === e.name ? 'bg-indigo-50' : ''" @click="vfGestor = vfGestor === e.name ? '' : e.name">
+                                        <td class="px-3 py-2 font-bold sticky left-0 bg-white whitespace-nowrap">{{ e.name }}</td>
+                                        <td class="px-3 py-2 text-slate-600 whitespace-nowrap"><span :class="e.branch === 'Sin sucursal' ? 'text-amber-600 font-semibold' : ''">{{ e.branch }}</span></td>
+                                        <td class="px-3 py-2 text-right font-bold text-indigo-700">{{ e.colocacion > 0 ? money(e.colocacion) : '—' }}</td>
+                                        <td class="px-3 py-2 text-right">{{ e.recuperacion > 0 ? money(e.recuperacion) : '—' }}</td>
+                                        <td class="px-3 py-2 text-right">{{ e.cartera > 0 ? money(e.cartera) : '—' }}</td>
+                                        <td class="px-3 py-2 text-right" :class="e.mora > 25 ? 'font-bold text-red-700' : ''">{{ e.cartera > 0 ? pct(e.mora) : '—' }}</td>
+                                        <td class="px-3 py-2 text-right font-bold">{{ e.neto > 0 ? money(e.neto) : '—' }}</td>
+                                        <td class="px-3 py-2 text-right">{{ e.gastos > 0 ? money(e.gastos) : '—' }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div v-if="filteredEmp.length > 15" class="text-center">
+                            <button @click="showAllEmp = !showAllEmp" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-5 py-2 text-sm font-bold text-slate-600 shadow-sm hover:bg-slate-50 transition">
+                                {{ showAllEmp ? 'Ver menos' : `Ver todos (${filteredEmp.length})` }}
+                            </button>
+                        </div>
+                        <p class="text-xs text-slate-400">Mostrando {{ empVisible.length }} de {{ filteredEmp.length }} registros.</p>
+                    </template>
+                    <EmptyState v-else title="Sin datos de gestores" description="Verifica que el archivo NOI fue procesado para este periodo." />
                 </div>
 
             </div>

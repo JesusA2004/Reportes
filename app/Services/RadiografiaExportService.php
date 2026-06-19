@@ -54,7 +54,7 @@ class RadiografiaExportService
         $pdf = Pdf::loadView('reports.radiography-pdf', [
             'period'   => $period,
             'snapshot' => $snapshot,
-        ])->setPaper('letter', 'portrait');
+        ])->setPaper('letter', 'portrait')->setOption('isPhpEnabled', true);
 
         $directory  = storage_path('app/radiografias');
         File::ensureDirectoryExists($directory);
@@ -145,7 +145,7 @@ class RadiografiaExportService
             'config'      => $config,
             'scope'       => $scope,
             'report_type' => $reportType,
-        ])->setPaper('letter', 'portrait');
+        ])->setPaper('letter', 'portrait')->setOption('isPhpEnabled', true);
 
         $suffix = match(true) {
             in_array($reportType, ['month_vs_month', 'bimester_vs_bimester', 'quarter_vs_quarter'])
