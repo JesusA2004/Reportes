@@ -49,9 +49,11 @@ class ExpenseCategoryMapper
         'SOFTWARE'                => 'Software Póliza Anual',
         'LICENCIA'                => 'Software Póliza Anual',
 
-        // Pólizas / Seguros
+        // Pólizas / Seguros / Coberturas (incluye Savehearts, CRECE, Crédito Grupal)
         'POLIZA'                  => 'Pólizas',
         'SEGURO'                  => 'Pólizas',
+        'COBERTURA'               => 'Pólizas',
+        'SAVEHEARTS'              => 'Pólizas',
 
         // Cascos
         'CASCO'                   => 'Nómina y Capital Humano',
@@ -155,6 +157,11 @@ class ExpenseCategoryMapper
 
         // Finiquito
         'FINIQUITO'               => 'Nómina y Capital Humano',
+
+        // Préstamo Z / Zéptimo — anticipo de nómina, no es gasto operativo
+        'PRESTAMO Z'              => 'Nómina y Capital Humano',
+        'PRÉSTAMO Z'              => 'Nómina y Capital Humano',
+        'PAGO PRESTAMO Z'         => 'Nómina y Capital Humano',
 
         // Formatería
         'FORMATER'                => 'Formatería',

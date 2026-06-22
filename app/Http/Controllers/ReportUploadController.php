@@ -63,6 +63,7 @@ class ReportUploadController extends Controller {
             $uploads              = $this->resolveUploadsForWeeks($coveredWeeks);
             $uploadedSourceCodes  = $uploads->pluck('dataSource.code')->filter()->unique()->values();
             $missingSources       = $sources->where('is_required_for_report', true)->whereNotIn('code', $uploadedSourceCodes)->pluck('name')->values();
+            $uploadedRequiredCount = $sources->where('is_required_for_report', true)->whereIn('code', $uploadedSourceCodes->toArray())->count();
             $summary              = $summariesByPeriod->get($period->id);
             $run                  = $runsByPeriod->get($period->id);
             $dbRun                = $dbRunsByPeriod->get($period->id);
@@ -137,7 +138,7 @@ class ReportUploadController extends Controller {
                 'start_date'          => optional($period->start_date)->format('Y-m-d'),
                 'end_date'            => optional($period->end_date)->format('Y-m-d'),
                 'updated_at'          => optional($uploads->sortByDesc('created_at')->first()?->created_at)->format('d/m/Y H:i'),
-                'uploaded_sources_count' => $uploadedSourceCodes->count(),
+                'uploaded_sources_count' => $uploadedRequiredCount,
                 'required_sources_count' => $sources->where('is_required_for_report', true)->count(),
                 'missing_sources_count'  => $missingSources->count(),
                 'processed_count'        => $uploads->where('status', 'processed')->count(),
@@ -198,6 +199,7 @@ class ReportUploadController extends Controller {
             $uploads             = $this->resolveUploadsForWeeks($coveredWeeks);
             $uploadedSourceCodes = $uploads->pluck('dataSource.code')->filter()->unique()->values();
             $missingSources      = $sources->where('is_required_for_report', true)->whereNotIn('code', $uploadedSourceCodes)->pluck('name')->values();
+            $uploadedRequiredCount = $sources->where('is_required_for_report', true)->whereIn('code', $uploadedSourceCodes->toArray())->count();
             $summary             = $summariesByPeriod->get($period->id);
             $run                 = $runsByPeriod->get($period->id);
             $dbRun               = $dbRunsByPeriod->get($period->id);
@@ -208,7 +210,7 @@ class ReportUploadController extends Controller {
                 'period_code'            => $period->code,
                 'period_label'           => $period->label,
                 'updated_at'             => optional($uploads->sortByDesc('created_at')->first()?->created_at)->format('d/m/Y H:i'),
-                'uploaded_sources_count' => $uploadedSourceCodes->count(),
+                'uploaded_sources_count' => $uploadedRequiredCount,
                 'required_sources_count' => $sources->where('is_required_for_report', true)->count(),
                 'missing_sources_count'  => $missingSources->count(),
                 'processed_count'        => $uploads->where('status', 'processed')->count(),
@@ -1432,12 +1434,12 @@ class ReportUploadController extends Controller {
             ->all();
 
         $failedDb = collect($bdSourceCodes)->filter(function ($code) use ($uploads) {
-            $upload = $uploads->first(fn ($item) => $item->dataSource?->code === $code);
+            $upload = $uploads->sortByDesc('id')->first(fn ($item) => $item->dataSource?->code === $code);
             return $upload && (string) ($upload->status?->value ?? $upload->status) === 'failed';
         })->values()->all();
 
         $unprocessedRadiography = collect($reportSourceCodes)->filter(function ($code) use ($uploads) {
-            $upload = $uploads->first(fn ($item) => $item->dataSource?->code === $code);
+            $upload = $uploads->sortByDesc('id')->first(fn ($item) => $item->dataSource?->code === $code);
             if (!$upload) return false;
             return (string) ($upload->status?->value ?? $upload->status) !== 'processed';
         })->values()->all();
@@ -1487,9 +1489,10 @@ class ReportUploadController extends Controller {
                            && empty($staleUploads);   // stale uploads invalidate BD state
         $databaseUpdated = $summaryValid || ($compoundPeriod && empty($missingDb) && empty($failedDb));
 
-        $radiographyReady = ($summary?->status === 'generated') && !$summary?->invalidated_at && empty($staleUploads);
-        $runStatus        = $run?->status;
-        $running          = in_array($runStatus, ['queued', 'running'], true);
+        $radiographyReady     = ($summary?->status === 'generated') && !$summary?->invalidated_at && empty($staleUploads);
+        $hasPreviousSuccess   = !$radiographyReady && $run && $run->status === 'success';
+        $runStatus            = $run?->status;
+        $running              = in_array($runStatus, ['queued', 'running'], true);
         $dbRunStatus      = $dbRun?->status;
         $dbRunning        = in_array($dbRunStatus, ['queued', 'running'], true);
 
@@ -1689,6 +1692,9 @@ class ReportUploadController extends Controller {
             'has_stale_uploads'               => !empty($staleUploads),
             'stale_upload_sources'            => $staleUploads,
             'stale_upload_details'            => $staleUploadInfo,
+            // Previous successful radiography (run succeeded but summary was later reset)
+            'has_previous_radiography'        => $hasPreviousSuccess,
+            'previous_radiography_at'         => $hasPreviousSuccess ? optional($run->finished_at)->format('d/m/Y H:i') : null,
         ];
     }
 }

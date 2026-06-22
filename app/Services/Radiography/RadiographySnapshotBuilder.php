@@ -56,10 +56,9 @@ class RadiographySnapshotBuilder
             ->selectRaw("SUM(COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.seguro')) AS DECIMAL(14,2)), 0)) as tot")
             ->value('tot') ?? 0);
 
-        // Recuperación: suma total del archivo, solo excluye seguros.
-        // Seguros detectados (is_savehearts=1): aportan únicamente savehearts_crece_share (30% CRECE, 0 resto).
-        // Seguros no detectados con COBERTURA en concept/operation: aportan 0.
-        // Todo lo demás: aporta total_amount completo.
+        // Recuperación: suma total del archivo, excluye seguros + unificación + condonación.
+        // Seguros (is_savehearts=1): aportan savehearts_crece_share (30% CRECE, 0 resto).
+        // No-savehearts con COBERTURA/SEGURO/UNIFICACION/CONDONACION: aportan 0.
         if (($gm['recuperacion_total'] ?? 0) == 0) {
             $gm['recuperacion_total'] = (float) DB::table('fact_recoveries')
                 ->whereIn('period_id', $this->dataIds)
@@ -68,30 +67,19 @@ class RadiographySnapshotBuilder
                     WHEN is_savehearts = 0 AND (
                         UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%'
                         OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
+                        OR UPPER(COALESCE(concept,'')) LIKE '%SEGURO%'
+                        OR UPPER(COALESCE(operation,'')) LIKE '%SEGURO%'
+                        OR UPPER(COALESCE(concept,'')) LIKE '%UNIFICACION%'
+                        OR UPPER(COALESCE(operation,'')) LIKE '%UNIFICACION%'
+                        OR UPPER(COALESCE(concept,'')) LIKE '%CONDONACION%'
+                        OR UPPER(COALESCE(operation,'')) LIKE '%CONDONACION%'
                     ) THEN 0
                     ELSE total_amount
                 END) as total")
                 ->value('total') ?? 0;
         }
 
-        if (($gm['gasto_total'] ?? 0) == 0) {
-            // Use only gastos_lendus (PDF) + gastos_erp as monetary sources — Excel duplicates PDF amounts.
-            // Exclude Envío utilidad, Nómina y Capital Humano, Préstamos Intersucursales (shown separately).
-            $nonOpCategories = [
-                'Envío de utilidad a corporativo',
-                'Nómina y Capital Humano',
-                'Préstamos Intersucursales',
-            ];
-            $monetarySources = DB::table('data_sources')
-                ->whereIn('code', ['gastos_lendus', 'gastos_erp'])
-                ->pluck('id');
-            $gm['gasto_total'] = (float) DB::table('fact_expenses as e')
-                ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
-                ->whereIn('e.period_id', $this->dataIds)
-                ->whereIn('ru.data_source_id', $monetarySources)
-                ->whereNotIn(DB::raw('COALESCE(e.category, \'\')'), $nonOpCategories)
-                ->sum('e.amount');
-        }
+        // gasto_total is resolved AFTER branchCalcGlobal is built below (see override section)
 
         $payroll           = $this->buildPayroll($period);
         $empGestoresResult = $this->buildEmployeesGestores($period);
@@ -150,6 +138,35 @@ class RadiographySnapshotBuilder
             $gm['colocacion_total'] = $calcColocacion;
         }
 
+        // Gastos: authoritative source is BranchRadiographyCalculator.
+        // gastos_operativos = gastos_erp_total + gastos_lendus_total (Pólizas Lendus excluded — in seguros_puente).
+        $calcGastosOp = (float) ($branchCalcGlobal['gastos_operativos'] ?? 0);
+        if ($calcGastosOp > 0 || ($gm['gasto_total'] ?? 0) == 0) {
+            $gm['gasto_total']        = $calcGastosOp;
+            $gm['gasto_erp']          = (float) ($branchCalcGlobal['gastos_erp_total'] ?? 0);
+            $gm['gasto_lendus']       = (float) ($branchCalcGlobal['gastos_lendus_total'] ?? 0);
+            $gm['seguros_lendus_puente'] = (float) ($branchCalcGlobal['seguros_lendus_puente'] ?? 0);
+            $gm['excedentes_total']   = (float) ($branchCalcGlobal['excedentes'] ?? 0);
+            $gm['fondeo_total']       = (float) ($branchCalcGlobal['prestamos_fondea'] ?? 0);
+        }
+
+        // ── EBITDA, Venta y Margen EBITDA ────────────────────────────────────
+        $saldoInicialParaEbitda = (float) ($period->saldo_inicial_caja ?? 0);
+        $nominaDetalleSuma      = array_sum(array_values((array) ($branchCalcGlobal['nomina_detalle'] ?? [])));
+        $nominaParaEbitda       = (float) ($branchCalcGlobal['nomina_total'] ?? 0)
+                                + (float) ($branchCalcGlobal['comisiones'] ?? 0)
+                                + (float) ($branchCalcGlobal['bonos'] ?? 0)
+                                + (float) ($branchCalcGlobal['vacaciones'] ?? 0)
+                                + (float) ($branchCalcGlobal['prima_vacacional'] ?? 0)
+                                + $nominaDetalleSuma;
+        $opexParaEbitda         = (float) ($branchCalcGlobal['gastos_operativos'] ?? 0);
+        $totalGastosEbitda      = $opexParaEbitda + $nominaParaEbitda;
+        $ebitdaGlobal           = $saldoInicialParaEbitda + $calcRecuperacion - $calcColocacion - $totalGastosEbitda;
+        $capitalRecuperado      = (float) ($branchCalcGlobal['capital_recuperado'] ?? 0);
+        $impuestoRecuperado     = (float) ($branchCalcGlobal['impuesto_recuperado'] ?? 0);
+        $ventaGlobal            = max(0.0, $calcRecuperacion - $capitalRecuperado - $impuestoRecuperado);
+        $margenEbitda           = $ventaGlobal > 0 ? round($ebitdaGlobal / $ventaGlobal * 100, 2) : 0.0;
+
         return [
             'period' => [
                 'id'         => $period->id,
@@ -172,15 +189,32 @@ class RadiographySnapshotBuilder
                 'recovery_total'               => (float)($gm['recuperacion_total'] ?? 0),
                 'recovery_bruta'               => (float)($branchCalcGlobal['recuperacion_bruta'] ?? 0),
                 'recovery_seguro_excluido'     => (float)($branchCalcGlobal['seguro_excluido_bruto'] ?? 0),
+                'recovery_savehearts_bruto'    => (float)($branchCalcGlobal['seguro_savehearts_bruto'] ?? 0),
+                'recovery_comadres_bruto'      => (float)($branchCalcGlobal['seguro_comadres_bruto'] ?? 0),
                 'recovery_crece_bruto'         => (float)($branchCalcGlobal['seguro_crece_bruto'] ?? 0),
                 'recovery_crece_reconocido'    => (float)($branchCalcGlobal['seguro_crece_reconocido'] ?? 0),
+                'recovery_crece_no_reconocido' => max(0.0, (float)($branchCalcGlobal['seguro_crece_bruto'] ?? 0) - (float)($branchCalcGlobal['seguro_crece_reconocido'] ?? 0)),
                 'placement_total'              => (float)($gm['colocacion_total'] ?? 0),
                 'portfolio_total'              => (float)($gm['valor_cartera_total'] ?? 0),
                 'overdue_portfolio'            => (float)($gm['cartera_vencida_total'] ?? 0),
                 'mora_index'                   => (float)($gm['mora_porcentaje'] ?? 0),
                 'expenses_total'               => (float)($gm['gasto_total'] ?? 0),
+                'expenses_erp'                 => (float)($gm['gasto_erp'] ?? 0),
+                'expenses_lendus'              => (float)($gm['gasto_lendus'] ?? 0),
+                'seguros_lendus_puente'        => (float)($gm['seguros_lendus_puente'] ?? 0),
+                'excedentes_total'             => (float)($gm['excedentes_total'] ?? 0),
+                'fondeo_total'                 => (float)($gm['fondeo_total'] ?? 0),
                 'payroll_total'                => $payroll['pagos'] + $payroll['bonos'],
                 'net_payroll'                  => $payroll['neto'],
+                'opex_total'                   => $opexParaEbitda,
+                'nomina_ebitda_total'          => $nominaParaEbitda,
+                'total_gastos_ebitda'          => $totalGastosEbitda,
+                'ebitda_global'                => $ebitdaGlobal,
+                'venta_global'                 => $ventaGlobal,
+                'margen_ebitda'                => $margenEbitda,
+                'ebitda_categoria'             => $this->ebitdaCategory($ebitdaGlobal),
+                'unificacion_excluida'         => (float)($branchCalcGlobal['unificacion_excluida'] ?? 0),
+                'condonacion_excluida'         => (float)($branchCalcGlobal['condonacion_excluida'] ?? 0),
             ],
             'sections' => [
                 'payroll'                    => $payroll,
@@ -2412,5 +2446,16 @@ class RadiographySnapshotBuilder
 
         usort($result, fn ($a, $b) => strcmp($a['branch'], $b['branch']) ?: $b['cartera'] <=> $a['cartera']);
         return $result;
+    }
+
+    private function ebitdaCategory(float $ebitda): string
+    {
+        return match (true) {
+            $ebitda >= 1_000_000 => 'DIAMANTE',
+            $ebitda >= 600_000   => 'MASTER',
+            $ebitda >= 300_000   => 'SENIOR',
+            $ebitda >= 100_000   => 'JUNIOR',
+            default              => 'MANTENIDO',
+        };
     }
 }

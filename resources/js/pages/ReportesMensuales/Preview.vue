@@ -184,9 +184,12 @@ const branchRadiography = computed(() => snap.value?.branch_radiography ?? null)
 const brGlobal  = computed(() => branchRadiography.value?.global ?? null)
 const brRaw     = computed(() => (branchRadiography.value?.branches ?? []) as any[])
 
-function ebitdaCategoryOf(value: number): 'SENIOR' | 'JUNIOR' | 'MANTENIDO' {
-    if (value >= 300_000) return 'SENIOR'
-    if (value >= 100_000) return 'JUNIOR'
+type EbitdaCategory = 'DIAMANTE' | 'MASTER' | 'SENIOR' | 'JUNIOR' | 'MANTENIDO'
+function ebitdaCategoryOf(value: number): EbitdaCategory {
+    if (value >= 1_000_000) return 'DIAMANTE'
+    if (value >= 600_000)   return 'MASTER'
+    if (value >= 300_000)   return 'SENIOR'
+    if (value >= 100_000)   return 'JUNIOR'
     return 'MANTENIDO'
 }
 
@@ -262,8 +265,10 @@ const gastosBySource   = computed(() => gastosDetail.value?.bySource ?? [])
 // (RadiographyWorkbookBuilder::buildGlobalSheet / radiography-pdf.blade.php).
 const saldoInicialCaja  = computed(() => Number(snap.value?.saldo_inicial_caja) || 0)
 const saldoFinalCaja    = computed(() => snap.value?.saldo_final_caja !== null && snap.value?.saldo_final_caja !== undefined ? Number(snap.value.saldo_final_caja) : null)
-const gastosEbitdaTotal = computed(() => brGlobalGastosTotal.value + nomNeto.value)
+const gastosEbitdaTotal = computed(() => brGlobalGastosTotal.value + nomTotal.value)
 const utilidadGlobal    = computed(() => saldoInicialCaja.value + recGlobal.value - colGlobal.value - gastosEbitdaTotal.value)
+const ventaGlobal       = computed(() => Math.max(0, recGlobal.value - ingrCapital.value - ingrImpuesto.value))
+const margenEbitdaPct   = computed(() => ventaGlobal.value > 0 ? (utilidadGlobal.value / ventaGlobal.value) * 100 : 0)
 // Diferencia = EBITDA − Envío de utilidad a corporativo. Puede ser negativa — no se fuerza a 0;
 // ese es justamente el saldo a llevar como saldo inicial del siguiente periodo.
 const diferencia        = computed(() => utilidadGlobal.value - excGlobal.value)
@@ -297,12 +302,17 @@ const branchesFull = computed(() => {
     return brRaw.value.map((b: any) => {
         const moraSum = (Number(b.mora_0_30) || 0) + (Number(b.mora_31_60) || 0) + (Number(b.mora_61_90) || 0) + (Number(b.mora_91_120) || 0) + (Number(b.mora_120_plus) || 0)
         const cartera = Number(b.valor_cartera) || 0
-        const nominaFull = (Number(b.nomina_total) || 0) + (Number(b.comisiones) || 0) + (Number(b.bonos) || 0)
+        const bonos   = Number(b.bonos) || 0
+        const nominaFull = (Number(b.nomina_total) || 0) + (Number(b.comisiones) || 0) + bonos
             + (Number(b.vacaciones) || 0) + (Number(b.prima_vacacional) || 0)
             + Object.values((b.nomina_detalle ?? {}) as Record<string, number>).reduce((s: number, v: any) => s + (Number(v) || 0), 0)
-        const recuperacion = Number(b.recuperacion_total) || 0
-        const gastos = Number(b.gastos_operativos) || 0
-        const ebitda = recuperacion - gastos - nominaFull
+        const recuperacion    = Number(b.recuperacion_total) || 0
+        const capitalRec      = Number(b.capital_recuperado) || 0
+        const impuestoRec     = Number(b.impuesto_recuperado) || 0
+        const gastos          = Number(b.gastos_operativos) || 0
+        const ebitda          = recuperacion - gastos - nominaFull
+        const ventaBranch     = Math.max(0, recuperacion - capitalRec - impuestoRec)
+        const margenEbitda    = ventaBranch > 0 ? (ebitda / ventaBranch) * 100 : 0
         return {
             nombre: b.sucursal,
             recuperacion,
@@ -312,7 +322,9 @@ const branchesFull = computed(() => {
             mora: cartera > 0 ? (moraSum / cartera) * 100 : 0,
             gastos,
             nomina: nominaFull,
+            bonos,
             ebitda,
+            margenEbitda,
             categoria: ebitdaCategoryOf(ebitda),
             mora_0_30: Number(b.mora_0_30) || 0,
             mora_31_60: Number(b.mora_31_60) || 0,
@@ -320,11 +332,11 @@ const branchesFull = computed(() => {
             mora_91_120: Number(b.mora_91_120) || 0,
             mora_120_plus: Number(b.mora_120_plus) || 0,
         }
-    }).sort((a, b) => a.nombre.localeCompare(b.nombre))
+    }).sort((a, b) => b.ebitda - a.ebitda)
 })
 
 const categoriaCounts = computed(() => {
-    const counts: Record<string, number> = { SENIOR: 0, JUNIOR: 0, MANTENIDO: 0 }
+    const counts: Record<string, number> = { DIAMANTE: 0, MASTER: 0, SENIOR: 0, JUNIOR: 0, MANTENIDO: 0 }
     for (const b of branchesFull.value) counts[b.categoria] = (counts[b.categoria] ?? 0) + 1
     return counts
 })
@@ -372,7 +384,7 @@ const vfBranchOptions    = computed(() => branchesFull.value.map(b => b.nombre))
 const vfProductOptions   = computed(() => productosRows.value.map((p: any) => p.producto))
 const vfBucketOptions    = computed(() => moraBucketsGlobal.value.map(b => b.label))
 const vfGestorOptions    = computed(() => (empGest.value as any[]).map(e => e.name).sort())
-const vfCategoriaOptions = ['SENIOR', 'JUNIOR', 'MANTENIDO']
+const vfCategoriaOptions = ['DIAMANTE', 'MASTER', 'SENIOR', 'JUNIOR', 'MANTENIDO']
 
 const vfBranchRow  = computed(() => vfBranch.value ? branchesFull.value.find(b => b.nombre === vfBranch.value) ?? null : null)
 const vfGestorRow  = computed(() => vfGestor.value ? (empGest.value as any[]).find(e => e.name === vfGestor.value) ?? null : null)
@@ -500,7 +512,7 @@ const tabs: { key: TabKey; label: string }[] = [
     { key: 'gastos',     label: 'Gastos' },
     { key: 'nomina',     label: 'Nómina' },
     { key: 'mora',       label: 'Mora / Cartera' },
-    { key: 'productos',  label: 'Productos' },
+    { key: 'productos',  label: 'Colocación / Recuperación por producto' },
     { key: 'prestamos',  label: 'Préstamos activos' },
     { key: 'categoria',  label: 'Categoría EBITDA' },
     { key: 'gestores',   label: 'Gestores' },
@@ -529,12 +541,12 @@ const carteraDonutSeries = computed(() => {
 })
 const carteraDonutOptions = computed(() => donutOptions(['Cartera sana', 'Cartera vencida'], [chartColors.teal, chartColors.red]))
 
-// Mora por bucket (stacked/column)
-const moraBucketSeries = computed(() => [{ name: 'Mora', data: moraBucketsGlobal.value.map(b => b.value) }])
-const moraBucketOptions = computed(() => ({
-    ...stackedBarOptions(moraBucketsGlobal.value.map(b => b.label), [chartColors.red]),
-    colors: dimColors(moraBucketsGlobal.value.map(b => b.label), vfBucket.value, chartColors.red),
-}))
+// Mora por bucket (donut/pastel — muestra porcentaje y monto)
+const moraBucketSeries = computed(() => moraBucketsGlobal.value.map(b => b.value))
+const moraBucketOptions = computed(() => donutOptions(
+    moraBucketsGlobal.value.map(b => b.label),
+    ['#e11d48', '#f97316', '#eab308', '#3b82f6', '#8b5cf6'],
+))
 
 // Sucursales: ranking por recuperación / cartera / EBITDA
 function rankingSeries(field: 'recuperacion' | 'cartera' | 'ebitda', limit = 13) {
@@ -562,10 +574,22 @@ const rankingEbitdaOptions = computed(() => ({
 const rankingEbitdaSeries = computed(() => [{ name: 'EBITDA', data: rankingEbitda.value.map(b => b.ebitda) }])
 
 // Categoría EBITDA: distribución (donut) + EBITDA por sucursal coloreado por categoría
-const categoriaDonutOptions = computed(() => donutOptions(['SENIOR', 'JUNIOR', 'MANTENIDO'], [chartColors.green, chartColors.amber, chartColors.red]))
-const categoriaDonutSeries = computed(() => [categoriaCounts.value.SENIOR, categoriaCounts.value.JUNIOR, categoriaCounts.value.MANTENIDO])
+const categoriaDonutOptions = computed(() => donutOptions(
+    ['DIAMANTE', 'MASTER', 'SENIOR', 'JUNIOR', 'MANTENIDO'],
+    ['#0ea5e9', '#8b5cf6', chartColors.green, chartColors.amber, chartColors.red],
+))
+const categoriaDonutSeries = computed(() => [
+    categoriaCounts.value.DIAMANTE,
+    categoriaCounts.value.MASTER,
+    categoriaCounts.value.SENIOR,
+    categoriaCounts.value.JUNIOR,
+    categoriaCounts.value.MANTENIDO,
+])
 
-const categoriaColorMap: Record<string, string> = { SENIOR: chartColors.green, JUNIOR: chartColors.amber, MANTENIDO: chartColors.red }
+const categoriaColorMap: Record<string, string> = {
+    DIAMANTE: '#0ea5e9', MASTER: '#8b5cf6',
+    SENIOR: chartColors.green, JUNIOR: chartColors.amber, MANTENIDO: chartColors.red,
+}
 const ebitdaPorSucursal = computed(() => [...branchesFiltered.value].sort((a, b) => b.ebitda - a.ebitda))
 const ebitdaPorSucursalOptions = computed(() => ({
     ...horizontalBarOptions(ebitdaPorSucursal.value.map(b => b.nombre)),
@@ -687,15 +711,18 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                     <p v-if="vfActiveBadge" class="mb-3 inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-3 py-1 text-xs font-black text-indigo-700">
                         {{ vfActiveBadge }}
                     </p>
-                    <div class="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
-                        <KpiCard label="Recuperación / Cobranza" :value="money(kpiRec)" :icon="HandCoins" tone="teal" />
+                    <div class="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6 xl:grid-cols-11">
+                        <KpiCard label="Recuperación" :value="money(kpiRec)" :icon="HandCoins" tone="teal" />
                         <KpiCard label="Colocación" :value="money(kpiCol)" :icon="TrendingUp" tone="blue" />
                         <KpiCard label="Cartera" :value="money(kpiCartera)" :icon="Landmark" tone="teal" />
                         <KpiCard label="Cartera vencida" :value="money(kpiMora)" :icon="AlertTriangle" :tone="kpiMoraPct > 25 ? 'red' : 'amber'" />
                         <KpiCard label="Mora %" :value="pct(kpiMoraPct)" :icon="Percent" :tone="kpiMoraPct > 25 ? 'red' : 'teal'" />
-                        <KpiCard label="Gastos operativos" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
+                        <KpiCard label="OPEX" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
                         <KpiCard label="Nómina" :value="money(kpiNomina)" :icon="Wallet" tone="blue" />
                         <KpiCard :label="kpiUtilLabel" :value="money(kpiUtil)" :icon="Gauge" :tone="kpiUtil < 0 ? 'red' : 'green'" />
+                        <KpiCard label="Margen EBITDA" :value="pct(margenEbitdaPct)" :icon="Percent" :tone="margenEbitdaPct < 0 ? 'red' : 'green'" />
+                        <KpiCard label="Préstamo activo" :value="money(activeLoansTotals.saldo)" :icon="Banknote" tone="blue" />
+                        <KpiCard label="Efectividad cobranza" value="Pendiente" :icon="CheckCircle2" tone="neutral" />
                     </div>
                 </div>
 
@@ -846,7 +873,7 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                     <!-- RESUMEN FINANCIERO GENERAL -->
                     <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
                         <div class="border-b bg-slate-50 px-5 py-3">
-                            <h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Resumen financiero general</h3>
+                            <h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Resumen ejecutivo</h3>
                         </div>
                         <table class="w-full text-sm">
                             <tbody>
@@ -855,9 +882,10 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                                 <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Cartera total</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(carteraGlobal) }}</td></tr>
                                 <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Cartera vencida / Mora total</td><td class="px-5 py-2.5 text-right font-black" :class="moraTotalGlobal > 0 ? 'text-red-700' : 'text-slate-950'">{{ money(moraTotalGlobal) }}</td></tr>
                                 <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Índice de mora</td><td class="px-5 py-2.5 text-right font-black" :class="kpiMoraPct > 25 ? 'text-red-700' : 'text-slate-950'">{{ pct(kpiMoraPct) }}</td></tr>
-                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Gastos operativos</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(brGlobalGastosTotal) }}</td></tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">OPEX (gastos ERP + Lendus)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(brGlobalGastosTotal) }}</td></tr>
                                 <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Nómina y Capital Humano</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(nomTotal) }}</td></tr>
                                 <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">EBITDA</td><td class="px-5 py-2.5 text-right font-black text-lg" :class="utilidadGlobal < 0 ? 'text-red-700' : 'text-indigo-900'">{{ money(utilidadGlobal) }}</td></tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-500 font-medium">Margen EBITDA</td><td class="px-5 py-2.5 text-right font-black" :class="margenEbitdaPct < 0 ? 'text-red-700' : 'text-slate-950'">{{ pct(margenEbitdaPct) }}</td></tr>
                                 <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Envío de utilidad a corporativo</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(excGlobal) }}</td></tr>
                                 <tr class="border-b"><td class="px-5 py-2.5 font-black text-slate-800">Diferencia</td><td class="px-5 py-2.5 text-right font-black" :class="diferencia < 0 ? 'text-red-700' : 'text-emerald-700'">{{ money(diferencia) }}</td></tr>
                                 <tr class="border-b bg-slate-50/60">
@@ -893,7 +921,7 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                         <ChartCard title="Recuperación vs Colocación" :series="recColSeries" :options="recColOptions" type="bar" :height="240" />
                         <ChartCard title="Cartera vs Cartera vencida" :series="carteraDonutSeries" :options="carteraDonutOptions" type="donut" :height="240" />
                     </div>
-                    <ChartCard title="Mora por bucket" :series="moraBucketSeries" :options="moraBucketOptions" type="bar" :height="260" />
+                    <ChartCard title="Mora por bucket" :series="moraBucketSeries" :options="moraBucketOptions" type="donut" :height="260" />
 
                     <div class="grid gap-4 lg:grid-cols-2">
                         <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
@@ -934,14 +962,14 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                                 <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
                                     <tr>
                                         <th class="px-4 py-3 text-left">Sucursal</th>
-                                        <th class="px-4 py-3 text-right">Recuperación</th>
-                                        <th class="px-4 py-3 text-right">Colocación</th>
-                                        <th class="px-4 py-3 text-right">Cartera</th>
-                                        <th class="px-4 py-3 text-right">Vencida</th>
+                                        <th class="px-4 py-3 text-right">Valor cartera</th>
+                                        <th class="px-4 py-3 text-right">Cartera vencida</th>
                                         <th class="px-4 py-3 text-right">Mora %</th>
-                                        <th class="px-4 py-3 text-right">Gastos</th>
+                                        <th class="px-4 py-3 text-right">OPEX</th>
                                         <th class="px-4 py-3 text-right">Nómina</th>
+                                        <th class="px-4 py-3 text-right">Bonos</th>
                                         <th class="px-4 py-3 text-right">EBITDA</th>
+                                        <th class="px-4 py-3 text-right">Margen EBITDA</th>
                                         <th class="px-4 py-3 text-center">Categoría</th>
                                     </tr>
                                 </thead>
@@ -949,14 +977,14 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                                     <tr v-for="b in branchesFiltered" :key="b.nombre" class="cursor-pointer border-t hover:bg-slate-50"
                                         :class="vfBranch === b.nombre ? 'bg-indigo-50' : ''" @click="vfBranch = vfBranch === b.nombre ? '' : b.nombre">
                                         <td class="px-4 py-2.5 font-bold">{{ b.nombre }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ money(b.recuperacion) }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ money(b.colocacion) }}</td>
                                         <td class="px-4 py-2.5 text-right">{{ money(b.cartera) }}</td>
                                         <td class="px-4 py-2.5 text-right" :class="b.vencida > 0 ? 'font-bold text-red-700' : ''">{{ money(b.vencida) }}</td>
                                         <td class="px-4 py-2.5 text-right font-bold" :class="b.mora > 25 ? 'text-red-700' : ''">{{ pct(b.mora) }}</td>
                                         <td class="px-4 py-2.5 text-right">{{ money(b.gastos) }}</td>
                                         <td class="px-4 py-2.5 text-right">{{ money(b.nomina) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(b.bonos) }}</td>
                                         <td class="px-4 py-2.5 text-right font-bold" :class="b.ebitda < 0 ? 'text-red-700' : 'text-emerald-700'">{{ money(b.ebitda) }}</td>
+                                        <td class="px-4 py-2.5 text-right font-bold" :class="b.margenEbitda < 0 ? 'text-red-700' : 'text-slate-700'">{{ pct(b.margenEbitda) }}</td>
                                         <td class="px-4 py-2.5 text-center"><EbitdaBadge :categoria="b.categoria" /></td>
                                     </tr>
                                 </tbody>
@@ -1001,8 +1029,9 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                 <!-- ══════════ GASTOS ══════════ -->
                 <div v-show="activeTab === 'gastos'" class="space-y-5">
                     <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                        <KpiCard label="Gastos operativos" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
-                        <KpiCard v-for="s in gastosBySource" :key="s.fuente" :label="`Fuente: ${s.fuente}`" :value="money(s.total)" tone="neutral" />
+                        <KpiCard label="OPEX" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
+                        <KpiCard label="OPEX — Gastos ERP" :value="money(Number(snap?.summary?.expenses_erp ?? 0))" :icon="Receipt" tone="neutral" />
+                        <KpiCard label="OPEX — Gastos Lendus" :value="money(Number(snap?.summary?.expenses_lendus ?? 0))" :icon="Receipt" tone="neutral" />
                     </div>
                     <div class="grid gap-4 lg:grid-cols-2">
                         <ChartCard title="Gastos por sucursal" :series="gastosPorSucursalSeries" :options="gastosPorSucursalOptions" type="bar" :height="300" />
@@ -1093,7 +1122,7 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                     </div>
                     <div class="grid gap-4 lg:grid-cols-2">
                         <ChartCard title="Cartera sana vs vencida" :series="carteraDonutSeries" :options="carteraDonutOptions" type="donut" :height="260" />
-                        <ChartCard title="Mora por bucket" :series="moraBucketSeries" :options="moraBucketOptions" type="bar" :height="260" />
+                        <ChartCard title="Mora por bucket" :series="moraBucketSeries" :options="moraBucketOptions" type="donut" :height="260" />
                     </div>
                     <ChartCard title="Top sucursales con más cartera vencida" :series="topVencidaSeries" :options="topVencidaOptions" type="bar" :height="300" />
 

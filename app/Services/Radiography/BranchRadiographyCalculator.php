@@ -19,11 +19,18 @@ class BranchRadiographyCalculator
     // Categories that appear as gastos but belong to the Nómina section (shown there, not in gastos)
     private const NOMINA_EXPENSE_CATS = ['Gasolina', 'Financiamiento Celular'];
 
+    // Lendus seguros/pólizas categories: passthrough to insurers — NOT in gastos operativos.
+    // Tracked separately as seguros_lendus_puente. ERP rows with 'Pólizas' ARE real expenses
+    // (vehicle/office insurance) and are intentionally excluded from this constant so they
+    // flow into gastos_erp_total normally.
+    private const SEGUROS_LENDUS_CATS = ['Pólizas'];
+
     // Categories that appear in Lendus PDF — ERP rows with these categories are
     // excluded to avoid double-counting with Lendus.
+    // Note: 'Pólizas' was removed; ERP pólizas are real operational expenses (vehicle/office
+    // insurance) that should appear in gastos_erp_total, while Lendus pólizas are passthroughs.
     private const LENDUS_PRESENT_CATS = [
         'Gastos Operativos',
-        'Pólizas',
         'Renta Oficina',
         'Recargas Telefónicas',
         'Gasolina',
@@ -143,8 +150,8 @@ class BranchRadiographyCalculator
                 if ($key === 'sucursal' || $key === 'gastos_detalle' || $key === 'nomina_detalle') {
                     continue; // array fields handled separately
                 }
-                if (array_key_exists($key, $global)) {
-                    $global[$key] += $val;
+                if (is_numeric($val) && array_key_exists($key, $global)) {
+                    $global[$key] += (float) $val;
                 }
             }
         }
@@ -280,14 +287,34 @@ class BranchRadiographyCalculator
             WHEN is_savehearts = 0 AND (
                 UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%'
                 OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
+                OR UPPER(COALESCE(concept,'')) LIKE '%SEGURO%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%SEGURO%'
+                OR UPPER(COALESCE(concept,'')) LIKE '%UNIFICACION%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%UNIFICACION%'
+                OR UPPER(COALESCE(concept,'')) LIKE '%CONDONACION%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%CONDONACION%'
             ) THEN 0
             ELSE total_amount
         END) as recovery,
         SUM(total_amount) as bruto,
         SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share = 0 THEN total_amount ELSE 0 END) as seguro_excluido,
+        SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share = 0
+            AND (UPPER(COALESCE(concept,'')) LIKE '%COMADRES%'
+              OR UPPER(COALESCE(concept,'')) LIKE '%GRUPAL%'
+              OR UPPER(COALESCE(operation,'')) LIKE '%COMADRES%'
+              OR UPPER(COALESCE(operation,'')) LIKE '%GRUPAL%')
+            THEN total_amount ELSE 0 END) as seguro_comadres,
+        SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share = 0
+            AND NOT (UPPER(COALESCE(concept,'')) LIKE '%COMADRES%'
+              OR UPPER(COALESCE(concept,'')) LIKE '%GRUPAL%'
+              OR UPPER(COALESCE(operation,'')) LIKE '%COMADRES%'
+              OR UPPER(COALESCE(operation,'')) LIKE '%GRUPAL%')
+            THEN total_amount ELSE 0 END) as seguro_savehearts,
         SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share > 0 THEN total_amount ELSE 0 END) as crece_bruto,
         SUM(COALESCE(savehearts_crece_share, 0)) as crece_reconocido,
-        SUM(capital) as capital, SUM(interest) as interest, SUM(tax) as tax, SUM(charges_due) as charges";
+        SUM(capital) as capital, SUM(interest) as interest, SUM(tax) as tax, SUM(charges_due) as charges,
+        SUM(CASE WHEN is_savehearts = 0 AND (UPPER(COALESCE(concept,'')) LIKE '%UNIFICACION%' OR UPPER(COALESCE(operation,'')) LIKE '%UNIFICACION%') THEN total_amount ELSE 0 END) as unificacion_excluida,
+        SUM(CASE WHEN is_savehearts = 0 AND (UPPER(COALESCE(concept,'')) LIKE '%CONDONACION%' OR UPPER(COALESCE(operation,'')) LIKE '%CONDONACION%') THEN total_amount ELSE 0 END) as condonacion_excluida";
 
         // Pass 1: branches already mapped to an operative sucursal via branch_id
         $rows = DB::table('fact_recoveries')
@@ -305,12 +332,16 @@ class BranchRadiographyCalculator
             $summaries[$suc]['recuperacion_total']      += (float) $row->recovery;
             $summaries[$suc]['recuperacion_bruta']      += (float) $row->bruto;
             $summaries[$suc]['seguro_excluido_bruto']   += (float) $row->seguro_excluido;
+            $summaries[$suc]['seguro_savehearts_bruto'] += (float) $row->seguro_savehearts;
+            $summaries[$suc]['seguro_comadres_bruto']   += (float) $row->seguro_comadres;
             $summaries[$suc]['seguro_crece_bruto']      += (float) $row->crece_bruto;
             $summaries[$suc]['seguro_crece_reconocido'] += (float) $row->crece_reconocido;
             $summaries[$suc]['capital_recuperado']      += (float) $row->capital;
             $summaries[$suc]['interes_recuperado']      += (float) $row->interest;
             $summaries[$suc]['impuesto_recuperado']     += (float) $row->tax;
             $summaries[$suc]['charges']                 += (float) $row->charges;
+            $summaries[$suc]['unificacion_excluida']    += (float) ($row->unificacion_excluida ?? 0);
+            $summaries[$suc]['condonacion_excluida']    += (float) ($row->condonacion_excluida ?? 0);
         }
 
         // Pass 2: route branches not in operativeMap (e.g. CUITLAHUAC, ATOTONILCO…)
@@ -332,12 +363,16 @@ class BranchRadiographyCalculator
             $summaries[$suc]['recuperacion_total']      += (float) $row->recovery;
             $summaries[$suc]['recuperacion_bruta']      += (float) $row->bruto;
             $summaries[$suc]['seguro_excluido_bruto']   += (float) $row->seguro_excluido;
+            $summaries[$suc]['seguro_savehearts_bruto'] += (float) $row->seguro_savehearts;
+            $summaries[$suc]['seguro_comadres_bruto']   += (float) $row->seguro_comadres;
             $summaries[$suc]['seguro_crece_bruto']      += (float) $row->crece_bruto;
             $summaries[$suc]['seguro_crece_reconocido'] += (float) $row->crece_reconocido;
             $summaries[$suc]['capital_recuperado']      += (float) $row->capital;
             $summaries[$suc]['interes_recuperado']      += (float) $row->interest;
             $summaries[$suc]['impuesto_recuperado']     += (float) $row->tax;
             $summaries[$suc]['charges']                 += (float) $row->charges;
+            $summaries[$suc]['unificacion_excluida']    += (float) ($row->unificacion_excluida ?? 0);
+            $summaries[$suc]['condonacion_excluida']    += (float) ($row->condonacion_excluida ?? 0);
         }
 
         // Pass 3: COMISIÓN POR APERTURA (mapped branches)
@@ -473,10 +508,15 @@ class BranchRadiographyCalculator
         // IDs to query: operative branches + corporativo (corporativo goes to unassigned)
         $queryIds = array_unique(array_merge($branchIds, $corporativoIds));
 
-        $queries = [];
+        $corpIdSet = array_flip($corporativoIds);
 
+        // Process Lendus and ERP separately to track individual totals and apply source-specific rules.
+        // Lendus 'Pólizas' (seguros/coberturas passthrough) → seguros_lendus_puente, NOT gastos_operativos.
+        // ERP 'Pólizas' (vehicle/office insurance, real expense) → gastos_erp_total + gastos_operativos.
+
+        $lendusRows = [];
         if ($lendusId) {
-            $queries[] = DB::table('fact_expenses as e')
+            $lendusRows = DB::table('fact_expenses as e')
                 ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
                 ->whereIn('e.period_id', $dataIds)
                 ->whereIn('e.branch_id', $queryIds)
@@ -486,8 +526,9 @@ class BranchRadiographyCalculator
                 ->get();
         }
 
+        $erpRows = [];
         if ($erpId) {
-            $queries[] = DB::table('fact_expenses as e')
+            $erpRows = DB::table('fact_expenses as e')
                 ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
                 ->whereIn('e.period_id', $dataIds)
                 ->whereIn('e.branch_id', $queryIds)
@@ -498,40 +539,46 @@ class BranchRadiographyCalculator
                 ->get();
         }
 
-        $corpIdSet = array_flip($corporativoIds);
-
-        foreach ($queries as $rows) {
+        foreach ([['lendus', $lendusRows], ['erp', $erpRows]] as [$srcType, $rows]) {
             foreach ($rows as $row) {
                 $branchId = (int) $row->branch_id;
                 $cat      = (string) $row->category;
                 $catUpper = strtoupper($cat);
                 $amt      = (float) $row->total;
 
-                // Determine which bucket
-                $isExcedente = $cat === self::EXCEDENTES_CAT || str_contains($catUpper, 'EXCEDENTE');
-                $isFondeo    = $cat === self::FONDEO_CAT || str_contains($catUpper, 'FONDEO') || str_contains($catUpper, 'INTERSUCURSAL');
-                $isNomina    = $cat === self::NOMINA_CAT || str_contains($catUpper, 'NOMINA') || str_contains($catUpper, 'NÓMINA');
+                $isExcedente     = $cat === self::EXCEDENTES_CAT || str_contains($catUpper, 'EXCEDENTE');
+                $isFondeo        = $cat === self::FONDEO_CAT || str_contains($catUpper, 'FONDEO') || str_contains($catUpper, 'INTERSUCURSAL');
+                $isNomina        = $cat === self::NOMINA_CAT || str_contains($catUpper, 'NOMINA') || str_contains($catUpper, 'NÓMINA');
+                $isNominaExpense = in_array($cat, self::NOMINA_EXPENSE_CATS, true);
+                // Lendus seguros/pólizas are passthrough to insurers — go to seguros_lendus_puente.
+                // ERP pólizas are real operational expenses — go to gastos_erp_total normally.
+                $isSegurosPuente = $srcType === 'lendus' && in_array($cat, self::SEGUROS_LENDUS_CATS, true);
 
-                $suc = $operativeMap[$branchId] ?? null;
+                $suc    = $operativeMap[$branchId] ?? null;
                 $isCorp = isset($corpIdSet[$branchId]);
 
-                $isNominaExpense = in_array($cat, self::NOMINA_EXPENSE_CATS, true);
-
                 if ($suc && isset($summaries[$suc])) {
-                    // Operative branch
-                    if ($isExcedente)       { $summaries[$suc]['excedentes']       += $amt; }
-                    elseif ($isFondeo)      { $summaries[$suc]['prestamos_fondea'] += $amt; }
-                    elseif ($isNomina)      { /* skip — accumulateNomina() handles this */ }
-                    elseif ($isNominaExpense){ /* skip — accumulateNomina() queries Gasolina/Celular separately */ }
-                    else {
+                    if ($isExcedente) {
+                        $summaries[$suc]['excedentes'] += $amt;
+                    } elseif ($isFondeo) {
+                        $summaries[$suc]['prestamos_fondea'] += $amt;
+                    } elseif ($isNomina || $isNominaExpense) {
+                        // skip — accumulateNomina() handles these
+                    } elseif ($isSegurosPuente) {
+                        $summaries[$suc]['seguros_lendus_puente'] += $amt;
+                    } else {
                         $summaries[$suc]['gastos_operativos'] += $amt;
-                        $concept = (string)($row->concept ?? '');
+                        if ($srcType === 'erp') {
+                            $summaries[$suc]['gastos_erp_total'] += $amt;
+                        } else {
+                            $summaries[$suc]['gastos_lendus_total'] += $amt;
+                        }
+                        $concept   = (string) ($row->concept ?? '');
                         $canonical = $this->canonicalGastoConcept($cat, $concept);
                         $summaries[$suc]['gastos_detalle'][$canonical] = ($summaries[$suc]['gastos_detalle'][$canonical] ?? 0.0) + $amt;
                     }
                 } elseif ($isCorp) {
-                    // CORPORATIVO gastos go to unassigned (excedentes/fondeo from corp still tracked on corp branch normally)
-                    if (!$isExcedente && !$isFondeo && !$isNomina) {
+                    if (!$isExcedente && !$isFondeo && !$isNomina && !$isSegurosPuente) {
                         $unassigned['gastos_operativos'] += $amt;
                         $unassigned['gastos_items'][] = [
                             'concepto' => $cat,
@@ -839,9 +886,13 @@ class BranchRadiographyCalculator
             'comision_apertura'         => 0.0,
             'recuperacion_total'        => 0.0,
             'recuperacion_bruta'        => 0.0,
-            'seguro_excluido_bruto'     => 0.0,
+            'seguro_excluido_bruto'     => 0.0,  // total no-CRECE savehearts (Savehearts + Comadres)
+            'seguro_savehearts_bruto'   => 0.0,  // solo Cobertura Savehearts (non-CRECE, non-Comadres)
+            'seguro_comadres_bruto'     => 0.0,  // Cobertura Crédito Grupal / Comadres (non-CRECE)
             'seguro_crece_bruto'        => 0.0,
             'seguro_crece_reconocido'   => 0.0,
+            'unificacion_excluida'      => 0.0,
+            'condonacion_excluida'      => 0.0,
             'mora_0_30'           => 0.0,
             'mora_31_60'          => 0.0,
             'mora_61_90'          => 0.0,
@@ -852,17 +903,20 @@ class BranchRadiographyCalculator
             'mora_61_90_cnt'      => 0,
             'mora_91_120_cnt'     => 0,
             'mora_120_plus_cnt'   => 0,
-            'gastos_operativos'   => 0.0,
-            'gastos_detalle'      => [],   // canonical_concept => amount (summed from source data)
-            'nomina_total'        => 0.0,
-            'comisiones'          => 0.0,
-            'bonos'               => 0.0,
-            'vacaciones'          => 0.0,
-            'prima_vacacional'    => 0.0,
-            'nomina_detalle'      => [],   // display_label => amount (IMSS, gasolina, finiquito, etc.)
-            'excedentes'          => 0.0,
-            'prestamos_fondea'    => 0.0,
-            'polizas_crece_30'    => 0.0,
+            'gastos_operativos'    => 0.0,  // gastos_erp_total + gastos_lendus_total
+            'gastos_erp_total'     => 0.0,  // ERP contribution (excl. cats in LENDUS_PRESENT_CATS)
+            'gastos_lendus_total'  => 0.0,  // Lendus operative contribution (excl. seguros/fondeo/excedentes/nomina)
+            'seguros_lendus_puente'=> 0.0,  // Lendus pólizas/seguros — passthrough, NOT in gastos_operativos
+            'gastos_detalle'       => [],   // canonical_concept => amount (summed from source data)
+            'nomina_total'         => 0.0,
+            'comisiones'           => 0.0,
+            'bonos'                => 0.0,
+            'vacaciones'           => 0.0,
+            'prima_vacacional'     => 0.0,
+            'nomina_detalle'       => [],   // display_label => amount (IMSS, gasolina, finiquito, etc.)
+            'excedentes'           => 0.0,
+            'prestamos_fondea'     => 0.0,
+            'polizas_crece_30'     => 0.0,
         ];
     }
 

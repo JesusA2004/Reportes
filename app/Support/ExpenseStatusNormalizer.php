@@ -8,6 +8,7 @@ class ExpenseStatusNormalizer
         'AUTORIZADO',
         'PAGADA',
         'PAGADO',
+        'PAGO AUTORIZADO',
         'POR COMPROBAR',
         'COMPROBADA',
         'COMPROBACION ACEPTADA',

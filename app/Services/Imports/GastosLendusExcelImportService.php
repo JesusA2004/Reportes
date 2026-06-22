@@ -183,7 +183,7 @@ class GastosLendusExcelImportService
             'concepto'      => ['concepto', 'descripcion', 'descripción', 'motivo'],
             'estatus'       => ['estatus', 'estado', 'status'],
             'fecha'         => ['fecha creacion', 'fecha creación', 'fecha_creacion', 'fecha de creacion', 'fecha de creación', 'fecha gasto', 'fecha de gasto', 'fecha'],
-            'monto'         => ['monto pagado empresa', 'monto pagado por empresa', 'monto gasto', 'monto total', 'monto', 'total', 'importe'],
+            'monto'         => ['monto aplicado en caja', 'monto pagado empresa', 'monto pagado por empresa', 'monto gasto', 'monto total', 'monto', 'total', 'importe'],
             'sucursal'      => ['sucursal', 'oficina', 'unidad', 'sucursal origen'],
             'observacion'   => ['observacion', 'observación', 'observaciones', 'obs'],
             'justificacion' => ['justificacion', 'justificación', 'justificaciones', 'justif'],

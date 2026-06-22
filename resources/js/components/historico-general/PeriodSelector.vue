@@ -35,6 +35,7 @@ const status = (period: any): string => {
     if (period.is_derived) return automaticStatus(period)
     if (period.failed_count > 0) return 'error'
     if (period.missing_sources_count > 0) return 'blocked'
+    if ((period.unprocessed_radiography_sources?.length ?? 0) > 0) return 'running'
     return 'completed'
 }
 
@@ -46,6 +47,7 @@ const statusLabel = (period: any): string => {
     } as Record<string, string>)[automaticStatus(period)] ?? 'Automático'
     if (period.failed_count > 0) return 'Con error'
     if (period.missing_sources_count > 0) return 'Incompleto'
+    if ((period.unprocessed_radiography_sources?.length ?? 0) > 0) return 'Procesando'
     return 'Completo'
 }
 </script>

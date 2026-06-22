@@ -128,7 +128,9 @@ const isQueued    = computed(() => liveStatus.value === 'queued')
 const isRunning   = computed(() => ['queued', 'running'].includes(liveStatus.value ?? ''))
 const isFailed    = computed(() => liveStatus.value === 'failed')
 const isCancelled = computed(() => liveStatus.value === 'cancelled')
-const isDone      = computed(() => props.period?.radiography_ready)
+const isDone              = computed(() => props.period?.radiography_ready)
+const hasPreviousReport   = computed(() => props.period?.has_previous_radiography)
+const previousReportAt    = computed(() => props.period?.previous_radiography_at ?? null)
 
 const elapsedFormatted = computed(() => {
     if (liveSeconds.value === null) return null
@@ -208,6 +210,31 @@ const statusConfig = computed(() => {
                             <ul class="mt-1.5 list-disc pl-4 space-y-0.5 text-xs text-amber-700">
                                 <li v-for="reason in period.blocking_reasons" :key="reason">{{ reason }}</li>
                             </ul>
+                        </div>
+                        <!-- Reporte anterior disponible aunque el flujo esté bloqueado -->
+                        <div v-if="hasPreviousReport && !isDone" class="mt-3 rounded-2xl border border-sky-200 bg-sky-50 p-3">
+                            <p class="text-xs font-black text-sky-800">Reporte anterior disponible</p>
+                            <p class="text-xs text-sky-700 mt-1">Generado el {{ previousReportAt }}. Puedes descargarlo mientras se completa la nueva actualización.</p>
+                            <div class="mt-2 flex flex-wrap gap-2">
+                                <a
+                                    :href="`/reportes-mensuales/${period?.id}/radiografia.xlsx`"
+                                    class="inline-flex items-center gap-1.5 rounded-xl border border-sky-300 bg-white px-3 py-1.5 text-xs font-bold text-sky-700 shadow-sm transition hover:bg-sky-50"
+                                >
+                                    <FileSpreadsheet class="size-3.5" />Excel anterior
+                                </a>
+                                <a
+                                    :href="`/reportes-mensuales/${period?.id}/radiografia.pdf`"
+                                    class="inline-flex items-center gap-1.5 rounded-xl border border-sky-300 bg-white px-3 py-1.5 text-xs font-bold text-sky-700 shadow-sm transition hover:bg-sky-50"
+                                >
+                                    <FileText class="size-3.5" />PDF anterior
+                                </a>
+                                <a
+                                    :href="`/reportes-mensuales/${period?.id}/preview`"
+                                    class="inline-flex items-center gap-1.5 rounded-xl border border-sky-300 bg-white px-3 py-1.5 text-xs font-bold text-sky-700 shadow-sm transition hover:bg-sky-50"
+                                >
+                                    <Download class="size-3.5" />Vista previa
+                                </a>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -359,6 +386,7 @@ const statusConfig = computed(() => {
                         <span v-if="isFailed">Reintentar generación</span>
                         <span v-else-if="isCancelled">Reiniciar generación</span>
                         <span v-else-if="isDone">Volver a generar</span>
+                        <span v-else-if="hasPreviousReport">Regenerar reporte</span>
                         <span v-else>Generar reporte</span>
                     </button>
 
