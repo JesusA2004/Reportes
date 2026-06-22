@@ -18,11 +18,11 @@ class AuditIncomeCommand extends Command
                                 {period_id}
                                 {--product= : filter by product keyword}
                                 {--by-product : show breakdown by product}
-                                {--by-branch : show breakdown by branch (PAGO+DESCUENTO, depurado)}
+                                {--by-branch : show breakdown by branch (nueva fórmula seguros)}
                                 {--direction-comercial : per-branch conciliation table vs Dirección Comercial reference}
-                                {--detail : full conciliation: by transaction type, by data source, approach comparison}
-                                {--compare-reference : deep audit against reference $18,332,149.55 with all combinations}
-                                {--descuento-breakdown : desglose DESCUENTO por sucursal/producto/operación + escenarios A-G vs $18,332,149.55}';
+                                {--detail : full conciliation: por tipo transacción, desglose seguros, comparativo enfoques}
+                                {--compare-reference : deep audit against reference $18,792,939.79 with all combinations}
+                                {--descuento-breakdown : desglose DESCUENTO por sucursal/producto/operación}';
     protected $description = 'Auditoría detallada de ingresos/recuperación por componente, producto y sucursal';
 
     public function handle(): int
@@ -52,83 +52,60 @@ class AuditIncomeCommand extends Command
             $q->whereRaw("UPPER(COALESCE(product_name,'')) LIKE ?", ["%{$filterProd}%"]);
         }
 
-        // ── Resumen por componente ────────────────────────────────────────────
+        // ── Resumen desglose seguros ──────────────────────────────────────────
         $this->line('');
-        $this->info('════ RESUMEN POR COMPONENTE ════');
+        $this->info('════ DESGLOSE RECUPERACIÓN / COBRANZA ════');
+        $this->line('  Regla: suma total archivo, excluye solo seguros. CRECE reconoce 30%.');
         $this->line('');
 
-        $tot = (clone $q)->selectRaw('
+        $tot = (clone $q)->selectRaw("
             COUNT(*) as filas,
-            SUM(capital) as capital,
-            SUM(interest) as interes,
-            SUM(tax) as impuesto,
-            SUM(charges) as cargos,
-            SUM(charges_due) as cargos_vcto,
-            SUM(total_amount) as total,
-            SUM(savehearts_crece_share) as polizas_crece_30,
-            SUM(CASE WHEN is_savehearts THEN 1 ELSE 0 END) as savehearts_filas,
-            SUM(CASE WHEN savehearts_crece_share > 0 THEN 1 ELSE 0 END) as polizas_con_share
-        ')->first();
+            SUM(total_amount) as bruta,
+            SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share = 0 THEN total_amount ELSE 0 END) as seguro_excluido,
+            SUM(CASE WHEN is_savehearts = 0 AND (UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%' OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%') THEN total_amount ELSE 0 END) as cobertura_undetected,
+            SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share > 0 THEN total_amount ELSE 0 END) as crece_bruto,
+            SUM(COALESCE(savehearts_crece_share, 0)) as crece_reconocido,
+            SUM(CASE
+                WHEN is_savehearts = 1 THEN COALESCE(savehearts_crece_share, 0)
+                WHEN is_savehearts = 0 AND (UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%' OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%') THEN 0
+                ELSE total_amount
+            END) as recuperacion_total,
+            SUM(CASE WHEN is_savehearts THEN 1 ELSE 0 END) as savehearts_filas
+        ")->first();
 
-        $components = [
-            ['Capital recuperado',          'fact_recoveries', 'capital',              (float)($tot->capital ?? 0)],
-            ['Intereses recuperados',        'fact_recoveries', 'interest',             (float)($tot->interes ?? 0)],
-            ['Impuestos recuperados',        'fact_recoveries', 'tax',                  (float)($tot->impuesto ?? 0)],
-            ['Cargos calendario',           'fact_recoveries', 'charges',              (float)($tot->cargos ?? 0)],
-            ['Cargos vencimiento',          'fact_recoveries', 'charges_due',          (float)($tot->cargos_vcto ?? 0)],
-        ];
+        $bruta            = (float)($tot->bruta ?? 0);
+        $seguroExcluido   = (float)($tot->seguro_excluido ?? 0) + (float)($tot->cobertura_undetected ?? 0);
+        $creceBruto       = (float)($tot->crece_bruto ?? 0);
+        $creceReconocido  = (float)($tot->crece_reconocido ?? 0);
+        $creceNoReconocido= max(0.0, $creceBruto - $creceReconocido);
+        $recuperacionTotal= (float)($tot->recuperacion_total ?? 0);
+        $recuperacionSinSeguros = $bruta - $seguroExcluido - $creceBruto;
 
-        $totalSinPolizas = 0.0;
-        $this->line(str_pad('Componente', 32) . str_pad('Tabla', 22) . str_pad('Columna', 22) .
-                    str_pad('Registros', 12) . 'Monto');
-        $this->line(str_repeat('─', 100));
+        $ref = 18_792_939.79;
+        $diff = $recuperacionTotal - $ref;
+        $sign = $diff >= 0 ? '+' : '';
 
-        foreach ($components as [$label, $table, $col, $amt]) {
-            $cnt = (clone $q)->whereRaw("{$col} > 0")->count();
-            $this->line(
-                str_pad($label, 32) . str_pad($table, 22) . str_pad($col, 22) .
-                str_pad(number_format($cnt), 12) . '$' . number_format($amt, 2)
-            );
-            $totalSinPolizas += $amt;
-        }
+        $this->line(str_pad('Concepto', 46) . str_pad('Monto', 20) . 'Clasificación');
+        $this->line(str_repeat('─', 90));
+        $this->line(str_pad('Recuperación bruta (total archivo)', 46) . str_pad('$' . number_format($bruta, 2), 20) . 'SUM(total_amount) sin filtros');
+        $this->warn(str_pad('(-) Seguros excluidos (no CRECE)', 46) . str_pad('-$' . number_format($seguroExcluido, 2), 20) . 'is_savehearts=1 y share=0, más COBERTURA no detectada');
+        $this->warn(str_pad('(-) Seguro CRECE bruto', 46) . str_pad('-$' . number_format($creceBruto, 2), 20) . 'is_savehearts=1 y share>0 (total bruto)');
+        $this->line(str_pad('  (-) No reconocido 70%', 46) . str_pad('-$' . number_format($creceNoReconocido, 2), 20) . 'bruto - share');
+        $this->line(str_pad('  (+) Reconocido 30%', 46) . str_pad('+$' . number_format($creceReconocido, 2), 20) . 'savehearts_crece_share');
+        $this->line(str_repeat('─', 90));
+        $this->line(str_pad('Recuperación sin seguros', 46) . '$' . number_format($recuperacionSinSeguros, 2));
+        $this->line(str_repeat('═', 90));
 
-        // Pólizas CRECE 30%
-        $polizas30 = (float)($tot->polizas_crece_30 ?? 0);
-        $polizasBruto = $polizas30 > 0 ? $polizas30 / 0.30 : 0.0;
-        $polizasExcluido = $polizasBruto - $polizas30;
-
-        $this->line(str_repeat('─', 100));
-        $this->line(str_pad('Subtotal (sin pólizas)', 32) . str_pad('', 44) . '$' . number_format($totalSinPolizas, 2));
-
-        $this->line('');
-        $this->info('── Pólizas CRECE 30% ──');
-        if ($polizas30 > 0) {
-            $this->info("  ✓ Pólizas CRECE detectadas:");
-            $this->line("    Filas con is_savehearts=true:  " . number_format($tot->savehearts_filas ?? 0));
-            $this->line("    Filas con share > 0:           " . number_format($tot->polizas_con_share ?? 0));
-            $this->line("    Monto bruto estimado:          $" . number_format($polizasBruto, 2));
-            $this->line("    30% reconocido (CRECE):        $" . number_format($polizas30, 2) . "  ← INCLUIDO en ingresos");
-            $this->line("    70% excluido (cliente):        $" . number_format($polizasExcluido, 2) . "  ← NO incluido");
-            $this->line("    Fuente/tabla: fact_recoveries | Columna: savehearts_crece_share");
+        $totalLine = str_pad('RECUPERACIÓN TOTAL', 46) . '$' . number_format($recuperacionTotal, 2);
+        if (abs($diff) < 1.0) {
+            $this->info($totalLine . '  ✓ EXACTO vs target $18,792,939.79');
         } else {
-            $this->warn("  ✗ Pólizas CRECE = $0");
-            $this->line("    Filas con is_savehearts=true:  " . number_format($tot->savehearts_filas ?? 0));
-            $anyShRows  = (clone $q)->where('is_savehearts', true)->count();
-            $operSeguro = (clone $q)->whereRaw("LOWER(COALESCE(operation,'')) REGEXP 'seguro|poliza'")->count();
-            $this->line("    Filas operacion=seguro/poliza: {$operSeguro}");
-            if ($anyShRows === 0 && $operSeguro === 0) {
-                $this->line("    → El Excel de cobranza NO contiene filas de tipo SEGURO/PÓLIZA.");
-                $this->line("    → O la columna 'Operación' no fue detectada en el import.");
-                $this->line("    DIAGNÓSTICO: Revisar con audit-row-trace --source=lendus_ingresos_cobranza.");
-            }
+            $this->warn($totalLine . '  Diff vs target: ' . $sign . '$' . number_format($diff, 2));
         }
 
-        $totalIngresos = $totalSinPolizas + $polizas30;
         $this->line('');
-        $this->line(str_repeat('═', 60));
-        $this->line(str_pad('TOTAL INGRESOS', 40) . '$' . number_format($totalIngresos, 2));
-        $this->line("  (Capital + Interés + Impuesto + Cargos + Pólizas CRECE 30%)");
-        $this->line("  Filas totales en fact_recoveries: " . number_format($tot->filas ?? 0));
+        $this->line("  Filas totales: " . number_format((int)($tot->filas ?? 0)) . " | is_savehearts=true: " . number_format((int)($tot->savehearts_filas ?? 0)));
+        $this->line("  Target: \$18,792,939.79 | Diff: {$sign}\$" . number_format(abs($diff), 2));
 
         // ── Savehearts detail ─────────────────────────────────────────────────
         $this->line('');
@@ -208,7 +185,7 @@ class AuditIncomeCommand extends Command
         // ── Por sucursal (filtrado a 13 sucursales operativas) ───────────────
         if ($this->option('by-branch')) {
             $this->line('');
-            $this->info('════ DESGLOSE POR SUCURSAL (13 sucursales operativas, PAGO + DESCUENTO depurado) ════');
+            $this->info('════ DESGLOSE POR SUCURSAL (nueva fórmula seguros) ════');
 
             $resolver    = app(BranchResolverService::class);
             $allBranches = DB::table('branches')->get();
@@ -221,26 +198,19 @@ class AuditIncomeCommand extends Command
             }
             $operativeIds = array_keys($operativeMap);
 
+            $recSql = "SUM(CASE
+                WHEN is_savehearts = 1 THEN COALESCE(savehearts_crece_share, 0)
+                WHEN is_savehearts = 0 AND (UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%' OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%') THEN 0
+                ELSE total_amount
+            END) as recovery";
+
             $byBranchRows = DB::table('fact_recoveries as fr')
                 ->leftJoin('branches as b', 'fr.branch_id', '=', 'b.id')
                 ->whereIn('fr.period_id', $dataIds)
                 ->whereIn('fr.branch_id', $operativeIds)
-                ->whereIn('fr.transaction', ['PAGO', 'DESCUENTO'])
-                ->whereRaw("UPPER(COALESCE(fr.concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
-                ->whereRaw("UPPER(COALESCE(fr.operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
                 ->when($filterProd, fn($q) => $q->whereRaw("UPPER(COALESCE(fr.product_name,'')) LIKE ?", ["%{$filterProd}%"]))
-                ->select(
-                    'b.name as branch_name',
-                    'fr.transaction',
-                    DB::raw('COUNT(*) as cnt'),
-                    DB::raw('SUM(fr.capital) as capital'),
-                    DB::raw('SUM(fr.interest) as interes'),
-                    DB::raw('SUM(fr.tax) as impuesto'),
-                    DB::raw('SUM(fr.charges) as cargos'),
-                    DB::raw('SUM(fr.charges_due) as moratorios'),
-                    DB::raw('SUM(fr.total_amount) as total')
-                )
-                ->groupBy('fr.branch_id', 'b.name', 'fr.transaction')
+                ->selectRaw("b.name as branch_name, COUNT(*) as cnt, SUM(fr.total_amount) as bruto, {$recSql}")
+                ->groupBy('fr.branch_id', 'b.name')
                 ->orderBy('b.name')
                 ->get();
 
@@ -248,77 +218,29 @@ class AuditIncomeCommand extends Command
             foreach ($byBranchRows as $br) {
                 $city = $resolver->resolveRealBranchFromRoute($br->branch_name ?? '') ?? $br->branch_name ?? 'Desconocida';
                 if (!isset($byCity[$city])) {
-                    $byCity[$city] = ['cnt' => 0, 'capital' => 0.0, 'interes' => 0.0, 'impuesto' => 0.0, 'cargos' => 0.0, 'moratorios' => 0.0, 'pago' => 0.0, 'descuento' => 0.0, 'total' => 0.0];
+                    $byCity[$city] = ['cnt' => 0, 'bruto' => 0.0, 'recovery' => 0.0];
                 }
-                $byCity[$city]['cnt']       += $br->cnt;
-                $byCity[$city]['capital']   += (float) $br->capital;
-                $byCity[$city]['interes']   += (float) $br->interes;
-                $byCity[$city]['impuesto']  += (float) $br->impuesto;
-                $byCity[$city]['cargos']    += (float) $br->cargos;
-                $byCity[$city]['moratorios']+= (float) $br->moratorios;
-                $byCity[$city]['total']     += (float) $br->total;
-                if ($br->transaction === 'PAGO')     $byCity[$city]['pago']     += (float) $br->total;
-                if ($br->transaction === 'DESCUENTO') $byCity[$city]['descuento'] += (float) $br->total;
+                $byCity[$city]['cnt']      += $br->cnt;
+                $byCity[$city]['bruto']    += (float) $br->bruto;
+                $byCity[$city]['recovery'] += (float) $br->recovery;
             }
-            uasort($byCity, fn($a, $b) => $b['total'] <=> $a['total']);
+            uasort($byCity, fn($a, $b) => $b['recovery'] <=> $a['recovery']);
 
-            $this->line(str_pad('Ciudad', 22) . str_pad('Regs', 7) . str_pad('Capital', 14) .
-                        str_pad('Interés', 13) . str_pad('Impuesto', 12) . str_pad('Cargos Cal.', 13) .
-                        str_pad('Moratorios', 13) . str_pad('PAGO', 14) . str_pad('DESCUENTO', 14) . 'Total');
-            $this->line(str_repeat('─', 135));
+            $this->line(str_pad('Ciudad', 26) . str_pad('Regs', 8) . str_pad('Bruta', 20) . 'Recuperación final');
+            $this->line(str_repeat('─', 80));
 
             $grandTotal = 0.0;
-            $grandPago  = 0.0;
-            $grandDesc  = 0.0;
             foreach ($byCity as $city => $d) {
                 $this->line(
-                    str_pad(mb_substr($city, 0, 20), 22) .
-                    str_pad(number_format($d['cnt']), 7) .
-                    str_pad('$' . number_format($d['capital'], 0), 14) .
-                    str_pad('$' . number_format($d['interes'], 0), 13) .
-                    str_pad('$' . number_format($d['impuesto'], 0), 12) .
-                    str_pad('$' . number_format($d['cargos'], 0), 13) .
-                    str_pad('$' . number_format($d['moratorios'], 0), 13) .
-                    str_pad('$' . number_format($d['pago'], 0), 14) .
-                    str_pad('$' . number_format($d['descuento'], 0), 14) .
-                    '$' . number_format($d['total'], 2)
+                    str_pad(mb_substr($city, 0, 24), 26) .
+                    str_pad(number_format($d['cnt']), 8) .
+                    str_pad('$' . number_format($d['bruto'], 2), 20) .
+                    '$' . number_format($d['recovery'], 2)
                 );
-                $grandTotal += $d['total'];
-                $grandPago  += $d['pago'];
-                $grandDesc  += $d['descuento'];
+                $grandTotal += $d['recovery'];
             }
-            $this->line(str_repeat('─', 135));
-            $this->info(str_pad('TOTAL (13 sucursales)', 22) . str_pad('', 110) . '$' . number_format($grandTotal, 2));
-            $this->line('  PAGO: $' . number_format($grandPago, 2) . '   DESCUENTO: $' . number_format($grandDesc, 2));
-
-            // Orphan rows (branches not in operative map)
-            $orphanBranches = DB::table('fact_recoveries as fr')
-                ->leftJoin('branches as b', 'fr.branch_id', '=', 'b.id')
-                ->whereIn('fr.period_id', $dataIds)
-                ->whereNotIn('fr.branch_id', $operativeIds)
-                ->whereIn('fr.transaction', ['PAGO', 'DESCUENTO'])
-                ->whereRaw("UPPER(COALESCE(fr.concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
-                ->whereRaw("UPPER(COALESCE(fr.operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
-                ->select(
-                    DB::raw('COALESCE(b.name, "Sin sucursal") as sucursal'),
-                    DB::raw('COUNT(*) as cnt'),
-                    DB::raw('SUM(fr.total_amount) as total')
-                )
-                ->groupBy('fr.branch_id', 'b.name')
-                ->orderByDesc('total')
-                ->get();
-
-            if ($orphanBranches->isNotEmpty()) {
-                $this->line('');
-                $this->warn('  SUCURSALES HUERFANAS (PAGO+DESC depurado, no resuelven a 12 ciudades):');
-                $orphanTotal = 0.0;
-                foreach ($orphanBranches as $ob) {
-                    $this->warn('    ' . str_pad(mb_substr($ob->sucursal, 0, 22), 24) .
-                                str_pad(number_format($ob->cnt), 7) . '$' . number_format((float)$ob->total, 2));
-                    $orphanTotal += (float) $ob->total;
-                }
-                $this->warn('    TOTAL HUERFANAS: $' . number_format($orphanTotal, 2));
-            }
+            $this->line(str_repeat('─', 80));
+            $this->info(str_pad('TOTAL (sucursales operativas)', 34) . str_pad('', 20) . '$' . number_format($grandTotal, 2));
         }
 
         if ($this->option('direction-comercial')) {
@@ -342,12 +264,12 @@ class AuditIncomeCommand extends Command
 
     private function showCompareReference(array $dataIds, string $label): void
     {
-        $ref = 18_332_149.55;
+        $ref = 18_792_939.79;
 
         $this->line('');
         $this->info('════════════════════════════════════════════════════════════════════════');
         $this->info("  AUDITORÍA PROFUNDA INGRESOS — {$label}");
-        $this->info('  Referencia: $' . number_format($ref, 2));
+        $this->info('  Referencia: $' . number_format($ref, 2) . ' (validada Excel)');
         $this->info('════════════════════════════════════════════════════════════════════════');
 
         // ── A. Por tipo de transacción ────────────────────────────────────────
@@ -614,14 +536,22 @@ class AuditIncomeCommand extends Command
             ->whereRaw("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.transaction')),'PAGO') != 'CONDONACION'")
             ->sum('total_amount');
 
-        $refIngresos  = 18_332_149.55;
+        $refIngresos = 18_792_939.79;
+
+        // Nueva fórmula validada: suma todo, excluye solo seguros, CRECE al 30%
+        $totalNueva = (float) DB::table('fact_recoveries')->whereIn('period_id', $dataIds)
+            ->selectRaw("SUM(CASE
+                WHEN is_savehearts = 1 THEN COALESCE(savehearts_crece_share, 0)
+                WHEN is_savehearts = 0 AND (UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%' OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%') THEN 0
+                ELSE total_amount
+            END) as t")->value('t') ?? 0;
 
         $rows = [
-            ['ACTUAL (sistema, todas las transacciones)',   (float)$totalAll,     '← Actualmente usado en EBITDA'],
-            ['Solo PAGO (cobros reales)',                    (float)$totalPago,    '← DebugRadiografía usa este'],
-            ['PAGO + DESCUENTO (sin CONDONACIÓN)',           (float)$totalPagoDesc,''],
-            ['Sin CONDONACIÓN (PAGO + DESCUENTO)',           (float)$totalSinCond, ''],
-            ['REFERENCIA abril 2026',                       $refIngresos,         '← Target del usuario'],
+            ['Total bruto (sin filtros)',                    (float)$totalAll,     'SUM(total_amount) completo'],
+            ['Solo PAGO',                                    (float)$totalPago,    'filtro transacción PAGO'],
+            ['PAGO + DESCUENTO',                             (float)$totalPagoDesc,'filtro PAGO + DESCUENTO'],
+            ['Nueva fórmula seguros (activa)',               $totalNueva,          '← Regla actual del sistema'],
+            ['REFERENCIA validada Excel',                   $refIngresos,         '← Target $18,792,939.79'],
         ];
 
         $this->line(str_pad('Enfoque', 46) . str_pad('Monto', 20) . str_pad('Diff vs Ref', 16) . 'Nota');
@@ -869,12 +799,12 @@ class AuditIncomeCommand extends Command
 
     private function showDescuentoBreakdown(array $dataIds): void
     {
-        $ref = 18_332_149.55;
+        $ref = 18_792_939.79;
 
         $this->line('');
         $this->info('════════════════════════════════════════════════════════════════════════');
-        $this->info('  DESGLOSE DESCUENTO REFINANCIAMIENTO — ¿Qué parte entra en ingresos?');
-        $this->info('  Referencia: $' . number_format($ref, 2));
+        $this->info('  DESGLOSE DESCUENTO REFINANCIAMIENTO — componente del total cobranza');
+        $this->info('  Referencia: $' . number_format($ref, 2) . ' (validada Excel)');
         $this->info('════════════════════════════════════════════════════════════════════════');
 
         $resolver    = app(\App\Services\BranchResolverService::class);

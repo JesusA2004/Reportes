@@ -15,10 +15,13 @@ use Illuminate\Support\Str;
 class SaveheartsRuleService
 {
     // Normalized keywords that identify a Savehearts/insurance row via the Operación column
-    private const OPERATION_KEYWORDS = ['seguro', 'seguros', 'poliza', 'polizas'];
+    private const OPERATION_KEYWORDS = ['seguro', 'seguros', 'poliza', 'polizas', 'cobertura'];
 
     // Normalized keywords that identify a Savehearts row via the Concepto column
-    private const CONCEPT_KEYWORDS = ['savehearts', 'cobertura savehearts'];
+    private const CONCEPT_KEYWORDS = ['savehearts', 'cobertura savehearts', 'cobertura credito grupal', 'cobertura'];
+
+    // Normalized keywords that identify a Savehearts row via the Producto column
+    private const PRODUCT_KEYWORDS = ['seguro', 'seguros', 'savehearts', 'cobertura'];
 
     // CRECE product keyword
     private const CRECE_KEYWORD = 'crece';
@@ -38,6 +41,7 @@ class SaveheartsRuleService
     {
         $op      = $this->normalize($row['operation'] ?? '');
         $concept = $this->normalize($row['concept'] ?? '');
+        $product = $this->normalize($row['product_name'] ?? '');
 
         foreach (self::OPERATION_KEYWORDS as $kw) {
             if ($op !== '' && str_contains($op, $this->normalize($kw))) {
@@ -47,6 +51,12 @@ class SaveheartsRuleService
 
         foreach (self::CONCEPT_KEYWORDS as $kw) {
             if ($concept !== '' && str_contains($concept, $this->normalize($kw))) {
+                return true;
+            }
+        }
+
+        foreach (self::PRODUCT_KEYWORDS as $kw) {
+            if ($product !== '' && str_contains($product, $this->normalize($kw))) {
                 return true;
             }
         }

@@ -105,14 +105,13 @@ $brCalc     = $snap['branch_radiography'] ?? null;
 $brBranches = $brCalc ? ($brCalc['branches'] ?? []) : [];
 $brGlobal   = $brCalc ? ($brCalc['global']   ?? null) : null;
 
-// ── Ingresos / Cobranza ───────────────────────────────────────────────────────
-$ingrCapital   = (float)($brGlobal['capital_recuperado']  ?? 0);
-$ingrInteres   = (float)($brGlobal['interes_recuperado']  ?? 0);
-$ingrImpuesto  = (float)($brGlobal['impuesto_recuperado'] ?? 0);
-$ingrMuletas   = (float)($brGlobal['charges']             ?? 0);
-$ingrCargosIni = (float)($brGlobal['cargos_inicio']       ?? 0);
-$ingrComAper   = (float)($brGlobal['comision_apertura']   ?? 0);
-$ingrTotal     = (float)($brGlobal['recuperacion_total']  ?? $sum['recovery_total']);
+// ── Ingresos / Cobranza — desglose seguros ───────────────────────────────────
+$ingrBruta       = (float)($brGlobal['recuperacion_bruta']      ?? $sum['recovery_bruta']            ?? 0);
+$ingrSegExcluido = (float)($brGlobal['seguro_excluido_bruto']   ?? $sum['recovery_seguro_excluido']  ?? 0);
+$ingrCrece       = (float)($brGlobal['seguro_crece_bruto']      ?? $sum['recovery_crece_bruto']      ?? 0);
+$ingrCrece30     = (float)($brGlobal['seguro_crece_reconocido'] ?? $sum['recovery_crece_reconocido'] ?? 0);
+$ingrCrece70     = max(0.0, $ingrCrece - $ingrCrece30);
+$ingrTotal       = (float)($brGlobal['recuperacion_total']      ?? $sum['recovery_total']);
 
 // ── Gastos operativos ─────────────────────────────────────────────────────────
 $gastosDetalle = (array)($brGlobal['gastos_detalle'] ?? []);
@@ -506,14 +505,13 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <table class="tbl">
                 <thead><tr><th>Concepto</th><th class="r">Monto</th></tr></thead>
                 <tbody>
-                    @if($ingrCapital > 0)<tr><td>Capital por producto</td><td class="r">{{ $fmt($ingrCapital) }}</td></tr>@endif
-                    @if($ingrInteres > 0)<tr><td>Intereses por producto</td><td class="r">{{ $fmt($ingrInteres) }}</td></tr>@endif
-                    @if($ingrImpuesto > 0)<tr><td>Impuestos por producto</td><td class="r">{{ $fmt($ingrImpuesto) }}</td></tr>@endif
-                    @if($ingrMuletas > 0)<tr><td>Multas / cargos</td><td class="r">{{ $fmt($ingrMuletas) }}</td></tr>@endif
-                    @if($ingrCargosIni > 0)<tr><td>Cargos al inicio</td><td class="r">{{ $fmt($ingrCargosIni) }}</td></tr>@endif
-                    @if($ingrComAper > 0)<tr><td>Comisión por apertura</td><td class="r">{{ $fmt($ingrComAper) }}</td></tr>@endif
+                    @if($ingrBruta > 0)<tr><td>Recuperación bruta (total archivo)</td><td class="r">{{ $fmt($ingrBruta) }}</td></tr>@endif
+                    @if($ingrSegExcluido > 0)<tr><td>(-) Seguros excluidos (no CRECE)</td><td class="r">- {{ $fmt($ingrSegExcluido) }}</td></tr>@endif
+                    @if($ingrCrece > 0)<tr><td>Seguro CRECE bruto</td><td class="r">{{ $fmt($ingrCrece) }}</td></tr>@endif
+                    @if($ingrCrece70 > 0)<tr><td>&nbsp;&nbsp;(-) No reconocido 70%</td><td class="r">- {{ $fmt($ingrCrece70) }}</td></tr>@endif
+                    @if($ingrCrece30 > 0)<tr><td>&nbsp;&nbsp;(+) Reconocido 30%</td><td class="r">{{ $fmt($ingrCrece30) }}</td></tr>@endif
                 </tbody>
-                <tfoot><tr><td>Cobranza total</td><td class="r">{{ $fmt($ingrTotal) }}</td></tr></tfoot>
+                <tfoot><tr><td>Recuperación total</td><td class="r">{{ $fmt($ingrTotal) }}</td></tr></tfoot>
             </table>
         </td>
         <td class="colR">

@@ -56,27 +56,22 @@ class RadiographySnapshotBuilder
             ->selectRaw("SUM(COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(p.raw_payload), '$.seguro')) AS DECIMAL(14,2)), 0)) as tot")
             ->value('tot') ?? 0);
 
-        // Recuperación: precise Norte filter (accredited prefix + zone + unambiguous names)
-        // + Corporativo/Falso/Inactiva operational exclusion (separate from Norte).
-        $filteredRecuperacion = (float) OperationalExclusion::applyTo(
-            RegionNorteFilter::applyRecoveryFilter(
-                DB::table('fact_recoveries as r')
-                    ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
-                    ->whereIn('r.period_id', $this->dataIds)
-                    ->whereIn('r.transaction', ['PAGO', 'DESCUENTO'])
-                    ->whereRaw("UPPER(COALESCE(r.concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
-                    ->whereRaw("UPPER(COALESCE(r.operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
-            )
-        )->sum('r.total_amount');
-        if ($filteredRecuperacion > 0) {
-            $gm['recuperacion_total'] = $filteredRecuperacion;
-        } elseif (($gm['recuperacion_total'] ?? 0) == 0) {
+        // Recuperación: suma total del archivo, solo excluye seguros.
+        // Seguros detectados (is_savehearts=1): aportan únicamente savehearts_crece_share (30% CRECE, 0 resto).
+        // Seguros no detectados con COBERTURA en concept/operation: aportan 0.
+        // Todo lo demás: aporta total_amount completo.
+        if (($gm['recuperacion_total'] ?? 0) == 0) {
             $gm['recuperacion_total'] = (float) DB::table('fact_recoveries')
                 ->whereIn('period_id', $this->dataIds)
-                ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
-                ->whereRaw("UPPER(COALESCE(concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
-                ->whereRaw("UPPER(COALESCE(operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
-                ->sum('total_amount');
+                ->selectRaw("SUM(CASE
+                    WHEN is_savehearts = 1 THEN COALESCE(savehearts_crece_share, 0)
+                    WHEN is_savehearts = 0 AND (
+                        UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%'
+                        OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
+                    ) THEN 0
+                    ELSE total_amount
+                END) as total")
+                ->value('total') ?? 0;
         }
 
         if (($gm['gasto_total'] ?? 0) == 0) {
@@ -173,15 +168,19 @@ class RadiographySnapshotBuilder
                 'unassigned' => $branchCalcUnassigned,
             ],
             'summary' => [
-                'employees_count'       => $payroll['total_empleados'],
-                'recovery_total'        => (float)($gm['recuperacion_total'] ?? 0),
-                'placement_total'       => (float)($gm['colocacion_total'] ?? 0),
-                'portfolio_total'       => (float)($gm['valor_cartera_total'] ?? 0),
-                'overdue_portfolio'     => (float)($gm['cartera_vencida_total'] ?? 0),
-                'mora_index'            => (float)($gm['mora_porcentaje'] ?? 0),
-                'expenses_total'        => (float)($gm['gasto_total'] ?? 0),
-                'payroll_total'         => $payroll['pagos'] + $payroll['bonos'],
-                'net_payroll'           => $payroll['neto'],
+                'employees_count'              => $payroll['total_empleados'],
+                'recovery_total'               => (float)($gm['recuperacion_total'] ?? 0),
+                'recovery_bruta'               => (float)($branchCalcGlobal['recuperacion_bruta'] ?? 0),
+                'recovery_seguro_excluido'     => (float)($branchCalcGlobal['seguro_excluido_bruto'] ?? 0),
+                'recovery_crece_bruto'         => (float)($branchCalcGlobal['seguro_crece_bruto'] ?? 0),
+                'recovery_crece_reconocido'    => (float)($branchCalcGlobal['seguro_crece_reconocido'] ?? 0),
+                'placement_total'              => (float)($gm['colocacion_total'] ?? 0),
+                'portfolio_total'              => (float)($gm['valor_cartera_total'] ?? 0),
+                'overdue_portfolio'            => (float)($gm['cartera_vencida_total'] ?? 0),
+                'mora_index'                   => (float)($gm['mora_porcentaje'] ?? 0),
+                'expenses_total'               => (float)($gm['gasto_total'] ?? 0),
+                'payroll_total'                => $payroll['pagos'] + $payroll['bonos'],
+                'net_payroll'                  => $payroll['neto'],
             ],
             'sections' => [
                 'payroll'                    => $payroll,

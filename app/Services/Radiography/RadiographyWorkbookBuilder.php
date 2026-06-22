@@ -161,25 +161,19 @@ class RadiographyWorkbookBuilder
         $moraTotal = $mora0_30 + $mora31_60 + $mora61_90 + $mora91_120 + $mora120p;
         $moraPct   = $carteraTotal > 0 ? round($moraTotal / $carteraTotal * 100, 2) : 0.0;
 
-        // ── Ingresos (valores, sin renderizar aún — se necesitan para el KPI band) ──
-        $ingrCapital   = $brCalcGlobal ? (float)$brCalcGlobal['capital_recuperado']  : 0.0;
-        $ingrInteres   = $brCalcGlobal ? (float)$brCalcGlobal['interes_recuperado']  : 0.0;
-        $ingrImpuesto  = $brCalcGlobal ? (float)$brCalcGlobal['impuesto_recuperado'] : 0.0;
-        $ingrMuletas   = $brCalcGlobal ? (float)$brCalcGlobal['charges']             : 0.0;
-        $ingrCargosIni = $brCalcGlobal ? (float)$brCalcGlobal['cargos_inicio']       : 0.0;
-        $ingrComAper   = $brCalcGlobal ? (float)$brCalcGlobal['comision_apertura']   : 0.0;
-        $ingrPolCrece  = $brCalcGlobal ? (float)$brCalcGlobal['polizas_crece_30']    : 0.0;
-        $ingrVencidos  = 0.0; // no hay cruce confiable con +90 días
-        $ingrTotal     = $ingrCapital + $ingrInteres + $ingrImpuesto + $ingrMuletas + $ingrCargosIni + $ingrComAper + $ingrPolCrece + $ingrVencidos;
+        // ── Ingresos / Cobranza — desglose seguros ──────────────────────────────
+        // Regla: suma total del archivo, excluye solo seguros. CRECE reconoce 30%.
+        $ingrBruta       = $brCalcGlobal ? (float)$brCalcGlobal['recuperacion_bruta']      : (float)($sum['recovery_bruta']            ?? 0.0);
+        $ingrSegExcluido = $brCalcGlobal ? (float)$brCalcGlobal['seguro_excluido_bruto']    : (float)($sum['recovery_seguro_excluido']  ?? 0.0);
+        $ingrCrece       = $brCalcGlobal ? (float)$brCalcGlobal['seguro_crece_bruto']       : (float)($sum['recovery_crece_bruto']      ?? 0.0);
+        $ingrCrece30     = $brCalcGlobal ? (float)$brCalcGlobal['seguro_crece_reconocido']  : (float)($sum['recovery_crece_reconocido'] ?? 0.0);
+        $ingrCrece70     = max(0.0, $ingrCrece - $ingrCrece30);
+        $ingrTotal       = $recTotal; // recuperacion_total ya incluye el 30% CRECE
         $ingrItems = [
-            ['Capital por producto',                    $ingrCapital,   'currency'],
-            ['Intereses por producto',                  $ingrInteres,   'currency'],
-            ['Impuestos por producto',                  $ingrImpuesto,  'currency'],
-            ['Multas por producto',                      $ingrMuletas,   'currency'],
-            ['Cargos al inicio',                         $ingrCargosIni, 'currency'],
-            ['Comisión por apertura',                    $ingrComAper,   'currency'],
-            ['Pólizas CRECE (30%)',                      $ingrPolCrece,  'currency'],
-            ['Ingreso de créditos vencidos (+90 días)',  $ingrVencidos,  'currency'],
+            ['Recuperación bruta (total archivo)',       $ingrBruta,       'currency'],
+            ['(-) Seguros excluidos (no CRECE)',         -$ingrSegExcluido,'currency'],
+            ['(-) Seguro CRECE no reconocido (70%)',     -$ingrCrece70,    'currency'],
+            ['(+) Seguro CRECE reconocido (30%)',        $ingrCrece30,     'currency'],
         ];
 
         // ── Gastos operativos (totales primero, render después) ─────────────
@@ -1579,24 +1573,20 @@ class RadiographyWorkbookBuilder
             }
             $r++;
 
-            // 2. Ingresos (per branch from calculator)
+            // 2. Ingresos (per branch from calculator) — desglose seguros
             $this->sectionHeader($sheet, "A{$r}:C{$r}", '2. INGRESOS');
             $r++;
-            $bIngrCapital  = $calc ? (float)$calc['capital_recuperado']  : 0.0;
-            $bIngrInteres  = $calc ? (float)$calc['interes_recuperado']  : 0.0;
-            $bIngrImpuesto = $calc ? (float)$calc['impuesto_recuperado'] : 0.0;
-            $bIngrMuletas  = $calc ? (float)$calc['charges']             : 0.0;
-            $bIngrPolCrece = $calc ? (float)$calc['polizas_crece_30']    : 0.0;
-            $bIngrTotal    = $bIngrCapital + $bIngrInteres + $bIngrImpuesto + $bIngrMuletas + $bIngrPolCrece;
+            $bIngrBruta       = $calc ? (float)$calc['recuperacion_bruta']      : 0.0;
+            $bIngrSegExcluido = $calc ? (float)$calc['seguro_excluido_bruto']    : 0.0;
+            $bIngrCrece       = $calc ? (float)$calc['seguro_crece_bruto']       : 0.0;
+            $bIngrCrece30     = $calc ? (float)$calc['seguro_crece_reconocido']  : 0.0;
+            $bIngrCrece70     = max(0.0, $bIngrCrece - $bIngrCrece30);
+            $bIngrTotal       = $calc ? (float)$calc['recuperacion_total']       : 0.0;
             $bIngrItems = [
-                'Capital por producto'                    => $bIngrCapital,
-                'Intereses por producto'                  => $bIngrInteres,
-                'Impuestos por producto'                  => $bIngrImpuesto,
-                'Multas por producto'                     => $bIngrMuletas,
-                'Cargos al inicio'                        => 0.0,
-                'Comisión por apertura'                   => 0.0,
-                'Pólizas CRECE (30%)'                     => $bIngrPolCrece,
-                'Ingreso de créditos vencidos (+90 días)' => 0.0,
+                'Recuperación bruta (total archivo)'  => $bIngrBruta,
+                '(-) Seguros excluidos (no CRECE)'    => -$bIngrSegExcluido,
+                '(-) Seguro CRECE no reconocido (70%)'=> -$bIngrCrece70,
+                '(+) Seguro CRECE reconocido (30%)'   => $bIngrCrece30,
             ];
             $bIngrIdx = 0;
             foreach ($bIngrItems as $bILabel => $bIVal) {

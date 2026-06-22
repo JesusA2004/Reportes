@@ -1578,10 +1578,12 @@ class ReportUploadController extends Controller {
                     if (($gm['recuperacion_total'] ?? 0) == 0) {
                         $gm['recuperacion_total'] = (float) DB::table('fact_recoveries')
                             ->whereIn('period_id', $dataIdsLocal)
-                            ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
-                            ->whereRaw("UPPER(COALESCE(concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
-                            ->whereRaw("UPPER(COALESCE(operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
-                            ->sum('total_amount');
+                            ->selectRaw("SUM(CASE
+                                WHEN is_savehearts = 1 THEN COALESCE(savehearts_crece_share, 0)
+                                WHEN is_savehearts = 0 AND (UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%' OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%') THEN 0
+                                ELSE total_amount
+                            END) as total")
+                            ->value('total') ?? 0;
                     }
                     if (($gm['valor_cartera_total'] ?? 0) == 0) {
                         $ct = (float) DB::table('fact_portfolios')->whereIn('period_id', $dataIdsLocal)->sum('balance');

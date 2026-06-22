@@ -389,10 +389,12 @@ class PeriodRadiographyService
                 'recuperacion_total' => (float) Recovery::query()
                     ->whereIn('period_id', $dataIds)
                     ->where('branch_id', $branchId)
-                    ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
-                    ->whereRaw("UPPER(COALESCE(concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
-                    ->whereRaw("UPPER(COALESCE(operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
-                    ->sum('total_amount'),
+                    ->selectRaw("SUM(CASE
+                        WHEN is_savehearts = 1 THEN COALESCE(savehearts_crece_share, 0)
+                        WHEN is_savehearts = 0 AND (UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%' OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%') THEN 0
+                        ELSE total_amount
+                    END) as total")
+                    ->value('total') ?? 0,
                 'colocacion_total'   => (float) Placement::query()
                     ->whereIn('period_id', $dataIds)
                     ->where('branch_id', $branchId)

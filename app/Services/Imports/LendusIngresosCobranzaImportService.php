@@ -158,17 +158,8 @@ class LendusIngresosCobranzaImportService {
                     $saveheartsShare = $isSavehearts
                         ? $this->savehearts->saveheartsCompanyShare($mapped)
                         : 0.0;
-
-                    // Non-CRECE Savehearts: zero out all metric amounts (auditing only)
-                    if ($isSavehearts && $saveheartsShare === 0.0) {
-                        $mapped['capital']      = 0;
-                        $mapped['interest']     = 0;
-                        $mapped['tax']          = 0;
-                        $mapped['charges']      = 0;
-                        $mapped['charges_due']  = 0;
-                        $mapped['excedente']    = 0;
-                        $mapped['total_amount'] = 0;
-                    }
+                    // Amounts preserved for ALL seguros (including non-CRECE).
+                    // Exclusion is handled at query time via is_savehearts flag.
 
                     $branch = $this->resolveBranchFromCobranza(
                         $mapped['contract'],
@@ -202,13 +193,14 @@ class LendusIngresosCobranzaImportService {
                         'is_savehearts'           => $isSavehearts,
                         'savehearts_crece_share'  => $saveheartsShare,
                         'raw_payload'             => json_encode([
-                            'branch_name_raw'    => $mapped['branch_name_raw'],
-                            'promoter_name'      => $mapped['promoter_name'],
-                            'client_name'        => $mapped['client_name'],
-                            'product_name'       => $mapped['product_name'],
-                            'operation'          => $mapped['operation'],
-                            'concept'            => $mapped['concept'],
-                            'transaction'        => $mapped['transaction'],
+                            'branch_name_raw'       => $mapped['branch_name_raw'],
+                            'promoter_name'         => $mapped['promoter_name'],
+                            'client_name'           => $mapped['client_name'],
+                            'product_name'          => $mapped['product_name'],
+                            'operation'             => $mapped['operation'],
+                            'concept'               => $mapped['concept'],
+                            'transaction'           => $mapped['transaction'],
+                            'total_amount_original' => $mapped['total_amount'],
                         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
                         'created_at'              => now(),
                         'updated_at'              => now(),

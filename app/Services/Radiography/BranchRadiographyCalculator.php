@@ -267,18 +267,33 @@ class BranchRadiographyCalculator
         }
     }
 
-    // ── Recuperación (PAGO + DESCUENTO, excluyendo CONDONACION / COBERTURA SAVEHEARTS / COMISIÓN POR APERTURA) ─
+    // ── Recuperación: suma TOTAL del archivo, excluye únicamente seguros ──────────
+    // Regla: sumar todo total_amount sin filtrar por tipo de transacción.
+    // Seguros detectados (is_savehearts=1): contribuyen savehearts_crece_share (30% CRECE, 0 resto).
+    // Seguros no detectados por importer pero con keyword COBERTURA en concept/operation: contribuyen 0.
+    // Todo lo demás: contribuye total_amount completo.
 
     private function accumulateRecuperacion(array $dataIds, array $branchIds, array $operativeMap, array &$summaries, array $corporativoIds = []): void
     {
+        $recoverySql = "SUM(CASE
+            WHEN is_savehearts = 1 THEN COALESCE(savehearts_crece_share, 0)
+            WHEN is_savehearts = 0 AND (
+                UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
+            ) THEN 0
+            ELSE total_amount
+        END) as recovery,
+        SUM(total_amount) as bruto,
+        SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share = 0 THEN total_amount ELSE 0 END) as seguro_excluido,
+        SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share > 0 THEN total_amount ELSE 0 END) as crece_bruto,
+        SUM(COALESCE(savehearts_crece_share, 0)) as crece_reconocido,
+        SUM(capital) as capital, SUM(interest) as interest, SUM(tax) as tax, SUM(charges_due) as charges";
+
         // Pass 1: branches already mapped to an operative sucursal via branch_id
         $rows = DB::table('fact_recoveries')
             ->whereIn('period_id', $dataIds)
             ->whereIn('branch_id', $branchIds)
-            ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
-            ->whereRaw("UPPER(COALESCE(concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
-            ->whereRaw("UPPER(COALESCE(operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
-            ->selectRaw('branch_id, SUM(capital) as capital, SUM(interest) as interest, SUM(tax) as tax, SUM(charges_due) as charges, SUM(total_amount) as total')
+            ->selectRaw("branch_id, {$recoverySql}")
             ->groupBy('branch_id')
             ->get();
 
@@ -287,24 +302,25 @@ class BranchRadiographyCalculator
             if (!$suc || !isset($summaries[$suc])) {
                 continue;
             }
-            $summaries[$suc]['capital_recuperado']  += (float) $row->capital;
-            $summaries[$suc]['interes_recuperado']  += (float) $row->interest;
-            $summaries[$suc]['impuesto_recuperado'] += (float) $row->tax;
-            $summaries[$suc]['charges']             += (float) $row->charges;
-            $summaries[$suc]['recuperacion_total']  += (float) $row->total;
+            $summaries[$suc]['recuperacion_total']      += (float) $row->recovery;
+            $summaries[$suc]['recuperacion_bruta']      += (float) $row->bruto;
+            $summaries[$suc]['seguro_excluido_bruto']   += (float) $row->seguro_excluido;
+            $summaries[$suc]['seguro_crece_bruto']      += (float) $row->crece_bruto;
+            $summaries[$suc]['seguro_crece_reconocido'] += (float) $row->crece_reconocido;
+            $summaries[$suc]['capital_recuperado']      += (float) $row->capital;
+            $summaries[$suc]['interes_recuperado']      += (float) $row->interest;
+            $summaries[$suc]['impuesto_recuperado']     += (float) $row->tax;
+            $summaries[$suc]['charges']                 += (float) $row->charges;
         }
 
         // Pass 2: route branches not in operativeMap (e.g. CUITLAHUAC, ATOTONILCO…)
-        // Resolve to operative sucursal via contract prefix (supports legacy ORI09247 and new 25CUE0667939 formats).
+        // Resolve to operative sucursal via contract prefix.
         // CORPORATIVO branches are explicitly excluded.
         $fallback = DB::table('fact_recoveries')
             ->whereIn('period_id', $dataIds)
             ->whereNotIn('branch_id', $branchIds)
             ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
-            ->whereIn('transaction', ['PAGO', 'DESCUENTO'])
-            ->whereRaw("UPPER(COALESCE(concept, '')) NOT LIKE '%COBERTURA SAVEHEARTS%'")
-            ->whereRaw("UPPER(COALESCE(operation, '')) NOT LIKE '%COMISION POR APERTURA%'")
-            ->selectRaw('branch_id, contract, SUM(capital) AS capital, SUM(interest) AS interest, SUM(tax) AS tax, SUM(charges_due) AS charges, SUM(total_amount) AS total')
+            ->selectRaw("branch_id, contract, {$recoverySql}")
             ->groupBy('branch_id', 'contract')
             ->get();
 
@@ -313,11 +329,15 @@ class BranchRadiographyCalculator
             if (!$suc || !$this->resolver->isSheetBranch($suc) || !isset($summaries[$suc])) {
                 continue;
             }
-            $summaries[$suc]['capital_recuperado']  += (float) $row->capital;
-            $summaries[$suc]['interes_recuperado']  += (float) $row->interest;
-            $summaries[$suc]['impuesto_recuperado'] += (float) $row->tax;
-            $summaries[$suc]['charges']             += (float) $row->charges;
-            $summaries[$suc]['recuperacion_total']  += (float) $row->total;
+            $summaries[$suc]['recuperacion_total']      += (float) $row->recovery;
+            $summaries[$suc]['recuperacion_bruta']      += (float) $row->bruto;
+            $summaries[$suc]['seguro_excluido_bruto']   += (float) $row->seguro_excluido;
+            $summaries[$suc]['seguro_crece_bruto']      += (float) $row->crece_bruto;
+            $summaries[$suc]['seguro_crece_reconocido'] += (float) $row->crece_reconocido;
+            $summaries[$suc]['capital_recuperado']      += (float) $row->capital;
+            $summaries[$suc]['interes_recuperado']      += (float) $row->interest;
+            $summaries[$suc]['impuesto_recuperado']     += (float) $row->tax;
+            $summaries[$suc]['charges']                 += (float) $row->charges;
         }
 
         // Pass 3: COMISIÓN POR APERTURA (mapped branches)
@@ -811,13 +831,17 @@ class BranchRadiographyCalculator
             'colocacion'          => 0.0,
             'creditos_colocados'  => 0,
             'seguro_crece_comadres_informativo' => 0.0,
-            'capital_recuperado'  => 0.0,
-            'interes_recuperado'  => 0.0,
-            'impuesto_recuperado' => 0.0,
-            'charges'             => 0.0,
-            'cargos_inicio'       => 0.0,
-            'comision_apertura'   => 0.0,
-            'recuperacion_total'  => 0.0,
+            'capital_recuperado'        => 0.0,
+            'interes_recuperado'        => 0.0,
+            'impuesto_recuperado'       => 0.0,
+            'charges'                   => 0.0,
+            'cargos_inicio'             => 0.0,
+            'comision_apertura'         => 0.0,
+            'recuperacion_total'        => 0.0,
+            'recuperacion_bruta'        => 0.0,
+            'seguro_excluido_bruto'     => 0.0,
+            'seguro_crece_bruto'        => 0.0,
+            'seguro_crece_reconocido'   => 0.0,
             'mora_0_30'           => 0.0,
             'mora_31_60'          => 0.0,
             'mora_61_90'          => 0.0,
