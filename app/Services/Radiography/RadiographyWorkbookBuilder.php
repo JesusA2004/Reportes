@@ -352,7 +352,7 @@ class RadiographyWorkbookBuilder
         RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'CARTERA VS CARTERA VENCIDA');
         $dashRow++;
         $carteraMoraMax = max($carteraTotal, $moraTotal, 1.0);
-        RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", 'Cartera');
+        RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", 'Valor cartera');
         $sheet->setCellValue("G{$dashRow}", $carteraTotal);
         RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
         RadiographyStyleHelper::addDataBar($sheet, "G{$dashRow}", RadiographyStyleHelper::BG_PRIMARY_DARK, true, 0.0, $carteraMoraMax);
@@ -2244,7 +2244,7 @@ class RadiographyWorkbookBuilder
         $this->colHeaders($sheet, 4, ['A' => 'MÉTRICA', 'B' => 'VALOR']);
 
         $globalRows = [
-            ['Cartera total',       $sum['portfolio_total'],   'currency'],
+            ['Valor cartera',       $sum['portfolio_total'],   'currency'],
             ['Cartera vencida',     $sum['overdue_portfolio'],  'currency'],
             ['Índice de mora',      $sum['mora_index'],        'percent'],
         ];

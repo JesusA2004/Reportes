@@ -239,9 +239,12 @@ class PeriodRadiographyService
         // ── Payroll aggregates (for preview cards) ──
         $payroll = $this->payrollMetrics($period, $dataIds);
 
-        $gastoSourceIds = DB::table('data_sources')
-            ->whereIn('code', ['gastos_lendus', 'gastos_erp'])
-            ->pluck('id');
+        // Always use gastos_lendus (PDF) — XLS rows have all NULL branch_id and get filtered
+        // out by the branch filter, producing $0 Lendus; PDF has proper branch_ids per row.
+        $lendusPdfId    = DB::table('data_sources')->where('code', 'gastos_lendus')->value('id');
+        $erpSrcId       = DB::table('data_sources')->where('code', 'gastos_erp')->value('id');
+        $gastoSourceIds = collect(array_values(array_filter([$lendusPdfId, $erpSrcId])));
+
         $gastoTotalQuery = DB::table('fact_expenses as e')
             ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
             ->whereIn('e.period_id', $dataIds)

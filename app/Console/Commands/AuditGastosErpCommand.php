@@ -3,7 +3,6 @@
 namespace App\Console\Commands;
 
 use App\Models\Period;
-use App\Services\BranchResolverService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -15,21 +14,7 @@ class AuditGastosErpCommand extends Command
                                 {--detail : mostrar cada fila con su motivo de inclusión/exclusión}
                                 {--export : exportar CSV a storage/app/auditorias/}';
 
-    protected $description = 'Auditoría Gastos ERP: valida filtros de estatus, sucursal y monto para el período';
-
-    // Statuses that are counted in EBITDA
-    private const BILLABLE_NORM = [
-        'COMPROBACION ACEPTADA',
-        'PAGADA',
-        'PAGADO',
-        'PAGO AUTORIZADO',
-        'POR COMPROBAR',
-        'COMPROBADA',
-        'AUTORIZADO',
-    ];
-
-    // Non-operative sucursales excluded from ERP total
-    private const EXCLUDED_BRANCHES_UPPER = ['CORPORATIVO', 'CORP', 'CORPORATE'];
+    protected $description = 'Auditoría Gastos ERP: filtro único por Sucursal (excluye Corporativo y sucursal vacía)';
 
     public function handle(): int
     {
@@ -55,7 +40,7 @@ class AuditGastosErpCommand extends Command
         $this->info('════════════════════════════════════════════════════════════');
         $this->info("  AUDITORÍA GASTOS ERP — {$period->label} (ID {$period->id})");
         $this->info('  Columna de monto: Total final requisición');
-        $this->info('  Clasificación: por Concepto');
+        $this->info('  Filtro: únicamente Sucursal (excluye Corporativo y sucursal vacía)');
         $this->info('════════════════════════════════════════════════════════════');
 
         // ── Pull all ERP expense rows with branch info ──────────────────────
@@ -84,11 +69,8 @@ class AuditGastosErpCommand extends Command
         $totalIncluido    = 0.0;
         $totalExclCorp    = 0.0;
         $totalExclSinSuc  = 0.0;
-        $totalExclStatus  = 0.0;
-        $totalExclOtro    = 0.0;
 
         $conceptoTotales  = [];
-        $statusAuditoria  = [];  // statuses not in BILLABLE_NORM and not CAPTURADA
         $detailRows       = [];
 
         foreach ($rows as $row) {
@@ -101,27 +83,17 @@ class AuditGastosErpCommand extends Command
 
             $totalCrudo += $monto;
 
-            $motivo     = '';
-            $incluido   = true;
+            $motivo   = '';
+            $incluido = true;
 
-            if (in_array($sucUpper, self::EXCLUDED_BRANCHES_UPPER, true)) {
-                $incluido = false;
-                $totalExclCorp += $monto;
-                $motivo = 'EXCLUIDO: Sucursal Corporativo';
-            } elseif ($row->branch_id === null || $sucursal === '') {
+            if ($row->branch_id === null || $sucursal === '') {
                 $incluido = false;
                 $totalExclSinSuc += $monto;
                 $motivo = 'EXCLUIDO: Sin sucursal asignada';
-            } elseif ($estatus === 'CAPTURADA') {
+            } elseif ($sucUpper === 'CORPORATIVO') {
                 $incluido = false;
-                $totalExclStatus += $monto;
-                $motivo = 'EXCLUIDO: Estatus CAPTURADA';
-            } elseif (!in_array($estatus, self::BILLABLE_NORM, true)) {
-                // Unknown status → send to audit bucket
-                $incluido = false;
-                $totalExclOtro += $monto;
-                $motivo = "AUDITORÍA: Estatus desconocido [{$estatus}]";
-                $statusAuditoria[$estatus] = ($statusAuditoria[$estatus] ?? 0) + 1;
+                $totalExclCorp += $monto;
+                $motivo = 'EXCLUIDO: Sucursal Corporativo';
             } else {
                 $totalIncluido += $monto;
                 $motivo = 'INCLUIDO';
@@ -146,13 +118,9 @@ class AuditGastosErpCommand extends Command
         // ── Resumen ──────────────────────────────────────────────────────────
         $this->line('');
         $this->info('════ RESUMEN ════');
-        $this->line(str_pad('Total crudo ERP',                    44) . '$' . number_format($totalCrudo, 2));
-        $this->line(str_pad('(-) Excluido por Corporativo',       44) . '$' . number_format($totalExclCorp, 2));
+        $this->line(str_pad('Total crudo ERP',                  44) . '$' . number_format($totalCrudo, 2));
+        $this->line(str_pad('(-) Excluido por Corporativo',      44) . '$' . number_format($totalExclCorp, 2));
         $this->line(str_pad('(-) Excluido sin sucursal',         44) . '$' . number_format($totalExclSinSuc, 2));
-        $this->line(str_pad('(-) Excluido estatus CAPTURADA',    44) . '$' . number_format($totalExclStatus, 2));
-        if ($totalExclOtro > 0) {
-            $this->warn(str_pad('(-) En auditoría (estatus desconocido)', 44) . '$' . number_format($totalExclOtro, 2));
-        }
         $this->line(str_repeat('─', 60));
         $this->info(str_pad('TOTAL INCLUIDO ERP',                 44) . '$' . number_format($totalIncluido, 2));
 
@@ -163,16 +131,6 @@ class AuditGastosErpCommand extends Command
         $this->line('');
         $this->line(str_pad('Referencia esperada',  44) . '$' . number_format($refERP, 2));
         $this->line(str_pad('Diferencia',            44) . $sign . '$' . number_format($diff, 2) . '  ' . $match);
-
-        // ── Estatus en auditoría ─────────────────────────────────────────────
-        if (!empty($statusAuditoria)) {
-            $this->line('');
-            $this->warn('════ ESTATUS EN AUDITORÍA (no en whitelist) ════');
-            foreach ($statusAuditoria as $est => $cnt) {
-                $this->warn("  [{$est}] → {$cnt} registro(s)");
-            }
-            $this->warn('  → Revisar y decidir si incluir o excluir estos estatus.');
-        }
 
         // ── Por concepto ─────────────────────────────────────────────────────
         $this->line('');

@@ -55,57 +55,59 @@ class AuditIncomeCommand extends Command
         // ── Resumen desglose seguros ──────────────────────────────────────────
         $this->line('');
         $this->info('════ DESGLOSE RECUPERACIÓN / COBRANZA ════');
-        $this->line('  Regla: suma total archivo, excluye solo seguros. CRECE reconoce 30%.');
+        $this->line('  Regla: Recuperación = SUM(total_amount) − Seguros/Coberturas (is_savehearts=1, completo,');
+        $this->line('  incl. CRECE 30%/70%) − Condonaciones (transaction=CONDONACION, cubre Unificación de Cartera).');
         $this->line('');
 
         $tot = (clone $q)->selectRaw("
             COUNT(*) as filas,
             SUM(total_amount) as bruta,
             SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share = 0 THEN total_amount ELSE 0 END) as seguro_excluido,
-            SUM(CASE WHEN is_savehearts = 0 AND (UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%' OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%') THEN total_amount ELSE 0 END) as cobertura_undetected,
             SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share > 0 THEN total_amount ELSE 0 END) as crece_bruto,
             SUM(COALESCE(savehearts_crece_share, 0)) as crece_reconocido,
+            SUM(CASE WHEN transaction = 'CONDONACION' THEN total_amount ELSE 0 END) as condonacion_excluida,
             SUM(CASE
-                WHEN is_savehearts = 1 THEN COALESCE(savehearts_crece_share, 0)
-                WHEN is_savehearts = 0 AND (UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%' OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%') THEN 0
+                WHEN is_savehearts = 1 THEN 0
+                WHEN transaction = 'CONDONACION' THEN 0
+                WHEN UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%' OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
+                  OR UPPER(COALESCE(concept,'')) LIKE '%SEGURO%' OR UPPER(COALESCE(operation,'')) LIKE '%SEGURO%' THEN 0
                 ELSE total_amount
             END) as recuperacion_total,
             SUM(CASE WHEN is_savehearts THEN 1 ELSE 0 END) as savehearts_filas
         ")->first();
 
-        $bruta            = (float)($tot->bruta ?? 0);
-        $seguroExcluido   = (float)($tot->seguro_excluido ?? 0) + (float)($tot->cobertura_undetected ?? 0);
-        $creceBruto       = (float)($tot->crece_bruto ?? 0);
-        $creceReconocido  = (float)($tot->crece_reconocido ?? 0);
-        $creceNoReconocido= max(0.0, $creceBruto - $creceReconocido);
-        $recuperacionTotal= (float)($tot->recuperacion_total ?? 0);
-        $recuperacionSinSeguros = $bruta - $seguroExcluido - $creceBruto;
+        $bruta             = (float)($tot->bruta ?? 0);
+        $seguroExcluido    = (float)($tot->seguro_excluido ?? 0);
+        $creceBruto        = (float)($tot->crece_bruto ?? 0);
+        $creceReconocido   = (float)($tot->crece_reconocido ?? 0);
+        $creceNoReconocido = max(0.0, $creceBruto - $creceReconocido);
+        $condonacion       = (float)($tot->condonacion_excluida ?? 0);
+        $recuperacionTotal = (float)($tot->recuperacion_total ?? 0);
 
-        $ref = 18_792_939.79;
+        $ref  = 18_324_971.76;
         $diff = $recuperacionTotal - $ref;
         $sign = $diff >= 0 ? '+' : '';
 
         $this->line(str_pad('Concepto', 46) . str_pad('Monto', 20) . 'Clasificación');
         $this->line(str_repeat('─', 90));
         $this->line(str_pad('Recuperación bruta (total archivo)', 46) . str_pad('$' . number_format($bruta, 2), 20) . 'SUM(total_amount) sin filtros');
-        $this->warn(str_pad('(-) Seguros excluidos (no CRECE)', 46) . str_pad('-$' . number_format($seguroExcluido, 2), 20) . 'is_savehearts=1 y share=0, más COBERTURA no detectada');
-        $this->warn(str_pad('(-) Seguro CRECE bruto', 46) . str_pad('-$' . number_format($creceBruto, 2), 20) . 'is_savehearts=1 y share>0 (total bruto)');
-        $this->line(str_pad('  (-) No reconocido 70%', 46) . str_pad('-$' . number_format($creceNoReconocido, 2), 20) . 'bruto - share');
-        $this->line(str_pad('  (+) Reconocido 30%', 46) . str_pad('+$' . number_format($creceReconocido, 2), 20) . 'savehearts_crece_share');
-        $this->line(str_repeat('─', 90));
-        $this->line(str_pad('Recuperación sin seguros', 46) . '$' . number_format($recuperacionSinSeguros, 2));
+        $this->warn(str_pad('(-) Seguros/Coberturas (Savehearts/Comadres)', 46) . str_pad('-$' . number_format($seguroExcluido, 2), 20) . 'is_savehearts=1, share=0');
+        $this->warn(str_pad('(-) Seguro CRECE bruto (100%, no se reconoce aquí)', 46) . str_pad('-$' . number_format($creceBruto, 2), 20) . 'is_savehearts=1, share>0');
+        $this->line(str_pad('    (30% reconocido — informativo, no en este KPI)', 46) . str_pad('$' . number_format($creceReconocido, 2), 20) . 'savehearts_crece_share');
+        $this->line(str_pad('    (70% puente — informativo)', 46) . str_pad('$' . number_format($creceNoReconocido, 2), 20) . 'bruto - share');
+        $this->warn(str_pad('(-) Condonaciones (incl. Unificación de Cartera)', 46) . str_pad('-$' . number_format($condonacion, 2), 20) . "transaction='CONDONACION'");
         $this->line(str_repeat('═', 90));
 
         $totalLine = str_pad('RECUPERACIÓN TOTAL', 46) . '$' . number_format($recuperacionTotal, 2);
         if (abs($diff) < 1.0) {
-            $this->info($totalLine . '  ✓ EXACTO vs target $18,792,939.79');
+            $this->info($totalLine . '  ✓ EXACTO vs target $' . number_format($ref, 2));
         } else {
             $this->warn($totalLine . '  Diff vs target: ' . $sign . '$' . number_format($diff, 2));
         }
 
         $this->line('');
         $this->line("  Filas totales: " . number_format((int)($tot->filas ?? 0)) . " | is_savehearts=true: " . number_format((int)($tot->savehearts_filas ?? 0)));
-        $this->line("  Target: \$18,792,939.79 | Diff: {$sign}\$" . number_format(abs($diff), 2));
+        $this->line("  Target: \$" . number_format($ref, 2) . " | Diff: {$sign}\$" . number_format(abs($diff), 2));
 
         // ── Savehearts detail ─────────────────────────────────────────────────
         $this->line('');
@@ -199,8 +201,10 @@ class AuditIncomeCommand extends Command
             $operativeIds = array_keys($operativeMap);
 
             $recSql = "SUM(CASE
-                WHEN is_savehearts = 1 THEN COALESCE(savehearts_crece_share, 0)
-                WHEN is_savehearts = 0 AND (UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%' OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%') THEN 0
+                WHEN is_savehearts = 1 THEN 0
+                WHEN transaction = 'CONDONACION' THEN 0
+                WHEN UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%' OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
+                  OR UPPER(COALESCE(concept,'')) LIKE '%SEGURO%' OR UPPER(COALESCE(operation,'')) LIKE '%SEGURO%' THEN 0
                 ELSE total_amount
             END) as recovery";
 

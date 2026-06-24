@@ -119,12 +119,16 @@ class RadiographySnapshotBuilder
         $this->branchCalcBranches = $branchCalcBranches; // fuente única (por sucursal) para cartera/mora
 
         // Prefer BranchRadiographyCalculator totals for the primary summary metrics
-        $calcCartera     = (float) $branchCalcGlobal['valor_cartera'];
         $calcRecuperacion= (float) $branchCalcGlobal['recuperacion_total'];
         $calcColocacion  = (float) $branchCalcGlobal['colocacion'];
-        $calcMoraTotal   = $branchCalcGlobal['mora_0_30'] + $branchCalcGlobal['mora_31_60']
-                         + $branchCalcGlobal['mora_61_90'] + $branchCalcGlobal['mora_91_120']
-                         + $branchCalcGlobal['mora_120_plus'];
+
+        // Valor cartera / Cartera vencida: fuente "Saldos Por Cliente" (Saldo actual), único
+        // filtro = excluir Aguascalientes/AGS. Incluye TODAS las sucursales/rutas, no solo las
+        // 13 oficiales — distinto del resto de KPIs (cartera/colocación/recuperación/mora por
+        // sucursal), que sí están limitados a las 13 sucursales operativas.
+        $carteraGlobalSinFiltro = $this->branchCalculator->computeCarteraGlobalSinFiltro($this->dataIds);
+        $calcCartera   = (float) $carteraGlobalSinFiltro['valor_cartera'];
+        $calcMoraTotal = (float) $carteraGlobalSinFiltro['cartera_vencida'];
 
         if ($calcCartera > 0) {
             $gm['valor_cartera_total']   = $calcCartera;
@@ -236,6 +240,7 @@ class RadiographySnapshotBuilder
                 'mora_by_gestor'             => $this->buildMoraByGestor($period),
                 'mora_by_branch_product'     => $this->buildMoraByBranchProduct($period),
                 'corporate_funding'          => $this->buildCorporateFunding($period),
+                'fondeo_detalle'             => $this->buildFondeoDetalle(),
                 'placement_by_branch_product'=> $this->buildPlacementByBranchProduct($period),
                 'rotation'                   => $this->buildRotationData($period),
                 'active_loans'               => $this->buildActiveLoans($period),
@@ -2060,6 +2065,52 @@ class RadiographySnapshotBuilder
 
         usort($result, fn ($a, $b) => $b['cartera_total'] <=> $a['cartera_total']);
         return $result;
+    }
+
+    /**
+     * Fondeos entre sucursales (Préstamos Intersucursales): solo rastreo de flujo, NO afecta EBITDA.
+     * Mismo query que reportes:audit-fondeos.
+     */
+    private function buildFondeoDetalle(): array
+    {
+        $rows = DB::table('fact_expenses as e')
+            ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+            ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
+            ->leftJoin('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+            ->whereIn('e.period_id', $this->dataIds)
+            ->where('e.category', 'Préstamos Intersucursales')
+            ->select(
+                'e.id',
+                'b.name as sucursal_origen',
+                'e.observations',
+                'e.expense_date as fecha',
+                'e.amount',
+                'e.paid_amount',
+                'ds.code as fuente',
+                DB::raw("JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.branch_to_detected')) as sucursal_destino"),
+                DB::raw("JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.solicitante')) as responsable"),
+            )
+            ->orderBy('b.name')
+            ->orderByDesc('e.amount')
+            ->get();
+
+        $detail = [];
+        $total  = 0.0;
+        foreach ($rows as $row) {
+            $monto = (float) ($row->paid_amount ?: $row->amount);
+            $total += $monto;
+            $detail[] = [
+                'sucursal_origen'  => (string) ($row->sucursal_origen ?? '(sin sucursal)'),
+                'sucursal_destino' => (string) ($row->sucursal_destino ?? 'No detectado'),
+                'responsable'      => (string) ($row->responsable ?? ''),
+                'monto'            => $monto,
+                'observacion'      => (string) ($row->observations ?? ''),
+                'fecha'            => $row->fecha,
+                'fuente'           => $row->fuente,
+            ];
+        }
+
+        return ['total' => $total, 'detalle' => $detail];
     }
 
     private function buildCorporateFunding(Period $period): array

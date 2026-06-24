@@ -16,19 +16,21 @@ class AuditGastosLendusCommand extends Command
 
     protected $description = 'Auditoría Gastos Lendus: valida exclusiones (Excedentes, Nómina, IMSS, Deducciones, Fondeo, Seguros/Pólizas)';
 
-    // Category → bucket for display
+    // Category → bucket for whole-category exclusions
     private const EXCLUSION_MAP = [
         'Envío de utilidad a corporativo' => 'EXCLUIDO: Excedentes (envío utilidad corporativo)',
         'Préstamos Intersucursales'        => 'EXCLUIDO: Fondeo a sucursal (rastreo entre sucursales)',
-        'Nómina y Capital Humano'          => 'EXCLUIDO: Nómina (se calcula desde NOI)',
         'Pólizas'                          => 'EXCLUIDO: Seguros/Coberturas (monto puente)',
         'Financiamiento Celular'           => 'EXCLUIDO: Nómina (financiamiento celular)',
         'Gasolina'                         => 'EXCLUIDO: Nómina (gasolina)',
     ];
 
-    // Concepts inside 'Nómina y Capital Humano' that are explicitly excluded
-    private const NOMINA_EXCLUDED_CONCEPTS = [
-        'NOMINA', 'DEDUCCIONES', 'DEDUCCIONES GENERALES', 'PAGO DE IMSS',
+    // 'Nómina y Capital Humano' is handled at concept level:
+    // Only these concepts are true nómina/payroll and are excluded. All other concepts
+    // under this category (PAGO FINANCIAMIENTO MOTO, COMPRA DE CASCOS, GASTOS MEDICOS…)
+    // are operational expenses → included in gastos_lendus_total.
+    private const NOMINA_SKIP_CONCEPTS = [
+        'NOMINA', 'PAGO DE IMSS', 'DEDUCCIONES', 'DEDUCCIONES GENERALES', 'PAGO PRESTAMO Z',
     ];
 
     public function handle(): int
@@ -45,15 +47,20 @@ class AuditGastosLendusCommand extends Command
             empty($weeklyIds) ? [] : $weeklyIds, [$period->id]
         )));
 
-        $lendusId = DB::table('data_sources')->where('code', 'gastos_lendus')->value('id');
-        if (!$lendusId) {
-            $this->error('Fuente gastos_lendus no encontrada en data_sources.');
+        // Always use gastos_lendus (PDF) — XLS rows have all NULL branch_id and are filtered
+        // out by the branch filter in BranchRadiographyCalculator::accumulateGastos().
+        $lendusPdfId = DB::table('data_sources')->where('code', 'gastos_lendus')->value('id');
+        if (!$lendusPdfId) {
+            $this->error('No se encontró fuente gastos_lendus (PDF) en data_sources.');
             return 1;
         }
+        $lendusIds   = collect([$lendusPdfId]);
+        $fuenteLabel = 'gastos_lendus (PDF)';
 
         $this->line('');
         $this->info('════════════════════════════════════════════════════════════');
         $this->info("  AUDITORÍA GASTOS LENDUS — {$period->label} (ID {$period->id})");
+        $this->info("  Fuente activa: {$fuenteLabel}");
         $this->info('  Columna de monto: Monto aplicado en caja (o Monto pagado empresa)');
         $this->info('  Clasificación: por Concepto');
         $this->info('════════════════════════════════════════════════════════════');
@@ -62,7 +69,7 @@ class AuditGastosLendusCommand extends Command
             ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
             ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
             ->whereIn('e.period_id', $dataIds)
-            ->where('ru.data_source_id', $lendusId)
+            ->whereIn('ru.data_source_id', $lendusIds)
             ->select(
                 'e.id',
                 'b.name as sucursal',
@@ -86,28 +93,33 @@ class AuditGastosLendusCommand extends Command
         foreach ($rows as $row) {
             $monto    = (float) ($row->paid_amount ?: $row->amount);
             $cat      = (string) ($row->category ?? '');
+            // Normalize unicode whitespace (incl. non-breaking spaces U+00A0) before matching
             $concepto = strtoupper(trim((string) ($row->concept ?? '')));
+            $concepto = preg_replace('/\s+/u', ' ', $concepto) ?? $concepto;
 
             $totalCrudo += $monto;
 
             $motivo   = '';
             $incluido = true;
 
-            if (isset(self::EXCLUSION_MAP[$cat])) {
+            if ($cat === 'Nómina y Capital Humano') {
+                // Concept-level exclusion: only true payroll concepts are excluded.
+                // Others (PAGO FINANCIAMIENTO MOTO, COMPRA DE CASCOS, GASTOS MEDICOS…)
+                // are operational → included in gastos_lendus.
+                if (in_array($concepto, self::NOMINA_SKIP_CONCEPTS, true)) {
+                    $motivo   = "EXCLUIDO: {$concepto} (nómina)";
+                    $incluido = false;
+                    $exclBuckets['Nómina y Capital Humano'] = ($exclBuckets['Nómina y Capital Humano'] ?? 0.0) + $monto;
+                } else {
+                    $totalIncluido += $monto;
+                    $motivo = "INCLUIDO (operativo: {$concepto})";
+                    $label  = $row->concept ?: $cat ?: 'Sin concepto';
+                    $conceptoTotales[$label] = ($conceptoTotales[$label] ?? 0.0) + $monto;
+                }
+            } elseif (isset(self::EXCLUSION_MAP[$cat])) {
                 $motivo   = self::EXCLUSION_MAP[$cat];
                 $incluido = false;
                 $exclBuckets[$cat] = ($exclBuckets[$cat] ?? 0.0) + $monto;
-
-                // Extra: concepts inside Nómina that should be flagged separately
-                if ($cat === 'Nómina y Capital Humano') {
-                    $nomUpper = strtoupper(trim($concepto));
-                    foreach (self::NOMINA_EXCLUDED_CONCEPTS as $excCon) {
-                        if (str_contains($nomUpper, $excCon)) {
-                            $motivo = "EXCLUIDO: {$excCon} (no sumar en gastos Lendus)";
-                            break;
-                        }
-                    }
-                }
             } else {
                 $totalIncluido += $monto;
                 $motivo = 'INCLUIDO';
@@ -135,7 +147,7 @@ class AuditGastosLendusCommand extends Command
 
         $exclLabels = [
             'Envío de utilidad a corporativo' => 'Excedentes',
-            'Nómina y Capital Humano'          => 'Nómina (NOMINA/IMSS/Deducciones)',
+            'Nómina y Capital Humano'          => 'Nómina payroll (NOMINA/IMSS/DEDUCCIONES/PAGO PRESTAMO Z)',
             'Préstamos Intersucursales'        => 'Fondeo a sucursal',
             'Pólizas'                          => 'Seguros/Coberturas (puente)',
             'Financiamiento Celular'           => 'Financiamiento Celular (nómina)',

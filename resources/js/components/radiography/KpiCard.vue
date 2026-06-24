@@ -40,7 +40,7 @@ const toneValueClasses: Record<string, string> = {
                 <component :is="icon" class="size-3.5" />
             </span>
         </div>
-        <p class="mt-1.5 truncate text-base font-black tabular-nums sm:text-lg" :class="toneValueClasses[tone ?? 'teal']" :title="value">{{ value }}</p>
+        <p class="mt-1.5 text-base font-black tabular-nums break-words sm:text-lg" :class="toneValueClasses[tone ?? 'teal']" :title="value">{{ value }}</p>
         <p v-if="hint" class="mt-0.5 truncate text-[10.5px] text-slate-400">{{ hint }}</p>
     </div>
 </template>

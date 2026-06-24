@@ -207,34 +207,50 @@ const nomComis    = computed(() => Number(brGlobal.value?.comisiones)      || 0)
 const nomVac      = computed(() => Number(brGlobal.value?.vacaciones)      || 0)
 const nomPrimaVac = computed(() => Number(brGlobal.value?.prima_vacacional)|| 0)
 const nomBonos    = computed(() => Number(brGlobal.value?.bonos)           || 0)
+const nomBonosAcel= computed(() => Number(brGlobal.value?.bonos_aceleradores) || 0)
 
 const NOI_DEDUCTION_LABELS = new Set(['Descuentos Infonavit', 'Pensión Alimenticia', 'Descuento Servicios Moto',
     'Financiamiento de Motos (desc.)', 'Préstamo Personal', 'Subsidio para el Empleo APL',
-    'Otros descuentos NOI', 'Descuento de uniformes'])
+    'Otros descuentos NOI', 'Descuento de uniformes', 'IMSS', 'Financiamiento Celular',
+    'Descuento gastos sin comprobar', 'Descuento extravío tarjeta de circulación',
+    'Descuentos Tienda Mr Lana', 'Descuento Servicios Automóvil', 'Descuento faltante en caja',
+    'Anticipo de nómina'])
 
 const nomDetalle = computed<{ label: string; value: number }[]>(() => {
     const det = brGlobal.value?.nomina_detalle as Record<string, number> | undefined
     if (!det) return []
     return Object.entries(det).filter(([, v]) => Number(v) > 0).map(([label, v]) => ({ label, value: Number(v) }))
 })
-const nomTotal = computed(() => nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value + nomDetalle.value.reduce((s, r) => s + r.value, 0))
+const nomTotal = computed(() => nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value + nomBonosAcel.value + nomDetalle.value.reduce((s, r) => s + r.value, 0))
 const nomDescuentosNOI = computed(() => nomDetalle.value.filter(r => NOI_DEDUCTION_LABELS.has(r.label)).reduce((s, r) => s + r.value, 0))
 const nomNeto = computed(() => nomTotal.value - nomDescuentosNOI.value)
 
 // ── Préstamos intersucursales ─────────────────────────────────────────────────
 const fondeoGlobal = computed(() => Number(brGlobal.value?.prestamos_fondea) || 0)
+const fondeoDetalle = computed(() => (snap.value?.sections?.fondeo_detalle?.detalle ?? []) as any[])
+
+// ── Seguros / Coberturas (puente) — no se suman a recuperación ni a gastos ─────
+const segurosSaveheartsBruto = computed(() => Number(snap.value?.summary?.recovery_savehearts_bruto) || 0)
+const segurosComadresBruto   = computed(() => Number(snap.value?.summary?.recovery_comadres_bruto) || 0)
+const segurosCreceBruto      = computed(() => Number(snap.value?.summary?.recovery_crece_bruto) || 0)
+const segurosCrece30         = computed(() => Number(snap.value?.summary?.recovery_crece_reconocido) || 0)
+const segurosCrece70         = computed(() => Number(snap.value?.summary?.recovery_crece_no_reconocido) || 0)
+const segurosPuenteTotal     = computed(() => segurosSaveheartsBruto.value + segurosComadresBruto.value + segurosCrece70.value)
 
 // ── Cartera / mora global ──────────────────────────────────────────────────────
 const recGlobal     = computed(() => Number(brGlobal.value?.recuperacion_total) || 0)
 const colGlobal     = computed(() => Number(brGlobal.value?.colocacion)         || 0)
-const carteraGlobal = computed(() => Number(brGlobal.value?.valor_cartera)      || 0)
+// Valor cartera / Cartera vencida GLOBAL: fuente snap.summary (todas las sucursales/rutas,
+// único filtro = excluir Aguascalientes). Distinto de la suma de las 13 sucursales oficiales
+// (brGlobal.valor_cartera), que sigue usándose para el desglose por sucursal/bucket.
+const carteraGlobal = computed(() => Number(snap.value?.summary?.portfolio_total)   || 0)
+const moraTotalGlobal = computed(() => Number(snap.value?.summary?.overdue_portfolio) || 0)
 const excGlobal     = computed(() => Number(brGlobal.value?.excedentes)         || 0)
 const mora0_30g    = computed(() => Number(brGlobal.value?.mora_0_30)     || 0)
 const mora31_60g   = computed(() => Number(brGlobal.value?.mora_31_60)    || 0)
 const mora61_90g   = computed(() => Number(brGlobal.value?.mora_61_90)    || 0)
 const mora91_120g  = computed(() => Number(brGlobal.value?.mora_91_120)   || 0)
 const mora120plusG = computed(() => Number(brGlobal.value?.mora_120_plus) || 0)
-const moraTotalGlobal = computed(() => mora0_30g.value + mora31_60g.value + mora61_90g.value + mora91_120g.value + mora120plusG.value)
 
 const moraBucketsGlobal = computed(() => [
     { label: 'Mora 1-30',   value: mora0_30g.value },
@@ -366,6 +382,15 @@ const activeLoansTotals = computed(() => {
     const saldo = rows.reduce((s, r) => s + r.saldo, 0)
     const vencido = rows.reduce((s, r) => s + r.vencido, 0)
     return { count, saldo, vencido, pct: saldo > 0 ? (vencido / saldo) * 100 : 0 }
+})
+
+// Préstamo activo = SUM(capital_activo) donde dias_vencidos = 0.
+// Distinto de Valor cartera (que usa saldo_activo de todos los contratos).
+const prestamoActivoKpi = computed(() => {
+    const rows = (snap.value?.sections?.active_loans ?? []) as any[]
+    return rows
+        .filter((al: any) => Number(al.dias_vencidos) === 0)
+        .reduce((sum: number, al: any) => sum + (Number(al.capital_activo) || 0), 0)
 })
 
 // ── Productos ──────────────────────────────────────────────────────────────────
@@ -711,17 +736,17 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                     <p v-if="vfActiveBadge" class="mb-3 inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-3 py-1 text-xs font-black text-indigo-700">
                         {{ vfActiveBadge }}
                     </p>
-                    <div class="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6 xl:grid-cols-11">
+                    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
                         <KpiCard label="Recuperación" :value="money(kpiRec)" :icon="HandCoins" tone="teal" />
                         <KpiCard label="Colocación" :value="money(kpiCol)" :icon="TrendingUp" tone="blue" />
-                        <KpiCard label="Cartera" :value="money(kpiCartera)" :icon="Landmark" tone="teal" />
+                        <KpiCard label="Valor cartera" :value="money(kpiCartera)" :icon="Landmark" tone="teal" />
                         <KpiCard label="Cartera vencida" :value="money(kpiMora)" :icon="AlertTriangle" :tone="kpiMoraPct > 25 ? 'red' : 'amber'" />
                         <KpiCard label="Mora %" :value="pct(kpiMoraPct)" :icon="Percent" :tone="kpiMoraPct > 25 ? 'red' : 'teal'" />
                         <KpiCard label="OPEX" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
                         <KpiCard label="Nómina" :value="money(kpiNomina)" :icon="Wallet" tone="blue" />
                         <KpiCard :label="kpiUtilLabel" :value="money(kpiUtil)" :icon="Gauge" :tone="kpiUtil < 0 ? 'red' : 'green'" />
                         <KpiCard label="Margen EBITDA" :value="pct(margenEbitdaPct)" :icon="Percent" :tone="margenEbitdaPct < 0 ? 'red' : 'green'" />
-                        <KpiCard label="Préstamo activo" :value="money(activeLoansTotals.saldo)" :icon="Banknote" tone="blue" />
+                        <KpiCard label="Préstamo activo" :value="money(prestamoActivoKpi)" :icon="Banknote" tone="blue" />
                         <KpiCard label="Efectividad cobranza" value="Pendiente" :icon="CheckCircle2" tone="neutral" />
                     </div>
                 </div>
@@ -887,6 +912,8 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                                 <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">EBITDA</td><td class="px-5 py-2.5 text-right font-black text-lg" :class="utilidadGlobal < 0 ? 'text-red-700' : 'text-indigo-900'">{{ money(utilidadGlobal) }}</td></tr>
                                 <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-500 font-medium">Margen EBITDA</td><td class="px-5 py-2.5 text-right font-black" :class="margenEbitdaPct < 0 ? 'text-red-700' : 'text-slate-950'">{{ pct(margenEbitdaPct) }}</td></tr>
                                 <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Envío de utilidad a corporativo</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(excGlobal) }}</td></tr>
+                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Fondeo entre sucursales (rastreo, no afecta EBITDA)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(fondeoGlobal) }}</td></tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguros / Coberturas (puente, no se suman a recuperación ni gastos)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosPuenteTotal) }}</td></tr>
                                 <tr class="border-b"><td class="px-5 py-2.5 font-black text-slate-800">Diferencia</td><td class="px-5 py-2.5 text-right font-black" :class="diferencia < 0 ? 'text-red-700' : 'text-emerald-700'">{{ money(diferencia) }}</td></tr>
                                 <tr class="border-b bg-slate-50/60">
                                     <td class="px-5 py-2.5 text-slate-600 font-medium">Saldo inicial en caja</td>
@@ -1069,6 +1096,52 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                             </div>
                         </div>
                         <EmptyState v-else class="m-4" title="Sin gastos para este filtro" />
+                    </div>
+
+                    <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                        <div class="border-b bg-slate-50 px-5 py-3 flex items-center justify-between">
+                            <h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Fondeos entre sucursales (rastreo — no afecta EBITDA)</h3>
+                            <span class="text-xs font-black text-slate-700">Total: {{ money(fondeoGlobal) }}</span>
+                        </div>
+                        <div v-if="fondeoDetalle.length" class="overflow-x-auto">
+                            <table class="w-full text-xs">
+                                <thead>
+                                    <tr class="border-b bg-slate-50/60 text-slate-500">
+                                        <th class="px-4 py-2 text-left font-bold">Sucursal origen</th>
+                                        <th class="px-4 py-2 text-left font-bold">Sucursal destino</th>
+                                        <th class="px-4 py-2 text-left font-bold">Empleado / responsable</th>
+                                        <th class="px-4 py-2 text-right font-bold">Monto</th>
+                                        <th class="px-4 py-2 text-left font-bold">Observación / Justificación</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="(f, i) in fondeoDetalle" :key="i" class="border-b last:border-0">
+                                        <td class="px-4 py-1.5 text-slate-700">{{ f.sucursal_origen }}</td>
+                                        <td class="px-4 py-1.5 text-slate-700">{{ f.sucursal_destino }}</td>
+                                        <td class="px-4 py-1.5 text-slate-600">{{ f.responsable || '—' }}</td>
+                                        <td class="px-4 py-1.5 text-right font-semibold text-slate-800">{{ money(f.monto) }}</td>
+                                        <td class="px-4 py-1.5 text-slate-500">{{ f.observacion || '—' }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <EmptyState v-else class="m-4" title="Sin fondeos entre sucursales en este periodo" />
+                    </div>
+
+                    <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                        <div class="border-b bg-slate-50 px-5 py-3">
+                            <h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Seguros / Coberturas (puente — no se suman a recuperación ni a gastos)</h3>
+                        </div>
+                        <table class="w-full text-sm">
+                            <tbody>
+                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Cobertura Savehearts</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosSaveheartsBruto) }}</td></tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Cobertura Crédito Grupal / Comadres</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosComadresBruto) }}</td></tr>
+                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE bruto</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosCreceBruto) }}</td></tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE 30% (reconocido como ingreso)</td><td class="px-5 py-2.5 text-right font-black text-emerald-700">{{ money(segurosCrece30) }}</td></tr>
+                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE 70% (puente, no reconocido)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosCrece70) }}</td></tr>
+                                <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">Total Seguros / Coberturas (puente)</td><td class="px-5 py-2.5 text-right font-black text-indigo-900">{{ money(segurosPuenteTotal) }}</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
 
