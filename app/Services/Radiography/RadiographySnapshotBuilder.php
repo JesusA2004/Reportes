@@ -165,7 +165,7 @@ class RadiographySnapshotBuilder
                                 + $nominaDetalleSuma;
         $opexParaEbitda         = (float) ($branchCalcGlobal['gastos_operativos'] ?? 0);
         $totalGastosEbitda      = $opexParaEbitda + $nominaParaEbitda;
-        $ebitdaGlobal           = $saldoInicialParaEbitda + $calcRecuperacion - $calcColocacion - $totalGastosEbitda;
+        $ebitdaGlobal           = $saldoInicialParaEbitda + $calcRecuperacion + $calcColocacion - $totalGastosEbitda;
         $capitalRecuperado      = (float) ($branchCalcGlobal['capital_recuperado'] ?? 0);
         $impuestoRecuperado     = (float) ($branchCalcGlobal['impuesto_recuperado'] ?? 0);
         $ventaGlobal            = max(0.0, $calcRecuperacion - $capitalRecuperado - $impuestoRecuperado);
@@ -478,34 +478,46 @@ class RadiographySnapshotBuilder
             ->get()
             ->keyBy('producto');
 
-        $portfolioMain = DB::table('fact_portfolios')
-            ->whereIn('period_id', $this->dataIds)
-            ->whereNotNull('product_name')
-            ->where('product_name', '<>', '')
-            ->whereRaw("product_name NOT REGEXP ?", [$excludeAll])
-            ->whereRaw("product_name NOT REGEXP ?", [self::PRODUCT_GROUP_PATTERN])
-            ->selectRaw('product_name as producto, COUNT(*) as contratos, SUM(balance) as cartera, SUM(CASE WHEN days_past_due > 0 THEN COALESCE(capital_due, past_due_balance, balance) ELSE 0 END) as vencida')
-            ->groupBy('product_name')
+        $realBranchNamesForProducts = $this->resolveRealBranchNormalizedNames();
+        $vencidaExpr = "SUM(CASE WHEN days_past_due > 0 THEN
+            COALESCE(capital_due, 0) + COALESCE(interes_atrasado, 0) + COALESCE(impuesto_atrasado, 0)
+            + COALESCE(saldo_interes_moratorio, 0) + COALESCE(saldo_impuesto_interes_moratorio, 0)
+        ELSE 0 END) as vencida";
+
+        $portfolioMain = DB::table('fact_portfolios as po')
+            ->join('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $this->dataIds)
+            ->whereNotNull('po.product_name')
+            ->where('po.product_name', '<>', '')
+            ->whereRaw("po.product_name NOT REGEXP ?", [$excludeAll])
+            ->whereRaw("po.product_name NOT REGEXP ?", [self::PRODUCT_GROUP_PATTERN])
+            ->when(!empty($realBranchNamesForProducts), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNamesForProducts))
+            ->selectRaw("po.product_name as producto, COUNT(*) as contratos, SUM(po.balance) as cartera, {$vencidaExpr}")
+            ->groupBy('po.product_name')
             ->get()
             ->keyBy('producto');
 
-        $portfolioOtros = DB::table('fact_portfolios')
-            ->whereIn('period_id', $this->dataIds)
-            ->whereNotNull('product_name')
-            ->where('product_name', '<>', '')
-            ->whereRaw("product_name REGEXP ? AND product_name NOT REGEXP ?", [self::PRODUCT_SPECIAL_PATTERN, self::PRODUCT_RESTRUCTURE_PATTERN])
-            ->selectRaw('product_name as producto, COUNT(*) as contratos, SUM(balance) as cartera, SUM(CASE WHEN days_past_due > 0 THEN COALESCE(capital_due, past_due_balance, balance) ELSE 0 END) as vencida')
-            ->groupBy('product_name')
+        $portfolioOtros = DB::table('fact_portfolios as po')
+            ->join('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $this->dataIds)
+            ->whereNotNull('po.product_name')
+            ->where('po.product_name', '<>', '')
+            ->whereRaw("po.product_name REGEXP ? AND po.product_name NOT REGEXP ?", [self::PRODUCT_SPECIAL_PATTERN, self::PRODUCT_RESTRUCTURE_PATTERN])
+            ->when(!empty($realBranchNamesForProducts), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNamesForProducts))
+            ->selectRaw("po.product_name as producto, COUNT(*) as contratos, SUM(po.balance) as cartera, {$vencidaExpr}")
+            ->groupBy('po.product_name')
             ->orderByDesc('cartera')
             ->get();
 
-        $portfolioReestructuras = DB::table('fact_portfolios')
-            ->whereIn('period_id', $this->dataIds)
-            ->whereNotNull('product_name')
-            ->where('product_name', '<>', '')
-            ->whereRaw("product_name REGEXP ?", [self::PRODUCT_RESTRUCTURE_PATTERN])
-            ->selectRaw('product_name as producto, COUNT(*) as contratos, SUM(balance) as cartera, SUM(CASE WHEN days_past_due > 0 THEN COALESCE(capital_due, past_due_balance, balance) ELSE 0 END) as vencida')
-            ->groupBy('product_name')
+        $portfolioReestructuras = DB::table('fact_portfolios as po')
+            ->join('branches as b', 'po.branch_id', '=', 'b.id')
+            ->whereIn('po.period_id', $this->dataIds)
+            ->whereNotNull('po.product_name')
+            ->where('po.product_name', '<>', '')
+            ->whereRaw("po.product_name REGEXP ?", [self::PRODUCT_RESTRUCTURE_PATTERN])
+            ->when(!empty($realBranchNamesForProducts), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNamesForProducts))
+            ->selectRaw("po.product_name as producto, COUNT(*) as contratos, SUM(po.balance) as cartera, {$vencidaExpr}")
+            ->groupBy('po.product_name')
             ->orderByDesc('cartera')
             ->get();
 
@@ -709,7 +721,10 @@ class RadiographySnapshotBuilder
                 b.name as sucursal,
                 po.route_name as ruta,
                 SUM(po.balance) as cartera,
-                SUM(CASE WHEN po.days_past_due > 0 THEN COALESCE(po.capital_due, po.past_due_balance, po.balance) ELSE 0 END) as vencida
+                SUM(CASE WHEN po.days_past_due > 0 THEN
+                    COALESCE(po.capital_due, 0) + COALESCE(po.interes_atrasado, 0) + COALESCE(po.impuesto_atrasado, 0)
+                    + COALESCE(po.saldo_interes_moratorio, 0) + COALESCE(po.saldo_impuesto_interes_moratorio, 0)
+                ELSE 0 END) as vencida
             ')
             ->groupBy('po.promoter_name', 'po.promoter_code', 'b.name', 'po.route_name')
             ->orderByDesc('cartera')
@@ -892,16 +907,25 @@ class RadiographySnapshotBuilder
                 $norm = $this->canonicalizer->normalize($mes->employee?->full_name ?? '');
                 if (!$norm) continue;
                 $rawNameByNorm[$norm] = $mes->employee?->full_name ?? '';
-                $payroll[$norm] = [
-                    'name'       => $mes->employee?->full_name ?? 'Sin empleado',
-                    'code'       => null,
-                    'branch_src' => $mes->branch?->name ?? null,
-                    'pagos'      => (float)$mes->total_payments,
-                    'bonos'      => (float)$mes->total_bonuses,
-                    'descuentos' => (float)$mes->total_discounts,
-                    'gastos'     => (float)$mes->total_expenses,
-                    'neto'       => (float)$mes->net_amount,
-                ];
+                if (isset($payroll[$norm])) {
+                    // Same employee in both fiscal + non-fiscal: accumulate, don't overwrite
+                    $payroll[$norm]['pagos']      += (float)$mes->total_payments;
+                    $payroll[$norm]['bonos']      += (float)$mes->total_bonuses;
+                    $payroll[$norm]['descuentos'] += (float)$mes->total_discounts;
+                    $payroll[$norm]['gastos']     += (float)$mes->total_expenses;
+                    $payroll[$norm]['neto']       += (float)$mes->net_amount;
+                } else {
+                    $payroll[$norm] = [
+                        'name'       => $mes->employee?->full_name ?? 'Sin empleado',
+                        'code'       => null,
+                        'branch_src' => $mes->branch?->name ?? null,
+                        'pagos'      => (float)$mes->total_payments,
+                        'bonos'      => (float)$mes->total_bonuses,
+                        'descuentos' => (float)$mes->total_discounts,
+                        'gastos'     => (float)$mes->total_expenses,
+                        'neto'       => (float)$mes->net_amount,
+                    ];
+                }
             }
         } else {
             $noiRows = DB::table('fact_noi_movements as n')
@@ -991,7 +1015,10 @@ class RadiographySnapshotBuilder
                 COALESCE(po.promoter_name, po.promoter_code) as raw_name,
                 b.name as sucursal, po.route_name as ruta,
                 SUM(po.balance) as cartera,
-                SUM(CASE WHEN po.days_past_due>0 THEN COALESCE(po.capital_due,po.past_due_balance,po.balance) ELSE 0 END) as vencida
+                SUM(CASE WHEN po.days_past_due > 0 THEN
+                    COALESCE(po.capital_due, 0) + COALESCE(po.interes_atrasado, 0) + COALESCE(po.impuesto_atrasado, 0)
+                    + COALESCE(po.saldo_interes_moratorio, 0) + COALESCE(po.saldo_impuesto_interes_moratorio, 0)
+                ELSE 0 END) as vencida
             ")
             ->groupBy('po.promoter_name', 'po.promoter_code', 'b.name', 'po.route_name')
             ->get();
@@ -1862,18 +1889,88 @@ class RadiographySnapshotBuilder
     {
         $resolver = app(BranchResolverService::class);
 
+        // Apply same exclusion logic as BranchRadiographyCalculator::accumulateRecuperacion()
+        // so total matches the global recuperacion KPI ($18,324,971.76).
+        // Excluded rows (savehearts + CONDONACION + COBERTURA/SEGURO/UNIFICACION patterns)
+        // are surfaced as separate informational columns for display in the Ingresos tab.
         $rawRows = DB::table('fact_recoveries as r')
             ->join('branches as b', 'r.branch_id', '=', 'b.id')
             ->whereIn('r.period_id', $this->dataIds)
-            ->selectRaw('
+            ->selectRaw("
                 b.name as branch,
-                SUM(r.capital) as capital,
-                SUM(r.interest) as interest,
-                SUM(r.tax) as tax,
-                SUM(r.charges) as charges,
-                SUM(r.total_amount) as total,
+                SUM(CASE
+                    WHEN r.is_savehearts = 1 THEN 0
+                    WHEN r.transaction = 'CONDONACION' THEN 0
+                    WHEN r.is_savehearts = 0 AND (
+                        UPPER(COALESCE(r.concept,'')) LIKE '%COBERTURA%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%COBERTURA%'
+                        OR UPPER(COALESCE(r.concept,'')) LIKE '%SEGURO%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%SEGURO%'
+                        OR UPPER(COALESCE(r.concept,'')) LIKE '%UNIFICACION%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%UNIFICACION%'
+                    ) THEN 0
+                    ELSE r.total_amount
+                END) as total,
+                SUM(CASE
+                    WHEN r.is_savehearts = 1 THEN 0
+                    WHEN r.transaction = 'CONDONACION' THEN 0
+                    WHEN r.is_savehearts = 0 AND (
+                        UPPER(COALESCE(r.concept,'')) LIKE '%COBERTURA%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%COBERTURA%'
+                        OR UPPER(COALESCE(r.concept,'')) LIKE '%SEGURO%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%SEGURO%'
+                        OR UPPER(COALESCE(r.concept,'')) LIKE '%UNIFICACION%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%UNIFICACION%'
+                    ) THEN 0
+                    ELSE r.capital
+                END) as capital,
+                SUM(CASE
+                    WHEN r.is_savehearts = 1 THEN 0
+                    WHEN r.transaction = 'CONDONACION' THEN 0
+                    WHEN r.is_savehearts = 0 AND (
+                        UPPER(COALESCE(r.concept,'')) LIKE '%COBERTURA%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%COBERTURA%'
+                        OR UPPER(COALESCE(r.concept,'')) LIKE '%SEGURO%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%SEGURO%'
+                        OR UPPER(COALESCE(r.concept,'')) LIKE '%UNIFICACION%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%UNIFICACION%'
+                    ) THEN 0
+                    ELSE r.interest
+                END) as interest,
+                SUM(CASE
+                    WHEN r.is_savehearts = 1 THEN 0
+                    WHEN r.transaction = 'CONDONACION' THEN 0
+                    WHEN r.is_savehearts = 0 AND (
+                        UPPER(COALESCE(r.concept,'')) LIKE '%COBERTURA%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%COBERTURA%'
+                        OR UPPER(COALESCE(r.concept,'')) LIKE '%SEGURO%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%SEGURO%'
+                        OR UPPER(COALESCE(r.concept,'')) LIKE '%UNIFICACION%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%UNIFICACION%'
+                    ) THEN 0
+                    ELSE r.tax
+                END) as tax,
+                SUM(CASE
+                    WHEN r.is_savehearts = 1 THEN 0
+                    WHEN r.transaction = 'CONDONACION' THEN 0
+                    WHEN r.is_savehearts = 0 AND (
+                        UPPER(COALESCE(r.concept,'')) LIKE '%COBERTURA%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%COBERTURA%'
+                        OR UPPER(COALESCE(r.concept,'')) LIKE '%SEGURO%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%SEGURO%'
+                        OR UPPER(COALESCE(r.concept,'')) LIKE '%UNIFICACION%'
+                        OR UPPER(COALESCE(r.operation,'')) LIKE '%UNIFICACION%'
+                    ) THEN 0
+                    ELSE r.charges
+                END) as charges,
+                SUM(CASE WHEN r.is_savehearts = 1 THEN r.total_amount ELSE 0 END) as seguros_excluidos,
+                SUM(CASE WHEN r.transaction = 'CONDONACION' THEN r.total_amount ELSE 0 END) as condonacion_excluida,
+                SUM(CASE WHEN r.transaction = 'CONDONACION'
+                    AND UPPER(COALESCE(r.operation,'')) LIKE '%UNIFICACION%'
+                    THEN r.total_amount ELSE 0 END) as unificacion_excluida,
+                SUM(r.total_amount) as bruto,
                 COUNT(*) as operaciones
-            ')
+            ")
             ->groupBy('r.branch_id', 'b.name')
             ->orderByDesc('total')
             ->get();
@@ -1887,22 +1984,30 @@ class RadiographySnapshotBuilder
             }
             if (!isset($grouped[$real])) {
                 $grouped[$real] = [
-                    'branch'      => $real,
-                    'capital'     => 0.0,
-                    'interest'    => 0.0,
-                    'tax'         => 0.0,
-                    'charges'     => 0.0,
-                    'moratorios'  => 0.0,
-                    'total'       => 0.0,
-                    'operaciones' => 0,
+                    'branch'               => $real,
+                    'capital'              => 0.0,
+                    'interest'             => 0.0,
+                    'tax'                  => 0.0,
+                    'charges'              => 0.0,
+                    'moratorios'           => 0.0,
+                    'total'                => 0.0,
+                    'bruto'                => 0.0,
+                    'seguros_excluidos'    => 0.0,
+                    'condonacion_excluida' => 0.0,
+                    'unificacion_excluida' => 0.0,
+                    'operaciones'          => 0,
                 ];
             }
-            $grouped[$real]['capital']     += (float)($r->capital    ?? 0);
-            $grouped[$real]['interest']    += (float)($r->interest   ?? 0);
-            $grouped[$real]['tax']         += (float)($r->tax        ?? 0);
-            $grouped[$real]['charges']     += (float)($r->charges    ?? 0);
-            $grouped[$real]['total']       += (float)($r->total      ?? 0);
-            $grouped[$real]['operaciones'] += (int)($r->operaciones  ?? 0);
+            $grouped[$real]['capital']              += (float)($r->capital              ?? 0);
+            $grouped[$real]['interest']             += (float)($r->interest             ?? 0);
+            $grouped[$real]['tax']                  += (float)($r->tax                  ?? 0);
+            $grouped[$real]['charges']              += (float)($r->charges              ?? 0);
+            $grouped[$real]['total']                += (float)($r->total                ?? 0);
+            $grouped[$real]['bruto']                += (float)($r->bruto                ?? 0);
+            $grouped[$real]['seguros_excluidos']    += (float)($r->seguros_excluidos    ?? 0);
+            $grouped[$real]['condonacion_excluida'] += (float)($r->condonacion_excluida ?? 0);
+            $grouped[$real]['unificacion_excluida'] += (float)($r->unificacion_excluida ?? 0);
+            $grouped[$real]['operaciones']          += (int)($r->operaciones            ?? 0);
         }
 
         usort($grouped, fn ($a, $b) => $b['total'] <=> $a['total']);
@@ -1941,6 +2046,8 @@ class RadiographySnapshotBuilder
     {
         $realBranchNames = $this->resolveRealBranchNormalizedNames();
 
+        // vencida = SUM de las 5 columnas vencidas (misma fórmula que BranchRadiographyCalculator),
+        // solo donde days_past_due > 0. NO usar balance ni past_due_balance.
         $rows = DB::table('fact_portfolios as po')
             ->join('branches as b', 'po.branch_id', '=', 'b.id')
             ->whereIn('po.period_id', $this->dataIds)
@@ -1950,7 +2057,18 @@ class RadiographySnapshotBuilder
                 COALESCE(NULLIF(po.product_name,''), 'Sin producto') as product,
                 COUNT(*) as contratos,
                 SUM(po.balance) as cartera,
-                SUM(CASE WHEN po.days_past_due > 0 THEN COALESCE(po.capital_due, po.past_due_balance, po.balance) ELSE 0 END) as vencida
+                SUM(CASE WHEN po.days_past_due > 0 THEN
+                    COALESCE(po.capital_due, 0)
+                    + COALESCE(po.interes_atrasado, 0)
+                    + COALESCE(po.impuesto_atrasado, 0)
+                    + COALESCE(po.saldo_interes_moratorio, 0)
+                    + COALESCE(po.saldo_impuesto_interes_moratorio, 0)
+                ELSE 0 END) as vencida,
+                SUM(CASE WHEN po.days_past_due > 0 THEN COALESCE(po.capital_due, 0) ELSE 0 END) as capital_atrasado,
+                SUM(CASE WHEN po.days_past_due > 0 THEN COALESCE(po.interes_atrasado, 0) ELSE 0 END) as interes_atrasado,
+                SUM(CASE WHEN po.days_past_due > 0 THEN COALESCE(po.impuesto_atrasado, 0) ELSE 0 END) as impuesto_atrasado,
+                SUM(CASE WHEN po.days_past_due > 0 THEN COALESCE(po.saldo_interes_moratorio, 0) ELSE 0 END) as saldo_interes_moratorio,
+                SUM(CASE WHEN po.days_past_due > 0 THEN COALESCE(po.saldo_impuesto_interes_moratorio, 0) ELSE 0 END) as saldo_impuesto_interes_moratorio
             ")
             ->groupBy('po.branch_id', 'b.name', 'po.product_name')
             ->orderBy('b.name')
@@ -1958,12 +2076,17 @@ class RadiographySnapshotBuilder
             ->get();
 
         return $rows->map(fn ($r) => [
-            'branch'    => $r->branch,
-            'product'   => $r->product,
-            'contratos' => (int) $r->contratos,
-            'cartera'   => (float) $r->cartera,
-            'vencida'   => (float) $r->vencida,
-            'mora'      => (float) $r->cartera > 0 ? round((float) $r->vencida / (float) $r->cartera * 100, 2) : 0.0,
+            'branch'                        => $r->branch,
+            'product'                       => $r->product,
+            'contratos'                     => (int) $r->contratos,
+            'cartera'                       => (float) $r->cartera,
+            'vencida'                       => (float) $r->vencida,
+            'capital_atrasado'              => (float) $r->capital_atrasado,
+            'interes_atrasado'              => (float) $r->interes_atrasado,
+            'impuesto_atrasado'             => (float) $r->impuesto_atrasado,
+            'saldo_interes_moratorio'       => (float) $r->saldo_interes_moratorio,
+            'saldo_impuesto_interes_moratorio' => (float) $r->saldo_impuesto_interes_moratorio,
+            'mora'                          => (float) $r->cartera > 0 ? round((float) $r->vencida / (float) $r->cartera * 100, 2) : 0.0,
         ])->values()->all();
     }
 
@@ -2038,15 +2161,11 @@ class RadiographySnapshotBuilder
     // mismo balance/Saldo actual, mismos buckets que cartera total y mora total).
     private function buildMoraByBranch(Period $period): array
     {
-        $defs = ['mora_0_30', 'mora_31_60', 'mora_61_90', 'mora_91_120', 'mora_120_plus'];
-
         $result = [];
         foreach ($this->branchCalcBranches as $branch) {
-            $vencida = 0.0;
-            foreach ($defs as $key) {
-                $vencida += (float) ($branch[$key] ?? 0);
-            }
-            $cartera = (float) ($branch['valor_cartera'] ?? 0);
+            // cartera_vencida = SUM(5 columnas vencidas) donde days_past_due>0 (fórmula definitiva)
+            $vencida = (float) ($branch['cartera_vencida'] ?? 0);
+            $cartera = (float) ($branch['valor_cartera']   ?? 0);
             if ($cartera == 0.0 && $vencida == 0.0) {
                 continue;
             }
@@ -2055,10 +2174,10 @@ class RadiographySnapshotBuilder
                 'cartera_total'  => $cartera,
                 'vencida_total'  => $vencida,
                 'al_corriente'   => $cartera - $vencida,
-                'mora_1_30'      => (float) ($branch['mora_0_30'] ?? 0),
-                'mora_31_60'     => (float) ($branch['mora_31_60'] ?? 0),
-                'mora_61_90'     => (float) ($branch['mora_61_90'] ?? 0),
-                'mora_91_120'    => (float) ($branch['mora_91_120'] ?? 0),
+                'mora_1_30'      => (float) ($branch['mora_0_30']    ?? 0),
+                'mora_31_60'     => (float) ($branch['mora_31_60']   ?? 0),
+                'mora_61_90'     => (float) ($branch['mora_61_90']   ?? 0),
+                'mora_91_120'    => (float) ($branch['mora_91_120']  ?? 0),
                 'mora_120_plus'  => (float) ($branch['mora_120_plus'] ?? 0),
             ];
         }
@@ -2167,26 +2286,36 @@ class RadiographySnapshotBuilder
 
     private function buildPlacementByBranchProduct(Period $period): array
     {
-        $realBranchNames = $this->resolveRealBranchNormalizedNames();
+        // Use the same operative branch map as BranchRadiographyCalculator so that
+        // routes (CUITLAHUAC → TEPIC, etc.) are resolved and the total matches the KPI.
+        $maps        = $this->branchCalculator->buildBranchMap();
+        $operativeMap = $maps['operative'];  // branch_id => real_sucursal_name
 
+        if (empty($operativeMap)) {
+            return [];
+        }
+
+        $operativeIds = array_keys($operativeMap);
+
+        // Misma regla que BranchRadiographyCalculator::accumulateColocacion():
+        // solo DESEMBOLSO y REFINANCIAMIENTO (excluye REESTRUCTURACIÓN, UNIFICACIÓN).
         $rows = DB::table('fact_placements as p')
-            ->join('branches as b', 'p.branch_id', '=', 'b.id')
             ->whereIn('p.period_id', $this->dataIds)
-            ->when(!empty($realBranchNames), fn ($q) => $q->whereIn(DB::raw('LOWER(b.name)'), $realBranchNames))
+            ->whereIn('p.branch_id', $operativeIds)
+            ->whereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(raw_payload), '$.credit_origin'))) IN ('DESEMBOLSO', 'REFINANCIAMIENTO')")
             ->selectRaw("
-                b.name as branch,
+                p.branch_id,
                 COALESCE(NULLIF(TRIM(p.product_name), ''), 'Sin producto') as product,
                 COUNT(*) as creditos,
                 SUM(p.amount) as monto
             ")
-            ->groupBy('p.branch_id', 'b.name', 'p.product_name')
+            ->groupBy('p.branch_id', 'p.product_name')
             ->having('monto', '>', 0)
-            ->orderBy('b.name')
             ->orderByDesc('monto')
             ->get();
 
         return $rows->map(fn ($r) => [
-            'branch'   => $r->branch,
+            'branch'   => $operativeMap[(int)$r->branch_id] ?? 'Sin sucursal',
             'product'  => $r->product,
             'creditos' => (int)$r->creditos,
             'monto'    => (float)$r->monto,
@@ -2322,22 +2451,25 @@ class RadiographySnapshotBuilder
                 po.days_past_due,
                 COUNT(*) as contratos,
                 SUM(po.balance) as balance,
-                SUM(COALESCE(po.past_due_balance, 0)) as past_due_balance
+                SUM(CASE WHEN po.days_past_due > 0 THEN
+                    COALESCE(po.capital_due, 0) + COALESCE(po.interes_atrasado, 0) + COALESCE(po.impuesto_atrasado, 0)
+                    + COALESCE(po.saldo_interes_moratorio, 0) + COALESCE(po.saldo_impuesto_interes_moratorio, 0)
+                ELSE 0 END) as vencida_5col
             ')
             ->groupBy('po.product_name', 'po.days_past_due')
             ->get();
 
         $byProduct = [];
         foreach ($rows as $row) {
-            $product = $row->product;
-            $dpd     = (int) $row->days_past_due;
-            $bal     = (float) $row->balance;
-            $pdb     = (float) $row->past_due_balance;
-            $cnt     = (int) $row->contratos;
+            $product    = $row->product;
+            $dpd        = (int) $row->days_past_due;
+            $bal        = (float) $row->balance;
+            $vencida5   = (float) $row->vencida_5col;
+            $cnt        = (int) $row->contratos;
 
             foreach ($defs as $def) {
                 if ($dpd >= $def['min'] && $dpd <= $def['max']) {
-                    $amount = $def['key'] === 'al_corriente' ? $bal : ($pdb > 0 ? $pdb : $bal);
+                    $amount = $def['key'] === 'al_corriente' ? $bal : $vencida5;
                     $byProduct[$product]['contratos']        = ($byProduct[$product]['contratos']        ?? 0) + $cnt;
                     $byProduct[$product][$def['key']]        = ($byProduct[$product][$def['key']]        ?? 0.0) + $amount;
                     $byProduct[$product]['balance_total']    = ($byProduct[$product]['balance_total']    ?? 0.0) + $bal;
@@ -2383,18 +2515,21 @@ class RadiographySnapshotBuilder
                 po.days_past_due,
                 COUNT(*) as contratos,
                 SUM(po.balance) as balance,
-                SUM(COALESCE(po.past_due_balance, 0)) as past_due_balance
+                SUM(CASE WHEN po.days_past_due > 0 THEN
+                    COALESCE(po.capital_due, 0) + COALESCE(po.interes_atrasado, 0) + COALESCE(po.impuesto_atrasado, 0)
+                    + COALESCE(po.saldo_interes_moratorio, 0) + COALESCE(po.saldo_impuesto_interes_moratorio, 0)
+                ELSE 0 END) as vencida_5col
             ')
             ->groupBy('po.promoter_name', 'po.promoter_code', 'b.name', 'po.days_past_due')
             ->get();
 
         $byGestor = [];
         foreach ($rows as $row) {
-            $key = $row->gestor . '|||' . ($row->sucursal ?? '');
-            $dpd = (int) $row->days_past_due;
-            $bal = (float) $row->balance;
-            $pdb = (float) $row->past_due_balance;
-            $cnt = (int) $row->contratos;
+            $key      = $row->gestor . '|||' . ($row->sucursal ?? '');
+            $dpd      = (int) $row->days_past_due;
+            $bal      = (float) $row->balance;
+            $vencida5 = (float) $row->vencida_5col;
+            $cnt      = (int) $row->contratos;
 
             if (!isset($byGestor[$key])) {
                 $byGestor[$key] = ['gestor' => $row->gestor, 'sucursal' => $row->sucursal, 'contratos' => 0, 'balance_total' => 0.0];
@@ -2402,7 +2537,7 @@ class RadiographySnapshotBuilder
 
             foreach ($defs as $def) {
                 if ($dpd >= $def['min'] && $dpd <= $def['max']) {
-                    $amount = $def['key'] === 'al_corriente' ? $bal : ($pdb > 0 ? $pdb : $bal);
+                    $amount = $def['key'] === 'al_corriente' ? $bal : $vencida5;
                     $byGestor[$key][$def['key']]     = ($byGestor[$key][$def['key']]     ?? 0.0) + $amount;
                     $byGestor[$key]['contratos']     += $cnt;
                     $byGestor[$key]['balance_total'] += $bal;

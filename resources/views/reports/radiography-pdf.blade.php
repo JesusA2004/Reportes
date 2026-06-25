@@ -113,6 +113,16 @@ $ingrCrece30     = (float)($brGlobal['seguro_crece_reconocido'] ?? $sum['recover
 $ingrCrece70     = max(0.0, $ingrCrece - $ingrCrece30);
 $ingrTotal       = (float)($brGlobal['recuperacion_total']      ?? $sum['recovery_total']);
 
+// Componentes de ingresos (desglose B)
+$ingrCapital     = (float)($brGlobal['capital_recuperado']   ?? 0);
+$ingrInteres     = (float)($brGlobal['interes_recuperado']   ?? 0);
+$ingrImpuesto    = (float)($brGlobal['impuesto_recuperado']  ?? 0);
+$ingrCharges     = (float)($brGlobal['charges']              ?? 0);
+$ingrCargosIni   = (float)($brGlobal['cargos_inicio']        ?? 0);
+$ingrComAper     = (float)($brGlobal['comision_apertura']    ?? 0);
+$ingrCondonacion = (float)($brGlobal['condonacion_excluida'] ?? 0);
+$ingrUnificacion = (float)($brGlobal['unificacion_excluida'] ?? 0);
+
 // ── Gastos operativos ─────────────────────────────────────────────────────────
 $gastosDetalle = (array)($brGlobal['gastos_detalle'] ?? []);
 arsort($gastosDetalle);
@@ -195,16 +205,19 @@ $inconsistencia = $excedentes > $utilidad;
 $diferencia     = $utilidad - $excedentes;
 
 // ── Categoría por EBITDA — fórmula centralizada (idéntica al Excel) ───────────
+// EBITDA = Recuperación − Colocación − OPEX − Nómina
 $categorias = [];
 foreach ($brBranches as $b) {
     $bRec  = (float)($b['recuperacion_total'] ?? 0);
+    $bCol  = (float)($b['colocacion'] ?? 0);
     $bGas  = (float)($b['gastos_operativos'] ?? 0);
     $bUtil = \App\Services\Radiography\RadiographyStyleHelper::branchEbitdaEstimate($b);
     $categorias[] = [
         'nombre'       => $b['sucursal'],
         'recuperacion' => $bRec,
+        'colocacion'   => $bCol,
         'gastos'       => $bGas,
-        'nomina'       => $bRec - $bGas - $bUtil,
+        'nomina'       => $bRec - $bCol - $bGas - $bUtil,
         'utilidad'     => $bUtil,
         'categoria'    => \App\Services\Radiography\RadiographyStyleHelper::ebitdaCategory($bUtil),
     ];
@@ -360,7 +373,8 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         <tr>
             <th>Sucursal</th>
             <th class="r">Recuperación</th>
-            <th class="r">Gastos</th>
+            <th class="r">Colocación</th>
+            <th class="r">OPEX</th>
             <th class="r">Nómina</th>
             <th class="r">EBITDA estimado</th>
             <th class="c">Categoría</th>
@@ -371,6 +385,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         <tr>
             <td class="b">{{ $c['nombre'] }}</td>
             <td class="r">{{ $fmt($c['recuperacion']) }}</td>
+            <td class="r">{{ $fmt($c['colocacion']) }}</td>
             <td class="r">{{ $fmt($c['gastos']) }}</td>
             <td class="r">{{ $fmt($c['nomina']) }}</td>
             <td class="r b" @if($c['utilidad'] < 0) style="color:#b91c1c;" @endif>{{ $fmt($c['utilidad']) }}</td>
@@ -379,7 +394,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         @endforeach
     </tbody>
 </table>
-<div class="note">EBITDA = Recuperación − Gastos − Nómina completa estimada por sucursal.</div>
+<div class="note">EBITDA = Recuperación − Colocación − OPEX − Nómina completa estimada por sucursal. Categorías: Diamante ≥$1M / Máster ≥$600K / Sénior ≥$300K / Júnior ≥$100K / Mantenido &lt;$100K.</div>
 @endif
 
 <!-- ═══════════════════════════════════════════════════════════════════════
@@ -498,32 +513,49 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
      PÁGINA 4 — INGRESOS / COBRANZA Y COLOCACIÓN
      ═══════════════════════════════════════════════════════════════════════ -->
 <div class="pagebreak"></div>
-<div class="section-bar">Ingresos / Cobranza</div>
-<table class="layout2 avoid">
-    <tr>
-        <td class="colL">
-            <table class="tbl">
-                <thead><tr><th>Concepto</th><th class="r">Monto</th></tr></thead>
-                <tbody>
-                    @if($ingrBruta > 0)<tr><td>Recuperación bruta (total archivo)</td><td class="r">{{ $fmt($ingrBruta) }}</td></tr>@endif
-                    @if($ingrSegExcluido > 0)<tr><td>(-) Seguros excluidos (no CRECE)</td><td class="r">- {{ $fmt($ingrSegExcluido) }}</td></tr>@endif
-                    @if($ingrCrece > 0)<tr><td>Seguro CRECE bruto</td><td class="r">{{ $fmt($ingrCrece) }}</td></tr>@endif
-                    @if($ingrCrece70 > 0)<tr><td>&nbsp;&nbsp;(-) No reconocido 70%</td><td class="r">- {{ $fmt($ingrCrece70) }}</td></tr>@endif
-                    @if($ingrCrece30 > 0)<tr><td>&nbsp;&nbsp;(+) Reconocido 30%</td><td class="r">{{ $fmt($ingrCrece30) }}</td></tr>@endif
-                </tbody>
-                <tfoot><tr><td>Recuperación total</td><td class="r">{{ $fmt($ingrTotal) }}</td></tr></tfoot>
-            </table>
-        </td>
-        <td class="colR">
-            <table class="tbl">
-                <thead><tr><th>Concepto</th><th class="r">Monto</th></tr></thead>
-                <tbody>
-                    <tr><td>Préstamos intersucursales (fondea)</td><td class="r">{{ $fmt($fondeoTotal) }}</td></tr>
-                </tbody>
-                <tfoot><tr><td>Colocación total</td><td class="r">{{ $fmt($colocacion) }}</td></tr></tfoot>
-            </table>
-        </td>
-    </tr>
+<div class="section-bar">Ingresos / Recuperación</div>
+
+{{-- A) Conciliación de seguros --}}
+<div class="section-bar alt">A) Conciliación de seguros</div>
+<table class="tbl avoid">
+    <thead><tr><th>Concepto</th><th class="r">Monto</th></tr></thead>
+    <tbody>
+        @if($ingrBruta > 0)<tr><td>Recuperación bruta (total archivo)</td><td class="r">{{ $fmt($ingrBruta) }}</td></tr>@endif
+        @if($ingrSegExcluido > 0)<tr><td>(-) Seguros excluidos (no CRECE)</td><td class="r">- {{ $fmt($ingrSegExcluido) }}</td></tr>@endif
+        @if($ingrCondonacion > 0)<tr><td>(-) Condonaciones excluidas</td><td class="r">- {{ $fmt($ingrCondonacion) }}</td></tr>@endif
+        @if($ingrUnificacion > 0)<tr><td>(-) Unificaciones excluidas</td><td class="r">- {{ $fmt($ingrUnificacion) }}</td></tr>@endif
+        @if($ingrCrece > 0)<tr><td>Seguro CRECE bruto</td><td class="r">{{ $fmt($ingrCrece) }}</td></tr>@endif
+        @if($ingrCrece70 > 0)<tr><td>&nbsp;&nbsp;(-) No reconocido 70%</td><td class="r">- {{ $fmt($ingrCrece70) }}</td></tr>@endif
+        @if($ingrCrece30 > 0)<tr><td>&nbsp;&nbsp;(+) Reconocido 30%</td><td class="r">{{ $fmt($ingrCrece30) }}</td></tr>@endif
+    </tbody>
+    <tfoot><tr><td><b>Recuperación total reconocida</b></td><td class="r">{{ $fmt($ingrTotal) }}</td></tr></tfoot>
+</table>
+
+{{-- B) Desglose por componente --}}
+@if($ingrCapital > 0 || $ingrInteres > 0)
+<div class="section-bar alt">B) Desglose por componente</div>
+<table class="tbl avoid">
+    <thead><tr><th>Componente</th><th class="r">Monto</th></tr></thead>
+    <tbody>
+        @if($ingrCapital > 0)<tr><td>Capital recuperado</td><td class="r">{{ $fmt($ingrCapital) }}</td></tr>@endif
+        @if($ingrInteres > 0)<tr><td>Intereses cobrados</td><td class="r">{{ $fmt($ingrInteres) }}</td></tr>@endif
+        @if($ingrImpuesto > 0)<tr><td>Impuestos sobre intereses</td><td class="r">{{ $fmt($ingrImpuesto) }}</td></tr>@endif
+        @if($ingrCharges > 0)<tr><td>Moratorios / cargos</td><td class="r">{{ $fmt($ingrCharges) }}</td></tr>@endif
+        @if($ingrCargosIni > 0)<tr><td>Cargos de inicio</td><td class="r">{{ $fmt($ingrCargosIni) }}</td></tr>@endif
+        @if($ingrComAper > 0)<tr><td>Comisión de apertura</td><td class="r">{{ $fmt($ingrComAper) }}</td></tr>@endif
+    </tbody>
+    <tfoot><tr><td><b>Total componentes</b></td><td class="r">{{ $fmt($ingrCapital + $ingrInteres + $ingrImpuesto + $ingrCharges + $ingrCargosIni + $ingrComAper) }}</td></tr></tfoot>
+</table>
+@endif
+
+{{-- Colocación: info complementaria --}}
+<div class="section-bar alt">Colocación del periodo (informativo)</div>
+<table class="tbl avoid">
+    <thead><tr><th>Concepto</th><th class="r">Monto</th></tr></thead>
+    <tbody>
+        <tr><td>Préstamos intersucursales (fondea)</td><td class="r">{{ $fmt($fondeoTotal) }}</td></tr>
+    </tbody>
+    <tfoot><tr><td>Colocación total (se resta del EBITDA)</td><td class="r">{{ $fmt($colocacion) }}</td></tr></tfoot>
 </table>
 
 @if(!empty($productosRows))

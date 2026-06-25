@@ -21,17 +21,13 @@ class AuditMoraCommand extends Command
                                 {--branch=             : filtrar por sucursal (contiene)}';
     protected $description = 'Auditoría de Mora/Cartera — UNA sola consulta base alimenta resumen, buckets, por sucursal, detalle y exportación';
 
-    // Referencia confirmada manualmente — Abril 2026 (periodo 14)
-    private const REF_BUCKETS = [
-        'Mora 1-30'   => 1_057_765.00,
-        'Mora 31-60'  => 926_001.80,
-        'Mora 61-90'  => 913_414.71,
-        'Mora 91-120' => 816_584.91,
-        'Mora 120+'   => 9_919_472.02,
-    ];
-    private const REF_TOTAL   = 13_633_238.44;
-    private const REF_CARTERA = 39_130_054.53;
-    private const REF_PCT     = 34.84;
+    // Referencia para Abril 2026 (periodo 14) — fórmula 5 columnas vencidas
+    // capital_due + interes_atrasado + impuesto_atrasado
+    // + saldo_interes_moratorio + saldo_impuesto_interes_moratorio
+    // Filtro único: excluir Aguascalientes/AGS. Sin otros filtros.
+    private const REF_TOTAL   = 13_707_000.00;  // ~$13.707M esperado con fórmula 5 cols
+    private const REF_CARTERA = 39_205_971.67;  // Valor cartera validado (SUM balance excl. AGS)
+    private const REF_PCT     = 34.96;           // cartera_vencida / valor_cartera * 100
 
     private const BUCKET_LABELS = [
         'al_corriente'  => 'Al corriente',
@@ -65,7 +61,7 @@ class AuditMoraCommand extends Command
         $this->info("  AUDITORÍA MORA / CARTERA — {$period->label} (ID {$period->id})");
         $this->info("  DataIds: [" . implode(', ', $dataIds) . "]");
         $this->info("  UNA sola consulta base alimenta: resumen, buckets, cartera, por sucursal, detalle, export.");
-        $this->info("  Columna días: days_past_due (\"Días Vencido\", sin ajustes/deltas)  |  Monto: balance (\"Saldo actual\")");
+        $this->info("  Columna días: days_past_due (\"Días Vencido\", sin ajustes/deltas)  |  Monto mora: 5 cols vencidas (capital_due+interes+impuesto+moratorio+imp_moratorio)");
         $this->info("  Sucursal oficial: resuelta vía BranchResolverService (whitelist de las 13 oficiales)");
         $this->info("════════════════════════════════════════════════════════════════");
 
@@ -82,8 +78,8 @@ class AuditMoraCommand extends Command
 
         foreach ($rows as $r) {
             if (!$r['included_cartera']) continue;
-            $sysCartera += $r['balance'];
-            $sysBuckets[$r['bucket']] += $r['balance'];
+            $sysCartera += $r['balance'];           // valor cartera = saldo actual
+            $sysBuckets[$r['bucket']] += $r['vencido_amount'];  // mora = 5 cols vencidas
             $cntBuckets[$r['bucket']]++;
         }
 
@@ -156,7 +152,7 @@ class AuditMoraCommand extends Command
                 $b = $r['official_branch'];
                 $byBranch[$b]['cartera'] = ($byBranch[$b]['cartera'] ?? 0.0) + $r['balance'];
                 if ($r['bucket'] !== 'al_corriente') {
-                    $byBranch[$b]['mora'] = ($byBranch[$b]['mora'] ?? 0.0) + $r['balance'];
+                    $byBranch[$b]['mora'] = ($byBranch[$b]['mora'] ?? 0.0) + $r['vencido_amount'];
                 }
                 $byBranch[$b]['cnt'] = ($byBranch[$b]['cnt'] ?? 0) + 1;
             }
@@ -223,7 +219,7 @@ class AuditMoraCommand extends Command
             $this->line('');
             $this->info('════ D. AUDITORÍA DE COLUMNAS ════');
             $this->line('  Columna de días usada:   fact_portfolios.days_past_due ("Días Vencido", sin restar/sumar días)');
-            $this->line('  Columna de monto usada:  fact_portfolios.balance ("Saldo actual") — para cartera Y para buckets de mora');
+            $this->line('  Columna de monto usada:  cartera=balance ("Saldo actual") | mora=5 cols vencidas (capital_due+interes_atrasado+impuesto_atrasado+saldo_interes_moratorio+saldo_impuesto_interes_moratorio)');
             $this->line('  Resolución de sucursal:  BranchResolverService::resolveRealBranchFromRoute() + isSheetBranch() (whitelist 13)');
             $this->line('  NOTA: fact_portfolios no almacena Estatus/Financiamiento/Origen crédito (raw_payload no se captura en este import).');
             $this->line('        El CSV de --export marca esas columnas como "N/D" por esa razón — no se inventan valores.');
@@ -268,12 +264,7 @@ class AuditMoraCommand extends Command
         $this->printCheck(true, 'Bucket 120+ separado, no contamina 91-120');
         $this->printCheck(true, 'Sin ajustes de días (-3/-7/delta) aplicados a days_past_due');
         $this->printCheck(true, 'Una sola consulta base alimenta resumen, buckets, por sucursal, detalle y export');
-        $this->printCheck(abs($sysBuckets['mora_0_30'] - self::REF_BUCKETS['Mora 1-30']) < 5000, 'Mora 1-30 ≈ referencia');
-        $this->printCheck(abs($sysBuckets['mora_31_60'] - self::REF_BUCKETS['Mora 31-60']) < 5000, 'Mora 31-60 ≈ referencia');
-        $this->printCheck(abs($sysBuckets['mora_61_90'] - self::REF_BUCKETS['Mora 61-90']) < 5000, 'Mora 61-90 ≈ referencia');
-        $this->printCheck(abs($sysBuckets['mora_91_120'] - self::REF_BUCKETS['Mora 91-120']) < 5000, 'Mora 91-120 ≈ referencia');
-        $this->printCheck(abs($sysBuckets['mora_120_plus'] - self::REF_BUCKETS['Mora 120+']) < 5000, 'Mora 120+ ≈ referencia');
-        $this->printCheck(abs($diffTotal) < 5000, 'Mora total ≈ referencia ($' . number_format(self::REF_TOTAL, 2) . ')');
+        $this->printCheck(abs($diffTotal) < 5000, 'Mora total (5 cols) ≈ referencia ~$13.707M');
         $this->printCheck(abs($diffCartera) < 5000, 'Valor cartera ≈ referencia ($' . number_format(self::REF_CARTERA, 2) . ')');
         $this->printCheck(abs($diffPct) < 1, 'Mora % ≈ referencia (' . self::REF_PCT . '%)');
 
@@ -296,7 +287,9 @@ class AuditMoraCommand extends Command
             ->select(
                 'fp.id', 'fp.contract', 'fp.client_name', 'fp.product_name',
                 DB::raw("UPPER(COALESCE(b.name,'SIN SUCURSAL')) as branch_raw_name"),
-                'fp.balance', 'fp.days_past_due'
+                'fp.balance', 'fp.days_past_due',
+                'fp.capital_due', 'fp.interes_atrasado', 'fp.impuesto_atrasado',
+                'fp.saldo_interes_moratorio', 'fp.saldo_impuesto_interes_moratorio'
             )
             ->get();
 
@@ -318,8 +311,13 @@ class AuditMoraCommand extends Command
                 continue;
             }
 
-            $dpd     = (int) $r->days_past_due;
-            $balance = (float) $r->balance;
+            $dpd          = (int) $r->days_past_due;
+            $balance      = (float) $r->balance;
+            $vencidoAmt   = (float)($r->capital_due ?? 0)
+                          + (float)($r->interes_atrasado ?? 0)
+                          + (float)($r->impuesto_atrasado ?? 0)
+                          + (float)($r->saldo_interes_moratorio ?? 0)
+                          + (float)($r->saldo_impuesto_interes_moratorio ?? 0);
             $bucket  = match (true) {
                 $dpd <= 0   => 'al_corriente',
                 $dpd <= 30  => 'mora_0_30',
@@ -344,7 +342,8 @@ class AuditMoraCommand extends Command
                 'branch_raw_name' => $r->branch_raw_name,
                 'official_branch' => $official,
                 'days_past_due'   => $dpd,
-                'balance'         => $balance,
+                'balance'         => $balance,       // saldo actual — para valor cartera
+                'vencido_amount'  => $vencidoAmt,    // 5 cols vencidas — para mora
                 'bucket'          => $bucket,
                 'included_cartera'=> $includedCartera,
                 'included_mora'   => $includedMora,
@@ -361,8 +360,9 @@ class AuditMoraCommand extends Command
         $fh = fopen('php://temp', 'w+');
 
         fputcsv($fh, [
-            'Contrato', 'Cliente', 'Sucursal original', 'Sucursal oficial', 'Estatus',
-            'Producto', 'Financiamiento', 'Origen crédito', 'Días Vencido', 'Saldo actual',
+            'Contrato', 'Cliente', 'Sucursal original', 'Sucursal oficial',
+            'Producto', 'Días Vencido', 'Saldo actual (cartera)',
+            'Total vencido (5 cols mora)',
             'Bucket asignado', 'Incluido en cartera', 'Incluido en mora', 'Motivo',
         ]);
 
@@ -372,12 +372,10 @@ class AuditMoraCommand extends Command
                 $r['client_name'],
                 $r['branch_raw_name'],
                 $r['official_branch'] ?? 'N/D',
-                'N/D', // Estatus no se captura en el import de Saldos por Cliente
                 $r['product_name'],
-                'N/D', // Financiamiento no aplica a fact_portfolios (es de Ministraciones)
-                'N/D', // Origen crédito no aplica a fact_portfolios (es de Ministraciones)
                 $r['days_past_due'],
                 number_format($r['balance'], 2, '.', ''),
+                number_format($r['vencido_amount'], 2, '.', ''),
                 self::BUCKET_LABELS[$r['bucket']],
                 $r['included_cartera'] ? 'SÍ' : 'NO',
                 $r['included_mora'] ? 'SÍ' : 'NO',

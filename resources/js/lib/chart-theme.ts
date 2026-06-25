@@ -71,7 +71,7 @@ export function stackedBarOptions(categories: string[], colors: string[] = categ
 }
 
 /** Donut — cartera sana vs vencida, categoría EBITDA, etc. */
-export function donutOptions(labels: string[], colors: string[] = [chartColors.teal, chartColors.red]) {
+export function donutOptions(labels: string[], colors: string[] = categoryPalette) {
     return {
         ...baseChart({ chart: { type: 'donut' } }),
         labels,

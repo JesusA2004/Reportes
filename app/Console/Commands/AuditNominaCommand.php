@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\Period;
+use App\Services\Radiography\BranchRadiographyCalculator;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -11,6 +12,8 @@ class AuditNominaCommand extends Command
 {
     protected $signature = 'reportes:audit-nomina
                                 {period_id}
+                                {--by-branch : desglose de nómina por sucursal oficial (usa BranchRadiographyCalculator)}
+                                {--by-employee : desglose por empleado normalizado con dedup fiscal/no-fiscal}
                                 {--detail : mostrar el detalle por código/concepto de cada fuente}
                                 {--export : exportar CSV a storage/app/auditorias/}';
 
@@ -171,7 +174,294 @@ class AuditNominaCommand extends Command
             $this->exportCsv($period->id, $rows);
         }
 
+        if ($this->option('by-branch')) {
+            $this->handleByBranch($period, $dataIds, $rows);
+        }
+
+        if ($this->option('by-employee')) {
+            $this->handleByEmployee($period, $dataIds);
+        }
+
         return 0;
+    }
+
+    private function handleByBranch(Period $period, array $dataIds, array $globalRows): void
+    {
+        /** @var BranchRadiographyCalculator $calc */
+        $calc   = app(BranchRadiographyCalculator::class);
+        $result = $calc->buildBranches($period, $dataIds, []);
+        $global = $calc->sumGlobal($result['branches'], $result['unassigned']);
+
+        // Main payroll fields from BranchRadiographyCalculator
+        $mainFields = [
+            'nomina_total'     => 'Nómina',
+            'comisiones'       => 'Comisiones',
+            'vacaciones'       => 'Vacaciones',
+            'prima_vacacional' => 'Prima vacacional',
+            'bonos'            => 'Bonos',
+            'bonos_aceleradores' => 'Bonos Aceleradores',
+        ];
+
+        $this->line('');
+        $this->info('════ NÓMINA POR SUCURSAL (BranchRadiographyCalculator) ════');
+
+        $allBranches = array_merge($result['branches'], [['sucursal' => 'GLOBAL'] + $global]);
+
+        $this->line(str_pad('Concepto', 32) . implode('', array_map(
+            fn ($b) => str_pad(mb_substr($b['sucursal'], 0, 13), 15),
+            $allBranches
+        )));
+        $this->line(str_repeat('─', 32 + 15 * count($allBranches)));
+
+        // Main fields
+        foreach ($mainFields as $key => $label) {
+            $line = str_pad($label, 32);
+            $totRow = 0.0;
+            foreach ($allBranches as $b) {
+                $val = (float) ($b[$key] ?? 0);
+                $totRow += $val;
+                $line .= str_pad(number_format($val, 2), 15);
+            }
+            $this->line($line);
+        }
+
+        // nomina_detalle items — collect all labels across branches
+        $allDetailLabels = [];
+        foreach ($allBranches as $b) {
+            foreach (array_keys($b['nomina_detalle'] ?? []) as $lbl) {
+                $allDetailLabels[$lbl] = true;
+            }
+        }
+
+        if (!empty($allDetailLabels)) {
+            $this->line(str_repeat('·', 32 + 15 * count($allBranches)));
+            foreach (array_keys($allDetailLabels) as $lbl) {
+                $line = str_pad(mb_substr($lbl, 0, 30), 32);
+                foreach ($allBranches as $b) {
+                    $val = (float) ($b['nomina_detalle'][$lbl] ?? 0);
+                    $line .= str_pad(number_format($val, 2), 15);
+                }
+                $this->line($line);
+            }
+        }
+
+        $this->line(str_repeat('─', 32 + 15 * count($allBranches)));
+
+        // Total row
+        $totLine = str_pad('TOTAL CAPITAL HUMANO', 32);
+        foreach ($allBranches as $b) {
+            $tot = (float) ($b['nomina_total'] ?? 0)
+                + (float) ($b['comisiones'] ?? 0)
+                + (float) ($b['bonos'] ?? 0)
+                + (float) ($b['bonos_aceleradores'] ?? 0)
+                + (float) ($b['vacaciones'] ?? 0)
+                + (float) ($b['prima_vacacional'] ?? 0);
+            foreach ($b['nomina_detalle'] ?? [] as $v) {
+                $tot += (float) $v;
+            }
+            $totLine .= str_pad(number_format($tot, 2), 15);
+        }
+        $this->info($totLine);
+
+        if ($this->option('export')) {
+            $this->exportByBranchCsv($period->id, $allBranches, $mainFields);
+        }
+    }
+
+    private function handleByEmployee(Period $period, array $dataIds): void
+    {
+        $noiFiscalId   = DB::table('data_sources')->where('code', 'noi_nomina_fiscal')->value('id');
+        $noiNoFiscalId = DB::table('data_sources')->where('code', 'noi_nomina')->value('id');
+        $lendusId      = DB::table('data_sources')->where('code', 'gastos_lendus')->value('id');
+        $erpId         = DB::table('data_sources')->where('code', 'gastos_erp')->value('id');
+
+        // Pull per-employee NOI rows with source flag
+        $noiRows = DB::table('fact_noi_movements as n')
+            ->join('report_uploads as ru', 'n.report_upload_id', '=', 'ru.id')
+            ->leftJoin('employees as e', 'n.employee_id', '=', 'e.id')
+            ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period) {
+                $j->on('eba.employee_id', '=', 'n.employee_id')
+                  ->where('eba.period_id', '=', $period->id);
+            })
+            ->leftJoin('branches as b', 'eba.branch_id', '=', 'b.id')
+            ->whereIn('n.period_id', $dataIds)
+            ->whereIn('ru.data_source_id', array_filter([$noiFiscalId, $noiNoFiscalId]))
+            ->where('n.concept_type', 'percepcion')
+            ->selectRaw("
+                ru.data_source_id,
+                n.employee_id,
+                COALESCE(e.full_name, 'SIN NOMBRE') as nombre_original,
+                COALESCE(b.name, 'SIN SUCURSAL') as sucursal,
+                COALESCE(n.concept, '') as concepto,
+                SUM(n.amount) as monto
+            ")
+            ->groupBy('ru.data_source_id', 'n.employee_id', 'e.full_name', 'b.name', 'n.concept')
+            ->get();
+
+        // Build normalized employee map
+        // Key: nombre_normalizado => [fiscal_total, nofiscal_total, sucursal, names_seen[], conceptos[]]
+        $empMap = [];
+
+        foreach ($noiRows as $row) {
+            $norm = $this->normalizeEmployeeName($row->nombre_original);
+            if (!isset($empMap[$norm])) {
+                $empMap[$norm] = [
+                    'norm'             => $norm,
+                    'nombres_original' => [],
+                    'sucursal'         => $row->sucursal,
+                    'fuente_flags'     => [],
+                    'monto_fiscal'     => 0.0,
+                    'monto_nofiscal'   => 0.0,
+                    'monto_lendus'     => 0.0,
+                    'monto_erp'        => 0.0,
+                    'conceptos'        => [],
+                ];
+            }
+
+            $empMap[$norm]['nombres_original'][] = $row->nombre_original;
+            $empMap[$norm]['conceptos'][]         = $row->concepto;
+
+            if ((int) $row->data_source_id === (int) $noiFiscalId) {
+                $empMap[$norm]['monto_fiscal']   += (float) $row->monto;
+                $empMap[$norm]['fuente_flags']['fiscal'] = true;
+            } else {
+                $empMap[$norm]['monto_nofiscal'] += (float) $row->monto;
+                $empMap[$norm]['fuente_flags']['nofiscal'] = true;
+            }
+        }
+
+        // Flag duplicates (appeared in BOTH fiscal and non-fiscal)
+        $this->line('');
+        $this->info('════ NÓMINA POR EMPLEADO (dedup fiscal+no-fiscal) ════');
+        $this->line(
+            str_pad('Empleado normalizado', 32)
+            . str_pad('Sucursal', 18)
+            . str_pad('Fiscal', 14)
+            . str_pad('No fiscal', 14)
+            . str_pad('Lendus/ERP', 13)
+            . str_pad('Total', 14)
+            . str_pad('Dup', 5)
+            . 'Acción'
+        );
+        $this->line(str_repeat('─', 132));
+
+        $totalFiscal   = 0.0;
+        $totalNoFiscal = 0.0;
+        $dupCount      = 0;
+        $employeeRows  = [];
+
+        foreach ($empMap as $norm => $emp) {
+            $isDup   = isset($emp['fuente_flags']['fiscal'], $emp['fuente_flags']['nofiscal']);
+            $total   = $emp['monto_fiscal'] + $emp['monto_nofiscal'] + $emp['monto_lendus'] + $emp['monto_erp'];
+            $accion  = $isDup ? 'CONSOLIDADO (fiscal+no-fiscal unificado)' : 'OK';
+            $dupFlag = $isDup ? 'SÍ' : 'no';
+            $nombreOriginal = implode(' / ', array_unique($emp['nombres_original']));
+
+            $totalFiscal   += $emp['monto_fiscal'];
+            $totalNoFiscal += $emp['monto_nofiscal'];
+            if ($isDup) $dupCount++;
+
+            $line = str_pad(mb_substr($norm, 0, 30), 32)
+                . str_pad(mb_substr($emp['sucursal'], 0, 16), 18)
+                . str_pad(number_format($emp['monto_fiscal'], 2), 14)
+                . str_pad(number_format($emp['monto_nofiscal'], 2), 14)
+                . str_pad(number_format($emp['monto_lendus'] + $emp['monto_erp'], 2), 13)
+                . str_pad(number_format($total, 2), 14)
+                . str_pad($dupFlag, 5)
+                . $accion;
+
+            $isDup ? $this->warn($line) : $this->line($line);
+
+            if ($this->option('detail') && $isDup) {
+                $this->line("    Nombres: {$nombreOriginal}");
+            }
+
+            $employeeRows[] = array_merge($emp, [
+                'total'          => $total,
+                'es_duplicado'   => $isDup ? 'SÍ' : 'no',
+                'accion'         => $accion,
+                'nombre_original'=> $nombreOriginal,
+            ]);
+        }
+
+        $this->line(str_repeat('─', 132));
+        $this->info(str_pad('TOTAL', 50) . '$' . number_format($totalFiscal + $totalNoFiscal, 2));
+        $this->line("  Empleados totales: " . count($empMap) . "   Duplicados (fiscal+no-fiscal): {$dupCount}");
+
+        if ($this->option('export')) {
+            $this->exportByEmployeeCsv($period->id, $employeeRows);
+        }
+    }
+
+    private function normalizeEmployeeName(string $name): string
+    {
+        $name = mb_strtoupper(trim($name));
+        // Strip accents
+        $from = ['Á','É','Í','Ó','Ú','Ü','Ñ','À','È','Ì','Ò','Ù'];
+        $to   = ['A','E','I','O','U','U','N','A','E','I','O','U'];
+        $name = str_replace($from, $to, $name);
+        // Collapse multiple spaces
+        $name = preg_replace('/\s+/', ' ', $name);
+        return $name;
+    }
+
+    private function exportByEmployeeCsv(int $periodId, array $rows): void
+    {
+        $dir  = 'auditorias';
+        $file = "nomina_por_empleado_periodo_{$periodId}_" . now()->format('Ymd_His') . '.csv';
+        $hdrs = ['Empleado normalizado', 'Nombre original', 'Sucursal', 'Monto fiscal', 'Monto no fiscal', 'Monto Lendus/ERP', 'Total', 'Duplicado', 'Acción'];
+        $lines = [implode(',', $hdrs)];
+        foreach ($rows as $r) {
+            $lines[] = implode(',', [
+                '"' . str_replace('"', '""', $r['norm']) . '"',
+                '"' . str_replace('"', '""', $r['nombre_original']) . '"',
+                '"' . str_replace('"', '""', $r['sucursal']) . '"',
+                number_format($r['monto_fiscal'], 2, '.', ''),
+                number_format($r['monto_nofiscal'], 2, '.', ''),
+                number_format($r['monto_lendus'] + $r['monto_erp'], 2, '.', ''),
+                number_format($r['total'], 2, '.', ''),
+                $r['es_duplicado'],
+                '"' . str_replace('"', '""', $r['accion']) . '"',
+            ]);
+        }
+        Storage::disk('local')->put("{$dir}/{$file}", implode("\n", $lines));
+        $this->info("  CSV por empleado: storage/app/{$dir}/{$file}");
+    }
+
+    private function exportByBranchCsv(int $periodId, array $allBranches, array $mainFields): void
+    {
+        $dir  = 'auditorias';
+        $file = "nomina_por_sucursal_periodo_{$periodId}_" . now()->format('Ymd_His') . '.csv';
+
+        $branchNames = array_map(fn ($b) => $b['sucursal'], $allBranches);
+        $headers     = array_merge(['Concepto', 'Fuente'], $branchNames);
+        $lines       = [implode(',', $headers)];
+
+        foreach ($mainFields as $key => $label) {
+            $row = ['"' . str_replace('"', '""', $label) . '"', 'NOI'];
+            foreach ($allBranches as $b) {
+                $row[] = number_format((float) ($b[$key] ?? 0), 2, '.', '');
+            }
+            $lines[] = implode(',', $row);
+        }
+
+        // Collect all detail labels
+        $allDetailLabels = [];
+        foreach ($allBranches as $b) {
+            foreach (array_keys($b['nomina_detalle'] ?? []) as $lbl) {
+                $allDetailLabels[$lbl] = true;
+            }
+        }
+        foreach (array_keys($allDetailLabels) as $lbl) {
+            $row = ['"' . str_replace('"', '""', $lbl) . '"', 'ERP/Lendus'];
+            foreach ($allBranches as $b) {
+                $row[] = number_format((float) ($b['nomina_detalle'][$lbl] ?? 0), 2, '.', '');
+            }
+            $lines[] = implode(',', $row);
+        }
+
+        Storage::disk('local')->put("{$dir}/{$file}", implode("\n", $lines));
+        $this->info("  CSV por sucursal: storage/app/{$dir}/{$file}");
     }
 
     private function sumNoi(array $dataIds, ?int $sourceId, array $percCodes, array $dedCodesWithSign): float

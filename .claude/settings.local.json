@@ -114,7 +114,8 @@
       "Bash(taskkill //F //IM php.exe //FI \"WINDOWTITLE eq*\")",
       "Bash(netstat -ano)",
       "Bash(taskkill *)",
-      "Bash(xxd)"
+      "Bash(xxd)",
+      "Bash(npx vite *)"
     ]
   }
 }

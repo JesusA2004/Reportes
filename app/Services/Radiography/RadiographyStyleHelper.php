@@ -44,8 +44,10 @@ final class RadiographyStyleHelper
     public const BORDER_LT       = 'FFD9E2EC';
 
     // EBITDA category thresholds — single source of truth shared by PDF and Excel.
-    public const EBITDA_SENIOR_MIN = 300_000.0;
-    public const EBITDA_JUNIOR_MIN = 100_000.0;
+    public const EBITDA_DIAMANTE_MIN = 1_000_000.0;
+    public const EBITDA_MASTER_MIN   =   600_000.0;
+    public const EBITDA_SENIOR_MIN   =   300_000.0;
+    public const EBITDA_JUNIOR_MIN   =   100_000.0;
 
     public const CURRENCY = '"$"#,##0.00';
     public const PERCENT  = '0.00"%"';
@@ -478,23 +480,25 @@ final class RadiographyStyleHelper
             + (float)($branch['prima_vacacional'] ?? 0)
             + array_sum((array)($branch['nomina_detalle'] ?? []));
 
-        return (float)($branch['recuperacion_total'] ?? 0) - (float)($branch['gastos_operativos'] ?? 0) - $nomina;
+        return (float)($branch['recuperacion_total'] ?? 0)
+            - (float)($branch['colocacion'] ?? 0)
+            - (float)($branch['gastos_operativos'] ?? 0)
+            - $nomina;
     }
 
     /**
      * Categoría de desempeño a partir del EBITDA estimado (ver branchEbitdaEstimate).
-     * Umbrales centralizados en EBITDA_SENIOR_MIN / EBITDA_JUNIOR_MIN.
+     * Umbrales: DIAMANTE ≥1M · MASTER ≥600K · SENIOR ≥300K · JUNIOR ≥100K · MANTENIDO <100K
      */
     public static function ebitdaCategory(float $ebitdaEstimado): string
     {
-        if ($ebitdaEstimado >= self::EBITDA_SENIOR_MIN) {
-            return 'SENIOR';
-        }
-        if ($ebitdaEstimado >= self::EBITDA_JUNIOR_MIN) {
-            return 'JUNIOR';
-        }
-
-        return 'MANTENIDO';
+        return match (true) {
+            $ebitdaEstimado >= self::EBITDA_DIAMANTE_MIN => 'DIAMANTE',
+            $ebitdaEstimado >= self::EBITDA_MASTER_MIN   => 'MASTER',
+            $ebitdaEstimado >= self::EBITDA_SENIOR_MIN   => 'SENIOR',
+            $ebitdaEstimado >= self::EBITDA_JUNIOR_MIN   => 'JUNIOR',
+            default                                      => 'MANTENIDO',
+        };
     }
 
     /**
@@ -503,9 +507,109 @@ final class RadiographyStyleHelper
     public static function categoryColors(string $categoria): array
     {
         return match ($categoria) {
-            'SENIOR' => ['bg' => self::BG_POSITIVE, 'fg' => self::FG_STRONG_GREEN],
-            'JUNIOR' => ['bg' => self::BG_AMBER, 'fg' => self::FG_AMBER],
-            default  => ['bg' => self::BG_ALERT_RED, 'fg' => self::FG_RED],
+            'DIAMANTE' => ['bg' => 'FFE0F2FE', 'fg' => 'FF0369A1'],
+            'MASTER'   => ['bg' => 'FFEDE9FE', 'fg' => 'FF7C3AED'],
+            'SENIOR'   => ['bg' => self::BG_POSITIVE, 'fg' => self::FG_STRONG_GREEN],
+            'JUNIOR'   => ['bg' => self::BG_AMBER, 'fg' => self::FG_AMBER],
+            default    => ['bg' => self::BG_ALERT_RED, 'fg' => self::FG_RED],
         };
+    }
+
+    /**
+     * Adds a donut (doughnut) chart — preferred over bar charts for showing
+     * distribution/composition (how a total is split among parts).
+     *
+     * @param array<string> $colors  optional ARGB hex colors per slice (without alpha prefix)
+     */
+    public static function addDonutChart(
+        Worksheet $sheet,
+        string $chartTitle,
+        string $categoryRange,
+        string $valueRange,
+        int $dataPointCount,
+        string $topLeftCell,
+        string $bottomRightCell,
+        array $colors = []
+    ): void {
+        $categoriesRef = self::sheetQualifiedRange($sheet, $categoryRange);
+        $valuesRef     = self::sheetQualifiedRange($sheet, $valueRange);
+
+        $values     = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, $valuesRef, null, $dataPointCount);
+        $categories = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, $categoriesRef, null, $dataPointCount);
+
+        if (!empty($colors)) {
+            $values->setFillColor(array_map([self::class, 'stripAlpha'], $colors));
+        }
+
+        $series = new DataSeries(
+            DataSeries::TYPE_DONUTCHART,
+            null,
+            [0],
+            [],
+            [$categories],
+            [$values]
+        );
+
+        $plotArea = new PlotArea(null, [$series]);
+        $legend   = new \PhpOffice\PhpSpreadsheet\Chart\Legend(
+            \PhpOffice\PhpSpreadsheet\Chart\Legend::POSITION_RIGHT,
+            null,
+            false
+        );
+        $title = new Title($chartTitle);
+
+        $chart = new Chart(uniqid('chart_', true), $title, $legend, $plotArea);
+        $chart->setTopLeftPosition($topLeftCell);
+        $chart->setBottomRightPosition($bottomRightCell);
+
+        $sheet->addChart($chart);
+    }
+
+    /**
+     * Adds a pie chart — use when each slice is truly exclusive and there are
+     * few categories (≤6). Prefer donut for ≥5 slices (donut reads better).
+     */
+    public static function addPieChart(
+        Worksheet $sheet,
+        string $chartTitle,
+        string $categoryRange,
+        string $valueRange,
+        int $dataPointCount,
+        string $topLeftCell,
+        string $bottomRightCell,
+        array $colors = []
+    ): void {
+        $categoriesRef = self::sheetQualifiedRange($sheet, $categoryRange);
+        $valuesRef     = self::sheetQualifiedRange($sheet, $valueRange);
+
+        $values     = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, $valuesRef, null, $dataPointCount);
+        $categories = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, $categoriesRef, null, $dataPointCount);
+
+        if (!empty($colors)) {
+            $values->setFillColor(array_map([self::class, 'stripAlpha'], $colors));
+        }
+
+        $series = new DataSeries(
+            DataSeries::TYPE_PIECHART,
+            null,
+            [0],
+            [],
+            [$categories],
+            [$values]
+        );
+
+        $plotArea = new PlotArea(null, [$series]);
+        $legend   = new \PhpOffice\PhpSpreadsheet\Chart\Legend(
+            \PhpOffice\PhpSpreadsheet\Chart\Legend::POSITION_RIGHT,
+            null,
+            false
+        );
+        $title = new Title($chartTitle);
+
+        $chart = new Chart(uniqid('chart_', true), $title, $legend, $plotArea);
+        $chart->setTopLeftPosition($topLeftCell);
+        $chart->setBottomRightPosition($bottomRightCell);
+
+        $sheet->addChart($chart);
     }
 }

@@ -79,10 +79,14 @@ class BranchRadiographyCalculator
     }
 
     /**
-     * Valor cartera / Cartera vencida — fuente "Saldos Por Cliente", columna Saldo actual.
-     * Único filtro: excluir Aguascalientes/AGS. Ningún otro filtro (no estatus, producto,
-     * substatus, reestructura, membresía, migración, activo/inactivo). Incluye TODAS las
-     * demás sucursales/rutas, no solo las 13 oficiales — a diferencia de accumulateCartera().
+     * Valor cartera / Cartera vencida — fuente "Saldos Por Cliente".
+     * Valor cartera = SUM(balance / Saldo actual), único filtro: excluir Aguascalientes/AGS.
+     * Cartera vencida = SUM(5 columnas vencidas) donde días_vencido > 0, mismo filtro AGS.
+     * 5 columnas: capital_due + interes_atrasado + impuesto_atrasado
+     *             + saldo_interes_moratorio + saldo_impuesto_interes_moratorio.
+     * Sin filtro por estatus, producto, substatus, reestructura, membresía, migración.
+     * Incluye TODAS las sucursales/rutas excepto AGS — distinto de accumulateCartera() que solo
+     * usa las 13 operativas.
      */
     public function computeCarteraGlobalSinFiltro(array $dataIds): array
     {
@@ -92,8 +96,18 @@ class BranchRadiographyCalculator
             ->whereIn('period_id', $dataIds)
             ->when(!empty($agsIds), fn ($q) => $q->whereNotIn('branch_id', $agsIds));
 
-        $valorCartera   = (float) $base->clone()->sum('balance');
-        $carteraVencida = (float) $base->clone()->where('days_past_due', '>', 0)->sum('balance');
+        $valorCartera = (float) $base->clone()->sum('balance');
+
+        $carteraVencida = (float) ($base->clone()
+            ->where('days_past_due', '>', 0)
+            ->selectRaw('SUM(
+                COALESCE(capital_due, 0)
+                + COALESCE(interes_atrasado, 0)
+                + COALESCE(impuesto_atrasado, 0)
+                + COALESCE(saldo_interes_moratorio, 0)
+                + COALESCE(saldo_impuesto_interes_moratorio, 0)
+            ) as vencido')
+            ->first()?->vencido ?? 0.0);
 
         return ['valor_cartera' => $valorCartera, 'cartera_vencida' => $carteraVencida];
     }
@@ -318,8 +332,10 @@ class BranchRadiographyCalculator
 
     private function accumulateRecuperacion(array $dataIds, array $branchIds, array $operativeMap, array &$summaries, array $corporativoIds = []): void
     {
-        $recoverySql = "SUM(CASE
-            WHEN is_savehearts = 1 THEN 0
+        // Exclusion condition shared between recovery total and component breakdown columns.
+        // Components (capital/interest/tax/charges_due) apply the SAME exclusions so that
+        // SUM(components) = recuperacion_total — enabling consistent INGRESOS breakdowns.
+        $excl = "WHEN is_savehearts = 1 THEN 0
             WHEN transaction = 'CONDONACION' THEN 0
             WHEN is_savehearts = 0 AND (
                 UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%'
@@ -328,9 +344,9 @@ class BranchRadiographyCalculator
                 OR UPPER(COALESCE(operation,'')) LIKE '%SEGURO%'
                 OR UPPER(COALESCE(concept,'')) LIKE '%UNIFICACION%'
                 OR UPPER(COALESCE(operation,'')) LIKE '%UNIFICACION%'
-            ) THEN 0
-            ELSE total_amount
-        END) as recovery,
+            ) THEN 0";
+
+        $recoverySql = "SUM(CASE {$excl} ELSE total_amount END) as recovery,
         SUM(total_amount) as bruto,
         SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share = 0 THEN total_amount ELSE 0 END) as seguro_excluido,
         SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share = 0
@@ -347,7 +363,10 @@ class BranchRadiographyCalculator
             THEN total_amount ELSE 0 END) as seguro_savehearts,
         SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share > 0 THEN total_amount ELSE 0 END) as crece_bruto,
         SUM(COALESCE(savehearts_crece_share, 0)) as crece_reconocido,
-        SUM(capital) as capital, SUM(interest) as interest, SUM(tax) as tax, SUM(charges_due) as charges,
+        SUM(CASE {$excl} ELSE capital END) as capital,
+        SUM(CASE {$excl} ELSE interest END) as interest,
+        SUM(CASE {$excl} ELSE tax END) as tax,
+        SUM(CASE {$excl} ELSE charges_due END) as charges,
         -- unificacion_excluida es INFORMATIVO: subconjunto de condonacion_excluida (operation
         -- 'UNIFICACION DE CARTERA' dentro de transaction='CONDONACION'). NO se resta aparte —
         -- ya está cubierta por la exclusión de transaction='CONDONACION' arriba (evita doble resta).
@@ -483,8 +502,13 @@ class BranchRadiographyCalculator
     // ── Mora por bucket — FUENTE ÚNICA para cartera/mora (UI, Excel, PDF, dashboard) ──
     //
     // Columna de días: days_past_due (= "Días Vencido"). Sin ajustes/deltas de ningún tipo.
-    // Monto: balance ("Saldo actual") — el contrato completo se bucketiza según su días vencido,
-    // NO solo la porción atrasada. 0 días = al corriente (excluido de mora).
+    // Monto: SUM de las 5 columnas vencidas del archivo Saldos Por Cliente:
+    //   capital_due (Capital atrasado, col DE)
+    //   + interes_atrasado (Interés atrasado, col DI)
+    //   + impuesto_atrasado (Impuesto atrasado, col EG)
+    //   + saldo_interes_moratorio (Saldo interés moratorio, col EE)
+    //   + saldo_impuesto_interes_moratorio (Saldo impuesto interés moratorio, col EF)
+    // Filtros: days_past_due > 0 (excluye contratos al corriente). Sin otros filtros.
     // Buckets: 1-30 / 31-60 / 61-90 / 91-120 / 120+ (sin contaminar entre sí).
 
     private function accumulateMora(array $dataIds, array $branchIds, array $operativeMap, array &$summaries): void
@@ -493,7 +517,15 @@ class BranchRadiographyCalculator
             ->whereIn('period_id', $dataIds)
             ->whereIn('branch_id', $branchIds)
             ->where('days_past_due', '>', 0)
-            ->selectRaw('branch_id, days_past_due, SUM(balance) as balance, COUNT(*) as cnt')
+            ->selectRaw('branch_id, days_past_due,
+                SUM(
+                    COALESCE(capital_due, 0)
+                    + COALESCE(interes_atrasado, 0)
+                    + COALESCE(impuesto_atrasado, 0)
+                    + COALESCE(saldo_interes_moratorio, 0)
+                    + COALESCE(saldo_impuesto_interes_moratorio, 0)
+                ) as vencido,
+                COUNT(*) as cnt')
             ->groupBy('branch_id', 'days_past_due')
             ->get();
 
@@ -504,7 +536,7 @@ class BranchRadiographyCalculator
             }
 
             $dpd     = (int) $row->days_past_due;
-            $balance = (float) $row->balance;
+            $vencido = (float) $row->vencido;
 
             $bucket = match (true) {
                 $dpd <= 30  => 'mora_0_30',
@@ -514,8 +546,9 @@ class BranchRadiographyCalculator
                 default     => 'mora_120_plus',
             };
 
-            $summaries[$suc][$bucket]            += $balance;
-            $summaries[$suc]["{$bucket}_cnt"]    += (int) $row->cnt;
+            $summaries[$suc][$bucket]         += $vencido;
+            $summaries[$suc]["{$bucket}_cnt"] += (int) $row->cnt;
+            $summaries[$suc]['cartera_vencida'] += $vencido;
         }
     }
 
@@ -996,6 +1029,7 @@ class BranchRadiographyCalculator
             'seguro_crece_reconocido'   => 0.0,
             'unificacion_excluida'      => 0.0,
             'condonacion_excluida'      => 0.0,
+            'cartera_vencida'     => 0.0,  // SUM 5 cols vencidas donde days_past_due>0
             'mora_0_30'           => 0.0,
             'mora_31_60'          => 0.0,
             'mora_61_90'          => 0.0,

@@ -18,7 +18,8 @@ class AuditIncomeCommand extends Command
                                 {period_id}
                                 {--product= : filter by product keyword}
                                 {--by-product : show breakdown by product}
-                                {--by-branch : show breakdown by branch (nueva fórmula seguros)}
+                                {--by-branch : desglose completo por sucursal con todos los componentes}
+                                {--export : exporta CSV del desglose por sucursal}
                                 {--direction-comercial : per-branch conciliation table vs Dirección Comercial reference}
                                 {--detail : full conciliation: por tipo transacción, desglose seguros, comparativo enfoques}
                                 {--compare-reference : deep audit against reference $18,792,939.79 with all combinations}
@@ -184,10 +185,10 @@ class AuditIncomeCommand extends Command
             );
         }
 
-        // ── Por sucursal (filtrado a 13 sucursales operativas) ───────────────
+        // ── Por sucursal — desglose completo con misma fórmula que BranchRadiographyCalculator ─
         if ($this->option('by-branch')) {
             $this->line('');
-            $this->info('════ DESGLOSE POR SUCURSAL (nueva fórmula seguros) ════');
+            $this->info('════ DESGLOSE POR SUCURSAL (Capital|Intereses|Impuestos|Multas|Cargos|ComAp|Seg.Excl|Cond.Excl|Unif.Excl|TOTAL) ════');
 
             $resolver    = app(BranchResolverService::class);
             $allBranches = DB::table('branches')->get();
@@ -200,20 +201,34 @@ class AuditIncomeCommand extends Command
             }
             $operativeIds = array_keys($operativeMap);
 
-            $recSql = "SUM(CASE
-                WHEN is_savehearts = 1 THEN 0
+            // Misma fórmula que BranchRadiographyCalculator::accumulateRecuperacion()
+            $excl = "WHEN is_savehearts = 1 THEN 0
                 WHEN transaction = 'CONDONACION' THEN 0
-                WHEN UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%' OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
-                  OR UPPER(COALESCE(concept,'')) LIKE '%SEGURO%' OR UPPER(COALESCE(operation,'')) LIKE '%SEGURO%' THEN 0
-                ELSE total_amount
-            END) as recovery";
+                WHEN is_savehearts = 0 AND (
+                    UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%'
+                    OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
+                    OR UPPER(COALESCE(concept,'')) LIKE '%SEGURO%'
+                    OR UPPER(COALESCE(operation,'')) LIKE '%SEGURO%'
+                    OR UPPER(COALESCE(concept,'')) LIKE '%UNIFICACION%'
+                    OR UPPER(COALESCE(operation,'')) LIKE '%UNIFICACION%'
+                ) THEN 0";
 
             $byBranchRows = DB::table('fact_recoveries as fr')
                 ->leftJoin('branches as b', 'fr.branch_id', '=', 'b.id')
                 ->whereIn('fr.period_id', $dataIds)
                 ->whereIn('fr.branch_id', $operativeIds)
                 ->when($filterProd, fn($q) => $q->whereRaw("UPPER(COALESCE(fr.product_name,'')) LIKE ?", ["%{$filterProd}%"]))
-                ->selectRaw("b.name as branch_name, COUNT(*) as cnt, SUM(fr.total_amount) as bruto, {$recSql}")
+                ->selectRaw("b.name as branch_name,
+                    SUM(CASE {$excl} ELSE fr.total_amount END) as recovery,
+                    SUM(CASE {$excl} ELSE fr.capital END) as capital,
+                    SUM(CASE {$excl} ELSE fr.interest END) as interest,
+                    SUM(CASE {$excl} ELSE fr.tax END) as tax,
+                    SUM(CASE {$excl} ELSE fr.charges_due END) as charges,
+                    SUM(CASE WHEN fr.is_savehearts = 1 THEN fr.total_amount ELSE 0 END) as seg_excluido,
+                    SUM(CASE WHEN fr.transaction = 'CONDONACION' THEN fr.total_amount ELSE 0 END) as cond_excluida,
+                    SUM(CASE WHEN fr.transaction = 'CONDONACION' AND UPPER(COALESCE(fr.operation,'')) LIKE '%UNIFICACION%' THEN fr.total_amount ELSE 0 END) as unif_excluida,
+                    SUM(fr.total_amount) as bruto,
+                    COUNT(*) as cnt")
                 ->groupBy('fr.branch_id', 'b.name')
                 ->orderBy('b.name')
                 ->get();
@@ -222,29 +237,53 @@ class AuditIncomeCommand extends Command
             foreach ($byBranchRows as $br) {
                 $city = $resolver->resolveRealBranchFromRoute($br->branch_name ?? '') ?? $br->branch_name ?? 'Desconocida';
                 if (!isset($byCity[$city])) {
-                    $byCity[$city] = ['cnt' => 0, 'bruto' => 0.0, 'recovery' => 0.0];
+                    $byCity[$city] = ['cnt' => 0, 'recovery' => 0.0, 'capital' => 0.0, 'interest' => 0.0,
+                        'tax' => 0.0, 'charges' => 0.0, 'seg_excluido' => 0.0,
+                        'cond_excluida' => 0.0, 'unif_excluida' => 0.0, 'bruto' => 0.0];
                 }
-                $byCity[$city]['cnt']      += $br->cnt;
-                $byCity[$city]['bruto']    += (float) $br->bruto;
-                $byCity[$city]['recovery'] += (float) $br->recovery;
+                $byCity[$city]['cnt']          += (int)$br->cnt;
+                $byCity[$city]['recovery']     += (float)$br->recovery;
+                $byCity[$city]['capital']      += (float)$br->capital;
+                $byCity[$city]['interest']     += (float)$br->interest;
+                $byCity[$city]['tax']          += (float)$br->tax;
+                $byCity[$city]['charges']      += (float)$br->charges;
+                $byCity[$city]['seg_excluido'] += (float)$br->seg_excluido;
+                $byCity[$city]['cond_excluida']+= (float)$br->cond_excluida;
+                $byCity[$city]['unif_excluida']+= (float)$br->unif_excluida;
+                $byCity[$city]['bruto']        += (float)$br->bruto;
             }
             uasort($byCity, fn($a, $b) => $b['recovery'] <=> $a['recovery']);
 
-            $this->line(str_pad('Ciudad', 26) . str_pad('Regs', 8) . str_pad('Bruta', 20) . 'Recuperación final');
-            $this->line(str_repeat('─', 80));
+            $w = 16;
+            $this->line(
+                str_pad('SUCURSAL', 22) .
+                str_pad('CAPITAL', $w) . str_pad('INTERESES', $w) . str_pad('IMPTOS', $w) .
+                str_pad('MULTAS', $w) . str_pad('SEG.EXC', $w) . str_pad('COND.EXC', $w) .
+                str_pad('UNIF.EXC', $w) . 'TOTAL RECUP.'
+            );
+            $this->line(str_repeat('─', 130));
 
             $grandTotal = 0.0;
+            $csvRows    = [];
             foreach ($byCity as $city => $d) {
+                $fmt = fn($v) => '$' . number_format($v, 2);
                 $this->line(
-                    str_pad(mb_substr($city, 0, 24), 26) .
-                    str_pad(number_format($d['cnt']), 8) .
-                    str_pad('$' . number_format($d['bruto'], 2), 20) .
-                    '$' . number_format($d['recovery'], 2)
+                    str_pad(mb_substr($city, 0, 20), 22) .
+                    str_pad($fmt($d['capital']), $w) . str_pad($fmt($d['interest']), $w) .
+                    str_pad($fmt($d['tax']), $w) . str_pad($fmt($d['charges']), $w) .
+                    str_pad($fmt($d['seg_excluido']), $w) . str_pad($fmt($d['cond_excluida']), $w) .
+                    str_pad($fmt($d['unif_excluida']), $w) . $fmt($d['recovery'])
                 );
                 $grandTotal += $d['recovery'];
+                $csvRows[]   = $d + ['sucursal' => $city];
             }
-            $this->line(str_repeat('─', 80));
-            $this->info(str_pad('TOTAL (sucursales operativas)', 34) . str_pad('', 20) . '$' . number_format($grandTotal, 2));
+            $this->line(str_repeat('─', 130));
+            $this->info(str_pad('TOTAL', 22) . str_repeat(' ', $w * 7) . '$' . number_format($grandTotal, 2));
+            $this->line("  Diferencia vs $18,324,971.76: $" . number_format($grandTotal - 18_324_971.76, 2));
+
+            if ($this->option('export')) {
+                $this->exportIncomeBranchCsv($period, $csvRows);
+            }
         }
 
         if ($this->option('direction-comercial')) {
@@ -1023,5 +1062,54 @@ class AuditIncomeCommand extends Command
                         str_pad('cap=$' . number_format((float)$p->capital, 0), 20) .
                         'total=$' . number_format((float)$p->total, 2));
         }
+    }
+
+    private function exportIncomeBranchCsv(Period $period, array $rows): void
+    {
+        $relPath = "radiografias/audit_income_branches_periodo_{$period->id}_" . now()->format('Ymd_His') . '.csv';
+        $fh = fopen('php://temp', 'w+');
+
+        fputcsv($fh, [
+            'Sucursal', 'Capital', 'Intereses', 'Impuestos', 'Multas/Moratorios',
+            'Seguros excluidos', 'Condonaciones excluidas', 'Unificación excluida',
+            'Bruto', 'Total recuperación',
+        ]);
+
+        $totals = array_fill_keys(['capital','interest','tax','charges','seg_excluido','cond_excluida','unif_excluida','bruto','recovery'], 0.0);
+        foreach ($rows as $r) {
+            fputcsv($fh, [
+                $r['sucursal'],
+                number_format($r['capital'], 2, '.', ''),
+                number_format($r['interest'], 2, '.', ''),
+                number_format($r['tax'], 2, '.', ''),
+                number_format($r['charges'], 2, '.', ''),
+                number_format($r['seg_excluido'], 2, '.', ''),
+                number_format($r['cond_excluida'], 2, '.', ''),
+                number_format($r['unif_excluida'], 2, '.', ''),
+                number_format($r['bruto'], 2, '.', ''),
+                number_format($r['recovery'], 2, '.', ''),
+            ]);
+            foreach ($totals as $k => &$v) { $v += $r[$k] ?? 0; }
+        }
+        // Global row
+        fputcsv($fh, [
+            'TOTAL',
+            number_format($totals['capital'], 2, '.', ''),
+            number_format($totals['interest'], 2, '.', ''),
+            number_format($totals['tax'], 2, '.', ''),
+            number_format($totals['charges'], 2, '.', ''),
+            number_format($totals['seg_excluido'], 2, '.', ''),
+            number_format($totals['cond_excluida'], 2, '.', ''),
+            number_format($totals['unif_excluida'], 2, '.', ''),
+            number_format($totals['bruto'], 2, '.', ''),
+            number_format($totals['recovery'], 2, '.', ''),
+        ]);
+
+        rewind($fh);
+        $csv = stream_get_contents($fh);
+        fclose($fh);
+
+        \Illuminate\Support\Facades\Storage::disk('local')->put($relPath, $csv);
+        $this->info("  CSV exportado: " . \Illuminate\Support\Facades\Storage::disk('local')->path($relPath));
     }
 }

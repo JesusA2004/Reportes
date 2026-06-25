@@ -12,7 +12,7 @@ import EbitdaBadge from '@/components/radiography/EbitdaBadge.vue'
 import EmptyState from '@/components/radiography/EmptyState.vue'
 import FilterBar from '@/components/radiography/FilterBar.vue'
 import { money, percent as fmtPercent, num } from '@/lib/format'
-import { chartColors, horizontalBarOptions, columnOptions, stackedBarOptions, donutOptions } from '@/lib/chart-theme'
+import { chartColors, categoryPalette, horizontalBarOptions, columnOptions, stackedBarOptions, donutOptions } from '@/lib/chart-theme'
 
 defineOptions({ layout: AppLayout })
 
@@ -323,16 +323,17 @@ const branchesFull = computed(() => {
             + (Number(b.vacaciones) || 0) + (Number(b.prima_vacacional) || 0)
             + Object.values((b.nomina_detalle ?? {}) as Record<string, number>).reduce((s: number, v: any) => s + (Number(v) || 0), 0)
         const recuperacion    = Number(b.recuperacion_total) || 0
+        const colocacion      = Number(b.colocacion ?? b.colocacion_total ?? b.otorgamientos ?? 0) || 0
         const capitalRec      = Number(b.capital_recuperado) || 0
         const impuestoRec     = Number(b.impuesto_recuperado) || 0
         const gastos          = Number(b.gastos_operativos) || 0
-        const ebitda          = recuperacion - gastos - nominaFull
+        const ebitda          = recuperacion - colocacion - gastos - nominaFull
         const ventaBranch     = Math.max(0, recuperacion - capitalRec - impuestoRec)
         const margenEbitda    = ventaBranch > 0 ? (ebitda / ventaBranch) * 100 : 0
         return {
             nombre: b.sucursal,
             recuperacion,
-            colocacion: Number(b.colocacion) || 0,
+            colocacion,
             cartera,
             vencida: moraSum,
             mora: cartera > 0 ? (moraSum / cartera) * 100 : 0,
@@ -553,11 +554,8 @@ function dimColors(labels: string[], selected: string, base: string | string[]):
 }
 
 // Resumen: Recuperación vs Colocación
-const recColSeries = computed(() => [{ name: 'Monto', data: [kpiRec.value, kpiCol.value] }])
-const recColOptions = computed(() => ({
-    ...columnOptions(['Recuperación / Cobranza', 'Colocación']),
-    colors: [chartColors.teal, chartColors.blue],
-}))
+const recColSeries = computed(() => [kpiRec.value, kpiCol.value])
+const recColOptions = computed(() => donutOptions(['Recuperación / Cobranza', 'Colocación'], [chartColors.teal, chartColors.blue]))
 
 // Resumen: Cartera vs Vencida (donut)
 const carteraDonutSeries = computed(() => {
@@ -578,25 +576,25 @@ function rankingSeries(field: 'recuperacion' | 'cartera' | 'ebitda', limit = 13)
     return [...branchesFiltered.value].sort((a, b) => b[field] - a[field]).slice(0, limit)
 }
 const rankingRecuperacion = computed(() => rankingSeries('recuperacion'))
-const rankingRecuperacionOptions = computed(() => ({
-    ...horizontalBarOptions(rankingRecuperacion.value.map(b => b.nombre)),
-    colors: dimColors(rankingRecuperacion.value.map(b => b.nombre), vfBranch.value, chartColors.teal),
-}))
-const rankingRecuperacionSeries = computed(() => [{ name: 'Recuperación', data: rankingRecuperacion.value.map(b => b.recuperacion) }])
+const rankingRecuperacionOptions = computed(() => donutOptions(
+    rankingRecuperacion.value.map(b => b.nombre),
+    dimColors(rankingRecuperacion.value.map(b => b.nombre), vfBranch.value, chartColors.teal),
+))
+const rankingRecuperacionSeries = computed(() => rankingRecuperacion.value.map(b => b.recuperacion))
 
 const rankingCartera = computed(() => rankingSeries('cartera'))
-const rankingCarteraOptions = computed(() => ({
-    ...horizontalBarOptions(rankingCartera.value.map(b => b.nombre)),
-    colors: dimColors(rankingCartera.value.map(b => b.nombre), vfBranch.value, chartColors.blue),
-}))
-const rankingCarteraSeries = computed(() => [{ name: 'Cartera', data: rankingCartera.value.map(b => b.cartera) }])
+const rankingCarteraOptions = computed(() => donutOptions(
+    rankingCartera.value.map(b => b.nombre),
+    dimColors(rankingCartera.value.map(b => b.nombre), vfBranch.value, chartColors.blue),
+))
+const rankingCarteraSeries = computed(() => rankingCartera.value.map(b => b.cartera))
 
 const rankingEbitda = computed(() => rankingSeries('ebitda'))
-const rankingEbitdaOptions = computed(() => ({
-    ...horizontalBarOptions(rankingEbitda.value.map(b => b.nombre)),
-    colors: rankingEbitda.value.map(b => (b.ebitda < 0 ? chartColors.red : chartColors.green)),
-}))
-const rankingEbitdaSeries = computed(() => [{ name: 'EBITDA', data: rankingEbitda.value.map(b => b.ebitda) }])
+const rankingEbitdaOptions = computed(() => donutOptions(
+    rankingEbitda.value.map(b => b.nombre),
+    rankingEbitda.value.map(b => (b.ebitda < 0 ? chartColors.red : chartColors.green)),
+))
+const rankingEbitdaSeries = computed(() => rankingEbitda.value.map(b => Math.abs(b.ebitda)))
 
 // Categoría EBITDA: distribución (donut) + EBITDA por sucursal coloreado por categoría
 const categoriaDonutOptions = computed(() => donutOptions(
@@ -616,50 +614,50 @@ const categoriaColorMap: Record<string, string> = {
     SENIOR: chartColors.green, JUNIOR: chartColors.amber, MANTENIDO: chartColors.red,
 }
 const ebitdaPorSucursal = computed(() => [...branchesFiltered.value].sort((a, b) => b.ebitda - a.ebitda))
-const ebitdaPorSucursalOptions = computed(() => ({
-    ...horizontalBarOptions(ebitdaPorSucursal.value.map(b => b.nombre)),
-    colors: ebitdaPorSucursal.value.map(b => categoriaColorMap[b.categoria]),
-}))
-const ebitdaPorSucursalSeries = computed(() => [{ name: 'EBITDA', data: ebitdaPorSucursal.value.map(b => b.ebitda) }])
+const ebitdaPorSucursalOptions = computed(() => donutOptions(
+    ebitdaPorSucursal.value.map(b => b.nombre),
+    ebitdaPorSucursal.value.map(b => categoriaColorMap[b.categoria] ?? chartColors.teal),
+))
+const ebitdaPorSucursalSeries = computed(() => ebitdaPorSucursal.value.map(b => Math.abs(b.ebitda)))
 
 // Ingresos / Cobranza: colocación por producto
 const productosSorted = computed(() => [...productosRows.value].sort((a: any, b: any) => (b.colocacion ?? 0) - (a.colocacion ?? 0)))
-const colocacionProductoOptions = computed(() => ({
-    ...horizontalBarOptions(productosSorted.value.map((p: any) => p.producto)),
-    colors: dimColors(productosSorted.value.map((p: any) => p.producto), vfProduct.value, chartColors.teal),
-}))
-const colocacionProductoSeries = computed(() => [{ name: 'Colocación', data: productosSorted.value.map((p: any) => p.colocacion ?? 0) }])
+const colocacionProductoOptions = computed(() => donutOptions(
+    productosSorted.value.map((p: any) => p.producto),
+    dimColors(productosSorted.value.map((p: any) => p.producto), vfProduct.value, chartColors.teal),
+))
+const colocacionProductoSeries = computed(() => productosSorted.value.map((p: any) => p.colocacion ?? 0))
 
 // Ingresos / Cobranza: ranking por sucursal (colocación)
-const colocacionSucursalOptions = computed(() => ({
-    ...horizontalBarOptions(branchesFiltered.value.map(b => b.nombre)),
-    colors: dimColors(branchesFiltered.value.map(b => b.nombre), vfBranch.value, chartColors.blue),
-}))
-const colocacionSucursalSeries = computed(() => [{ name: 'Colocación', data: [...branchesFiltered.value].map(b => b.colocacion) }])
+const colocacionSucursalOptions = computed(() => donutOptions(
+    branchesFiltered.value.map(b => b.nombre),
+    dimColors(branchesFiltered.value.map(b => b.nombre), vfBranch.value, chartColors.blue),
+))
+const colocacionSucursalSeries = computed(() => [...branchesFiltered.value].map(b => b.colocacion))
 
 // Gastos: por sucursal / por categoría
 const gastosPorSucursalSorted = computed(() => [...branchesFiltered.value].filter(b => b.gastos > 0).sort((a, b) => b.gastos - a.gastos))
-const gastosPorSucursalOptions = computed(() => ({
-    ...horizontalBarOptions(gastosPorSucursalSorted.value.map(b => b.nombre)),
-    colors: dimColors(gastosPorSucursalSorted.value.map(b => b.nombre), vfBranch.value, chartColors.amber),
-}))
-const gastosPorSucursalSeries = computed(() => [{ name: 'Gastos', data: gastosPorSucursalSorted.value.map(b => b.gastos) }])
+const gastosPorSucursalOptions = computed(() => donutOptions(
+    gastosPorSucursalSorted.value.map(b => b.nombre),
+    dimColors(gastosPorSucursalSorted.value.map(b => b.nombre), vfBranch.value, chartColors.amber),
+))
+const gastosPorSucursalSeries = computed(() => gastosPorSucursalSorted.value.map(b => b.gastos))
 
-const gastosPorCategoriaOptions = computed(() => horizontalBarOptions(brGlobalGastos.value.slice(0, 10).map(g => g.concepto), [chartColors.teal]))
-const gastosPorCategoriaSeries = computed(() => [{ name: 'Monto', data: brGlobalGastos.value.slice(0, 10).map(g => g.total) }])
+const gastosPorCategoriaOptions = computed(() => donutOptions(brGlobalGastos.value.slice(0, 10).map(g => g.concepto), categoryPalette))
+const gastosPorCategoriaSeries = computed(() => brGlobalGastos.value.slice(0, 10).map(g => g.total))
 
 // Nómina por sucursal
 const nominaPorSucursalSorted = computed(() => [...branchesFiltered.value].filter(b => b.nomina > 0).sort((a, b) => b.nomina - a.nomina))
-const nominaPorSucursalOptions = computed(() => ({
-    ...horizontalBarOptions(nominaPorSucursalSorted.value.map(b => b.nombre)),
-    colors: dimColors(nominaPorSucursalSorted.value.map(b => b.nombre), vfBranch.value, chartColors.teal),
-}))
-const nominaPorSucursalSeries = computed(() => [{ name: 'Nómina', data: nominaPorSucursalSorted.value.map(b => b.nomina) }])
+const nominaPorSucursalOptions = computed(() => donutOptions(
+    nominaPorSucursalSorted.value.map(b => b.nombre),
+    dimColors(nominaPorSucursalSorted.value.map(b => b.nombre), vfBranch.value, chartColors.teal),
+))
+const nominaPorSucursalSeries = computed(() => nominaPorSucursalSorted.value.map(b => b.nomina))
 
 // Mora / Cartera: top sucursales con más vencida
 const topVencidaBranches = computed(() => [...branchesFiltered.value].filter(b => b.vencida > 0).sort((a, b) => b.vencida - a.vencida).slice(0, 10))
-const topVencidaOptions = computed(() => horizontalBarOptions(topVencidaBranches.value.map(b => b.nombre), [chartColors.red]))
-const topVencidaSeries = computed(() => [{ name: 'Vencida', data: topVencidaBranches.value.map(b => b.vencida) }])
+const topVencidaOptions = computed(() => donutOptions(topVencidaBranches.value.map(b => b.nombre), categoryPalette))
+const topVencidaSeries = computed(() => topVencidaBranches.value.map(b => b.vencida))
 
 // Préstamos activos: saldo / vencido por sucursal
 const prestamosFiltered = computed(() => {
@@ -667,14 +665,14 @@ const prestamosFiltered = computed(() => {
     if (vfBranch.value) rows = rows.filter(r => r.sucursal === vfBranch.value)
     return rows
 })
-const prestamosSaldoOptions = computed(() => horizontalBarOptions(prestamosFiltered.value.map(r => r.sucursal), [chartColors.blue]))
-const prestamosSaldoSeries = computed(() => [{ name: 'Saldo activo', data: prestamosFiltered.value.map(r => r.saldo) }])
-const prestamosVencidoOptions = computed(() => horizontalBarOptions(prestamosFiltered.value.map(r => r.sucursal), [chartColors.red]))
-const prestamosVencidoSeries = computed(() => [{ name: 'Vencido', data: prestamosFiltered.value.map(r => r.vencido) }])
+const prestamosSaldoOptions = computed(() => donutOptions(prestamosFiltered.value.map(r => r.sucursal), categoryPalette))
+const prestamosSaldoSeries = computed(() => prestamosFiltered.value.map(r => r.saldo))
+const prestamosVencidoOptions = computed(() => donutOptions(prestamosFiltered.value.map(r => r.sucursal), categoryPalette))
+const prestamosVencidoSeries = computed(() => prestamosFiltered.value.map(r => r.vencido))
 
 // Gestores: ranking por colocación
-const rankingGestoresOptions = computed(() => horizontalBarOptions(topGestoresColocacion.value.map((e: any) => e.name), [chartColors.teal]))
-const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGestoresColocacion.value.map((e: any) => e.colocacion) }])
+const rankingGestoresOptions = computed(() => donutOptions(topGestoresColocacion.value.map((e: any) => e.name), categoryPalette))
+const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e: any) => e.colocacion))
 </script>
 
 <template>
@@ -944,8 +942,136 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                         </p>
                     </div>
 
+                    <!-- ── DESGLOSES DETALLADOS ─────────────────────────────────── -->
                     <div class="grid gap-4 lg:grid-cols-2">
-                        <ChartCard title="Recuperación vs Colocación" :series="recColSeries" :options="recColOptions" type="bar" :height="240" />
+                        <!-- A) Ingresos / Recuperación -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="border-b bg-emerald-50 px-5 py-3 flex items-center justify-between">
+                                <h3 class="text-xs font-black uppercase tracking-wider text-emerald-700">Ingresos / Recuperación</h3>
+                                <span class="font-black text-emerald-800">{{ money(recGlobal) }}</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Recuperación final (ingreso)</td><td class="px-5 py-2 text-right font-black text-emerald-700">{{ money(recGlobal) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Capital recuperado</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrCapital) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Intereses</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrInteres) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Impuestos</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrImpuesto) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Moratorios / Multas</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrMultas) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Cargos al inicio</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrCargosIni) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Comisión por apertura</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrComAper) }}</td></tr>
+                                    <tr class="border-b bg-amber-50/60"><td class="px-5 py-2 pl-8 text-amber-700 text-xs">Seguros excluidos (Savehearts)</td><td class="px-5 py-2 text-right text-xs font-semibold text-amber-700">{{ money(segurosSaveheartsBruto) }}</td></tr>
+                                    <tr class="border-b bg-amber-50/60"><td class="px-5 py-2 pl-8 text-amber-700 text-xs">Seguros excluidos (Comadres)</td><td class="px-5 py-2 text-right text-xs font-semibold text-amber-700">{{ money(segurosComadresBruto) }}</td></tr>
+                                    <tr class="bg-amber-50/60"><td class="px-5 py-2 pl-8 text-amber-700 text-xs">Seguro CRECE 70% excluido</td><td class="px-5 py-2 text-right text-xs font-semibold text-amber-700">{{ money(segurosCrece70) }}</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <!-- B) Colocación -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="border-b bg-blue-50 px-5 py-3 flex items-center justify-between">
+                                <h3 class="text-xs font-black uppercase tracking-wider text-blue-700">Colocación por producto</h3>
+                                <span class="font-black text-blue-800">{{ money(colGlobal) }}</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr v-for="(p, i) in productosSorted.slice(0, 10)" :key="p.producto"
+                                        :class="i % 2 === 1 ? 'bg-slate-50/60' : ''" class="border-b">
+                                        <td class="px-5 py-2 text-slate-600">{{ p.producto }}</td>
+                                        <td class="px-5 py-2 text-right font-semibold text-slate-800">{{ money(p.colocacion ?? 0) }}</td>
+                                    </tr>
+                                    <tr v-if="!productosSorted.length"><td colspan="2" class="px-5 py-3 text-xs text-slate-400 italic">Sin desglose por producto disponible.</td></tr>
+                                    <tr class="border-t-2 border-blue-200 bg-blue-50"><td class="px-5 py-2.5 font-black text-blue-900">Total colocación</td><td class="px-5 py-2.5 text-right font-black text-blue-900">{{ money(colGlobal) }}</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="grid gap-4 lg:grid-cols-2">
+                        <!-- C) Cartera / Mora -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="border-b bg-red-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-red-700">Valor Cartera / Mora</h3></div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Valor cartera total</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(carteraGlobal) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">Cartera vencida (5 columnas)</td><td class="px-5 py-2 text-right font-black text-red-700">{{ money(moraTotalGlobal) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">Mora 1-30 días</td><td class="px-5 py-2 text-right text-xs text-red-600">{{ money(mora0_30g) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">Mora 31-60 días</td><td class="px-5 py-2 text-right text-xs text-red-600">{{ money(mora31_60g) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">Mora 61-90 días</td><td class="px-5 py-2 text-right text-xs text-red-600">{{ money(mora61_90g) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">Mora 91-120 días</td><td class="px-5 py-2 text-right text-xs text-red-600">{{ money(mora91_120g) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">Mora 120+ días</td><td class="px-5 py-2 text-right text-xs text-red-600">{{ money(mora120plusG) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">Cartera sana</td><td class="px-5 py-2 text-right font-black text-emerald-700">{{ money(Math.max(0, carteraGlobal - moraTotalGlobal)) }}</td></tr>
+                                    <tr><td class="px-5 py-2.5 font-black text-slate-800">Índice de mora</td><td class="px-5 py-2.5 text-right font-black" :class="kpiMoraPct > 25 ? 'text-red-700' : 'text-slate-950'">{{ pct(kpiMoraPct) }}</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <!-- D) OPEX -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="border-b bg-amber-50 px-5 py-3 flex items-center justify-between">
+                                <h3 class="text-xs font-black uppercase tracking-wider text-amber-700">OPEX</h3>
+                                <span class="font-black text-amber-800">{{ money(brGlobalGastosTotal) }}</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Gastos ERP</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(Number(snap?.summary?.expenses_erp ?? 0)) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">Gastos Lendus</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(Number(snap?.summary?.expenses_lendus ?? 0)) }}</td></tr>
+                                    <tr v-if="brGlobalGastos.length" class="border-b"><td colspan="2" class="px-5 py-1.5 text-xs font-black uppercase tracking-wider text-slate-400 bg-slate-50">Principales conceptos</td></tr>
+                                    <tr v-for="(g, i) in brGlobalGastos.slice(0, 6)" :key="g.concepto"
+                                        :class="i % 2 === 0 ? '' : 'bg-slate-50/60'" class="border-b last:border-0">
+                                        <td class="px-5 py-1.5 pl-8 text-slate-500 text-xs">{{ g.concepto }}</td>
+                                        <td class="px-5 py-1.5 text-right text-xs font-semibold text-slate-700">{{ money(g.total) }}</td>
+                                    </tr>
+                                    <tr class="border-t-2 border-amber-200 bg-amber-50"><td class="px-5 py-2.5 font-black text-amber-900">OPEX total</td><td class="px-5 py-2.5 text-right font-black text-amber-900">{{ money(brGlobalGastosTotal) }}</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="grid gap-4 lg:grid-cols-2">
+                        <!-- E) Nómina y Capital Humano -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="border-b bg-blue-50 px-5 py-3 flex items-center justify-between">
+                                <h3 class="text-xs font-black uppercase tracking-wider text-blue-700">Nómina y Capital Humano</h3>
+                                <span class="font-black text-blue-800">{{ money(nomTotal) }}</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Sueldos / Nómina</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomNomina) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">Comisiones</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomComis) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Vacaciones</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomVac) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">Prima vacacional</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomPrimaVac) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Bonos</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomBonos) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">Bonos aceleradores</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomBonosAcel) }}</td></tr>
+                                    <template v-for="(item, i) in nomDetalle.filter(r => !NOI_DEDUCTION_LABELS.has(r.label))" :key="item.label">
+                                        <tr :class="i % 2 === 0 ? '' : 'bg-slate-50/60'" class="border-b">
+                                            <td class="px-5 py-1.5 pl-8 text-slate-500 text-xs">{{ item.label }}</td>
+                                            <td class="px-5 py-1.5 text-right text-xs font-semibold text-slate-700">{{ money(item.value) }}</td>
+                                        </tr>
+                                    </template>
+                                    <tr class="border-t-2 border-blue-200 bg-blue-50"><td class="px-5 py-2.5 font-black text-blue-900">Total Nómina y Capital Humano</td><td class="px-5 py-2.5 text-right font-black text-blue-900">{{ money(nomTotal) }}</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <!-- F) EBITDA -->
+                        <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="border-b bg-indigo-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-indigo-700">EBITDA — desglose</h3></div>
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">+ Recuperación final</td><td class="px-5 py-2 text-right font-black text-emerald-700">{{ money(recGlobal) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">− Colocación del periodo</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(colGlobal) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">− OPEX</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(brGlobalGastosTotal) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">− Nómina y Capital Humano</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomTotal) }}</td></tr>
+                                    <tr v-if="saldoInicialCaja > 0" class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">+ Saldo inicial en caja</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(saldoInicialCaja) }}</td></tr>
+                                    <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">EBITDA</td><td class="px-5 py-2.5 text-right font-black text-lg" :class="utilidadGlobal < 0 ? 'text-red-700' : 'text-indigo-900'">{{ money(utilidadGlobal) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-500 font-medium">Margen EBITDA</td><td class="px-5 py-2 text-right font-black" :class="margenEbitdaPct < 0 ? 'text-red-700' : 'text-slate-950'">{{ pct(margenEbitdaPct) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">− Envío de utilidad a corporativo</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(excGlobal) }}</td></tr>
+                                    <tr><td class="px-5 py-2.5 font-black text-slate-800">Diferencia / Saldo final</td><td class="px-5 py-2.5 text-right font-black" :class="diferencia < 0 ? 'text-red-700' : 'text-emerald-700'">{{ money(diferencia) }}</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- ── GRÁFICAS DE DISTRIBUCIÓN ─────────────────────────────── -->
+                    <div class="grid gap-4 lg:grid-cols-2">
+                        <ChartCard title="Recuperación vs Colocación" :series="recColSeries" :options="recColOptions" type="donut" :height="240" />
                         <ChartCard title="Cartera vs Cartera vencida" :series="carteraDonutSeries" :options="carteraDonutOptions" type="donut" :height="240" />
                     </div>
                     <ChartCard title="Mora por bucket" :series="moraBucketSeries" :options="moraBucketOptions" type="donut" :height="260" />
@@ -957,8 +1083,7 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                                 <tbody>
                                     <tr v-for="b in [...branchesFull].sort((a,b)=>b.cartera-a.cartera).slice(0,6)" :key="b.nombre" class="border-b last:border-0 hover:bg-slate-50">
                                         <td class="px-4 py-2 font-bold">{{ b.nombre }}</td>
-                                        <td class="px-4 py-2 text-right">{{ money(b.cartera) }}</td>
-                                        <td class="px-4 py-2 text-right"><EbitdaBadge :categoria="b.categoria" /></td>
+                                        <td class="px-4 py-2 text-right font-black">{{ money(b.cartera) }}</td>
                                     </tr>
                                 </tbody>
                             </table>
@@ -966,11 +1091,22 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                         </div>
                         <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
                             <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Categoría por EBITDA</h3></div>
-                            <div v-if="branchesFull.length" class="flex flex-wrap gap-2 p-4">
-                                <span v-for="b in branchesFull" :key="b.nombre" class="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-2.5 py-1.5 text-xs font-bold text-slate-700">
-                                    {{ b.nombre }} <EbitdaBadge :categoria="b.categoria" />
-                                </span>
-                            </div>
+                            <table v-if="branchesFull.length" class="w-full text-sm">
+                                <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
+                                    <tr>
+                                        <th class="px-4 py-2 text-left">Sucursal</th>
+                                        <th class="px-4 py-2 text-right">EBITDA</th>
+                                        <th class="px-4 py-2 text-center">Categoría</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="b in branchesFull" :key="b.nombre" class="border-t hover:bg-slate-50">
+                                        <td class="px-4 py-2 font-bold">{{ b.nombre }}</td>
+                                        <td class="px-4 py-2 text-right font-black" :class="b.ebitda < 0 ? 'text-red-700' : 'text-emerald-700'">{{ money(b.ebitda) }}</td>
+                                        <td class="px-4 py-2 text-center"><EbitdaBadge :categoria="b.categoria" /></td>
+                                    </tr>
+                                </tbody>
+                            </table>
                             <EmptyState v-else class="m-4" title="Sin datos de categoría EBITDA" />
                         </div>
                     </div>
@@ -980,9 +1116,9 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                 <div v-show="activeTab === 'sucursales'" class="space-y-5">
                     <template v-if="branchesFiltered.length">
                         <div class="grid gap-4 lg:grid-cols-3">
-                            <ChartCard title="Ranking por recuperación" :series="rankingRecuperacionSeries" :options="rankingRecuperacionOptions" type="bar" :height="320" />
-                            <ChartCard title="Ranking por cartera" :series="rankingCarteraSeries" :options="rankingCarteraOptions" type="bar" :height="320" />
-                            <ChartCard title="EBITDA por sucursal" :series="rankingEbitdaSeries" :options="rankingEbitdaOptions" type="bar" :height="320" />
+                            <ChartCard title="Ranking por recuperación" :series="rankingRecuperacionSeries" :options="rankingRecuperacionOptions" type="donut" :height="320" />
+                            <ChartCard title="Ranking por cartera" :series="rankingCarteraSeries" :options="rankingCarteraOptions" type="donut" :height="320" />
+                            <ChartCard title="EBITDA por sucursal" :series="rankingEbitdaSeries" :options="rankingEbitdaOptions" type="donut" :height="320" />
                         </div>
                         <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
                             <table class="w-full text-sm">
@@ -1030,8 +1166,8 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                         <KpiCard label="Intereses recuperados" :value="money(ingrInteres)" :icon="Percent" tone="blue" />
                     </div>
                     <div class="grid gap-4 lg:grid-cols-2">
-                        <ChartCard title="Colocación por producto" :series="colocacionProductoSeries" :options="colocacionProductoOptions" type="bar" :height="280" />
-                        <ChartCard title="Colocación por sucursal" :series="colocacionSucursalSeries" :options="colocacionSucursalOptions" type="bar" :height="280" />
+                        <ChartCard title="Colocación por producto" :series="colocacionProductoSeries" :options="colocacionProductoOptions" type="donut" :height="280" />
+                        <ChartCard title="Colocación por sucursal" :series="colocacionSucursalSeries" :options="colocacionSucursalOptions" type="donut" :height="280" />
                     </div>
                     <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
                         <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Ranking por producto</h3></div>
@@ -1061,8 +1197,8 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                         <KpiCard label="OPEX — Gastos Lendus" :value="money(Number(snap?.summary?.expenses_lendus ?? 0))" :icon="Receipt" tone="neutral" />
                     </div>
                     <div class="grid gap-4 lg:grid-cols-2">
-                        <ChartCard title="Gastos por sucursal" :series="gastosPorSucursalSeries" :options="gastosPorSucursalOptions" type="bar" :height="300" />
-                        <ChartCard title="Top categorías de gasto" :series="gastosPorCategoriaSeries" :options="gastosPorCategoriaOptions" type="bar" :height="300" />
+                        <ChartCard title="Gastos por sucursal" :series="gastosPorSucursalSeries" :options="gastosPorSucursalOptions" type="donut" :height="300" />
+                        <ChartCard title="Top categorías de gasto" :series="gastosPorCategoriaSeries" :options="gastosPorCategoriaOptions" type="donut" :height="300" />
                     </div>
 
                     <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
@@ -1153,7 +1289,7 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                         <KpiCard label="Comisiones" :value="money(nomComis)" tone="teal" />
                         <KpiCard label="Bonos" :value="money(nomBonos)" tone="teal" />
                     </div>
-                    <ChartCard title="Nómina por sucursal" :series="nominaPorSucursalSeries" :options="nominaPorSucursalOptions" type="bar" :height="320" />
+                    <ChartCard title="Nómina por sucursal" :series="nominaPorSucursalSeries" :options="nominaPorSucursalOptions" type="donut" :height="320" />
 
                     <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
                         <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Nómina por sucursal — detalle</h3></div>
@@ -1197,7 +1333,7 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                         <ChartCard title="Cartera sana vs vencida" :series="carteraDonutSeries" :options="carteraDonutOptions" type="donut" :height="260" />
                         <ChartCard title="Mora por bucket" :series="moraBucketSeries" :options="moraBucketOptions" type="donut" :height="260" />
                     </div>
-                    <ChartCard title="Top sucursales con más cartera vencida" :series="topVencidaSeries" :options="topVencidaOptions" type="bar" :height="300" />
+                    <ChartCard title="Top sucursales con más cartera vencida" :series="topVencidaSeries" :options="topVencidaOptions" type="donut" :height="300" />
 
                     <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
                         <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Distribución por días vencidos</h3></div>
@@ -1221,7 +1357,7 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                 <!-- ══════════ PRODUCTOS ══════════ -->
                 <div v-show="activeTab === 'productos'" class="space-y-5">
                     <template v-if="productosRows.length">
-                        <ChartCard title="Colocación por producto" :series="colocacionProductoSeries" :options="colocacionProductoOptions" type="bar" :height="300" />
+                        <ChartCard title="Colocación por producto" :series="colocacionProductoSeries" :options="colocacionProductoOptions" type="donut" :height="300" />
                         <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
                             <table class="w-full text-sm">
                                 <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
@@ -1253,8 +1389,8 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                             <KpiCard label="% Vencido" :value="pct(activeLoansTotals.pct)" :icon="Percent" :tone="activeLoansTotals.pct > 25 ? 'red' : 'teal'" />
                         </div>
                         <div class="grid gap-4 lg:grid-cols-2">
-                            <ChartCard title="Saldo activo por sucursal" :series="prestamosSaldoSeries" :options="prestamosSaldoOptions" type="bar" :height="300" />
-                            <ChartCard title="Vencido por sucursal" :series="prestamosVencidoSeries" :options="prestamosVencidoOptions" type="bar" :height="300" />
+                            <ChartCard title="Saldo activo por sucursal" :series="prestamosSaldoSeries" :options="prestamosSaldoOptions" type="donut" :height="300" />
+                            <ChartCard title="Vencido por sucursal" :series="prestamosVencidoSeries" :options="prestamosVencidoOptions" type="donut" :height="300" />
                         </div>
                         <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
                             <table class="w-full text-sm">
@@ -1282,18 +1418,27 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                     <template v-if="branchesFull.length">
                         <div class="grid gap-4 lg:grid-cols-3">
                             <ChartCard title="Distribución por categoría" :series="categoriaDonutSeries" :options="categoriaDonutOptions" type="donut" :height="280" class="lg:col-span-1" />
-                            <ChartCard title="EBITDA por sucursal" :series="ebitdaPorSucursalSeries" :options="ebitdaPorSucursalOptions" type="bar" :height="280" class="lg:col-span-2" />
+                            <ChartCard title="EBITDA por sucursal" :series="ebitdaPorSucursalSeries" :options="ebitdaPorSucursalOptions" type="donut" :height="280" class="lg:col-span-2" />
                         </div>
                         <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
                             <table class="w-full text-sm">
                                 <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
-                                    <tr><th class="px-4 py-3 text-left">Sucursal</th><th class="px-4 py-3 text-right">Recuperación</th><th class="px-4 py-3 text-right">Gastos</th><th class="px-4 py-3 text-right">Nómina</th><th class="px-4 py-3 text-right">EBITDA estimado</th><th class="px-4 py-3 text-center">Categoría</th></tr>
+                                    <tr>
+                                        <th class="px-4 py-3 text-left">Sucursal</th>
+                                        <th class="px-4 py-3 text-right">Recuperación</th>
+                                        <th class="px-4 py-3 text-right">Colocación</th>
+                                        <th class="px-4 py-3 text-right">OPEX</th>
+                                        <th class="px-4 py-3 text-right">Nómina</th>
+                                        <th class="px-4 py-3 text-right">EBITDA</th>
+                                        <th class="px-4 py-3 text-center">Categoría</th>
+                                    </tr>
                                 </thead>
                                 <tbody>
                                     <tr v-for="b in branchesFiltered" :key="b.nombre" class="cursor-pointer border-t hover:bg-slate-50"
                                         :class="vfBranch === b.nombre ? 'bg-indigo-50' : ''" @click="vfBranch = vfBranch === b.nombre ? '' : b.nombre">
                                         <td class="px-4 py-2.5 font-bold">{{ b.nombre }}</td>
                                         <td class="px-4 py-2.5 text-right">{{ money(b.recuperacion) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(b.colocacion) }}</td>
                                         <td class="px-4 py-2.5 text-right">{{ money(b.gastos) }}</td>
                                         <td class="px-4 py-2.5 text-right">{{ money(b.nomina) }}</td>
                                         <td class="px-4 py-2.5 text-right font-black" :class="b.ebitda < 0 ? 'text-red-700' : 'text-emerald-700'">{{ money(b.ebitda) }}</td>
@@ -1302,7 +1447,7 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                                 </tbody>
                             </table>
                         </div>
-                        <p class="text-xs italic text-slate-400">EBITDA = Recuperación − Gastos − Nómina completa estimada por sucursal.</p>
+                        <p class="text-xs italic text-slate-400">EBITDA = Recuperación − Colocación − OPEX − Nómina completa estimada por sucursal.</p>
                     </template>
                     <EmptyState v-else title="Sin datos para calcular categoría EBITDA" />
                 </div>
@@ -1310,7 +1455,7 @@ const rankingGestoresSeries = computed(() => [{ name: 'Colocación', data: topGe
                 <!-- ══════════ GESTORES ══════════ -->
                 <div v-show="activeTab === 'gestores'" class="space-y-5">
                     <template v-if="empGest.length">
-                        <ChartCard v-if="topGestoresColocacion.length" title="Ranking de gestores por colocación" :series="rankingGestoresSeries" :options="rankingGestoresOptions" type="bar" :height="280" />
+                        <ChartCard v-if="topGestoresColocacion.length" title="Ranking de gestores por colocación" :series="rankingGestoresSeries" :options="rankingGestoresOptions" type="donut" :height="280" />
 
                         <div class="flex flex-wrap gap-3">
                             <div class="relative flex-1 min-w-52">
