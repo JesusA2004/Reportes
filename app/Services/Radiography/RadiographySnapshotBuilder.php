@@ -244,6 +244,7 @@ class RadiographySnapshotBuilder
                 'placement_by_branch_product'=> $this->buildPlacementByBranchProduct($period),
                 'rotation'                   => $this->buildRotationData($period),
                 'active_loans'               => $this->buildActiveLoans($period),
+                'efectividad_cobranza'       => $this->buildEfectividadCobranza($period),
             ],
             'charts' => [
                 'recovery_by_branch'      => $this->chartByBranch($period, 'recuperacion'),
@@ -2643,5 +2644,108 @@ class RadiographySnapshotBuilder
             $ebitda >= 100_000   => 'JUNIOR',
             default              => 'MANTENIDO',
         };
+    }
+
+    // ── Efectividad de Cobranza ───────────────────────────────────────────────
+    //
+    // Clasifica los cobros del período por estatus del crédito:
+    //   Vigente   → days_past_due = 0 (o sin cartera conocida)
+    //   Atrasado  → days_past_due 1-90
+    //   Vencido   → days_past_due > 90
+    //
+    // Fuentes: fact_recoveries (cobros) + fact_portfolios (DPD del crédito).
+    // Se aplican las mismas exclusiones que en recuperacion_total:
+    //   - is_savehearts = 1 (seguros)
+    //   - transaction = 'CONDONACION'
+    //   - Conceptos COBERTURA/SEGURO en is_savehearts=0
+
+    private function buildEfectividadCobranza(Period $period): array
+    {
+        $dataIds = $this->dataIds;
+
+        // DPD autoritativo por contrato (máximo en el período — si hay varios registros)
+        $portfolioDpd = DB::table('fact_portfolios')
+            ->whereIn('period_id', $dataIds)
+            ->whereNotNull('contract')
+            ->selectRaw('contract, MAX(days_past_due) as dpd')
+            ->groupBy('contract')
+            ->pluck('dpd', 'contract')
+            ->all();
+
+        // Recoveries del período, con las mismas exclusiones que recuperacion_total
+        $recoveries = DB::table('fact_recoveries as r')
+            ->leftJoin('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.period_id', $dataIds)
+            ->where(function ($q) {
+                $q->where('r.is_savehearts', '!=', 1)
+                  ->where('r.transaction', '!=', 'CONDONACION')
+                  ->where(function ($q2) {
+                      $q2->whereRaw("NOT (r.is_savehearts = 0 AND (
+                          UPPER(COALESCE(r.concept,'')) LIKE '%COBERTURA%'
+                          OR UPPER(COALESCE(r.operation,'')) LIKE '%COBERTURA%'
+                          OR UPPER(COALESCE(r.concept,'')) LIKE '%SEGURO%'
+                          OR UPPER(COALESCE(r.operation,'')) LIKE '%SEGURO%'
+                      ))");
+                  });
+            })
+            ->whereNotNull('r.contract')
+            ->select(
+                'r.contract',
+                'r.days_past_due as recovery_dpd',
+                'b.name as sucursal',
+                DB::raw('COALESCE(r.capital, 0) as capital'),
+                DB::raw('COALESCE(r.interest, 0) as interes'),
+                DB::raw('COALESCE(r.tax, 0) as impuesto'),
+                DB::raw('COALESCE(r.charges_due, 0) as moratorios'),
+                DB::raw('COALESCE(r.total_amount, 0) as total'),
+            )
+            ->get();
+
+        $empty = fn () => ['capital' => 0.0, 'interes' => 0.0, 'impuesto' => 0.0, 'moratorios' => 0.0, 'total' => 0.0, 'contratos' => 0];
+        $buckets = [
+            'vigente'    => $empty(),
+            'atrasado'   => $empty(),
+            'vencido'    => $empty(),
+            'sin_status' => $empty(),
+        ];
+
+        $contractsSeen = ['vigente' => [], 'atrasado' => [], 'vencido' => [], 'sin_status' => []];
+
+        foreach ($recoveries as $row) {
+            $contract = (string) $row->contract;
+            // Prefer recovery's own DPD, fall back to portfolio DPD
+            $dpd = $row->recovery_dpd !== null
+                ? (int) $row->recovery_dpd
+                : ($portfolioDpd[$contract] ?? null);
+
+            $status = match (true) {
+                $dpd === null      => 'sin_status',
+                $dpd === 0         => 'vigente',
+                $dpd <= 90         => 'atrasado',
+                default            => 'vencido',
+            };
+
+            $buckets[$status]['capital']    += (float) $row->capital;
+            $buckets[$status]['interes']    += (float) $row->interes;
+            $buckets[$status]['impuesto']   += (float) $row->impuesto;
+            $buckets[$status]['moratorios'] += (float) $row->moratorios;
+            $buckets[$status]['total']      += (float) $row->total;
+            if (!isset($contractsSeen[$status][$contract])) {
+                $contractsSeen[$status][$contract] = true;
+                $buckets[$status]['contratos']++;
+            }
+        }
+
+        $total = $empty();
+        foreach ($buckets as $b) {
+            $total['capital']    += $b['capital'];
+            $total['interes']    += $b['interes'];
+            $total['impuesto']   += $b['impuesto'];
+            $total['moratorios'] += $b['moratorios'];
+            $total['total']      += $b['total'];
+            $total['contratos']  += $b['contratos'];
+        }
+
+        return array_merge($buckets, ['total' => $total]);
     }
 }

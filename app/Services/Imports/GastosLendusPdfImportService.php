@@ -125,6 +125,18 @@ class GastosLendusPdfImportService
 
                     $category = $this->resolveCategory($parsed['category'], $parsed['concept']);
 
+                    $payload = [
+                        'concept_raw'   => $parsed['concept'],
+                        'category_raw'  => $parsed['category'],
+                        'branch_origen' => $currentBranch,
+                    ];
+                    if ($category === 'Préstamos Intersucursales' || $category === 'Envío de utilidad a corporativo') {
+                        $fondeoInfo = $this->parseFondeoDestino($parsed['concept']);
+                        $payload['fondeo_destino_texto'] = $fondeoInfo['texto_raw'];
+                        $payload['fondeo_destino_sucursal'] = $fondeoInfo['sucursal'];
+                        $payload['fondeo_tipo'] = $fondeoInfo['tipo'];
+                    }
+
                     Expense::query()->create([
                         'period_id'        => $upload->period_id,
                         'report_upload_id' => $upload->id,
@@ -139,7 +151,7 @@ class GastosLendusPdfImportService
                         'paid_amount'      => $parsed['amount'],
                         'expense_date'     => $parsed['date'],
                         'observations'     => $parsed['employee'] ?: null,
-                        'raw_payload'      => null,
+                        'raw_payload'      => $payload,
                     ]);
 
                     $rowsInserted++;
@@ -246,12 +258,101 @@ class GastosLendusPdfImportService
     private function resolveCategory(string $category, string $concept): string
     {
         $cu = mb_strtoupper(trim($concept));
+
+        // Excedente / envío a corporativo must be detected BEFORE fondeo to avoid
+        // misclassifying "DEPOSITO A CORPORATIVO" as a fondeo entre sucursales.
+        if (
+            str_contains($cu, 'EXCEDENTE') ||
+            str_contains($cu, 'DEPOSITO A CORPORATIVO') ||
+            str_contains($cu, 'DEPÓSITO A CORPORATIVO') ||
+            str_contains($cu, 'DEPOSITO CORPORATIVO') ||
+            str_contains($cu, 'ENVIO CORPORATIVO') ||
+            str_contains($cu, 'ENVÍO CORPORATIVO')
+        ) {
+            return 'Envío de utilidad a corporativo';
+        }
+
         if (str_starts_with($cu, 'FONDEO A') || str_contains($cu, 'FONDEO') || str_contains($cu, 'PRESTAMO INTERSUCURSAL')) {
             return 'Préstamos Intersucursales';
         }
 
         // Use mapper on concept + PDF category to produce a normalized category
         return ExpenseCategoryMapper::fromFields($concept, $category);
+    }
+
+    /**
+     * Parse fondeo destination from concept text.
+     * Returns the raw text used, the resolved sucursal name, and type.
+     */
+    private function parseFondeoDestino(string $concept): array
+    {
+        $cu = mb_strtoupper(trim($concept));
+        // Normalize: remove double spaces, accents
+        $cu = strtr($cu, ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U','Ü'=>'U','Ñ'=>'N']);
+        $cu = preg_replace('/\s+/', ' ', $cu) ?? $cu;
+
+        // Check corporativo first
+        if (
+            str_contains($cu, 'CORPORATIVO') || str_contains($cu, 'EXCEDENTE')
+        ) {
+            return ['texto_raw' => $concept, 'sucursal' => 'CORPORATIVO', 'tipo' => 'excedente_corporativo'];
+        }
+
+        // Strip noise words to extract branch name
+        $noisePatterns = [
+            '/^FONDEO\s+(A\s+)?SUC\.?\s+/i',
+            '/^FONDEO\s+(A\s+)?SUCURSAL\s+/i',
+            '/^FONDEO\s+A\s+/i',
+            '/^FONDEO\s+/i',
+            '/^A\s+SUC\.?\s+/i',
+            '/^A\s+SUCURSAL\s+/i',
+            '/^PRESTAMO\s+INTERSUCURSAL\s+/i',
+            '/^PRESTAMO\s+A\s+/i',
+            '/\s*FONDEO\s*/i',
+            '/\s*DEPOSITO\s*/i',
+            '/\s*DEPÓSITO\s*/i',
+        ];
+
+        $cleaned = $cu;
+        foreach ($noisePatterns as $pattern) {
+            $cleaned = preg_replace($pattern, '', $cleaned) ?? $cleaned;
+        }
+        $cleaned = trim($cleaned);
+
+        $sucursal = $this->matchBranchFromText($cleaned);
+
+        return [
+            'texto_raw' => $concept,
+            'sucursal'  => $sucursal ?? 'No detectado',
+            'tipo'      => $sucursal ? 'fondeo_sucursal' : 'no_clasificado',
+        ];
+    }
+
+    private function matchBranchFromText(string $text): ?string
+    {
+        static $officialBranches = [
+            'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
+            'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN JUAN DEL RIO', 'SAN JUAN',
+            'SAN LUIS POTOSI', 'TENANGO DEL VALLE', 'TENANGO', 'TLAXCALA', 'TULA',
+            'CHIHUAHUA', 'DURANGO', 'YAUTEPEC',
+        ];
+
+        $textNorm = strtr(mb_strtoupper(trim($text)), ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U','Ü'=>'U','Ñ'=>'N']);
+
+        foreach ($officialBranches as $branch) {
+            if (str_contains($textNorm, $branch)) {
+                // Normalize compound names to official form
+                if ($branch === 'SAN JUAN') {
+                    return 'SAN JUAN DEL RÍO';
+                }
+                if ($branch === 'TENANGO') {
+                    return 'TENANGO DEL VALLE';
+                }
+                return $branch;
+            }
+        }
+
+        return null;
     }
 
     private function resolveBranch(string $name): ?Branch

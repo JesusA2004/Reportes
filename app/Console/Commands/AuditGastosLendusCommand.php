@@ -16,22 +16,22 @@ class AuditGastosLendusCommand extends Command
 
     protected $description = 'Auditoría Gastos Lendus: valida exclusiones (Excedentes, Nómina, IMSS, Deducciones, Fondeo, Seguros/Pólizas)';
 
-    // Category → bucket for whole-category exclusions
+    // Categories excluded entirely from OPEX (assigned to a named bucket)
     private const EXCLUSION_MAP = [
-        'Envío de utilidad a corporativo' => 'EXCLUIDO: Excedentes (envío utilidad corporativo)',
-        'Préstamos Intersucursales'        => 'EXCLUIDO: Fondeo a sucursal (rastreo entre sucursales)',
-        'Pólizas'                          => 'EXCLUIDO: Seguros/Coberturas (monto puente)',
-        'Financiamiento Celular'           => 'EXCLUIDO: Nómina (financiamiento celular)',
-        'Gasolina'                         => 'EXCLUIDO: Nómina (gasolina)',
+        'Envío de utilidad a corporativo' => ['bucket' => 'excedentes',  'motivo' => 'EXCLUIDO: Excedentes / envío a corporativo'],
+        'Préstamos Intersucursales'        => ['bucket' => 'fondeo',      'motivo' => 'EXCLUIDO: Fondeo entre sucursales (rastreo)'],
+        'Pólizas'                          => ['bucket' => 'polizas',     'motivo' => 'EXCLUIDO: Seguros/Coberturas puente'],
+        'Financiamiento Celular'           => ['bucket' => 'nomina',      'motivo' => 'EXCLUIDO: Reclasificado a Nómina (financiamiento celular)'],
+        'Gasolina'                         => ['bucket' => 'nomina',      'motivo' => 'EXCLUIDO: Reclasificado a Nómina (gasolina)'],
     ];
 
-    // 'Nómina y Capital Humano' is handled at concept level:
-    // Only these concepts are true nómina/payroll and are excluded. All other concepts
-    // under this category (PAGO FINANCIAMIENTO MOTO, COMPRA DE CASCOS, GASTOS MEDICOS…)
-    // are operational expenses → included in gastos_lendus_total.
+    // Within 'Nómina y Capital Humano': true payroll items excluded from OPEX
     private const NOMINA_SKIP_CONCEPTS = [
         'NOMINA', 'PAGO DE IMSS', 'DEDUCCIONES', 'DEDUCCIONES GENERALES', 'PAGO PRESTAMO Z',
     ];
+
+    // Within 'Nómina y Capital Humano': employee-related items reclassified to Nómina (not OPEX)
+    private const NOMINA_RECLASS_KEYWORDS = ['FINIQUITO', 'MEDICO', 'MÉDICO'];
 
     public function handle(): int
     {
@@ -84,46 +84,70 @@ class AuditGastosLendusCommand extends Command
             ->orderByDesc('e.amount')
             ->get();
 
-        $totalCrudo          = 0.0;
-        $totalIncluido       = 0.0;
-        $exclBuckets         = [];
-        $conceptoTotales     = [];
-        $detailRows          = [];
+        $totalCrudo              = 0.0;
+        $totalIncluido           = 0.0;
+        $exclFondeo              = 0.0;
+        $exclExcedentes          = 0.0;
+        $exclNomina              = 0.0;   // true payroll: NOMINA/IMSS/DEDUCCIONES
+        $exclNominaExpense       = 0.0;   // GASOLINA/FINANCIAMIENTO CELULAR category
+        $reclasificadoNomina     = 0.0;   // FINIQUITO/MEDICO reclassified
+        $exclPolizas             = 0.0;
+        $conceptoTotales         = [];
+        $detailRows              = [];
 
         foreach ($rows as $row) {
             $monto    = (float) ($row->paid_amount ?: $row->amount);
             $cat      = (string) ($row->category ?? '');
             // Normalize unicode whitespace (incl. non-breaking spaces U+00A0) before matching
-            $concepto = strtoupper(trim((string) ($row->concept ?? '')));
-            $concepto = preg_replace('/\s+/u', ' ', $concepto) ?? $concepto;
+            $conceptoRaw = (string) ($row->concept ?? '');
+            $concepto    = strtoupper(trim($conceptoRaw));
+            $concepto    = preg_replace('/\s+/u', ' ', $concepto) ?? $concepto;
 
             $totalCrudo += $monto;
 
             $motivo   = '';
             $incluido = true;
+            $destino  = 'OPEX';
 
             if ($cat === 'Nómina y Capital Humano') {
-                // Concept-level exclusion: only true payroll concepts are excluded.
-                // Others (PAGO FINANCIAMIENTO MOTO, COMPRA DE CASCOS, GASTOS MEDICOS…)
-                // are operational → included in gastos_lendus.
                 if (in_array($concepto, self::NOMINA_SKIP_CONCEPTS, true)) {
-                    $motivo   = "EXCLUIDO: {$concepto} (nómina)";
+                    $exclNomina += $monto;
+                    $motivo   = "EXCLUIDO: {$concepto} (nómina real payroll)";
+                    $destino  = 'Excluido / Nómina payroll';
                     $incluido = false;
-                    $exclBuckets['Nómina y Capital Humano'] = ($exclBuckets['Nómina y Capital Humano'] ?? 0.0) + $monto;
+                } elseif ($this->isNominaReclass($concepto)) {
+                    $reclasificadoNomina += $monto;
+                    $motivo   = "RECLASIFICADO a Nómina: {$concepto}";
+                    $destino  = 'Nómina y Capital Humano';
+                    $incluido = false;
                 } else {
                     $totalIncluido += $monto;
-                    $motivo = "INCLUIDO (operativo: {$concepto})";
-                    $label  = $row->concept ?: $cat ?: 'Sin concepto';
+                    $motivo = "INCLUIDO en OPEX (operativo: {$concepto})";
+                    $label  = $conceptoRaw ?: $cat ?: 'Sin concepto';
                     $conceptoTotales[$label] = ($conceptoTotales[$label] ?? 0.0) + $monto;
                 }
             } elseif (isset(self::EXCLUSION_MAP[$cat])) {
-                $motivo   = self::EXCLUSION_MAP[$cat];
+                $info    = self::EXCLUSION_MAP[$cat];
+                $motivo  = $info['motivo'];
                 $incluido = false;
-                $exclBuckets[$cat] = ($exclBuckets[$cat] ?? 0.0) + $monto;
+                $destino  = match($info['bucket']) {
+                    'excedentes' => 'Excluido / Excedentes',
+                    'fondeo'     => 'Excluido / Fondeo',
+                    'polizas'    => 'Excluido / Pólizas',
+                    'nomina'     => 'Nómina y Capital Humano',
+                    default      => 'Excluido',
+                };
+                match($info['bucket']) {
+                    'excedentes' => ($exclExcedentes += $monto),
+                    'fondeo'     => ($exclFondeo     += $monto),
+                    'polizas'    => ($exclPolizas    += $monto),
+                    'nomina'     => ($exclNominaExpense += $monto),
+                    default      => null,
+                };
             } else {
                 $totalIncluido += $monto;
-                $motivo = 'INCLUIDO';
-                $label  = $row->concept ?: $cat ?: 'Sin concepto';
+                $motivo = 'INCLUIDO en OPEX';
+                $label  = $conceptoRaw ?: $cat ?: 'Sin concepto';
                 $conceptoTotales[$label] = ($conceptoTotales[$label] ?? 0.0) + $monto;
             }
 
@@ -131,44 +155,28 @@ class AuditGastosLendusCommand extends Command
                 'id'        => $row->id,
                 'sucursal'  => (string) ($row->sucursal ?? '(sin sucursal)'),
                 'categoria' => $cat,
-                'concepto'  => (string) ($row->concept ?? ''),
+                'concepto'  => $conceptoRaw,
                 'obs'       => mb_substr((string) ($row->observations ?? ''), 0, 50),
                 'fecha'     => $row->expense_date,
                 'monto'     => $monto,
                 'incluido'  => $incluido ? 'SÍ' : 'NO',
                 'motivo'    => $motivo,
+                'destino'   => $destino,
             ];
         }
 
         // ── Resumen ──────────────────────────────────────────────────────────
         $this->line('');
-        $this->info('════ RESUMEN ════');
-        $this->line(str_pad('Total crudo Lendus',                      44) . '$' . number_format($totalCrudo, 2));
-
-        $exclLabels = [
-            'Envío de utilidad a corporativo' => 'Excedentes',
-            'Nómina y Capital Humano'          => 'Nómina payroll (NOMINA/IMSS/DEDUCCIONES/PAGO PRESTAMO Z)',
-            'Préstamos Intersucursales'        => 'Fondeo a sucursal',
-            'Pólizas'                          => 'Seguros/Coberturas (puente)',
-            'Financiamiento Celular'           => 'Financiamiento Celular (nómina)',
-            'Gasolina'                         => 'Gasolina (nómina)',
-        ];
-        foreach ($exclLabels as $cat => $label) {
-            $excAmt = $exclBuckets[$cat] ?? 0.0;
-            if ($excAmt > 0) {
-                $this->line(str_pad("(-) Excluido {$label}", 44) . '$' . number_format($excAmt, 2));
-            }
-        }
-        $this->line(str_repeat('─', 60));
-        $this->info(str_pad('TOTAL INCLUIDO LENDUS',                   44) . '$' . number_format($totalIncluido, 2));
-
-        $refLendus = 557_561.29;
-        $diff      = $totalIncluido - $refLendus;
-        $sign      = $diff >= 0 ? '+' : '';
-        $match     = abs($diff) < 200 ? '✓ DENTRO DE RANGO' : (abs($diff) < 5_000 ? '≈ CERCANO' : '⚠ REVISAR');
-        $this->line('');
-        $this->line(str_pad('Referencia esperada',  44) . '$' . number_format($refLendus, 2));
-        $this->line(str_pad('Diferencia',            44) . $sign . '$' . number_format($diff, 2) . '  ' . $match);
+        $this->info('════ RESUMEN — INTEGRACIÓN LENDUS ════');
+        $this->line(str_pad('Lendus total cargado (PDF)',                      52) . '$' . number_format($totalCrudo, 2));
+        $this->line(str_pad('(-) Excluido: fondeos entre sucursales',          52) . '$' . number_format($exclFondeo, 2));
+        $this->line(str_pad('(-) Excluido: excedentes / envíos a corporativo', 52) . '$' . number_format($exclExcedentes, 2));
+        $this->line(str_pad('(-) Excluido: nómina real (NOMINA/IMSS/etc.)',    52) . '$' . number_format($exclNomina, 2));
+        $this->line(str_pad('(-) Reclasificado a Nómina (Gasolina/Celular)',   52) . '$' . number_format($exclNominaExpense, 2));
+        $this->line(str_pad('(-) Reclasificado a Nómina (Finiquito/Médico)',   52) . '$' . number_format($reclasificadoNomina, 2));
+        $this->line(str_pad('(-) Excluido: pólizas / seguros puente',          52) . '$' . number_format($exclPolizas, 2));
+        $this->line(str_repeat('─', 68));
+        $this->info(str_pad('(=) LENDUS FINAL OPEX',                           52) . '$' . number_format($totalIncluido, 2));
 
         // ── Por concepto (incluidos) ──────────────────────────────────────────
         $this->line('');
@@ -187,23 +195,23 @@ class AuditGastosLendusCommand extends Command
             $this->line(
                 str_pad('ID', 8) .
                 str_pad('Sucursal', 22) .
-                str_pad('Categoría', 28) .
-                str_pad('Concepto', 28) .
+                str_pad('Concepto', 30) .
                 str_pad('Monto', 16) .
-                str_pad('Inc', 5) .
+                str_pad('Destino', 28) .
                 'Motivo'
             );
             $this->line(str_repeat('─', 140));
             foreach ($detailRows as $r) {
                 $line = str_pad($r['id'], 8) .
                         str_pad(mb_substr($r['sucursal'], 0, 20), 22) .
-                        str_pad(mb_substr($r['categoria'], 0, 26), 28) .
-                        str_pad(mb_substr($r['concepto'], 0, 26), 28) .
+                        str_pad(mb_substr($r['concepto'], 0, 28), 30) .
                         str_pad('$' . number_format($r['monto'], 2), 16) .
-                        str_pad($r['incluido'], 5) .
+                        str_pad(mb_substr($r['destino'], 0, 26), 28) .
                         $r['motivo'];
-                if ($r['incluido'] === 'SÍ') {
+                if ($r['destino'] === 'OPEX') {
                     $this->line($line);
+                } elseif ($r['destino'] === 'Nómina y Capital Humano') {
+                    $this->comment($line);
                 } else {
                     $this->warn($line);
                 }
@@ -225,7 +233,7 @@ class AuditGastosLendusCommand extends Command
         $path = "{$dir}/{$file}";
 
         $lines   = [];
-        $headers = ['ID', 'Sucursal', 'Categoría', 'Concepto', 'Observación', 'Fecha', 'Monto', 'Incluido', 'Motivo'];
+        $headers = ['ID', 'Sucursal', 'Categoría', 'Concepto', 'Observación', 'Fecha', 'Monto', 'Destino', 'Motivo'];
         $lines[] = implode(',', $headers);
 
         foreach ($rows as $r) {
@@ -237,12 +245,22 @@ class AuditGastosLendusCommand extends Command
                 '"' . str_replace('"', '""', $r['obs']) . '"',
                 $r['fecha'] ?? '',
                 number_format($r['monto'], 2, '.', ''),
-                $r['incluido'],
+                '"' . str_replace('"', '""', $r['destino']) . '"',
                 '"' . str_replace('"', '""', $r['motivo']) . '"',
             ]);
         }
 
         Storage::disk('local')->put($path, implode("\n", $lines));
         $this->info("  CSV exportado: storage/app/{$path}");
+    }
+
+    private function isNominaReclass(string $conceptoUpper): bool
+    {
+        foreach (self::NOMINA_RECLASS_KEYWORDS as $keyword) {
+            if (str_contains($conceptoUpper, $keyword)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

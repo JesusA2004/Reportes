@@ -115,7 +115,8 @@
       "Bash(netstat -ano)",
       "Bash(taskkill *)",
       "Bash(xxd)",
-      "Bash(npx vite *)"
+      "Bash(npx vite *)",
+      "Bash(Select-Object -First 30)"
     ]
   }
 }

@@ -50,10 +50,18 @@ class GastosErpExcelImportService
 
         Expense::query()->where('report_upload_id', $upload->id)->delete();
 
+        // Fecha de pago filtering: only include rows whose fecha_pago falls within the period.
+        // If the ERP file has no fecha_pago column, fall back to fecha_captura (no date filter).
+        $period          = $upload->period;
+        $hasFechaPago    = isset($colMap['fecha_pago']);
+        $periodStart     = $hasFechaPago && $period?->start_date ? $period->start_date->format('Y-m-d') : null;
+        $periodEnd       = $hasFechaPago && $period?->end_date   ? $period->end_date->format('Y-m-d')   : null;
+
         $rowsRead              = 0;
         $rowsInserted          = 0;
         $rowsSkipped           = 0;
         $rowsSkippedByStatus   = 0;
+        $rowsSkippedByDate     = 0;
         $rowsErrors            = 0;
         $statusCounts          = [];
 
@@ -84,12 +92,13 @@ class GastosErpExcelImportService
                     continue;
                 }
 
-                $sucursal    = $this->str($row[$colMap['sucursal']] ?? null);
-                $solicitante = $this->str($row[$colMap['solicitante']] ?? null);
-                $concepto    = $this->str($row[$colMap['concepto']] ?? null);
-                $observ      = $this->str($row[$colMap['observaciones']] ?? null);
-                $fechaStr    = $row[$colMap['fecha_captura']] ?? null;
-                $total       = $this->toDecimal($row[$colMap['total_final']] ?? null);
+                $sucursal       = $this->str($row[$colMap['sucursal']] ?? null);
+                $solicitante    = $this->str($row[$colMap['solicitante']] ?? null);
+                $concepto       = $this->str($row[$colMap['concepto']] ?? null);
+                $observ         = $this->str($row[$colMap['observaciones']] ?? null);
+                $fechaCapturaRaw = $row[$colMap['fecha_captura']] ?? null;
+                $fechaPagoRaw    = $hasFechaPago ? ($row[$colMap['fecha_pago']] ?? null) : null;
+                $total           = $this->toDecimal($row[$colMap['total_final']] ?? null);
 
                 // Skip rows with zero or null total
                 if ($total === null || $total == 0.0) {
@@ -97,9 +106,21 @@ class GastosErpExcelImportService
                     continue;
                 }
 
+                // Determine payment date: prefer fecha_pago, fall back to fecha_captura
+                $fechaPago    = $hasFechaPago ? $this->toDate($fechaPagoRaw) : null;
+                $fechaCaptura = $this->toDate($fechaCapturaRaw);
+                $primaryDate  = $fechaPago ?? $fechaCaptura;
+
+                // Filter by payment date when fecha_pago column is present
+                if ($hasFechaPago && $periodStart && $periodEnd) {
+                    if (!$fechaPago || $fechaPago < $periodStart || $fechaPago > $periodEnd) {
+                        $rowsSkippedByDate++;
+                        continue;
+                    }
+                }
+
                 $branch   = $this->resolveBranch($sucursal);
                 $employee = $this->resolveEmployee($solicitante);
-                $date     = $this->toDate($fechaStr);
 
                 $notes = collect([$observ, 'Folio: ' . $folio])
                     ->filter()
@@ -114,9 +135,15 @@ class GastosErpExcelImportService
                     'concept'          => $concepto ?? 'Sin concepto',
                     'amount'           => $total,
                     'paid_amount'      => $total,
-                    'expense_date'     => $date,
+                    'expense_date'     => $primaryDate,
                     'observations'     => $notes ?: null,
-                    'raw_payload'      => ['estatus' => $rawStatus],
+                    'raw_payload'      => [
+                        'estatus'       => $rawStatus,
+                        'folio'         => $folio,
+                        'sucursal_raw'  => $sucursal,
+                        'fecha_pago'    => $fechaPago,
+                        'fecha_captura' => $fechaCaptura,
+                    ],
                 ]);
 
                 $rowsInserted++;
@@ -130,6 +157,7 @@ class GastosErpExcelImportService
                     'rows_inserted'         => $rowsInserted,
                     'rows_skipped'          => $rowsSkipped,
                     'rows_skipped_by_status'=> $rowsSkippedByStatus,
+                    'rows_skipped_by_date'  => $rowsSkippedByDate,
                     'rows_with_errors'      => $rowsErrors,
                     'log'                   => "Gastos ERP: {$rowsRead} requisiciones leídas…",
                 ]);
@@ -141,11 +169,13 @@ class GastosErpExcelImportService
             'rows_inserted'          => $rowsInserted,
             'rows_skipped'           => $rowsSkipped,
             'rows_skipped_by_status' => $rowsSkippedByStatus,
+            'rows_skipped_by_date'   => $rowsSkippedByDate,
             'rows_with_errors'       => $rowsErrors,
             'status_counts'          => $statusCounts,
+            'uses_fecha_pago'        => $hasFechaPago,
             'log'                    => sprintf(
-                'Gastos ERP importados. Leídas: %d, contabilizadas: %d, ignoradas por estatus: %d, omitidas: %d, errores: %d.',
-                $rowsRead, $rowsInserted, $rowsSkippedByStatus, $rowsSkipped, $rowsErrors
+                'Gastos ERP importados. Leídas: %d, contabilizadas: %d, ignoradas por estatus: %d, ignoradas por fecha pago: %d, omitidas: %d, errores: %d.',
+                $rowsRead, $rowsInserted, $rowsSkippedByStatus, $rowsSkippedByDate, $rowsSkipped, $rowsErrors
             ),
         ];
     }
@@ -172,7 +202,8 @@ class GastosErpExcelImportService
             'solicitante'    => ['solicitante', 'empleado', 'responsable'],
             'concepto'       => ['concepto'],
             'observaciones'  => ['observaciones', 'observación', 'observacion'],
-            'fecha_captura'  => ['fecha captura', 'fecha de captura', 'fecha_captura'],
+            'fecha_pago'     => ['fecha pago', 'fecha de pago', 'fecha_pago', 'f. pago', 'fecha de pago real'],
+            'fecha_captura'  => ['fecha captura', 'fecha de captura', 'fecha_captura', 'fecha registro'],
             'total_final'    => ['total final requisición', 'total final requisicion', 'total final', 'monto pagado empresa', 'monto pagado por empresa'],
         ];
 

@@ -173,7 +173,7 @@ onMounted(() => {
 // distintos a Excel/PDF. EBITDA usa los mismos umbrales que
 // RadiographyStyleHelper::ebitdaCategory() (300,000 / 100,000).
 // ════════════════════════════════════════════════════════════════════════════
-type TabKey = 'resumen' | 'sucursales' | 'ingresos' | 'gastos' | 'nomina' | 'mora' | 'productos' | 'prestamos' | 'categoria' | 'gestores'
+type TabKey = 'resumen' | 'sucursales' | 'ingresos' | 'gastos' | 'nomina' | 'mora' | 'productos' | 'prestamos' | 'categoria' | 'gestores' | 'cobranza'
 const activeTab = ref<TabKey>('resumen')
 
 const snap   = computed(() => props.snapshot)
@@ -260,6 +260,57 @@ const moraBucketsGlobal = computed(() => [
     { label: 'Mora 120+',   value: mora120plusG.value },
 ])
 
+const g = (k: string) => Number(brGlobal.value?.[k]) || 0
+const moraComponentes = computed(() => {
+    const totalMora = moraTotalGlobal.value || 1
+    return [
+        {
+            label: 'Mora 1-30', key: 'mora_0_30',
+            capital: g('mora_0_30_capital'), interes: g('mora_0_30_interes'),
+            impuesto: g('mora_0_30_impuesto'), moratorio: g('mora_0_30_moratorio'),
+            imp_moratorio: g('mora_0_30_imp_moratorio'), total: mora0_30g.value,
+            pct: (mora0_30g.value / totalMora * 100),
+        },
+        {
+            label: 'Mora 31-60', key: 'mora_31_60',
+            capital: g('mora_31_60_capital'), interes: g('mora_31_60_interes'),
+            impuesto: g('mora_31_60_impuesto'), moratorio: g('mora_31_60_moratorio'),
+            imp_moratorio: g('mora_31_60_imp_moratorio'), total: mora31_60g.value,
+            pct: (mora31_60g.value / totalMora * 100),
+        },
+        {
+            label: 'Mora 61-90', key: 'mora_61_90',
+            capital: g('mora_61_90_capital'), interes: g('mora_61_90_interes'),
+            impuesto: g('mora_61_90_impuesto'), moratorio: g('mora_61_90_moratorio'),
+            imp_moratorio: g('mora_61_90_imp_moratorio'), total: mora61_90g.value,
+            pct: (mora61_90g.value / totalMora * 100),
+        },
+        {
+            label: 'Mora 91-120', key: 'mora_91_120',
+            capital: g('mora_91_120_capital'), interes: g('mora_91_120_interes'),
+            impuesto: g('mora_91_120_impuesto'), moratorio: g('mora_91_120_moratorio'),
+            imp_moratorio: g('mora_91_120_imp_moratorio'), total: mora91_120g.value,
+            pct: (mora91_120g.value / totalMora * 100),
+        },
+        {
+            label: 'Mora 120+', key: 'mora_120_plus',
+            capital: g('mora_120_plus_capital'), interes: g('mora_120_plus_interes'),
+            impuesto: g('mora_120_plus_impuesto'), moratorio: g('mora_120_plus_moratorio'),
+            imp_moratorio: g('mora_120_plus_imp_moratorio'), total: mora120plusG.value,
+            pct: (mora120plusG.value / totalMora * 100),
+        },
+    ]
+})
+
+const moraTotalesComponentes = computed(() => ({
+    capital:      g('mora_total_capital'),
+    interes:      g('mora_total_interes'),
+    impuesto:     g('mora_total_impuesto'),
+    moratorio:    g('mora_total_moratorio'),
+    imp_moratorio: g('mora_total_imp_moratorio'),
+    total:        moraTotalGlobal.value,
+}))
+
 // ── Gastos ─────────────────────────────────────────────────────────────────────
 const brGlobalGastos = computed(() => {
     const det = brGlobal.value?.gastos_detalle as Record<string, number> | undefined
@@ -267,6 +318,20 @@ const brGlobalGastos = computed(() => {
     return Object.entries(det).map(([concepto, total]) => ({ concepto, total: Number(total) })).filter(c => c.total > 0).sort((a, b) => b.total - a.total)
 })
 const brGlobalGastosTotal = computed(() => Number(brGlobal.value?.gastos_operativos) || 0)
+
+// Desglose ERP: cargado → reclasificado → OPEX final
+const erpCargado             = computed(() => Number(brGlobal.value?.gastos_erp_cargado) || 0)
+const erpReclasificadoNomina = computed(() => Number(brGlobal.value?.gastos_erp_reclasificado_nomina) || 0)
+const erpFinalOpex           = computed(() => Number(brGlobal.value?.gastos_erp_total) || 0)
+
+// Desglose Lendus: cargado → exclusiones → OPEX final
+const lendusCargado             = computed(() => Number(brGlobal.value?.gastos_lendus_cargado) || 0)
+const lendusExclFondeo          = computed(() => Number(brGlobal.value?.gastos_lendus_excluido_fondeo) || 0)
+const lendusExclExcedentes      = computed(() => Number(brGlobal.value?.gastos_lendus_excluido_excedentes) || 0)
+const lendusExclNomina          = computed(() => Number(brGlobal.value?.gastos_lendus_excluido_nomina) || 0)
+const lendusReclasificadoNomina = computed(() => Number(brGlobal.value?.gastos_lendus_reclasificado_nomina) || 0)
+const lendusExclPolizas         = computed(() => Number(brGlobal.value?.gastos_lendus_excluido_polizas) || 0)
+const lendusFinalOpex           = computed(() => Number(brGlobal.value?.gastos_lendus_total) || 0)
 
 // Desglose bruto (fuente legacy fact_expenses) — complementa la vista canónica
 const gastosDetail     = computed(() => snap.value?.sections?.expenses_detail ?? {})
@@ -531,6 +596,20 @@ const expandedNominaBranch = ref<string | null>(null)
 
 const pct = fmtPercent
 
+// ── Efectividad de Cobranza ─────────────────────────────────────────────────
+const ecData = computed(() => snap.value?.sections?.efectividad_cobranza ?? null)
+const ecStatus = computed(() => {
+    const ec = ecData.value
+    if (!ec) return []
+    return [
+        { key: 'vigente',    label: 'Vigente (DPD=0)',   tone: 'green',  ...ec['vigente']    },
+        { key: 'atrasado',   label: 'Atrasado (1-90)',   tone: 'amber',  ...ec['atrasado']   },
+        { key: 'vencido',    label: 'Vencido (>90)',     tone: 'red',    ...ec['vencido']    },
+        { key: 'sin_status', label: 'Sin estatus',       tone: 'slate',  ...ec['sin_status'] },
+    ]
+})
+const ecTotal = computed(() => ecData.value?.total ?? { capital: 0, interes: 0, impuesto: 0, moratorios: 0, total: 0, contratos: 0 })
+
 const tabs: { key: TabKey; label: string }[] = [
     { key: 'resumen',    label: 'Resumen' },
     { key: 'sucursales', label: 'Sucursales' },
@@ -538,6 +617,7 @@ const tabs: { key: TabKey; label: string }[] = [
     { key: 'gastos',     label: 'Gastos' },
     { key: 'nomina',     label: 'Nómina' },
     { key: 'mora',       label: 'Mora / Cartera' },
+    { key: 'cobranza',   label: 'Efectividad de cobranza' },
     { key: 'productos',  label: 'Colocación / Recuperación por producto' },
     { key: 'prestamos',  label: 'Préstamos activos' },
     { key: 'categoria',  label: 'Categoría EBITDA' },
@@ -1192,9 +1272,44 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                 <!-- ══════════ GASTOS ══════════ -->
                 <div v-show="activeTab === 'gastos'" class="space-y-5">
                     <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                        <KpiCard label="OPEX" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
-                        <KpiCard label="OPEX — Gastos ERP" :value="money(Number(snap?.summary?.expenses_erp ?? 0))" :icon="Receipt" tone="neutral" />
-                        <KpiCard label="OPEX — Gastos Lendus" :value="money(Number(snap?.summary?.expenses_lendus ?? 0))" :icon="Receipt" tone="neutral" />
+                        <KpiCard label="OPEX Total" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
+                        <KpiCard label="ERP final OPEX" :value="money(erpFinalOpex)" :icon="Receipt" tone="neutral" />
+                        <KpiCard label="Lendus final OPEX" :value="money(lendusFinalOpex)" :icon="Receipt" tone="neutral" />
+                    </div>
+
+                    <!-- Resumen integración OPEX -->
+                    <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                        <div class="border-b bg-amber-50 px-5 py-3">
+                            <h3 class="text-xs font-black uppercase tracking-wider text-amber-700">Resumen integración OPEX (ERP + Lendus)</h3>
+                        </div>
+                        <div class="grid gap-0 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-slate-100">
+                            <!-- ERP -->
+                            <table class="w-full text-xs">
+                                <thead><tr class="border-b bg-slate-50"><th class="px-5 py-2 text-left font-bold text-slate-500 uppercase tracking-wider" colspan="2">ERP / Requisiciones</th></tr></thead>
+                                <tbody>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600">ERP total cargado (fecha de pago)</td><td class="px-5 py-2 text-right font-semibold text-slate-800">{{ money(erpCargado) }}</td></tr>
+                                    <tr class="border-b bg-red-50/40"><td class="px-5 py-2 text-slate-600">(-) Reclasificado a Nómina</td><td class="px-5 py-2 text-right font-semibold text-red-700">{{ money(erpReclasificadoNomina) }}</td></tr>
+                                    <tr class="border-t-2 border-amber-200 bg-amber-50"><td class="px-5 py-2.5 font-black text-amber-900">(=) ERP final OPEX</td><td class="px-5 py-2.5 text-right font-black text-amber-900">{{ money(erpFinalOpex) }}</td></tr>
+                                </tbody>
+                            </table>
+                            <!-- Lendus -->
+                            <table class="w-full text-xs">
+                                <thead><tr class="border-b bg-slate-50"><th class="px-5 py-2 text-left font-bold text-slate-500 uppercase tracking-wider" colspan="2">Lendus (PDF)</th></tr></thead>
+                                <tbody>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600">Lendus total cargado</td><td class="px-5 py-2 text-right font-semibold text-slate-800">{{ money(lendusCargado) }}</td></tr>
+                                    <tr v-if="lendusExclFondeo > 0" class="border-b bg-red-50/40"><td class="px-5 py-2 text-slate-600">(-) Excluido: fondeos</td><td class="px-5 py-2 text-right font-semibold text-red-700">{{ money(lendusExclFondeo) }}</td></tr>
+                                    <tr v-if="lendusExclExcedentes > 0" class="border-b bg-red-50/40"><td class="px-5 py-2 text-slate-600">(-) Excluido: excedentes/corporativo</td><td class="px-5 py-2 text-right font-semibold text-red-700">{{ money(lendusExclExcedentes) }}</td></tr>
+                                    <tr v-if="lendusExclNomina > 0" class="border-b bg-red-50/40"><td class="px-5 py-2 text-slate-600">(-) Excluido: nómina real</td><td class="px-5 py-2 text-right font-semibold text-red-700">{{ money(lendusExclNomina) }}</td></tr>
+                                    <tr v-if="lendusReclasificadoNomina > 0" class="border-b bg-orange-50/40"><td class="px-5 py-2 text-slate-600">(-) Reclasificado a Nómina</td><td class="px-5 py-2 text-right font-semibold text-orange-600">{{ money(lendusReclasificadoNomina) }}</td></tr>
+                                    <tr v-if="lendusExclPolizas > 0" class="border-b bg-red-50/40"><td class="px-5 py-2 text-slate-600">(-) Excluido: pólizas/seguros</td><td class="px-5 py-2 text-right font-semibold text-red-700">{{ money(lendusExclPolizas) }}</td></tr>
+                                    <tr class="border-t-2 border-amber-200 bg-amber-50"><td class="px-5 py-2.5 font-black text-amber-900">(=) Lendus final OPEX</td><td class="px-5 py-2.5 text-right font-black text-amber-900">{{ money(lendusFinalOpex) }}</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="border-t-2 border-indigo-200 bg-indigo-50 px-5 py-3 flex items-center justify-between">
+                            <span class="text-sm font-black text-indigo-900">OPEX TOTAL (ERP final + Lendus final)</span>
+                            <span class="text-sm font-black text-indigo-900">{{ money(brGlobalGastosTotal) }}</span>
+                        </div>
                     </div>
                     <div class="grid gap-4 lg:grid-cols-2">
                         <ChartCard title="Gastos por sucursal" :series="gastosPorSucursalSeries" :options="gastosPorSucursalOptions" type="donut" :height="300" />
@@ -1352,6 +1467,110 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                         </table>
                         <EmptyState v-else class="m-4" title="Sin datos de días vencidos" />
                     </div>
+
+                    <!-- Desglose por componente -->
+                    <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                        <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Desglose por componente — mora global</h3></div>
+                        <table class="w-full text-sm">
+                            <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
+                                <tr>
+                                    <th class="px-4 py-3 text-left">Bucket</th>
+                                    <th class="px-4 py-3 text-right">Capital atrasado</th>
+                                    <th class="px-4 py-3 text-right">Interés atrasado</th>
+                                    <th class="px-4 py-3 text-right">Impuesto atrasado</th>
+                                    <th class="px-4 py-3 text-right">S. Interés moratorio</th>
+                                    <th class="px-4 py-3 text-right">S. Imp. moratorio</th>
+                                    <th class="px-4 py-3 text-right">Total bucket</th>
+                                    <th class="px-4 py-3 text-right">% Mora</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="b in moraComponentes" :key="b.key" class="border-t hover:bg-slate-50">
+                                    <td class="px-4 py-2.5 font-semibold">{{ b.label }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(b.capital) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(b.interes) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(b.impuesto) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(b.moratorio) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(b.imp_moratorio) }}</td>
+                                    <td class="px-4 py-2.5 text-right font-bold text-red-700">{{ money(b.total) }}</td>
+                                    <td class="px-4 py-2.5 text-right text-slate-600">{{ b.pct.toFixed(1) }}%</td>
+                                </tr>
+                            </tbody>
+                            <tfoot class="bg-slate-100 font-black text-xs">
+                                <tr>
+                                    <td class="px-4 py-2.5 uppercase tracking-wider">Total mora</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(moraTotalesComponentes.capital) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(moraTotalesComponentes.interes) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(moraTotalesComponentes.impuesto) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(moraTotalesComponentes.moratorio) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(moraTotalesComponentes.imp_moratorio) }}</td>
+                                    <td class="px-4 py-2.5 text-right text-red-700">{{ money(moraTotalesComponentes.total) }}</td>
+                                    <td class="px-4 py-2.5 text-right">100%</td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- ══════════ EFECTIVIDAD DE COBRANZA ══════════ -->
+                <div v-show="activeTab === 'cobranza'" class="space-y-5">
+                    <template v-if="ecData">
+                        <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                            <KpiCard label="Total cobrado" :value="money(ecTotal.total)" :icon="Banknote" tone="teal" />
+                            <KpiCard label="Cobros vigentes" :value="money(ecData?.vigente?.total ?? 0)" :icon="CheckCircle2" tone="green" />
+                            <KpiCard label="Cobros en atraso" :value="money((ecData?.atrasado?.total ?? 0) + (ecData?.vencido?.total ?? 0))" :icon="AlertTriangle" tone="amber" />
+                            <KpiCard label="Cobros vencidos" :value="money(ecData?.vencido?.total ?? 0)" :icon="AlertTriangle" tone="red" />
+                        </div>
+
+                        <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                            <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Cobranza por estatus del crédito</h3></div>
+                            <table class="w-full text-sm">
+                                <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
+                                    <tr>
+                                        <th class="px-4 py-3 text-left">Estatus</th>
+                                        <th class="px-4 py-3 text-right">Contratos</th>
+                                        <th class="px-4 py-3 text-right">Capital</th>
+                                        <th class="px-4 py-3 text-right">Interés</th>
+                                        <th class="px-4 py-3 text-right">Impuesto</th>
+                                        <th class="px-4 py-3 text-right">Moratorios</th>
+                                        <th class="px-4 py-3 text-right">Total</th>
+                                        <th class="px-4 py-3 text-right">% Total</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="s in ecStatus" :key="s.key" class="border-t hover:bg-slate-50">
+                                        <td class="px-4 py-2.5 font-semibold">{{ s.label }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ num(s.contratos ?? 0) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(s.capital ?? 0) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(s.interes ?? 0) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(s.impuesto ?? 0) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(s.moratorios ?? 0) }}</td>
+                                        <td class="px-4 py-2.5 text-right font-bold" :class="s.key === 'vencido' ? 'text-red-700' : s.key === 'vigente' ? 'text-emerald-700' : ''">{{ money(s.total ?? 0) }}</td>
+                                        <td class="px-4 py-2.5 text-right text-slate-600">{{ ecTotal.total > 0 ? ((s.total ?? 0) / ecTotal.total * 100).toFixed(1) : '0.0' }}%</td>
+                                    </tr>
+                                </tbody>
+                                <tfoot class="bg-slate-100 font-black text-xs">
+                                    <tr>
+                                        <td class="px-4 py-2.5 uppercase tracking-wider">Total</td>
+                                        <td class="px-4 py-2.5 text-right">{{ num(ecTotal.contratos) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(ecTotal.capital) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(ecTotal.interes) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(ecTotal.impuesto) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(ecTotal.moratorios) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(ecTotal.total) }}</td>
+                                        <td class="px-4 py-2.5 text-right">100%</td>
+                                    </tr>
+                                </tfoot>
+                            </table>
+                        </div>
+
+                        <div class="rounded-2xl border bg-amber-50 px-5 py-4 text-sm text-amber-800">
+                            <strong>Nota metodológica:</strong> Los cobros se clasifican por los días de atraso del crédito al momento del cobro
+                            (DPD del archivo de cobros, con fallback a la cartera del mismo período). Excluye seguros (savehearts), condonaciones
+                            y coberturas — mismas exclusiones que la recuperación total.
+                        </div>
+                    </template>
+                    <EmptyState v-else title="Sin datos de efectividad de cobranza" description="Genera el reporte para ver esta sección." />
                 </div>
 
                 <!-- ══════════ PRODUCTOS ══════════ -->

@@ -63,6 +63,7 @@ class RadiographyWorkbookBuilder
             ['buildGlobalSheet',           'GLOBAL'],
             ['buildValorCarteraSheet',     'VALOR CARTERA'],
             ['buildMorasSheet',            'MORAS'],
+            ['buildEfectividadCobranzaSheet', 'EFECT. COBRANZA'],
             ['buildIngresosSheet',         'INGRESOS'],
             ['buildGastosSheet',           'GASTOS'],
             ['buildNominaSheet',           'NÓMINA'],
@@ -1115,7 +1116,167 @@ class RadiographyWorkbookBuilder
             $r++;
         }
 
-        foreach (['A'=>22,'B'=>18,'C'=>18,'D'=>18,'E'=>18,'F'=>18,'G'=>18,'H'=>18,'I'=>10] as $col => $w) {
+        // ── Desglose por componente por bucket (GLOBAL) ──────────────────────────
+        $global = $brCalc['global'] ?? [];
+        $bucketDefs = [
+            'mora_0_30'     => 'Mora 1-30 días',
+            'mora_31_60'    => 'Mora 31-60 días',
+            'mora_61_90'    => 'Mora 61-90 días',
+            'mora_91_120'   => 'Mora 91-120 días',
+            'mora_120_plus' => 'Mora 120+ días',
+        ];
+        $r++;
+        $this->sectionHeader($sheet, "A{$r}:H{$r}", 'DESGLOSE POR COMPONENTE — MORA GLOBAL');
+        $r++;
+        $this->colHeaders($sheet, $r, [
+            'A' => 'BUCKET',
+            'B' => 'CAPITAL ATRASADO',
+            'C' => 'INTERÉS ATRASADO',
+            'D' => 'IMPUESTO ATRASADO',
+            'E' => 'S. INTERÉS MORATORIO',
+            'F' => 'S. IMP. MORATORIO',
+            'G' => 'TOTAL BUCKET',
+            'H' => '% MORA TOTAL',
+        ]);
+        $r++;
+        $totalVencidaGlobal = (float) ($global['cartera_vencida'] ?? 0.0);
+        $totCompCols = array_fill_keys(['B','C','D','E','F','G'], 0.0);
+        $idx = 0;
+        foreach ($bucketDefs as $bKey => $bLabel) {
+            $cap  = (float) ($global["{$bKey}_capital"]       ?? 0.0);
+            $int  = (float) ($global["{$bKey}_interes"]       ?? 0.0);
+            $imp  = (float) ($global["{$bKey}_impuesto"]      ?? 0.0);
+            $mor  = (float) ($global["{$bKey}_moratorio"]     ?? 0.0);
+            $impm = (float) ($global["{$bKey}_imp_moratorio"] ?? 0.0);
+            $tot  = (float) ($global[$bKey]                   ?? 0.0);
+            $pct  = $totalVencidaGlobal > 0 ? round($tot / $totalVencidaGlobal * 100, 1) : 0.0;
+
+            $sheet->setCellValue("A{$r}", $bLabel);
+            foreach (['B'=>$cap,'C'=>$int,'D'=>$imp,'E'=>$mor,'F'=>$impm,'G'=>$tot] as $col => $val) {
+                $sheet->setCellValue("{$col}{$r}", $val);
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+                $totCompCols[$col] += $val;
+            }
+            $sheet->setCellValue("H{$r}", $pct);
+            $sheet->getStyle("H{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            $sheet->getStyle("H{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            $this->dataRow($sheet, "A{$r}:H{$r}", $idx % 2 === 0);
+            $idx++;
+            $r++;
+        }
+        // Totals row
+        $sheet->setCellValue("A{$r}", 'TOTAL MORA');
+        foreach ($totCompCols as $col => $val) {
+            $sheet->setCellValue("{$col}{$r}", $val);
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+        }
+        $sheet->setCellValue("H{$r}", 100.0);
+        $sheet->getStyle("H{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+        $this->totalsRow($sheet, "A{$r}:H{$r}");
+        $r++;
+
+        foreach (['A'=>22,'B'=>18,'C'=>18,'D'=>18,'E'=>20,'F'=>20,'G'=>18,'H'=>12,'I'=>10] as $col => $w) {
+            $sheet->getColumnDimension($col)->setWidth($w);
+        }
+        $sheet->freezePane('A4');
+    }
+
+    // ── EFECTIVIDAD DE COBRANZA ───────────────────────────────────────────────
+
+    private function buildEfectividadCobranzaSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet = $ss->createSheet()->setTitle('EFECT. COBRANZA');
+        $label = strtoupper($period->label);
+        $ec    = $snap['sections']['efectividad_cobranza'] ?? [];
+
+        $this->sheetTitle($sheet, 'A1:H1', 'EFECTIVIDAD DE COBRANZA — ' . $label);
+        $sheet->setCellValue('B2', 'Cobros clasificados por estatus del crédito: Vigente (DPD=0) / Atrasado (1-90) / Vencido (>90). Exclusiones: Seguros, Condonaciones, Coberturas.');
+        $this->metaStyle($sheet, 'B2:H2');
+        RadiographyStyleHelper::mergeCellsSafe($sheet, 'B2:H2');
+
+        $r = 4;
+        $this->sectionHeader($sheet, "A{$r}:H{$r}", 'RESUMEN POR ESTATUS');
+        $r++;
+        $this->colHeaders($sheet, $r, [
+            'A' => 'ESTATUS',
+            'B' => 'CONTRATOS',
+            'C' => 'CAPITAL',
+            'D' => 'INTERÉS',
+            'E' => 'IMPUESTO',
+            'F' => 'MORATORIOS',
+            'G' => 'TOTAL',
+            'H' => '% COBRADO',
+        ]);
+        $r++;
+
+        $statusDefs = [
+            'vigente'    => 'Vigente (DPD=0)',
+            'atrasado'   => 'Atrasado (1-90)',
+            'vencido'    => 'Vencido (>90)',
+            'sin_status' => 'Sin estatus',
+        ];
+        $grandTotal = (float) ($ec['total']['total'] ?? 0.0) ?: 1;
+        $idx = 0;
+        foreach ($statusDefs as $key => $label2) {
+            $b   = $ec[$key] ?? [];
+            $tot = (float) ($b['total'] ?? 0.0);
+            $pct = round($tot / $grandTotal * 100, 1);
+
+            $sheet->setCellValue("A{$r}", $label2);
+            $sheet->setCellValue("B{$r}", (int) ($b['contratos'] ?? 0));
+            $sheet->setCellValue("C{$r}", (float) ($b['capital']    ?? 0));
+            $sheet->setCellValue("D{$r}", (float) ($b['interes']    ?? 0));
+            $sheet->setCellValue("E{$r}", (float) ($b['impuesto']   ?? 0));
+            $sheet->setCellValue("F{$r}", (float) ($b['moratorios'] ?? 0));
+            $sheet->setCellValue("G{$r}", $tot);
+            $sheet->setCellValue("H{$r}", $pct);
+            $this->dataRow($sheet, "A{$r}:H{$r}", $idx % 2 === 0);
+            $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::INTEGER);
+            foreach (['C','D','E','F','G'] as $col) {
+                $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            }
+            $sheet->getStyle("H{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            $sheet->getStyle("H{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            $idx++;
+            $r++;
+        }
+
+        // Totals
+        $tot2 = $ec['total'] ?? [];
+        $sheet->setCellValue("A{$r}", 'TOTAL');
+        $sheet->setCellValue("B{$r}", (int) ($tot2['contratos'] ?? 0));
+        $sheet->setCellValue("C{$r}", (float) ($tot2['capital']    ?? 0));
+        $sheet->setCellValue("D{$r}", (float) ($tot2['interes']    ?? 0));
+        $sheet->setCellValue("E{$r}", (float) ($tot2['impuesto']   ?? 0));
+        $sheet->setCellValue("F{$r}", (float) ($tot2['moratorios'] ?? 0));
+        $sheet->setCellValue("G{$r}", (float) ($tot2['total']      ?? 0));
+        $sheet->setCellValue("H{$r}", 100.0);
+        $this->totalsRow($sheet, "A{$r}:H{$r}");
+        foreach (['C','D','E','F','G'] as $col) {
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        }
+        $sheet->getStyle("H{$r}")->getNumberFormat()->setFormatCode(self::PERCENT);
+        $r++;
+
+        $r++;
+        $this->sectionHeader($sheet, "A{$r}:H{$r}", 'INDICADORES DE EFECTIVIDAD');
+        $r++;
+        $vigente  = (float) ($ec['vigente']['total']  ?? 0);
+        $atrasado = (float) ($ec['atrasado']['total'] ?? 0);
+        $vencido  = (float) ($ec['vencido']['total']  ?? 0);
+        $total    = (float) ($ec['total']['total']    ?? 0) ?: 1;
+        $enMora   = $atrasado + $vencido;
+        $sheet->setCellValue("A{$r}", 'Cobros en mora (Atrasado + Vencido)');
+        $sheet->setCellValue("B{$r}", '$' . number_format($enMora, 2) . ' (' . round($enMora / $total * 100, 1) . '%)');
+        $r++;
+        $sheet->setCellValue("A{$r}", 'Cobros al corriente (Vigente)');
+        $sheet->setCellValue("B{$r}", '$' . number_format($vigente, 2) . ' (' . round($vigente / $total * 100, 1) . '%)');
+        $r++;
+
+        foreach (['A'=>32,'B'=>22,'C'=>18,'D'=>18,'E'=>18,'F'=>18,'G'=>18,'H'=>12] as $col => $w) {
             $sheet->getColumnDimension($col)->setWidth($w);
         }
         $sheet->freezePane('A4');
@@ -1247,8 +1408,54 @@ class RadiographyWorkbookBuilder
         RadiographyStyleHelper::applyTitleStyle($sheet, "A1:{$lastCol}1", 'GASTOS OPERATIVOS — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
 
-        // ── Vista 1: jerárquica por sucursal ─────────────────────────────────
+        // ── 0. Resumen OPEX: ERP y Lendus desglosados ───────────────────────
         $r = 4;
+        $this->sectionHeader($sheet, "A{$r}:C{$r}", '0. RESUMEN — INTEGRACIÓN OPEX (ERP + LENDUS)');
+        $r++;
+
+        $get = fn (string $k) => (float) ($global[$k] ?? 0.0);
+
+        $resumenRows = [
+            ['ERP total cargado (válido por fecha de pago)',          $get('gastos_erp_cargado'),                 false],
+            ['(-) ERP reclasificado a Nómina y Capital Humano',        -$get('gastos_erp_reclasificado_nomina'),   false],
+            ['(=) ERP final OPEX',                                     $get('gastos_erp_total'),                   true ],
+            ['',                                                        null,                                        false],
+            ['Lendus total cargado (PDF)',                              $get('gastos_lendus_cargado'),               false],
+            ['(-) Lendus excluido: fondeos entre sucursales',          -$get('gastos_lendus_excluido_fondeo'),      false],
+            ['(-) Lendus excluido: excedentes / envíos a corporativo', -$get('gastos_lendus_excluido_excedentes'), false],
+            ['(-) Lendus excluido: nómina real (NOMINA/IMSS/etc.)',    -$get('gastos_lendus_excluido_nomina'),     false],
+            ['(-) Lendus reclasificado a Nómina y Capital Humano',     -$get('gastos_lendus_reclasificado_nomina'),false],
+            ['(-) Lendus excluido: pólizas / seguros puente',          -$get('gastos_lendus_excluido_polizas'),    false],
+            ['(=) Lendus final OPEX',                                  $get('gastos_lendus_total'),                true ],
+            ['',                                                        null,                                        false],
+            ['OPEX TOTAL (ERP final + Lendus final)',                  $get('gastos_operativos'),                  true ],
+        ];
+
+        foreach ($resumenRows as $i => [$label2, $val, $isTotal]) {
+            if ($label2 === '') {
+                $r++;
+                continue;
+            }
+            RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", $label2);
+            if ($val !== null) {
+                $sheet->setCellValue("B{$r}", $val);
+                $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $sheet->getStyle("B{$r}")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_RIGHT);
+            }
+            if ($isTotal) {
+                $this->totalsRow($sheet, "A{$r}:B{$r}");
+                RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$r}");
+            } else {
+                $this->dataRow($sheet, "A{$r}:B{$r}", $i % 2 === 0);
+                if ($val !== null && $val < 0) {
+                    $sheet->getStyle("B{$r}")->getFont()->getColor()->setARGB(RadiographyStyleHelper::FG_RED);
+                }
+            }
+            $r++;
+        }
+        $r += 2;
+
+        // ── Vista 1: jerárquica por sucursal ─────────────────────────────────
         $vista1Row = $r;
         $this->sectionHeader($sheet, "A{$r}:B{$r}", 'VISTA 1 — GASTOS POR SUCURSAL (DESGLOSE JERÁRQUICO)');
         $r++;

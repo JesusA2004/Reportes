@@ -518,6 +518,11 @@ class BranchRadiographyCalculator
             ->whereIn('branch_id', $branchIds)
             ->where('days_past_due', '>', 0)
             ->selectRaw('branch_id, days_past_due,
+                SUM(COALESCE(capital_due, 0))                          as capital_vencido,
+                SUM(COALESCE(interes_atrasado, 0))                     as interes_vencido,
+                SUM(COALESCE(impuesto_atrasado, 0))                    as impuesto_vencido,
+                SUM(COALESCE(saldo_interes_moratorio, 0))              as moratorio_vencido,
+                SUM(COALESCE(saldo_impuesto_interes_moratorio, 0))     as imp_moratorio_vencido,
                 SUM(
                     COALESCE(capital_due, 0)
                     + COALESCE(interes_atrasado, 0)
@@ -537,6 +542,11 @@ class BranchRadiographyCalculator
 
             $dpd     = (int) $row->days_past_due;
             $vencido = (float) $row->vencido;
+            $capital  = (float) $row->capital_vencido;
+            $interes  = (float) $row->interes_vencido;
+            $impuesto = (float) $row->impuesto_vencido;
+            $morat    = (float) $row->moratorio_vencido;
+            $impMorat = (float) $row->imp_moratorio_vencido;
 
             $bucket = match (true) {
                 $dpd <= 30  => 'mora_0_30',
@@ -546,9 +556,20 @@ class BranchRadiographyCalculator
                 default     => 'mora_120_plus',
             };
 
-            $summaries[$suc][$bucket]         += $vencido;
-            $summaries[$suc]["{$bucket}_cnt"] += (int) $row->cnt;
-            $summaries[$suc]['cartera_vencida'] += $vencido;
+            $summaries[$suc][$bucket]                   += $vencido;
+            $summaries[$suc]["{$bucket}_cnt"]            += (int) $row->cnt;
+            $summaries[$suc]["{$bucket}_capital"]        += $capital;
+            $summaries[$suc]["{$bucket}_interes"]        += $interes;
+            $summaries[$suc]["{$bucket}_impuesto"]       += $impuesto;
+            $summaries[$suc]["{$bucket}_moratorio"]      += $morat;
+            $summaries[$suc]["{$bucket}_imp_moratorio"]  += $impMorat;
+
+            $summaries[$suc]['cartera_vencida']          += $vencido;
+            $summaries[$suc]['mora_total_capital']        += $capital;
+            $summaries[$suc]['mora_total_interes']        += $interes;
+            $summaries[$suc]['mora_total_impuesto']       += $impuesto;
+            $summaries[$suc]['mora_total_moratorio']      += $morat;
+            $summaries[$suc]['mora_total_imp_moratorio']  += $impMorat;
         }
     }
 
@@ -635,11 +656,13 @@ class BranchRadiographyCalculator
                 }
 
                 if ($srcType === 'erp') {
-                    // ERP rule: filter ONLY on Sucursal (already done above). Gasolina/Financiamiento
-                    // Celular are reclassified to Nómina y Capital Humano (ligados a gestores/
-                    // empleados) — accumulateNomina() ya los suma allá; aquí se excluyen de OPEX
-                    // para no duplicar gasto. Todo lo demás cuenta hacia gastos_erp_total sin excepción.
+                    // ERP: track total cargado (before Nómina reclassification)
+                    $summaries[$suc]['gastos_erp_cargado'] += $amt;
+
+                    // Gasolina/Financiamiento Celular → reclassified to Nómina y Capital Humano.
+                    // accumulateNomina() ya los suma allá; aquí se excluyen de OPEX para no duplicar.
                     if (in_array($cat, self::NOMINA_EXPENSE_CATS, true)) {
+                        $summaries[$suc]['gastos_erp_reclasificado_nomina'] += $amt;
                         continue;
                     }
                     $summaries[$suc]['gastos_operativos'] += $amt;
@@ -650,7 +673,9 @@ class BranchRadiographyCalculator
                     continue;
                 }
 
-                // Lendus: unchanged exclusion rules (Excedentes, Fondeo, Nómina, Seguros/Pólizas).
+                // Lendus: track total cargado (before all exclusions)
+                $summaries[$suc]['gastos_lendus_cargado'] += $amt;
+
                 $conceptUp = strtoupper(trim((string) ($row->concept ?? '')));
                 $conceptUp = preg_replace('/\s+/u', ' ', $conceptUp) ?? $conceptUp;
                 $isExcedente = $cat === self::EXCEDENTES_CAT || str_contains($catUpper, 'EXCEDENTE');
@@ -673,16 +698,21 @@ class BranchRadiographyCalculator
                 );
 
                 if ($isExcedente) {
-                    $summaries[$suc]['excedentes'] += $amt;
+                    $summaries[$suc]['excedentes']                       += $amt;
+                    $summaries[$suc]['gastos_lendus_excluido_excedentes'] += $amt;
                 } elseif ($isFondeo) {
-                    $summaries[$suc]['prestamos_fondea'] += $amt;
+                    $summaries[$suc]['prestamos_fondea']                 += $amt;
+                    $summaries[$suc]['gastos_lendus_excluido_fondeo']    += $amt;
                 } elseif ($isNomina || $isNominaExpense) {
+                    $summaries[$suc]['gastos_lendus_excluido_nomina']    += $amt;
                     // skip — accumulateNomina() handles these
                 } elseif ($isNominaReclass) {
                     $label = $this->canonicalNominaExpense($cat, (string) ($row->concept ?? ''));
-                    $summaries[$suc]['nomina_detalle'][$label] = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amt;
+                    $summaries[$suc]['nomina_detalle'][$label]             = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amt;
+                    $summaries[$suc]['gastos_lendus_reclasificado_nomina'] += $amt;
                 } elseif ($isSegurosPuente) {
-                    $summaries[$suc]['seguros_lendus_puente'] += $amt;
+                    $summaries[$suc]['seguros_lendus_puente']            += $amt;
+                    $summaries[$suc]['gastos_lendus_excluido_polizas']   += $amt;
                 } else {
                     $summaries[$suc]['gastos_operativos']  += $amt;
                     $summaries[$suc]['gastos_lendus_total'] += $amt;
@@ -1035,16 +1065,56 @@ class BranchRadiographyCalculator
             'mora_61_90'          => 0.0,
             'mora_91_120'         => 0.0,
             'mora_120_plus'       => 0.0,
-            'mora_0_30_cnt'       => 0,
-            'mora_31_60_cnt'      => 0,
-            'mora_61_90_cnt'      => 0,
-            'mora_91_120_cnt'     => 0,
-            'mora_120_plus_cnt'   => 0,
-            'gastos_operativos'    => 0.0,  // gastos_erp_total + gastos_lendus_total
-            'gastos_erp_total'     => 0.0,  // ERP contribution (excl. cats in LENDUS_PRESENT_CATS)
-            'gastos_lendus_total'  => 0.0,  // Lendus operative contribution (excl. seguros/fondeo/excedentes/nomina)
-            'seguros_lendus_puente'=> 0.0,  // Lendus pólizas/seguros — passthrough, NOT in gastos_operativos
-            'gastos_detalle'       => [],   // canonical_concept => amount (summed from source data)
+            'mora_0_30_cnt'           => 0,
+            'mora_31_60_cnt'          => 0,
+            'mora_61_90_cnt'          => 0,
+            'mora_91_120_cnt'         => 0,
+            'mora_120_plus_cnt'       => 0,
+            // Per-bucket component breakdown
+            'mora_0_30_capital'       => 0.0,
+            'mora_0_30_interes'       => 0.0,
+            'mora_0_30_impuesto'      => 0.0,
+            'mora_0_30_moratorio'     => 0.0,
+            'mora_0_30_imp_moratorio' => 0.0,
+            'mora_31_60_capital'       => 0.0,
+            'mora_31_60_interes'       => 0.0,
+            'mora_31_60_impuesto'      => 0.0,
+            'mora_31_60_moratorio'     => 0.0,
+            'mora_31_60_imp_moratorio' => 0.0,
+            'mora_61_90_capital'       => 0.0,
+            'mora_61_90_interes'       => 0.0,
+            'mora_61_90_impuesto'      => 0.0,
+            'mora_61_90_moratorio'     => 0.0,
+            'mora_61_90_imp_moratorio' => 0.0,
+            'mora_91_120_capital'       => 0.0,
+            'mora_91_120_interes'       => 0.0,
+            'mora_91_120_impuesto'      => 0.0,
+            'mora_91_120_moratorio'     => 0.0,
+            'mora_91_120_imp_moratorio' => 0.0,
+            'mora_120_plus_capital'       => 0.0,
+            'mora_120_plus_interes'       => 0.0,
+            'mora_120_plus_impuesto'      => 0.0,
+            'mora_120_plus_moratorio'     => 0.0,
+            'mora_120_plus_imp_moratorio' => 0.0,
+            // Totals across all buckets
+            'mora_total_capital'       => 0.0,
+            'mora_total_interes'       => 0.0,
+            'mora_total_impuesto'      => 0.0,
+            'mora_total_moratorio'     => 0.0,
+            'mora_total_imp_moratorio' => 0.0,
+            'gastos_operativos'                  => 0.0,  // = gastos_erp_total + gastos_lendus_total (OPEX final)
+            'gastos_erp_total'                   => 0.0,  // ERP que queda en OPEX (excl. reclasificados a Nómina)
+            'gastos_erp_cargado'                 => 0.0,  // ERP total cargado (antes de reclasificación)
+            'gastos_erp_reclasificado_nomina'    => 0.0,  // ERP excluido: reclasificado a Nómina/Capital Humano
+            'gastos_lendus_total'                => 0.0,  // Lendus que queda en OPEX
+            'gastos_lendus_cargado'              => 0.0,  // Lendus total cargado (antes de todas las exclusiones)
+            'gastos_lendus_excluido_fondeo'      => 0.0,  // Lendus excluido: fondeos entre sucursales
+            'gastos_lendus_excluido_excedentes'  => 0.0,  // Lendus excluido: envíos a corporativo/excedentes
+            'gastos_lendus_excluido_nomina'      => 0.0,  // Lendus excluido: nómina real (NOMINA/IMSS/DEDUCCIONES)
+            'gastos_lendus_reclasificado_nomina' => 0.0,  // Lendus reclasificado: FINIQUITO/MEDICO → Nómina
+            'gastos_lendus_excluido_polizas'     => 0.0,  // Lendus excluido: seguros/coberturas puente
+            'seguros_lendus_puente'              => 0.0,  // alias de gastos_lendus_excluido_polizas (backward compat)
+            'gastos_detalle'                     => [],   // canonical_concept => amount (summed from source data)
             'nomina_total'         => 0.0,
             'comisiones'           => 0.0,
             'bonos'                => 0.0,
@@ -1212,9 +1282,18 @@ class BranchRadiographyCalculator
             'vacaciones'         => 0.0,
             'prima_vacacional'   => 0.0,
             'nomina_detalle'     => [],   // display_label => amount
-            'gastos_operativos'  => 0.0,  // CORPORATIVO operative ERP+Lendus (added to global)
-            'gastos_erp_total'   => 0.0,  // CORPORATIVO ERP operative contribution
-            'gastos_lendus_total'=> 0.0,  // CORPORATIVO Lendus operative contribution
+            'gastos_operativos'                  => 0.0,
+            'gastos_erp_total'                   => 0.0,
+            'gastos_erp_cargado'                 => 0.0,
+            'gastos_erp_reclasificado_nomina'    => 0.0,
+            'gastos_lendus_total'                => 0.0,
+            'gastos_lendus_cargado'              => 0.0,
+            'gastos_lendus_excluido_fondeo'      => 0.0,
+            'gastos_lendus_excluido_excedentes'  => 0.0,
+            'gastos_lendus_excluido_nomina'      => 0.0,
+            'gastos_lendus_reclasificado_nomina' => 0.0,
+            'gastos_lendus_excluido_polizas'     => 0.0,
+            'seguros_lendus_puente'              => 0.0,
             'empleados'          => [],   // per-employee detail for SIN ASIGNAR sheet
             'gastos_items'       => [],   // per-gasto detail for SIN ASIGNAR sheet
             'pension_alimenticia_detectada' => 0.0, // D010 — auditoría, NO se suma a Nómina y Capital Humano
