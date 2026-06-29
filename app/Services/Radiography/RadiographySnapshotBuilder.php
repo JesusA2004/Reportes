@@ -1804,9 +1804,24 @@ class RadiographySnapshotBuilder
                 if ($detected) $toBranch = $detected;
             }
 
-            $fromBranch = ($ex->branch && $ex->branch !== '')
-                ? ($resolver->resolveRealBranchFromRoute($ex->branch) ?? $ex->branch)
-                : 'Sin identificar';
+            if ($ex->branch && $ex->branch !== '') {
+                $fromBranch = $resolver->resolveRealBranchFromRoute($ex->branch) ?? $ex->branch;
+            } else {
+                $fromBranch = 'Sin identificar';
+                $observ = trim($ex->observations ?? '');
+                if ($observ !== '') {
+                    $normName   = $this->canonicalizer->normalize($observ);
+                    $empBranch  = DB::table('employees as e')
+                        ->join('employee_branch_assignments as eba', 'e.id', '=', 'eba.employee_id')
+                        ->join('branches as b', 'eba.branch_id', '=', 'b.id')
+                        ->where('e.normalized_name', $normName)
+                        ->where('eba.period_id', $period->id)
+                        ->value('b.name');
+                    if ($empBranch) {
+                        $fromBranch = strtoupper($empBranch);
+                    }
+                }
+            }
 
             $fondeaMap[$fromBranch] = ($fondeaMap[$fromBranch] ?? 0.0) + $exAmount;
             $recibeMap[$toBranch]   = ($recibeMap[$toBranch]   ?? 0.0) + $exAmount;
@@ -1823,22 +1838,78 @@ class RadiographySnapshotBuilder
             ];
         }
 
-        $total = array_sum(array_column($detail, 'amount'));
+        // ── D: Classify each row as fondeo operativo or excedente ───────────────
+        // "Excedente" = to_branch is CORPORATIVO (money sent to corporate office).
+        // "Fondeo operativo" = everything else (operative-to-operative).
+        // Rule: operative fondeos must satisfy fondea_total == recibe_total (neto=$0).
+        $EXCEDENTE_DESTINATIONS = ['CORPORATIVO'];
 
-        $fondeaRows = collect($fondeaMap)
+        $fondeaOperMap   = [];
+        $recibeOperMap   = [];
+        $excedenteByMap  = [];
+
+        $detailFondeos   = [];
+        $detailExcedentes = [];
+
+        foreach ($detail as $row) {
+            $tob = $row['to_branch'];
+            if (in_array($tob, $EXCEDENTE_DESTINATIONS, true)) {
+                $excedenteByMap[$row['from_branch']] = ($excedenteByMap[$row['from_branch']] ?? 0.0) + $row['amount'];
+                $row['type']      = 'excedente';
+                $detailExcedentes[] = $row;
+            } else {
+                $fondeaOperMap[$row['from_branch']] = ($fondeaOperMap[$row['from_branch']] ?? 0.0) + $row['amount'];
+                $recibeOperMap[$tob]               = ($recibeOperMap[$tob]               ?? 0.0) + $row['amount'];
+                $row['type']      = 'fondeo';
+                $detailFondeos[]  = $row;
+            }
+        }
+
+        $totalFondeoOper = array_sum($fondeaOperMap);
+        $totalExcedentes = array_sum($excedenteByMap);
+        $total           = $totalFondeoOper + $totalExcedentes;
+
+        $fondeaOperRows = collect($fondeaOperMap)
             ->map(fn ($v, $k) => ['branch' => $k, 'total' => $v])
             ->sortByDesc('total')->values()->all();
 
+        $recibeOperRows = collect($recibeOperMap)
+            ->map(fn ($v, $k) => ['branch' => $k, 'total' => $v])
+            ->sortByDesc('total')->values()->all();
+
+        $excedenteRows = collect($excedenteByMap)
+            ->map(fn ($v, $k) => ['branch' => $k, 'total' => $v])
+            ->sortByDesc('total')->values()->all();
+
+        // Backward-compat: combined fondea/recibe (all rows)
+        $fondeaRows = collect($fondeaMap)
+            ->map(fn ($v, $k) => ['branch' => $k, 'total' => $v])
+            ->sortByDesc('total')->values()->all();
         $recibeRows = collect($recibeMap)
             ->map(fn ($v, $k) => ['branch' => $k, 'total' => $v])
             ->sortByDesc('total')->values()->all();
 
         return [
+            // Operative fondeos section (fondea = recibe, neto = $0)
+            'operative_fondeos' => [
+                'fondea'        => $fondeaOperRows,
+                'recibe'        => $recibeOperRows,
+                'fondea_total'  => $totalFondeoOper,
+                'recibe_total'  => $totalFondeoOper, // = fondea (neto=0 by design)
+                'detail'        => $detailFondeos,
+            ],
+            // Excedentes / envío a CORPORATIVO section
+            'excedentes' => [
+                'by_branch'     => $excedenteRows,
+                'total'         => $totalExcedentes,
+                'detail'        => $detailExcedentes,
+            ],
+            // Totals and combined detail (all rows)
             'total'     => $total,
             'fondea'    => $fondeaRows,
             'recibe'    => $recibeRows,
             'by_branch' => $fondeaRows,
-            'detail'    => $detail,
+            'detail'    => array_merge($detailFondeos, $detailExcedentes),
             'unmatched' => $unmatched,
             'incidents' => $incidents,
         ];
@@ -1852,33 +1923,77 @@ class RadiographySnapshotBuilder
     {
         if (empty(trim($text))) return null;
 
-        $upper    = mb_strtoupper($text);
+        // Split on pipe (|) and try each segment independently so "FONDEO | A CUERNAVACA"
+        // resolves "A CUERNAVACA" correctly.
+        $segments = array_map('trim', explode('|', $text));
+        foreach ($segments as $segment) {
+            $result = $this->detectBranchFromSegment($segment, $resolver);
+            if ($result) return $result;
+        }
+
+        return null;
+    }
+
+    private function detectBranchFromSegment(string $text, BranchResolverService $resolver): ?string
+    {
+        if (empty(trim($text))) return null;
+
+        $upper = mb_strtoupper(trim($text));
+
         $patterns = [
-            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/FOND(?:EA|EO)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/FOND(?:EA|EO)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/INTERSUCURSAL\s+(?:A|PARA)?\s*SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/INTERSUCURSAL\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/(?:A|PARA)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/^SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/DEP[OÓ]SITO\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/APOYO\s+(?:A|PARA)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/FOND(?:EA|EO)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/FOND(?:EA|EO)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/INTERSUCURSAL\s+(?:A|PARA)?\s*SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/INTERSUCURSAL\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/(?:A|PARA)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/\bSUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/DEP[OÓ]SITO\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/APOYO\s+(?:A|PARA)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
         ];
 
         foreach ($patterns as $pattern) {
-            if (preg_match($pattern, $upper, $m)) {
-                $candidate = trim($m[1]);
-                if (strlen($candidate) >= 3) {
+            if (preg_match_all($pattern, $upper, $matches)) {
+                // Take the LAST match group — handles "FONDEO FONDEO IXTLAHUACA" double-prefix
+                $lastIdx   = count($matches[1]) - 1;
+                $candidate = $this->stripBranchNoise(trim($matches[1][$lastIdx]));
+                if (mb_strlen($candidate) >= 3) {
                     $resolved = $resolver->resolveRealBranchFromRoute($candidate);
                     if ($resolved) return $resolved;
                 }
             }
         }
 
+        // Fallback: strip all noise from entire segment and try direct resolution.
+        // Covers "SAN JUAN DEL RIO", "SUCURSAL CORDOBA", "A SUC TENANGO", etc.
+        $stripped = $this->stripBranchNoise($upper);
+        if (mb_strlen($stripped) >= 3) {
+            $resolved = $resolver->resolveRealBranchFromRoute($stripped);
+            if ($resolved) return $resolved;
+        }
+
         return null;
+    }
+
+    private function stripBranchNoise(string $candidate): string
+    {
+        static $noiseLeading = ['FONDEO', 'FONDEA', 'DEPOSITO', 'DEPÓSITO', 'A', 'PARA', 'DE', 'SUC', 'SUCURSAL'];
+        $c = mb_strtoupper(trim($candidate));
+        $changed = true;
+        while ($changed) {
+            $changed = false;
+            foreach ($noiseLeading as $noise) {
+                if (str_starts_with($c, $noise . ' ')) {
+                    $c       = trim(mb_substr($c, mb_strlen($noise)));
+                    $changed = true;
+                    break;
+                }
+            }
+        }
+        return $c;
     }
 
     /**
@@ -2193,22 +2308,54 @@ class RadiographySnapshotBuilder
      */
     private function buildFondeoDetalle(): array
     {
+        // Alias map: texto normalizado (sin acentos) → nombre oficial
+        static $branchAliases = [
+            'CORDOBA'           => 'CÓRDOBA',
+            'SAN JUAN DEL RIO'  => 'SAN JUAN DEL RÍO',
+            'SAN JUAN'          => 'SAN JUAN DEL RÍO',
+            'SAN LUIS POTOSI'   => 'SAN LUIS POTOSÍ',
+            'TENANGO'           => 'TENANGO DEL VALLE',
+            'MIACATLAN'         => 'MIACATLÁN',
+            'ATLACOMULCO'       => 'ATLACOMULCO',
+            'ATLIXCO'           => 'ATLIXCO',
+            'CUERNAVACA'        => 'CUERNAVACA',
+            'HUAMANTLA'         => 'HUAMANTLA',
+            'IXTLAHUACA'        => 'IXTLAHUACA',
+            'ORIZABA'           => 'ORIZABA',
+            'TENANGO DEL VALLE' => 'TENANGO DEL VALLE',
+            'TLAXCALA'          => 'TLAXCALA',
+            'TULA'              => 'TULA',
+        ];
+
+        $normalize = static function (string $v): string {
+            return strtr(mb_strtoupper(trim($v)), ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U','Ü'=>'U','Ñ'=>'N']);
+        };
+
+        // Solo fuente PDF (gastos_lendus). El Excel complementario (gastos_lendus_excel)
+        // se usa en buildInterbranchLoans() para el cruce destino. Aquí mostramos un registro
+        // por movimiento con origen ya resuelto, sin duplicados PDF+Excel.
         $rows = DB::table('fact_expenses as e')
             ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+            ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
             ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
-            ->leftJoin('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
             ->whereIn('e.period_id', $this->dataIds)
             ->where('e.category', 'Préstamos Intersucursales')
+            ->where('ds.code', 'gastos_lendus')
             ->select(
                 'e.id',
-                'b.name as sucursal_origen',
+                // Origen: branch resuelto en import; fallback a branch_origen del bloque PDF
+                DB::raw("COALESCE(b.name, JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.branch_origen'))) as sucursal_origen"),
                 'e.observations',
                 'e.expense_date as fecha',
                 'e.amount',
                 'e.paid_amount',
                 'ds.code as fuente',
-                DB::raw("JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.branch_to_detected')) as sucursal_destino"),
-                DB::raw("JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.solicitante')) as responsable"),
+                // Destino: PDF usa fondeo_destino_sucursal; fallback al concepto raw si ambos fallan
+                DB::raw("COALESCE(
+                    NULLIF(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.fondeo_destino_sucursal')), 'No detectado'), 'null'),
+                    NULLIF(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.branch_to_detected')), 'No detectado'), 'null')
+                ) as sucursal_destino_raw"),
+                DB::raw("JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.fondeo_destino_texto')) as destino_texto"),
             )
             ->orderBy('b.name')
             ->orderByDesc('e.amount')
@@ -2219,12 +2366,34 @@ class RadiographySnapshotBuilder
         foreach ($rows as $row) {
             $monto = (float) ($row->paid_amount ?: $row->amount);
             $total += $monto;
+
+            // Normalize origen
+            $origen = (string) ($row->sucursal_origen ?? '');
+            if ($origen === '' || $origen === 'null') {
+                $origen = '(sin sucursal)';
+            } else {
+                $norm = $normalize($origen);
+                $origen = $branchAliases[$norm] ?? $origen;
+            }
+
+            // Normalize destino
+            $destino = (string) ($row->sucursal_destino_raw ?? '');
+            if ($destino === '' || $destino === 'null') {
+                $destino = 'No detectado';
+            } else {
+                $norm = $normalize($destino);
+                $destino = $branchAliases[$norm] ?? $destino;
+            }
+
+            // El empleado/responsable del PDF viene en observations (campo employee del PDF)
+            $responsable = (string) ($row->observations ?? '');
+
             $detail[] = [
-                'sucursal_origen'  => (string) ($row->sucursal_origen ?? '(sin sucursal)'),
-                'sucursal_destino' => (string) ($row->sucursal_destino ?? 'No detectado'),
-                'responsable'      => (string) ($row->responsable ?? ''),
+                'sucursal_origen'  => $origen,
+                'sucursal_destino' => $destino,
+                'responsable'      => $responsable,
                 'monto'            => $monto,
-                'observacion'      => (string) ($row->observations ?? ''),
+                'observacion'      => (string) ($row->destino_texto ?? ''),
                 'fecha'            => $row->fecha,
                 'fuente'           => $row->fuente,
             ];
@@ -2325,12 +2494,61 @@ class RadiographySnapshotBuilder
     }
 
     // ── ROTACIÓN DE PERSONAL ─────────────────────────────────────────────────
+    //
+    // Prioridad: datos del archivo XLSX importado (fact_rotacion).
+    // Fallback: cálculo derivado de NOI (comparación entre periodos).
 
     private function buildRotationData(Period $period): array
     {
+        // Try uploaded Excel data first
+        $xlsxRows = DB::table('fact_rotacion as fr')
+            ->leftJoin('branches as b', 'fr.branch_id', '=', 'b.id')
+            ->whereIn('fr.period_id', $this->dataIds)
+            ->select(
+                'fr.sucursal_nombre',
+                'fr.branch_id',
+                'fr.mes',
+                'fr.bajas',
+                'fr.promedio_personal',
+                'fr.indice_rotacion',
+                'fr.hoja_fuente',
+                'b.name as branch_name',
+            )
+            ->orderBy('fr.sucursal_nombre')
+            ->get();
+
+        if ($xlsxRows->isNotEmpty()) {
+            $totalBajas    = $xlsxRows->sum('bajas');
+            $totalPromedio = $xlsxRows->sum('promedio_personal');
+            $mesUsado      = $xlsxRows->pluck('mes')->unique()->first() ?? '';
+            $indiceGlobal  = $totalPromedio > 0
+                ? round($totalBajas / $totalPromedio * 100, 2)
+                : round($xlsxRows->avg('indice_rotacion') ?? 0.0, 2);
+
+            $porSucursal = $xlsxRows->map(fn ($r) => [
+                'sucursal'          => $r->sucursal_nombre,
+                'bajas'             => (int) $r->bajas,
+                'promedio_personal' => (float) $r->promedio_personal,
+                'indice_rotacion'   => (float) $r->indice_rotacion,
+                'mes'               => $r->mes,
+                'hoja_fuente'       => $r->hoja_fuente,
+            ])->values()->all();
+
+            return [
+                'fuente'        => 'xlsx',
+                'mes'           => $mesUsado,
+                'bajas'         => (int) $totalBajas,
+                'promedio'      => round((float) $totalPromedio, 2),
+                'indice'        => $indiceGlobal,
+                'current_count' => 0,
+                'prev_count'    => 0,
+                'por_sucursal'  => $porSucursal,
+            ];
+        }
+
+        // Fallback: derive from NOI movements (compare prev vs current period)
         $allPeriods = Period::all();
 
-        // Active employees in current period (NOI movements)
         $currentEmps = DB::table('fact_noi_movements')
             ->whereIn('period_id', $this->dataIds)
             ->whereNotNull('employee_id')
@@ -2339,7 +2557,6 @@ class RadiographySnapshotBuilder
             ->toArray();
         $currentCount = count($currentEmps);
 
-        // Previous period: highest id strictly less than current period id
         $prevPeriod = $allPeriods
             ->filter(fn ($p) => $p->id < $period->id)
             ->sortByDesc('id')
@@ -2374,11 +2591,14 @@ class RadiographySnapshotBuilder
         $indice   = $promedio > 0 ? round($bajas / $promedio * 100, 2) : 0.0;
 
         return [
+            'fuente'        => 'noi',
+            'mes'           => '',
             'bajas'         => $bajas,
             'promedio'      => $promedio,
             'indice'        => $indice,
             'current_count' => $currentCount,
             'prev_count'    => $prevCount,
+            'por_sucursal'  => [],
         ];
     }
 
@@ -2703,13 +2923,12 @@ class RadiographySnapshotBuilder
 
         $empty = fn () => ['capital' => 0.0, 'interes' => 0.0, 'impuesto' => 0.0, 'moratorios' => 0.0, 'total' => 0.0, 'contratos' => 0];
         $buckets = [
-            'vigente'    => $empty(),
-            'atrasado'   => $empty(),
-            'vencido'    => $empty(),
-            'sin_status' => $empty(),
+            'vigente'  => $empty(),
+            'atrasado' => $empty(),
+            'vencido'  => $empty(),
         ];
 
-        $contractsSeen = ['vigente' => [], 'atrasado' => [], 'vencido' => [], 'sin_status' => []];
+        $contractsSeen = ['vigente' => [], 'atrasado' => [], 'vencido' => []];
 
         foreach ($recoveries as $row) {
             $contract = (string) $row->contract;
@@ -2718,11 +2937,13 @@ class RadiographySnapshotBuilder
                 ? (int) $row->recovery_dpd
                 : ($portfolioDpd[$contract] ?? null);
 
+            // DPD null → tratar como vigente (sin evidencia de atraso).
+            // Estos registros quedan en auditoría audit-efectividad-cobranza.
             $status = match (true) {
-                $dpd === null      => 'sin_status',
-                $dpd === 0         => 'vigente',
-                $dpd <= 90         => 'atrasado',
-                default            => 'vencido',
+                $dpd === null => 'vigente',
+                $dpd === 0    => 'vigente',
+                $dpd <= 90    => 'atrasado',
+                default       => 'vencido',
             };
 
             $buckets[$status]['capital']    += (float) $row->capital;

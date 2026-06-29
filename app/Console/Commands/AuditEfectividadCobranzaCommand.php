@@ -85,51 +85,74 @@ class AuditEfectividadCobranzaCommand extends Command
         }
 
         $empty = fn () => ['capital' => 0.0, 'interes' => 0.0, 'impuesto' => 0.0, 'moratorios' => 0.0, 'total' => 0.0, 'contratos' => 0, 'movimientos' => 0];
-        $buckets = ['Vigente' => $empty(), 'Atrasado' => $empty(), 'Vencido' => $empty(), 'Sin status' => $empty()];
-        $contractsSeen = ['Vigente' => [], 'Atrasado' => [], 'Vencido' => [], 'Sin status' => []];
+        // Sin status se mantiene SOLO en auditoría (en el reporte principal se mueve a Vigente).
+        $buckets = ['Vigente' => $empty(), 'Atrasado' => $empty(), 'Vencido' => $empty(), 'Sin status (→ Vigente)' => $empty()];
+        $contractsSeen = ['Vigente' => [], 'Atrasado' => [], 'Vencido' => [], 'Sin status (→ Vigente)' => []];
         $dpds = [];
         $detailRows = [];
 
         foreach ($recoveries as $row) {
-            $contract = (string) $row->contract;
-            $dpd = $row->recovery_dpd !== null
-                ? (int) $row->recovery_dpd
-                : ($portfolioDpd[$contract] ?? null);
+            $contract    = (string) $row->contract;
+            $recoveryDpd = $row->recovery_dpd !== null ? (int) $row->recovery_dpd : null;
+            $portfolioDpdVal = $portfolioDpd[$contract] ?? null;
+            $dpd = $recoveryDpd ?? $portfolioDpdVal;
 
-            $status = match (true) {
-                $dpd === null => 'Sin status',
+            $dpdFuente = $recoveryDpd !== null ? 'cobro' : ($portfolioDpdVal !== null ? 'cartera' : 'desconocido');
+
+            // Para auditoría usamos la categoría real (sin el fallback a Vigente).
+            // En el reporte principal, dpd===null se trata como Vigente.
+            $auditStatus = match (true) {
+                $dpd === null => 'Sin status (→ Vigente)',
+                $dpd === 0    => 'Vigente',
+                $dpd <= 90    => 'Atrasado',
+                default       => 'Vencido',
+            };
+            // Clasificación final visible en el reporte (igual que buildEfectividadCobranza)
+            $clasificacionFinal = match (true) {
+                $dpd === null => 'Vigente',
                 $dpd === 0    => 'Vigente',
                 $dpd <= 90    => 'Atrasado',
                 default       => 'Vencido',
             };
 
-            $buckets[$status]['capital']    += (float) $row->capital;
-            $buckets[$status]['interes']    += (float) $row->interes;
-            $buckets[$status]['impuesto']   += (float) $row->impuesto;
-            $buckets[$status]['moratorios'] += (float) $row->moratorios;
-            $buckets[$status]['total']      += (float) $row->total;
-            $buckets[$status]['movimientos']++;
-            if (!isset($contractsSeen[$status][$contract])) {
-                $contractsSeen[$status][$contract] = true;
-                $buckets[$status]['contratos']++;
+            $motivo = match ($dpdFuente) {
+                'cobro'      => 'DPD tomado de fact_recoveries',
+                'cartera'    => 'DPD tomado de fact_portfolios (fallback)',
+                default      => 'DPD nulo en cobro y saldos — clasificado como Vigente por defecto',
+            };
+
+            $buckets[$auditStatus]['capital']    += (float) $row->capital;
+            $buckets[$auditStatus]['interes']    += (float) $row->interes;
+            $buckets[$auditStatus]['impuesto']   += (float) $row->impuesto;
+            $buckets[$auditStatus]['moratorios'] += (float) $row->moratorios;
+            $buckets[$auditStatus]['total']      += (float) $row->total;
+            $buckets[$auditStatus]['movimientos']++;
+            if (!isset($contractsSeen[$auditStatus][$contract])) {
+                $contractsSeen[$auditStatus][$contract] = true;
+                $buckets[$auditStatus]['contratos']++;
             }
 
             $dpds[$contract] = $dpd;
 
             $detailRows[] = [
-                'id'          => $row->id,
-                'contract'    => $contract,
-                'sucursal'    => (string) ($row->sucursal ?? '(sin sucursal)'),
-                'status'      => $status,
-                'dpd'         => $dpd ?? '—',
-                'dpd_fuente'  => $row->recovery_dpd !== null ? 'cobro' : (($portfolioDpd[$contract] ?? null) !== null ? 'cartera' : 'desconocido'),
-                'concept'     => (string) ($row->concept ?? ''),
-                'operation'   => (string) ($row->operation ?? ''),
-                'capital'     => (float) $row->capital,
-                'interes'     => (float) $row->interes,
-                'impuesto'    => (float) $row->impuesto,
-                'moratorios'  => (float) $row->moratorios,
-                'total'       => (float) $row->total,
+                'id'                 => $row->id,
+                'contract'           => $contract,
+                'sucursal'           => (string) ($row->sucursal ?? '(sin sucursal)'),
+                'status'             => $auditStatus,
+                'clasificacion_final'=> $clasificacionFinal,
+                'incluido'           => 'SÍ',
+                'dpd'                => $dpd ?? '—',
+                'dpd_cobro'          => $recoveryDpd ?? '—',
+                'dpd_saldos'         => $portfolioDpdVal ?? '—',
+                'dpd_fuente'         => $dpdFuente,
+                'motivo'             => $motivo,
+                'concept'            => (string) ($row->concept ?? ''),
+                'operation'          => (string) ($row->operation ?? ''),
+                'capital'            => (float) $row->capital,
+                'interes'            => (float) $row->interes,
+                'impuesto'           => (float) $row->impuesto,
+                'moratorios'         => (float) $row->moratorios,
+                'total'              => (float) $row->total,
             ];
         }
 
@@ -209,27 +232,31 @@ class AuditEfectividadCobranzaCommand extends Command
                 str_pad('ID', 8) .
                 str_pad('Contrato', 22) .
                 str_pad('Sucursal', 22) .
-                str_pad('Estatus', 12) .
-                str_pad('DPD', 8) .
-                str_pad('Fuente', 10) .
+                str_pad('Audit', 22) .
+                str_pad('Final', 12) .
+                str_pad('DPD', 6) .
+                str_pad('Cobro', 7) .
+                str_pad('Saldos', 7) .
                 str_pad('Total', 16) .
-                'Concepto'
+                'Motivo'
             );
-            $this->line(str_repeat('─', 140));
+            $this->line(str_repeat('─', 160));
             foreach ($detailRows as $r) {
                 $line = str_pad($r['id'], 8) .
                         str_pad(mb_substr($r['contract'], 0, 20), 22) .
                         str_pad(mb_substr($r['sucursal'], 0, 20), 22) .
-                        str_pad($r['status'], 12) .
-                        str_pad((string) $r['dpd'], 8) .
-                        str_pad($r['dpd_fuente'], 10) .
+                        str_pad(mb_substr($r['status'], 0, 20), 22) .
+                        str_pad($r['clasificacion_final'], 12) .
+                        str_pad((string) $r['dpd'], 6) .
+                        str_pad((string) $r['dpd_cobro'], 7) .
+                        str_pad((string) $r['dpd_saldos'], 7) .
                         str_pad('$' . number_format($r['total'], 2), 16) .
-                        mb_substr($r['concept'], 0, 40);
-                match ($r['status']) {
-                    'Vigente'    => $this->info($line),
-                    'Atrasado'   => $this->comment($line),
-                    'Vencido'    => $this->warn($line),
-                    default      => $this->line($line),
+                        mb_substr($r['motivo'], 0, 60);
+                match ($r['clasificacion_final']) {
+                    'Vigente'  => $this->info($line),
+                    'Atrasado' => $this->comment($line),
+                    'Vencido'  => $this->warn($line),
+                    default    => $this->line($line),
                 };
             }
         }
@@ -248,8 +275,13 @@ class AuditEfectividadCobranzaCommand extends Command
         $file = "efectividad_cobranza_periodo_{$periodId}_" . now()->format('Ymd_His') . '.csv';
         $path = "{$dir}/{$file}";
 
-        $headers = ['ID', 'Contrato', 'Sucursal', 'Estatus', 'DPD', 'Fuente DPD', 'Capital', 'Interés', 'Impuesto', 'Moratorios', 'Total', 'Concepto', 'Operación'];
-        $lines   = [implode(',', $headers)];
+        $headers = [
+            'ID', 'Contrato', 'Sucursal', 'Estatus auditoría', 'Clasificación final',
+            'Incluido', 'DPD', 'DPD cobro', 'DPD saldos', 'Fuente DPD',
+            'Capital', 'Interés', 'Impuesto', 'Moratorios', 'Total',
+            'Concepto', 'Operación', 'Motivo',
+        ];
+        $lines = [implode(',', $headers)];
 
         foreach ($rows as $r) {
             $lines[] = implode(',', [
@@ -257,7 +289,11 @@ class AuditEfectividadCobranzaCommand extends Command
                 '"' . str_replace('"', '""', $r['contract']) . '"',
                 '"' . str_replace('"', '""', $r['sucursal']) . '"',
                 '"' . str_replace('"', '""', $r['status']) . '"',
+                '"' . str_replace('"', '""', $r['clasificacion_final']) . '"',
+                '"' . str_replace('"', '""', $r['incluido']) . '"',
                 $r['dpd'] === '—' ? '' : $r['dpd'],
+                $r['dpd_cobro'] === '—' ? '' : $r['dpd_cobro'],
+                $r['dpd_saldos'] === '—' ? '' : $r['dpd_saldos'],
                 '"' . str_replace('"', '""', $r['dpd_fuente']) . '"',
                 number_format($r['capital'],    2, '.', ''),
                 number_format($r['interes'],    2, '.', ''),
@@ -266,6 +302,7 @@ class AuditEfectividadCobranzaCommand extends Command
                 number_format($r['total'],      2, '.', ''),
                 '"' . str_replace('"', '""', $r['concept']) . '"',
                 '"' . str_replace('"', '""', $r['operation']) . '"',
+                '"' . str_replace('"', '""', $r['motivo']) . '"',
             ]);
         }
 

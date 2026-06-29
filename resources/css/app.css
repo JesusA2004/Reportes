@@ -77,11 +77,20 @@
 
     html {
         @apply scroll-smooth;
+        height: 100%;
     }
 
     body {
         @apply bg-background text-foreground antialiased;
         font-family: var(--font-sans);
+        min-height: 100%;
+        scrollbar-gutter: stable;
+    }
+
+    #app {
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
     }
 }
 
@@ -148,6 +157,15 @@
 
     .app-table-content {
         @apply overflow-x-auto;
+    }
+
+    /* Scrollbar utilities */
+    .scrollbar-none {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+    }
+    .scrollbar-none::-webkit-scrollbar {
+        display: none;
     }
 
     /* SWEETALERT2 */

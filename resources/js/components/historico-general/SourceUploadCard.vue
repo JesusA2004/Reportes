@@ -63,9 +63,9 @@ const doUpload = () => {
                 <div>
                     <div class="flex flex-wrap items-center gap-2">
                         <h3 class="font-black text-slate-950">{{ source.name }}</h3>
-                        <span v-if="isRequiredForDb" class="rounded-full bg-indigo-50 px-2 py-1 text-[11px] font-black text-indigo-700">Req. Carga</span>
-                        <span v-if="isRequiredForReport" class="rounded-full bg-violet-50 px-2 py-1 text-[11px] font-black text-violet-700">Req. Radiografía</span>
-                        <span v-if="!isRequiredForDb && !isRequiredForReport" class="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-black text-slate-500">Opcional</span>
+                        <span v-if="isRequiredForDb" class="rounded-full bg-indigo-50 px-2 py-1 text-[11px] font-black text-indigo-700">Necesaria</span>
+                        <span v-if="isRequiredForReport" class="rounded-full bg-violet-50 px-2 py-1 text-[11px] font-black text-violet-700">Para el reporte</span>
+                        <span v-if="!isRequiredForDb && !isRequiredForReport" class="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-black text-slate-500">Complementaria</span>
                     </div>
                     <p class="mt-1 text-xs leading-5 text-slate-500">{{ source.description }}</p>
                 </div>

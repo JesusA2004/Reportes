@@ -47,12 +47,18 @@ class AuditFondeosCommand extends Command
         $this->info('  Nota: NO afectan EBITDA — solo rastreo de flujo');
         $this->info('════════════════════════════════════════════════════════════');
 
+        // Use PDF only (gastos_lendus) — Excel records have branch_id=NULL and are used only for
+        // destination cross-reference in buildInterbranchLoans(). Showing them as separate rows
+        // would produce 132 "sin origen" false positives.
+        $lendusPdfId = DB::table('data_sources')->where('code', 'gastos_lendus')->value('id');
+
         $fondeos = DB::table('fact_expenses as e')
             ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
             ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
             ->leftJoin('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
             ->whereIn('e.period_id', $dataIds)
             ->whereIn('e.category', ['Préstamos Intersucursales', 'Envío de utilidad a corporativo'])
+            ->when($lendusPdfId, fn ($q) => $q->where('ru.data_source_id', $lendusPdfId))
             ->select(
                 'e.id',
                 'b.name as sucursal_origen',
@@ -75,6 +81,25 @@ class AuditFondeosCommand extends Command
             return 0;
         }
 
+        // Pre-load Excel records indexed by (amount rounded to int) for cross-reference
+        $lendusExcelId = DB::table('data_sources')->where('code', 'gastos_lendus_excel')->value('id');
+        $excelByAmount = [];
+        if ($lendusExcelId) {
+            $excelRows = DB::table('fact_expenses as e')
+                ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+                ->whereIn('e.period_id', $dataIds)
+                ->where('ru.data_source_id', $lendusExcelId)
+                ->whereIn('e.category', ['Préstamos Intersucursales', 'Envío de utilidad a corporativo'])
+                ->select('e.id', 'e.amount', 'e.paid_amount', 'e.observations', 'e.raw_payload')
+                ->get();
+            foreach ($excelRows as $ex) {
+                $amt = (int) round((float) ($ex->paid_amount ?: $ex->amount));
+                $excelByAmount[$amt][] = $ex;
+            }
+        }
+
+        $usedExcelIds = [];
+
         $totalFondeo     = 0.0;
         $totalCorporativo = 0.0;
         $sinOrigen       = 0.0;
@@ -91,22 +116,53 @@ class AuditFondeosCommand extends Command
             $concepto = (string) ($row->concepto ?? '');
             $payload  = json_decode((string) ($row->raw_payload ?? 'null'), true) ?? [];
 
-            // Destination: prefer parsed raw_payload keys (new format), fall back to
-            // legacy 'branch_to_detected', then parse from concept text on the fly
-            $destinoSuc = $payload['fondeo_destino_sucursal']
-                ?? $payload['branch_to_detected']
-                ?? null;
+            // Destination: prefer parsed raw_payload keys, then cross-reference with Excel by amount
+            $destinoSuc = $payload['fondeo_destino_sucursal'] ?? null;
+            if (!$destinoSuc || $destinoSuc === 'No detectado' || $destinoSuc === 'null') {
+                $destinoSuc = null;
+            }
             $destinoTexto = $payload['fondeo_destino_texto'] ?? $concepto;
             $fondeoTipo   = $payload['fondeo_tipo'] ?? null;
+            $excelObs     = '';
 
-            if (!$destinoSuc) {
-                $parsed       = $this->parseDestinoFromConcept($concepto);
-                $destinoSuc   = $parsed['sucursal'];
-                $fondeoTipo   = $parsed['tipo'];
+            // Cross-reference with Excel by amount ±1 peso
+            if (!$destinoSuc && !empty($excelByAmount)) {
+                $montoInt = (int) round($monto);
+                $candidates = array_merge(
+                    $excelByAmount[$montoInt]     ?? [],
+                    $excelByAmount[$montoInt + 1] ?? [],
+                    $excelByAmount[$montoInt - 1] ?? [],
+                );
+                foreach ($candidates as $ex) {
+                    if (in_array($ex->id, $usedExcelIds, true)) continue;
+                    $exPayload = json_decode((string) ($ex->raw_payload ?? 'null'), true) ?? [];
+                    $candidate = $exPayload['branch_to_detected'] ?? null;
+                    if (!$candidate || $candidate === 'No detectado' || $candidate === 'null') {
+                        // Try to detect from observations
+                        $exText = mb_strtoupper(trim((string) ($ex->observations ?? '')));
+                        if ($exText) {
+                            $candidate = $this->detectFromExcelText($exText);
+                        }
+                    }
+                    if ($candidate) {
+                        $destinoSuc   = $candidate;
+                        $excelObs     = (string) ($ex->observations ?? '');
+                        $fondeoTipo   = 'fondeo_sucursal';
+                        $usedExcelIds[] = $ex->id;
+                        break;
+                    }
+                }
             }
 
-            // Normalize destination name
-            if ($destinoSuc && $destinoSuc !== 'No detectado' && $destinoSuc !== 'CORPORATIVO') {
+            if (!$destinoSuc) {
+                $parsed     = $this->parseDestinoFromConcept($concepto);
+                $destinoSuc = $parsed['sucursal'];
+                $fondeoTipo = $parsed['tipo'];
+            }
+
+            // Normalize destination name (strip noise, apply aliases)
+            if ($destinoSuc && $destinoSuc !== 'CORPORATIVO') {
+                $destinoSuc = $this->stripNoise($destinoSuc);
                 $normKey    = strtr(mb_strtoupper(trim($destinoSuc)), ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U','Ü'=>'U','Ñ'=>'N']);
                 $destinoSuc = self::BRANCH_ALIASES[$normKey] ?? self::BRANCH_ALIASES[$destinoSuc] ?? $destinoSuc;
             }
@@ -269,6 +325,61 @@ class AuditFondeosCommand extends Command
             if (str_contains($norm, $key)) return $official;
         }
         return null;
+    }
+
+    private function detectFromExcelText(string $textUpper): ?string
+    {
+        static $noiseLeading = ['FONDEO', 'FONDEA', 'DEPOSITO', 'DEPÓSITO', 'A', 'PARA', 'DE', 'SUC', 'SUCURSAL'];
+
+        $patterns = [
+            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/FOND(?:EA|EO)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/FOND(?:EA|EO)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/DEP[OÓ]SITO\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $textUpper, $m)) {
+                $candidate = trim($m[1]);
+                // Strip noise words
+                $changed = true;
+                while ($changed) {
+                    $changed = false;
+                    foreach ($noiseLeading as $noise) {
+                        if (str_starts_with($candidate, $noise . ' ')) {
+                            $candidate = trim(mb_substr($candidate, mb_strlen($noise)));
+                            $changed = true;
+                            break;
+                        }
+                    }
+                }
+                if (strlen($candidate) >= 3) {
+                    $matched = $this->matchBranch($candidate);
+                    if ($matched) return $matched;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function stripNoise(string $candidate): string
+    {
+        static $noiseLeading = ['FONDEO', 'FONDEA', 'DEPOSITO', 'DEPÓSITO', 'A', 'PARA', 'DE', 'SUC', 'SUCURSAL'];
+        $c = mb_strtoupper(trim($candidate));
+        $changed = true;
+        while ($changed) {
+            $changed = false;
+            foreach ($noiseLeading as $noise) {
+                if (str_starts_with($c, $noise . ' ')) {
+                    $c = trim(mb_substr($c, mb_strlen($noise)));
+                    $changed = true;
+                    break;
+                }
+            }
+        }
+        return $c;
     }
 
     private function exportCsv(int $periodId, array $rows): void

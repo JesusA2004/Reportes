@@ -38,6 +38,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::get('/{period}/generar-reporte/progreso', [ReportUploadController::class, 'generationProgress'])->name('generation-progress');
             Route::post('/{period}/generar-reporte/cancelar', [ReportUploadController::class, 'cancelGeneration'])->name('cancel-generation');
             Route::post('/{period}/generar-reporte/procesar-ahora', [ReportUploadController::class, 'processGenerationNow'])->name('process-generation-now');
+            Route::post('/{period}/procesar-fuentes-pendientes', [ReportUploadController::class, 'processPendingSources'])->name('process-pending-sources');
             Route::post('/{period}/reprocesar-todo', [ReportUploadController::class, 'reprocessAll'])->name('reprocess-all');
         });
 

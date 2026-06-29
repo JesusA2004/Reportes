@@ -247,12 +247,20 @@ class GastosLendusPdfImportService
             return false;
         }
 
+        // Exact match in known branch list (covers all multi-word branch names
+        // like "TENANGO DEL VALLE", "SAN JUAN DEL RIO", "SAN LUIS POTOSI").
         if (in_array($line, self::KNOWN_BRANCHES, true)) {
             return true;
         }
 
-        // All uppercase letters, spaces and accented chars — no digits, no punctuation
-        return (bool) preg_match('/^[A-ZÁÉÍÓÚÜÑ\s]+$/u', $line);
+        // Multi-word lines not in KNOWN_BRANCHES are almost certainly employee names
+        // (e.g. "ANA KAREN BERNABE GAMBOA") — do NOT override currentBranch with them.
+        // Only accept single-word all-caps lines as candidate unknown branches.
+        if (str_contains($line, ' ')) {
+            return false;
+        }
+
+        return (bool) preg_match('/^[A-ZÁÉÍÓÚÜÑ]+$/u', $line);
     }
 
     private function resolveCategory(string $category, string $concept): string
@@ -330,25 +338,33 @@ class GastosLendusPdfImportService
 
     private function matchBranchFromText(string $text): ?string
     {
-        static $officialBranches = [
-            'ATLACOMULCO', 'ATLIXCO', 'CORDOBA', 'CUERNAVACA', 'HUAMANTLA',
-            'IXTLAHUACA', 'MIACATLAN', 'ORIZABA', 'SAN JUAN DEL RIO', 'SAN JUAN',
-            'SAN LUIS POTOSI', 'TENANGO DEL VALLE', 'TENANGO', 'TLAXCALA', 'TULA',
-            'CHIHUAHUA', 'DURANGO', 'YAUTEPEC',
+        // Key = nombre normalizado sin acentos; Value = nombre oficial con acentos
+        static $branchMap = [
+            'ATLACOMULCO'       => 'ATLACOMULCO',
+            'ATLIXCO'           => 'ATLIXCO',
+            'CORDOBA'           => 'CÓRDOBA',
+            'CUERNAVACA'        => 'CUERNAVACA',
+            'HUAMANTLA'         => 'HUAMANTLA',
+            'IXTLAHUACA'        => 'IXTLAHUACA',
+            'MIACATLAN'         => 'MIACATLÁN',
+            'ORIZABA'           => 'ORIZABA',
+            'SAN JUAN DEL RIO'  => 'SAN JUAN DEL RÍO',
+            'SAN JUAN'          => 'SAN JUAN DEL RÍO',
+            'SAN LUIS POTOSI'   => 'SAN LUIS POTOSÍ',
+            'TENANGO DEL VALLE' => 'TENANGO DEL VALLE',
+            'TENANGO'           => 'TENANGO DEL VALLE',
+            'TLAXCALA'          => 'TLAXCALA',
+            'TULA'              => 'TULA',
+            'CHIHUAHUA'         => 'CHIHUAHUA',
+            'DURANGO'           => 'DURANGO',
+            'YAUTEPEC'          => 'YAUTEPEC',
         ];
 
         $textNorm = strtr(mb_strtoupper(trim($text)), ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U','Ü'=>'U','Ñ'=>'N']);
 
-        foreach ($officialBranches as $branch) {
-            if (str_contains($textNorm, $branch)) {
-                // Normalize compound names to official form
-                if ($branch === 'SAN JUAN') {
-                    return 'SAN JUAN DEL RÍO';
-                }
-                if ($branch === 'TENANGO') {
-                    return 'TENANGO DEL VALLE';
-                }
-                return $branch;
+        foreach ($branchMap as $key => $official) {
+            if (str_contains($textNorm, $key)) {
+                return $official;
             }
         }
 
@@ -361,7 +377,6 @@ class GastosLendusPdfImportService
             return null;
         }
 
-        // Normalize accent variants: "SAN JUAN DEL RÍO" → "SAN JUAN DEL RIO"
         $nameNorm = $this->normalize($name);
 
         $branch = Branch::query()
@@ -372,13 +387,21 @@ class GastosLendusPdfImportService
             return $branch;
         }
 
-        // Resolve route → official branch; log + skip unknown names.
+        // Intentar resolver vía route → nombre oficial
         $officialName = $this->branchResolver->resolveRealBranchFromRoute($name);
-        if (!$officialName) {
-            \Illuminate\Support\Facades\Log::warning('GastosLendusPdfImportService: unknown branch name.', ['raw' => $name]);
-            return null;
+        if ($officialName) {
+            return $this->branchResolver->findOrCreateBranchByName($officialName);
         }
-        return $this->branchResolver->findOrCreateBranchByName($officialName);
+
+        // Último recurso: el encabezado de sección del PDF ES el nombre oficial.
+        // Solo aplica a nombres en KNOWN_BRANCHES (evitar crear sucursales falsas).
+        $nameUp = mb_strtoupper(trim($name));
+        if (in_array($nameUp, self::KNOWN_BRANCHES, true)) {
+            return $this->branchResolver->findOrCreateBranchByName($name);
+        }
+
+        \Illuminate\Support\Facades\Log::warning('GastosLendusPdfImportService: sucursal no reconocida.', ['raw' => $name]);
+        return null;
     }
 
     private function resolveEmployee(string $name): ?Employee

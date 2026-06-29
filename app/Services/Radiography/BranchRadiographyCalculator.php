@@ -179,6 +179,9 @@ class BranchRadiographyCalculator
         // Pólizas CRECE: 30% share stored in fact_recoveries.savehearts_crece_share
         $this->accumulatePolizasCrece($dataIds, $operativeIds, $operativeMap, $summaries);
 
+        // IMSS patronal: cuota mensual por sucursal desde el archivo IMSS (data_source 'imss')
+        $this->accumulateImssPatronal($dataIds, $operativeIds, $operativeMap, $summaries, $unassigned);
+
         return ['branches' => array_values($summaries), 'unassigned' => $unassigned];
     }
 
@@ -367,6 +370,8 @@ class BranchRadiographyCalculator
         SUM(CASE {$excl} ELSE interest END) as interest,
         SUM(CASE {$excl} ELSE tax END) as tax,
         SUM(CASE {$excl} ELSE charges_due END) as charges,
+        SUM(CASE {$excl} ELSE charges END) as cargos_iniciales,
+        SUM(CASE {$excl} ELSE excedente END) as excedente_monto,
         -- unificacion_excluida es INFORMATIVO: subconjunto de condonacion_excluida (operation
         -- 'UNIFICACION DE CARTERA' dentro de transaction='CONDONACION'). NO se resta aparte —
         -- ya está cubierta por la exclusión de transaction='CONDONACION' arriba (evita doble resta).
@@ -397,6 +402,8 @@ class BranchRadiographyCalculator
             $summaries[$suc]['interes_recuperado']      += (float) $row->interest;
             $summaries[$suc]['impuesto_recuperado']     += (float) $row->tax;
             $summaries[$suc]['charges']                 += (float) $row->charges;
+            $summaries[$suc]['cargos_adicionales']      += (float) ($row->cargos_iniciales ?? 0);
+            $summaries[$suc]['excedente_recuperado']    += (float) ($row->excedente_monto   ?? 0);
             $summaries[$suc]['unificacion_excluida']    += (float) ($row->unificacion_excluida ?? 0);
             $summaries[$suc]['condonacion_excluida']    += (float) ($row->condonacion_excluida ?? 0);
         }
@@ -428,6 +435,8 @@ class BranchRadiographyCalculator
             $summaries[$suc]['interes_recuperado']      += (float) $row->interest;
             $summaries[$suc]['impuesto_recuperado']     += (float) $row->tax;
             $summaries[$suc]['charges']                 += (float) $row->charges;
+            $summaries[$suc]['cargos_adicionales']      += (float) ($row->cargos_iniciales ?? 0);
+            $summaries[$suc]['excedente_recuperado']    += (float) ($row->excedente_monto   ?? 0);
             $summaries[$suc]['unificacion_excluida']    += (float) ($row->unificacion_excluida ?? 0);
             $summaries[$suc]['condonacion_excluida']    += (float) ($row->condonacion_excluida ?? 0);
         }
@@ -465,11 +474,22 @@ class BranchRadiographyCalculator
         }
 
         // Pass 5: ACUERDO CON CLIENTE — charges_due maps to cargos_inicio (mapped branches)
+        // Only include rows also counted in recuperacion_total (same exclusion filter as Pass 1+2).
         $acuerdos = DB::table('fact_recoveries')
             ->whereIn('period_id', $dataIds)
             ->whereIn('branch_id', $branchIds)
             ->where('operation', 'ACUERDO CON CLIENTE')
             ->where('charges_due', '>', 0)
+            ->where('is_savehearts', '!=', 1)
+            ->where('transaction', '!=', 'CONDONACION')
+            ->whereRaw("NOT (is_savehearts = 0 AND (
+                UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
+                OR UPPER(COALESCE(concept,'')) LIKE '%SEGURO%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%SEGURO%'
+                OR UPPER(COALESCE(concept,'')) LIKE '%UNIFICACION%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%UNIFICACION%'
+            ))")
             ->selectRaw('branch_id, SUM(charges_due) as cargos')
             ->groupBy('branch_id')
             ->get();
@@ -480,13 +500,23 @@ class BranchRadiographyCalculator
             $summaries[$suc]['cargos_inicio'] += (float) $row->cargos;
         }
 
-        // Pass 6: ACUERDO CON CLIENTE (fallback route branches)
+        // Pass 6: ACUERDO CON CLIENTE (fallback route branches) — same exclusion filter
         $acuerdosFb = DB::table('fact_recoveries')
             ->whereIn('period_id', $dataIds)
             ->whereNotIn('branch_id', $branchIds)
             ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
             ->where('operation', 'ACUERDO CON CLIENTE')
             ->where('charges_due', '>', 0)
+            ->where('is_savehearts', '!=', 1)
+            ->where('transaction', '!=', 'CONDONACION')
+            ->whereRaw("NOT (is_savehearts = 0 AND (
+                UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
+                OR UPPER(COALESCE(concept,'')) LIKE '%SEGURO%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%SEGURO%'
+                OR UPPER(COALESCE(concept,'')) LIKE '%UNIFICACION%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%UNIFICACION%'
+            ))")
             ->selectRaw("branch_id, LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3) AS prefix3, SUM(charges_due) AS cargos")
             ->groupByRaw("branch_id, LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3)")
             ->get();
@@ -497,6 +527,25 @@ class BranchRadiographyCalculator
             if (!$suc || !$this->resolver->isSheetBranch($suc) || !isset($summaries[$suc])) continue;
             $summaries[$suc]['cargos_inicio'] += (float) $row->cargos;
         }
+
+        // Residual: amounts in recuperacion_total not explained by any named component
+        // (e.g. GASTOS DE COBRANZA rows where all 6 component columns are zero).
+        // Ensures SUM(all components) == recuperacion_total exactly.
+        foreach ($summaries as $suc => &$sum) {
+            $sum['otros_recuperacion'] = round(
+                $sum['recuperacion_total']
+                - $sum['capital_recuperado']
+                - $sum['interes_recuperado']
+                - $sum['impuesto_recuperado']
+                - $sum['charges']
+                - $sum['cargos_adicionales']
+                - $sum['excedente_recuperado']
+                - $sum['cargos_inicio']
+                - $sum['comision_apertura'],
+                2
+            );
+        }
+        unset($sum);
     }
 
     // ── Mora por bucket — FUENTE ÚNICA para cartera/mora (UI, Excel, PDF, dashboard) ──
@@ -949,24 +998,57 @@ class BranchRadiographyCalculator
             //    archivo (Financiamiento Celular target = $0.00 para Abril 2026).
             $lendusExcelId = DB::table('data_sources')->where('code', 'gastos_lendus_excel')->value('id');
             if ($lendusExcelId) {
+                // Build employee normalized_name → operative branch map for cross-reference.
+                // Motos/Cascos rows in gastos_lendus_excel always have branch_id=NULL because the
+                // Excel file has no sucursal column. The observation field contains the employee name,
+                // which we use to route each row to the correct operative branch.
+                $operativeBranchNames = array_keys($summaries);
+                $empBranchLookup = DB::table('employee_branch_assignments as eba')
+                    ->join('employees as e', 'eba.employee_id', '=', 'e.id')
+                    ->join('branches as b', 'eba.branch_id', '=', 'b.id')
+                    ->whereIn('b.name', $operativeBranchNames)
+                    ->select('e.normalized_name', DB::raw('b.name as branch_name'))
+                    ->get()
+                    ->mapWithKeys(fn ($r) => [$r->normalized_name => $r->branch_name])
+                    ->toArray();
+
+                $normalizeEmpName = function (string $raw): string {
+                    $s = mb_strtolower(trim($raw));
+                    $s = preg_replace('/[^a-záéíóúüñ\s]/u', ' ', $s);
+                    $map = ['á'=>'a','é'=>'e','í'=>'i','ó'=>'o','ú'=>'u','ü'=>'u','ñ'=>'n'];
+                    $s = strtr($s, $map);
+                    return preg_replace('/\s+/', ' ', trim($s));
+                };
+
                 $motoCascoRows = DB::table('fact_expenses as e')
                     ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
                     ->whereIn('e.period_id', $dataIds)
                     ->where('ru.data_source_id', $lendusExcelId)
                     ->where('e.category', self::NOMINA_CAT)
                     ->whereIn(DB::raw("UPPER(TRIM(COALESCE(e.concept,'')))"), ['PAGO FINANCIAMIENTO MOTO', 'COMPRA DE CASCOS'])
-                    ->selectRaw("e.branch_id, UPPER(TRIM(COALESCE(e.concept,''))) as concept, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
-                    ->groupBy('e.branch_id', 'e.concept')
+                    ->selectRaw("UPPER(TRIM(COALESCE(e.concept,''))) as concept, COALESCE(NULLIF(e.paid_amount,0), e.amount) as amount, COALESCE(e.observations,'') as observations")
                     ->get();
 
                 foreach ($motoCascoRows as $row) {
-                    $branchId = (int) $row->branch_id;
-                    $label    = str_contains((string) $row->concept, 'CASCO') ? 'Cascos' : 'Financiamiento de Motos';
-                    $amount   = (float) $row->total;
+                    $label  = str_contains((string) $row->concept, 'CASCO') ? 'Cascos' : 'Financiamiento de Motos';
+                    $amount = (float) $row->amount;
 
-                    $suc = $operativeMap[$branchId] ?? null;
-                    if ($suc && isset($summaries[$suc])) {
-                        $summaries[$suc]['nomina_detalle'][$label] = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amount;
+                    // Try to resolve branch via employee name in observations
+                    $resolvedBranch = null;
+                    $obsNorm = $normalizeEmpName((string) $row->observations);
+                    if ($obsNorm !== '') {
+                        foreach ($empBranchLookup as $empNorm => $branchName) {
+                            if ($empNorm !== '' && (str_contains($obsNorm, $empNorm) || str_contains($empNorm, $obsNorm))) {
+                                if (isset($summaries[$branchName])) {
+                                    $resolvedBranch = $branchName;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if ($resolvedBranch !== null) {
+                        $summaries[$resolvedBranch]['nomina_detalle'][$label] = ($summaries[$resolvedBranch]['nomina_detalle'][$label] ?? 0.0) + $amount;
                     } else {
                         $unassigned['nomina_detalle'][$label] = ($unassigned['nomina_detalle'][$label] ?? 0.0) + $amount;
                     }
@@ -1033,6 +1115,42 @@ class BranchRadiographyCalculator
         }
     }
 
+    // ── IMSS Patronal ────────────────────────────────────────────────────────
+    //
+    // Fuente: fact_expenses con data_source.code = 'imss', category = 'IMSS'.
+    // Importado desde el archivo "CALCULO DE CUOTA SEMANAL DEL IMSS POR SUCURSAL".
+    // Se acumula en nomina_detalle['IMSS'] (separado del D002/D009 de NOI que son
+    // deducciones del trabajador — este es costo patronal distinto).
+
+    private function accumulateImssPatronal(array $dataIds, array $branchIds, array $operativeMap, array &$summaries, array &$unassigned): void
+    {
+        $imssSourceId = DB::table('data_sources')->where('code', 'imss')->value('id');
+        if (!$imssSourceId) {
+            return; // Fuente no configurada aún — se salta silenciosamente
+        }
+
+        $rows = DB::table('fact_expenses as e')
+            ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+            ->whereIn('e.period_id', $dataIds)
+            ->where('ru.data_source_id', $imssSourceId)
+            ->where('e.category', 'IMSS')
+            ->selectRaw("e.branch_id, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
+            ->groupBy('e.branch_id')
+            ->get();
+
+        foreach ($rows as $row) {
+            $branchId = (int) $row->branch_id;
+            $amount   = (float) $row->total;
+
+            $suc = $operativeMap[$branchId] ?? null;
+            if ($suc && isset($summaries[$suc])) {
+                $summaries[$suc]['nomina_detalle']['IMSS Patronal'] = ($summaries[$suc]['nomina_detalle']['IMSS Patronal'] ?? 0.0) + $amount;
+            } else {
+                $unassigned['nomina_detalle']['IMSS Patronal'] = ($unassigned['nomina_detalle']['IMSS Patronal'] ?? 0.0) + $amount;
+            }
+        }
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private function emptyBranchSummary(string $sucursal): array
@@ -1047,9 +1165,12 @@ class BranchRadiographyCalculator
             'capital_recuperado'        => 0.0,
             'interes_recuperado'        => 0.0,
             'impuesto_recuperado'       => 0.0,
-            'charges'                   => 0.0,
-            'cargos_inicio'             => 0.0,
+            'charges'                   => 0.0,  // charges_due moratorios (excl. ACUERDO CON CLIENTE)
+            'cargos_adicionales'        => 0.0,  // DB charges column (PAGO A CONTRATO)
+            'excedente_recuperado'      => 0.0,  // DB excedente column
+            'cargos_inicio'             => 0.0,  // ACUERDO CON CLIENTE charges_due
             'comision_apertura'         => 0.0,
+            'otros_recuperacion'        => 0.0,  // residual: total - named components
             'recuperacion_total'        => 0.0,
             'recuperacion_bruta'        => 0.0,
             'seguro_excluido_bruto'     => 0.0,  // total no-CRECE savehearts (Savehearts + Comadres)

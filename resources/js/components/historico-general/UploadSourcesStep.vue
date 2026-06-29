@@ -12,7 +12,7 @@ const emit = defineEmits(['upload', 'delete'])
         <SectionHeader
             eyebrow="Etapa 1"
             title="Archivos y periodo"
-            description="Carga los archivos sobre el mes operativo seleccionado. Las fuentes marcadas &quot;Req. Carga&quot; habilitan la carga de registros; las marcadas &quot;Req. Radiografía&quot; son necesarias para generar el reporte final."
+            description="Carga los archivos del mes. Las fuentes marcadas &quot;Necesaria&quot; son obligatorias para activar la carga de registros; las marcadas &quot;Para el reporte&quot; son necesarias para generar la radiografía financiera."
         />
         <AutomaticPeriodInfo v-if="period?.is_derived" :period="period" />
         <div v-else class="grid gap-5 md:grid-cols-2 xl:grid-cols-3">

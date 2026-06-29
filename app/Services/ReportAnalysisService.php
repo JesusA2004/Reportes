@@ -12,11 +12,13 @@ use App\Services\Imports\GastosErpExcelImportService;
 use App\Services\Imports\GastosImportService;
 use App\Services\Imports\GastosLendusExcelImportService;
 use App\Services\Imports\GastosLendusPdfImportService;
+use App\Services\Imports\ImssExcelImportService;
 use App\Services\Imports\LendusIngresosCobranzaImportService;
 use App\Services\Imports\NoiNominaImportService;
 use App\Services\Imports\LendusEmployeeDirectoryImportService;
 use App\Services\Imports\LendusMinistracionesImportService;
 use App\Services\Imports\LendusSaldosClienteImportService;
+use App\Services\Imports\RotacionExcelImportService;
 use Illuminate\Support\Facades\DB;
 
 class ReportAnalysisService
@@ -27,6 +29,8 @@ class ReportAnalysisService
         protected GastosLendusPdfImportService $gastosLendusPdfImportService,
         protected GastosErpExcelImportService $gastosErpExcelImportService,
         protected GastosLendusExcelImportService $gastosLendusExcelImportService,
+        protected ImssExcelImportService $imssExcelImportService,
+        protected RotacionExcelImportService $rotacionExcelImportService,
         protected LendusIngresosCobranzaImportService $lendusIngresosCobranzaImportService,
         protected LendusMinistracionesImportService $lendusMinistracionesImportService,
         protected LendusSaldosClienteImportService $lendusSaldosClienteImportService,
@@ -77,6 +81,8 @@ class ReportAnalysisService
                     DataSourceCode::LendusMinistraciones->value   => $this->lendusMinistracionesImportService->handle($upload, $progress),
                     DataSourceCode::LendusSaldosCliente->value    => $this->lendusSaldosClienteImportService->handle($upload, $progress),
                     DataSourceCode::LendusEmpleados->value        => $this->lendusEmployeeDirectoryImportService->handle($upload, $progress),
+                    DataSourceCode::Imss->value                   => $this->imssExcelImportService->handle($upload, $progress),
+                    DataSourceCode::Rotacion->value               => $this->rotacionExcelImportService->handle($upload, $progress),
                     default => throw new \RuntimeException("La fuente [{$sourceCode}] aún no tiene importador implementado."),
                 };
             });

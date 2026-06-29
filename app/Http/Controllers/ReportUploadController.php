@@ -1088,6 +1088,37 @@ class ReportUploadController extends Controller {
         }
     }
 
+    public function processPendingSources(Period $period): RedirectResponse
+    {
+        $bdSourceCodes = DataSource::query()
+            ->where('is_active', true)
+            ->where('is_required_for_bd', true)
+            ->pluck('code')
+            ->values()
+            ->all();
+
+        $pendingUploads = ReportUpload::query()
+            ->with('dataSource')
+            ->where('period_id', $period->id)
+            ->whereIn('status', ['pending', 'failed'])
+            ->get()
+            ->filter(fn ($u) => !in_array($u->dataSource?->code, $bdSourceCodes, true))
+            ->values();
+
+        if ($pendingUploads->isEmpty()) {
+            return back()->with('info', 'No hay fuentes pendientes de procesar para este periodo.');
+        }
+
+        foreach ($pendingUploads as $upload) {
+            ReprocessReportUploadJob::dispatch($upload->id, auth()->id());
+        }
+
+        $count = $pendingUploads->count();
+        $names = $pendingUploads->map(fn ($u) => $u->dataSource?->name ?? $u->id)->implode(', ');
+
+        return back()->with('success', "Se enviaron {$count} fuente(s) a procesamiento: {$names}. Recibirás un correo cuando terminen.");
+    }
+
     public function analyze(ReportUpload $reportUpload): RedirectResponse
     {
         $sourceCode = $reportUpload->dataSource?->code ?? '';

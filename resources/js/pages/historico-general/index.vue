@@ -272,6 +272,27 @@ const processNow = async () => {
     })
 }
 
+const processPendingSources = async () => {
+    if (!selectedPeriodId.value) return
+    const pendingCount = grouped.value?.pending_count ?? 0
+    if (!pendingCount) return Swal.fire({ title: 'Sin fuentes pendientes', text: 'No hay archivos pendientes de procesar en este periodo.', icon: 'info', confirmButtonText: 'Entendido' })
+    const result = await Swal.fire({
+        title: 'Procesar fuentes pendientes',
+        html: `Se enviarán a procesamiento <strong>${pendingCount}</strong> archivo(s) pendiente(s) (IMSS, Rotación, etc.), sin volver a cargar los registros base.`,
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonText: 'Procesar',
+        cancelButtonText: 'Cancelar',
+        reverseButtons: true,
+    })
+    if (!result.isConfirmed) return
+    router.post(`/historico-general/${selectedPeriodId.value}/procesar-fuentes-pendientes`, {}, {
+        preserveScroll: true,
+        onSuccess: () => Swal.fire({ title: 'Procesamiento enviado', text: 'Las fuentes están en cola. Recibirás correo cuando terminen.', icon: 'success', confirmButtonText: 'Entendido' }),
+        onError:   () => Swal.fire('No se pudo iniciar', 'Verifica que haya archivos pendientes y vuelve a intentarlo.', 'error'),
+    })
+}
+
 const requeueRun = async () => {
     if (!selectedPeriodId.value) return
     router.post(`/historico-general/${selectedPeriodId.value}/actualizacion-bd/reencolar`, {}, {
@@ -626,12 +647,23 @@ const processGenerationNow = async () => {
 
                         <!-- Avance a Etapa 2 -->
                         <div class="flex items-center justify-between rounded-[2rem] border border-white/70 bg-white px-6 py-4 shadow-xl shadow-slate-200/70">
-                            <p v-if="!period?.can_update_database" class="text-sm text-slate-500">
-                                Carga las fuentes requeridas para continuar a la siguiente etapa.
-                            </p>
-                            <p v-else class="text-sm text-slate-600">
-                                Todas las fuentes requeridas están cargadas.
-                            </p>
+                            <div class="flex flex-col gap-1.5">
+                                <p v-if="!period?.can_update_database" class="text-sm text-slate-500">
+                                    Carga las fuentes requeridas para continuar a la siguiente etapa.
+                                </p>
+                                <p v-else class="text-sm text-slate-600">
+                                    Todas las fuentes requeridas están cargadas.
+                                </p>
+                                <button
+                                    v-if="(grouped?.pending_count ?? 0) > 0"
+                                    type="button"
+                                    class="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-bold text-indigo-700 transition hover:bg-indigo-100"
+                                    @click="processPendingSources"
+                                >
+                                    <svg class="size-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z" /></svg>
+                                    Procesar fuentes pendientes ({{ grouped?.pending_count }})
+                                </button>
+                            </div>
                             <button
                                 type="button"
                                 class="ml-4 inline-flex h-10 shrink-0 items-center gap-2 rounded-2xl px-5 text-sm font-black transition focus:outline-none focus:ring-4 disabled:cursor-not-allowed disabled:opacity-40"

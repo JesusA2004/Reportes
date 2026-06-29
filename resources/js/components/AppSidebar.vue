@@ -4,7 +4,6 @@ import {
     LayoutGrid,
     CalendarRange,
     Upload,
-    GitCompareArrows,
     FileSpreadsheet,
     Settings,
 } from 'lucide-vue-next';
@@ -40,11 +39,6 @@ const mainNavItems: NavItem[] = [
         title: 'Periodos',
         href: '/periodos',
         icon: CalendarRange,
-    },
-    {
-        title: 'Empleados',
-        href: '/asignaciones-empleado-sucursal',
-        icon: GitCompareArrows,
     },
     {
         title: 'Reportes mensuales',

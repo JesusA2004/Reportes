@@ -226,31 +226,44 @@ class GastosLendusExcelImportService
             return null;
         }
 
+        // Split on pipe (|) and process each segment; handles "FONDEO | A CUERNAVACA"
+        $segments = array_map('trim', explode('|', $text));
+        foreach ($segments as $segment) {
+            $result = $this->detectToBranchSegment($segment);
+            if ($result) return $result;
+        }
+
+        return null;
+    }
+
+    private function detectToBranchSegment(string $text): ?string
+    {
+        if (empty(trim($text))) return null;
+
         $upper = mb_strtoupper(trim($text));
 
-        // Patterns: "FONDEA A XXXX", "FONDEO A XXXX", "FONDEO PARA XXXX",
-        //           "PRESTAMO A XXXX", "PRÉSTAMO A XXXX", "INTERSUCURSAL A XXXX",
-        //           "CREDITO A XXXX", "FONDEO XXXX" (direct branch name following)
         $patterns = [
-            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/FOND(?:EA|EO)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/FOND(?:EA|EO)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/INTERSUCURSAL\s+(?:A|PARA)?\s*SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/INTERSUCURSAL\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/CR[EÉ]DITO\s+(?:A|PARA)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/(?:A|PARA)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/^SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/DEP[OÓ]SITO\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
-            '/APOYO\s+(?:A|PARA)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.]|$)/u',
+            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/FOND(?:EA|EO)\s+(?:A|PARA|DE)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/FOND(?:EA|EO)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/FOND(?:EA|EO)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/PR[EÉ]STAMO\s+(?:A|PARA|INTER)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/INTERSUCURSAL\s+(?:A|PARA)?\s*SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/INTERSUCURSAL\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/CR[EÉ]DITO\s+(?:A|PARA)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/(?:A|PARA)\s+SUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/\bSUC(?:URSAL)?\.?\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/DEP[OÓ]SITO\s+(?:A|PARA)?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
+            '/APOYO\s+(?:A|PARA)\s+([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*[-,.|]|$)/u',
         ];
 
         foreach ($patterns as $pattern) {
-            if (preg_match($pattern, $upper, $m)) {
-                $candidate = trim($m[1]);
-                if (strlen($candidate) < 3) {
+            if (preg_match_all($pattern, $upper, $matches)) {
+                // Take LAST match to handle "FONDEO FONDEO XXXX" double-prefix
+                $lastIdx   = count($matches[1]) - 1;
+                $candidate = $this->stripBranchNoise(trim($matches[1][$lastIdx]));
+                if (mb_strlen($candidate) < 3) {
                     continue;
                 }
                 $resolved = $this->branchResolver->resolveRealBranchFromRoute($candidate);
@@ -260,7 +273,33 @@ class GastosLendusExcelImportService
             }
         }
 
+        // Fallback: strip noise from entire segment and resolve directly.
+        // Covers "SAN JUAN DEL RIO", "SUCURSAL CORDOBA", "A SUC TENANGO", etc.
+        $stripped = $this->stripBranchNoise($upper);
+        if (mb_strlen($stripped) >= 3) {
+            $resolved = $this->branchResolver->resolveRealBranchFromRoute($stripped);
+            if ($resolved) return $resolved;
+        }
+
         return null;
+    }
+
+    private function stripBranchNoise(string $candidate): string
+    {
+        static $noiseLeading = ['FONDEO', 'FONDEA', 'DEPOSITO', 'DEPÓSITO', 'A', 'PARA', 'DE', 'SUC', 'SUCURSAL'];
+        $c = mb_strtoupper(trim($candidate));
+        $changed = true;
+        while ($changed) {
+            $changed = false;
+            foreach ($noiseLeading as $noise) {
+                if (str_starts_with($c, $noise . ' ')) {
+                    $c       = trim(mb_substr($c, mb_strlen($noise)));
+                    $changed = true;
+                    break;
+                }
+            }
+        }
+        return $c;
     }
 
     private function looksLikeIntersucursal(string $text): bool
