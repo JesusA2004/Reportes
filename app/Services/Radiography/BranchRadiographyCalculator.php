@@ -196,7 +196,7 @@ class BranchRadiographyCalculator
 
         foreach ($branches as $branch) {
             foreach ($branch as $key => $val) {
-                if ($key === 'sucursal' || $key === 'gastos_detalle' || $key === 'nomina_detalle') {
+                if ($key === 'sucursal' || $key === 'gastos_detalle' || $key === 'nomina_detalle' || $key === 'otros_detalle') {
                     continue; // array fields handled separately
                 }
                 if (is_numeric($val) && array_key_exists($key, $global)) {
@@ -228,6 +228,14 @@ class BranchRadiographyCalculator
         }
         foreach ($unassigned['nomina_detalle'] ?? [] as $label => $amount) {
             $global['nomina_detalle'][$label] = ($global['nomina_detalle'][$label] ?? 0.0) + (float) $amount;
+        }
+
+        // Sum otros_detalle across all branches for GLOBAL breakdown
+        $global['otros_detalle'] = [];
+        foreach ($branches as $branch) {
+            foreach ($branch['otros_detalle'] ?? [] as $concept => $amount) {
+                $global['otros_detalle'][$concept] = ($global['otros_detalle'][$concept] ?? 0.0) + (float) $amount;
+            }
         }
 
         return $global;
@@ -526,6 +534,56 @@ class BranchRadiographyCalculator
             $suc     = $this->resolver->resolveBranchNameFromCode($prefix3);
             if (!$suc || !$this->resolver->isSheetBranch($suc) || !isset($summaries[$suc])) continue;
             $summaries[$suc]['cargos_inicio'] += (float) $row->cargos;
+        }
+
+        // Pass 7: "Otros" desglosado por concepto real — mismas filas que componen el
+        // residual (ningún componente nombrado las explica), agrupadas por su concepto
+        // real de origen en vez de una bolsa genérica "Otros cobros".
+        $otrosCond = "is_savehearts != 1
+            AND transaction != 'CONDONACION'
+            AND NOT (is_savehearts = 0 AND (
+                UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
+                OR UPPER(COALESCE(concept,'')) LIKE '%SEGURO%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%SEGURO%'
+                OR UPPER(COALESCE(concept,'')) LIKE '%UNIFICACION%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%UNIFICACION%'
+            ))
+            AND operation != 'COMISIÓN POR APERTURA'
+            AND COALESCE(capital,0) = 0 AND COALESCE(interest,0) = 0 AND COALESCE(tax,0) = 0
+            AND COALESCE(charges_due,0) = 0 AND COALESCE(charges,0) = 0 AND COALESCE(excedente,0) = 0
+            AND total_amount != 0";
+
+        $otros = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('branch_id', $branchIds)
+            ->whereRaw($otrosCond)
+            ->selectRaw('branch_id, concept, operation, SUM(total_amount) as monto')
+            ->groupBy('branch_id', 'concept', 'operation')
+            ->get();
+
+        $otrosFb = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereNotIn('branch_id', $branchIds)
+            ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
+            ->whereRaw($otrosCond)
+            ->selectRaw("branch_id, contract, concept, operation, SUM(total_amount) as monto")
+            ->groupBy('branch_id', 'contract', 'concept', 'operation')
+            ->get();
+
+        $applyOtros = function ($row, ?string $suc) use (&$summaries): void {
+            if (!$suc || !isset($summaries[$suc])) return;
+            $concept = trim((string) ($row->concept ?? ''));
+            $label   = $concept !== '' ? $concept : (trim((string) ($row->operation ?? '')) ?: 'Otros conceptos');
+            $summaries[$suc]['otros_detalle'][$label] = ($summaries[$suc]['otros_detalle'][$label] ?? 0.0) + (float) $row->monto;
+        };
+
+        foreach ($otros as $row) {
+            $applyOtros($row, $operativeMap[(int) $row->branch_id] ?? null);
+        }
+        foreach ($otrosFb as $row) {
+            $suc = $this->resolver->resolveBranchNameFromCode((string) $row->contract);
+            $applyOtros($row, ($suc && $this->resolver->isSheetBranch($suc)) ? $suc : null);
         }
 
         // Residual: amounts in recuperacion_total not explained by any named component
@@ -1171,6 +1229,7 @@ class BranchRadiographyCalculator
             'cargos_inicio'             => 0.0,  // ACUERDO CON CLIENTE charges_due
             'comision_apertura'         => 0.0,
             'otros_recuperacion'        => 0.0,  // residual: total - named components
+            'otros_detalle'             => [],   // concepto real => monto (desglose del residual, nunca bolsa genérica)
             'recuperacion_total'        => 0.0,
             'recuperacion_bruta'        => 0.0,
             'seguro_excluido_bruto'     => 0.0,  // total no-CRECE savehearts (Savehearts + Comadres)

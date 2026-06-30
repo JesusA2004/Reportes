@@ -108,9 +108,12 @@ $brGlobal   = $brCalc ? ($brCalc['global']   ?? null) : null;
 // ── Ingresos / Cobranza — desglose seguros ───────────────────────────────────
 $ingrBruta       = (float)($brGlobal['recuperacion_bruta']      ?? $sum['recovery_bruta']            ?? 0);
 $ingrSegExcluido = (float)($brGlobal['seguro_excluido_bruto']   ?? $sum['recovery_seguro_excluido']  ?? 0);
+$ingrSavehearts  = (float)($brGlobal['seguro_savehearts_bruto'] ?? 0);
+$ingrComadres    = (float)($brGlobal['seguro_comadres_bruto']   ?? 0);
 $ingrCrece       = (float)($brGlobal['seguro_crece_bruto']      ?? $sum['recovery_crece_bruto']      ?? 0);
 $ingrCrece30     = (float)($brGlobal['seguro_crece_reconocido'] ?? $sum['recovery_crece_reconocido'] ?? 0);
 $ingrCrece70     = max(0.0, $ingrCrece - $ingrCrece30);
+$ingrCanalizadoAseguradora = $ingrSavehearts + $ingrComadres + $ingrCrece70;
 $ingrTotal       = (float)($brGlobal['recuperacion_total']      ?? $sum['recovery_total']);
 
 // Componentes de ingresos (desglose B)
@@ -122,6 +125,9 @@ $ingrCargosIni   = (float)($brGlobal['cargos_inicio']        ?? 0);
 $ingrComAper     = (float)($brGlobal['comision_apertura']    ?? 0);
 $ingrCondonacion = (float)($brGlobal['condonacion_excluida'] ?? 0);
 $ingrUnificacion = (float)($brGlobal['unificacion_excluida'] ?? 0);
+$ingrCargosAdic  = (float)($brGlobal['cargos_adicionales']   ?? 0);
+$ingrExcedRec    = (float)($brGlobal['excedente_recuperado'] ?? 0);
+$ingrOtrosDet    = (array)($brGlobal['otros_detalle']        ?? []);
 
 // ── Gastos operativos ─────────────────────────────────────────────────────────
 $gastosDetalle = (array)($brGlobal['gastos_detalle'] ?? []);
@@ -194,11 +200,9 @@ foreach ($nomDetalle as $dk => $dv) {
 }
 $nomNeto        = $nomPercep + $nomExtraExp - $nomDescuentosNOI;
 $gastosTotal    = $gastosOpTotal + $nomNeto;
-// EBITDA = Saldo inicial en caja + Ingresos totales (Recuperación/Cobranza) − Colocación −
-// Gastos totales. Misma fórmula que Excel (RadiographyWorkbookBuilder::buildGlobalSheet).
-$saldoInicial   = (float)($snap['saldo_inicial_caja'] ?? 0);
-$saldoFinal     = $snap['saldo_final_caja'] ?? null; // null = no configurado manualmente
-$utilidad       = $saldoInicial + $recTotal - $colocacion - $gastosTotal;
+// EBITDA = Recuperación/Cobranza − Colocación − Gastos totales.
+// Misma fórmula que Excel (RadiographyWorkbookBuilder::buildGlobalSheet).
+$utilidad       = $recTotal - $colocacion - $gastosTotal;
 
 // ── Categoría por EBITDA — fórmula centralizada (idéntica al Excel) ───────────
 // EBITDA = Recuperación − Colocación − OPEX − Nómina
@@ -514,6 +518,11 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         @if($ingrCharges > 0)<tr><td>Moratorios / Multas</td><td class="r">{{ $fmt($ingrCharges) }}</td></tr>@endif
         @if($ingrCargosIni > 0)<tr><td>Cargos al inicio</td><td class="r">{{ $fmt($ingrCargosIni) }}</td></tr>@endif
         @if($ingrComAper > 0)<tr><td>Comisión por apertura</td><td class="r">{{ $fmt($ingrComAper) }}</td></tr>@endif
+        @if($ingrCargosAdic > 0)<tr><td>Cargos adicionales</td><td class="r">{{ $fmt($ingrCargosAdic) }}</td></tr>@endif
+        @if($ingrExcedRec > 0)<tr><td>Excedentes recuperados</td><td class="r">{{ $fmt($ingrExcedRec) }}</td></tr>@endif
+        @foreach($ingrOtrosDet as $otrosLabel => $otrosVal)
+            @if($otrosVal != 0)<tr><td>{{ $otrosLabel }}</td><td class="r">{{ $fmt($otrosVal) }}</td></tr>@endif
+        @endforeach
     </tbody>
     <tfoot><tr><td><b>Total Recuperación</b></td><td class="r">{{ $fmt($ingrTotal) }}</td></tr></tfoot>
 </table>
@@ -530,52 +539,109 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <th class="r">Intereses</th>
             <th class="r">Impuestos</th>
             <th class="r">Moratorios</th>
+            <th class="r">Cargos adic.</th>
             <th class="r">Cargos inicio</th>
             <th class="r">Com. apertura</th>
+            <th class="r">Conceptos adic.</th>
             <th class="r">Total</th>
         </tr>
     </thead>
     <tbody>
         @foreach($brBranches as $bi => $bb)
+        @php
+            $bbOtros = (float)($bb['excedente_recuperado'] ?? 0) + (float)($bb['otros_recuperacion'] ?? 0);
+        @endphp
         <tr @if($bi % 2 === 1) style="background:#f8fafc;" @endif>
             <td class="b">{{ $bb['sucursal'] }}</td>
             <td class="r">{{ $fmt((float)($bb['capital_recuperado'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($bb['interes_recuperado'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($bb['impuesto_recuperado'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($bb['charges'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($bb['cargos_adicionales'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($bb['cargos_inicio'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($bb['comision_apertura'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt($bbOtros) }}</td>
             <td class="r b">{{ $fmt((float)($bb['recuperacion_total'] ?? 0)) }}</td>
         </tr>
         @endforeach
     </tbody>
     <tfoot>
+        @php
+            $globalOtros = (float)($brGlobal['excedente_recuperado'] ?? 0) + (float)($brGlobal['otros_recuperacion'] ?? 0);
+        @endphp
         <tr>
             <td>TOTAL</td>
             <td class="r">{{ $fmt((float)($brGlobal['capital_recuperado'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($brGlobal['interes_recuperado'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($brGlobal['impuesto_recuperado'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($brGlobal['charges'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($brGlobal['cargos_adicionales'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($brGlobal['cargos_inicio'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($brGlobal['comision_apertura'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt($globalOtros) }}</td>
             <td class="r">{{ $fmt($ingrTotal) }}</td>
         </tr>
     </tfoot>
 </table>
 @endif
 
-{{-- C) Seguros y coberturas canalizadas --}}
-@if($ingrCrece > 0 || $ingrSegExcluido > 0)
+{{-- C) Recuperación por producto --}}
+@php $recoveryByProduct = $snap['sections']['recovery_by_product']['rows'] ?? []; @endphp
+@if(!empty($recoveryByProduct))
+<div class="section-bar alt">C) Recuperación por producto</div>
+<table class="tbl avoid">
+    <thead>
+        <tr>
+            <th>Producto</th>
+            <th class="r">Capital</th>
+            <th class="r">Intereses</th>
+            <th class="r">Impuestos</th>
+            <th class="r">Moratorios</th>
+            <th class="r">Cargos adic.</th>
+            <th class="r">Com. apertura</th>
+            <th class="r">Conceptos adic.</th>
+            <th class="r">Total</th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach($recoveryByProduct as $pi => $pr)
+        <tr @if($pi % 2 === 1) style="background:#f8fafc;" @endif>
+            <td class="b">{{ $pr['product'] }}</td>
+            <td class="r">{{ $fmt((float)($pr['capital'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($pr['interes'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($pr['impuesto'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($pr['moratorios'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($pr['cargos_adicionales'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($pr['comision_apertura'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($pr['otros'] ?? 0)) }}</td>
+            <td class="r b">{{ $fmt((float)($pr['total'] ?? 0)) }}</td>
+        </tr>
+        @endforeach
+    </tbody>
+    <tfoot>
+        <tr>
+            <td>TOTAL</td>
+            <td colspan="6"></td>
+            <td></td>
+            <td class="r">{{ $fmt($ingrTotal) }}</td>
+        </tr>
+    </tfoot>
+</table>
+@endif
+
+{{-- Seguros y coberturas canalizadas — informativo, no afecta recuperación, OPEX, nómina ni EBITDA --}}
+@if($ingrCrece > 0 || $ingrSavehearts > 0 || $ingrComadres > 0)
 <div class="section-bar alt">Seguros y coberturas canalizadas</div>
 <table class="tbl avoid">
     <thead><tr><th>Concepto</th><th class="r">Monto</th></tr></thead>
     <tbody>
+        @if($ingrSavehearts > 0)<tr><td>Cobertura Savehearts</td><td class="r">{{ $fmt($ingrSavehearts) }}</td></tr>@endif
+        @if($ingrComadres > 0)<tr style="background:#f8fafc;"><td>Cobertura Crédito Grupal / Comadres</td><td class="r">{{ $fmt($ingrComadres) }}</td></tr>@endif
         @if($ingrCrece > 0)<tr><td>Seguro CRECE total</td><td class="r">{{ $fmt($ingrCrece) }}</td></tr>@endif
         @if($ingrCrece30 > 0)<tr style="background:#f8fafc;"><td>&nbsp;&nbsp;Reconocido como ingreso MR Lana (30%)</td><td class="r" style="color:#065f46;">{{ $fmt($ingrCrece30) }}</td></tr>@endif
-        @if($ingrCrece70 > 0)<tr><td>&nbsp;&nbsp;Canalizado a Savehearts (70%)</td><td class="r">{{ $fmt($ingrCrece70) }}</td></tr>@endif
-        @if($ingrSegExcluido > 0)<tr style="background:#f8fafc;"><td>Cobertura Savehearts / Crédito Grupal</td><td class="r">{{ $fmt($ingrSegExcluido) }}</td></tr>@endif
+        @if($ingrCrece70 > 0)<tr><td>&nbsp;&nbsp;Canalizado a aseguradora (70%)</td><td class="r">{{ $fmt($ingrCrece70) }}</td></tr>@endif
     </tbody>
-    <tfoot><tr><td><b>Total canalizado a Savehearts / aseguradora</b></td><td class="r">{{ $fmt($ingrCrece70 + $ingrSegExcluido) }}</td></tr></tfoot>
+    <tfoot><tr><td><b>Total canalizado a aseguradora</b></td><td class="r">{{ $fmt($ingrCanalizadoAseguradora) }}</td></tr></tfoot>
 </table>
 @endif
 

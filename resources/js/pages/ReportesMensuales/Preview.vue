@@ -208,6 +208,41 @@ const ingrSumaDesglose = computed(() =>
     + ingrMultas.value + ingrCargosAdic.value + ingrExcedente.value
     + ingrCargosIni.value + ingrComAper.value + ingrOtros.value
 )
+// "Otros" desglosado por su concepto real de origen — nunca como bolsa genérica.
+const ingrOtrosDetalle = computed<{ label: string; value: number }[]>(() => {
+    const det = brGlobal.value?.otros_detalle as Record<string, number> | undefined
+    if (!det) return []
+    return Object.entries(det).filter(([, v]) => Number(v) !== 0).map(([label, v]) => ({ label, value: Number(v) }))
+})
+
+// ── Recuperación por sucursal / por producto (tablas, no solo gráfica) ─────────
+const recuperacionPorSucursal = computed(() => brRaw.value.map((b: any) => ({
+    sucursal:           b.sucursal,
+    capital:            Number(b.capital_recuperado) || 0,
+    interes:            Number(b.interes_recuperado) || 0,
+    impuesto:           Number(b.impuesto_recuperado) || 0,
+    moratorios:         Number(b.charges) || 0,
+    cargos_adicionales: Number(b.cargos_adicionales) || 0,
+    cargos_inicio:      Number(b.cargos_inicio) || 0,
+    comision_apertura:  Number(b.comision_apertura) || 0,
+    otros:              (Number(b.excedente_recuperado) || 0) + (Number(b.otros_recuperacion) || 0),
+    total:              Number(b.recuperacion_total) || 0,
+})).sort((a, b) => b.total - a.total))
+
+const recuperacionPorProducto = computed(() => {
+    const rows = snap.value?.sections?.recovery_by_product?.rows as any[] ?? []
+    return rows.map((p: any) => ({
+        producto:           p.product,
+        capital:            Number(p.capital) || 0,
+        interes:            Number(p.interes) || 0,
+        impuesto:           Number(p.impuesto) || 0,
+        moratorios:         Number(p.moratorios) || 0,
+        cargos_adicionales: Number(p.cargos_adicionales) || 0,
+        comision_apertura:  Number(p.comision_apertura) || 0,
+        otros:              Number(p.otros) || 0,
+        total:              Number(p.total) || 0,
+    }))
+})
 
 // ── Nómina ─────────────────────────────────────────────────────────────────────
 const nomNomina   = computed(() => Number(brGlobal.value?.nomina_total)    || 0)
@@ -907,7 +942,6 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                         <KpiCard :label="kpiUtilLabel" :value="money(kpiUtil)" :icon="Gauge" :tone="kpiUtil < 0 ? 'red' : 'green'" />
                         <KpiCard label="Margen EBITDA" :value="pct(margenEbitdaPct)" :icon="Percent" :tone="margenEbitdaPct < 0 ? 'red' : 'green'" />
                         <KpiCard label="Préstamo activo" :value="money(prestamoActivoKpi)" :icon="Banknote" tone="blue" />
-                        <KpiCard label="Efectividad cobranza" :value="efectividadKpiPct !== null ? pct(efectividadKpiPct) : '—'" :icon="CheckCircle2" :tone="efectividadKpiPct !== null ? (efectividadKpiPct >= 70 ? 'green' : 'amber') : 'neutral'" />
                     </div>
                 </div>
 
@@ -1097,7 +1131,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                     <tr v-if="ingrExcedente > 0" class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Excedentes</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrExcedente) }}</td></tr>
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Cargos al inicio</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrCargosIni) }}</td></tr>
                                     <tr class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Comisión por apertura</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrComAper) }}</td></tr>
-                                    <tr v-if="ingrOtros > 0" class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Otros cobros</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrOtros) }}</td></tr>
+                                    <tr v-for="(o, i) in ingrOtrosDetalle" :key="o.label" class="border-b" :class="i % 2 === 1 ? 'bg-slate-50/60' : ''"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ {{ o.label }}</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(o.value) }}</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -1304,7 +1338,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                         <ChartCard title="Colocación por sucursal" :series="colocacionSucursalSeries" :options="colocacionSucursalOptions" type="donut" :height="280" />
                     </div>
                     <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
-                        <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Ranking por producto</h3></div>
+                        <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Ranking por producto (colocación)</h3></div>
                         <table v-if="productosSorted.length" class="w-full text-sm">
                             <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
                                 <tr><th class="px-4 py-3 text-left">Producto</th><th class="px-4 py-3 text-right">Operaciones</th><th class="px-4 py-3 text-right">Colocación</th><th class="px-4 py-3 text-right">Recuperación</th></tr>
@@ -1320,6 +1354,98 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                             </tbody>
                         </table>
                         <EmptyState v-else class="m-4" title="Sin datos de producto" description="Verifica que el archivo de ministraciones incluya la columna de producto financiero." />
+                    </div>
+
+                    <!-- A) Recuperación por componente -->
+                    <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                        <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">A) Recuperación por componente</h3></div>
+                        <table class="w-full text-sm">
+                            <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
+                                <tr><th class="px-4 py-3 text-left">Componente</th><th class="px-4 py-3 text-right">Monto</th><th class="px-4 py-3 text-right">% del total</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="c in [
+                                        { label: 'Capital recuperado', value: ingrCapital },
+                                        { label: 'Intereses', value: ingrInteres },
+                                        { label: 'Impuestos', value: ingrImpuesto },
+                                        { label: 'Moratorios / Multas', value: ingrMultas },
+                                        { label: 'Cargos al inicio', value: ingrCargosIni },
+                                        { label: 'Comisión por apertura', value: ingrComAper },
+                                        { label: 'Cargos adicionales', value: ingrCargosAdic },
+                                        { label: 'Excedentes recuperados', value: ingrExcedente },
+                                        ...ingrOtrosDetalle,
+                                    ].filter(c => c.value !== 0)" :key="c.label" class="border-t hover:bg-slate-50">
+                                    <td class="px-4 py-2.5 font-semibold">{{ c.label }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(c.value) }}</td>
+                                    <td class="px-4 py-2.5 text-right text-slate-500">{{ recGlobal > 0 ? (c.value / recGlobal * 100).toFixed(1) : '0.0' }}%</td>
+                                </tr>
+                            </tbody>
+                            <tfoot class="bg-slate-100 font-black text-xs">
+                                <tr><td class="px-4 py-2.5 uppercase tracking-wider">Total recuperación</td><td class="px-4 py-2.5 text-right">{{ money(recGlobal) }}</td><td class="px-4 py-2.5 text-right">100%</td></tr>
+                            </tfoot>
+                        </table>
+                    </div>
+
+                    <!-- B) Recuperación por sucursal -->
+                    <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                        <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">B) Recuperación por sucursal</h3></div>
+                        <table class="w-full text-sm">
+                            <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
+                                <tr>
+                                    <th class="px-4 py-3 text-left">Sucursal</th><th class="px-4 py-3 text-right">Capital</th><th class="px-4 py-3 text-right">Intereses</th>
+                                    <th class="px-4 py-3 text-right">Impuestos</th><th class="px-4 py-3 text-right">Moratorios</th><th class="px-4 py-3 text-right">Cargos adic.</th>
+                                    <th class="px-4 py-3 text-right">Cargos inicio</th><th class="px-4 py-3 text-right">Com. apertura</th><th class="px-4 py-3 text-right">Conceptos adic.</th><th class="px-4 py-3 text-right">Total</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="r in recuperacionPorSucursal" :key="r.sucursal" class="border-t hover:bg-slate-50">
+                                    <td class="px-4 py-2.5 font-bold">{{ r.sucursal }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(r.capital) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(r.interes) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(r.impuesto) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(r.moratorios) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(r.cargos_adicionales) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(r.cargos_inicio) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(r.comision_apertura) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(r.otros) }}</td>
+                                    <td class="px-4 py-2.5 text-right font-black">{{ money(r.total) }}</td>
+                                </tr>
+                            </tbody>
+                            <tfoot class="bg-slate-100 font-black text-xs">
+                                <tr><td class="px-4 py-2.5 uppercase tracking-wider">Total</td><td colspan="8"></td><td class="px-4 py-2.5 text-right">{{ money(recGlobal) }}</td></tr>
+                            </tfoot>
+                        </table>
+                    </div>
+
+                    <!-- C) Recuperación por producto -->
+                    <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                        <div class="border-b bg-slate-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-slate-500">C) Recuperación por producto</h3></div>
+                        <table v-if="recuperacionPorProducto.length" class="w-full text-sm">
+                            <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
+                                <tr>
+                                    <th class="px-4 py-3 text-left">Producto</th><th class="px-4 py-3 text-right">Capital</th><th class="px-4 py-3 text-right">Intereses</th>
+                                    <th class="px-4 py-3 text-right">Impuestos</th><th class="px-4 py-3 text-right">Moratorios</th><th class="px-4 py-3 text-right">Cargos adic.</th>
+                                    <th class="px-4 py-3 text-right">Com. apertura</th><th class="px-4 py-3 text-right">Conceptos adic.</th><th class="px-4 py-3 text-right">Total</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="p in recuperacionPorProducto" :key="p.producto" class="border-t hover:bg-slate-50">
+                                    <td class="px-4 py-2.5 font-bold">{{ p.producto }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(p.capital) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(p.interes) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(p.impuesto) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(p.moratorios) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(p.cargos_adicionales) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(p.comision_apertura) }}</td>
+                                    <td class="px-4 py-2.5 text-right">{{ money(p.otros) }}</td>
+                                    <td class="px-4 py-2.5 text-right font-black">{{ money(p.total) }}</td>
+                                </tr>
+                            </tbody>
+                            <tfoot class="bg-slate-100 font-black text-xs">
+                                <tr><td class="px-4 py-2.5 uppercase tracking-wider">Total</td><td colspan="7"></td><td class="px-4 py-2.5 text-right">{{ money(recGlobal) }}</td></tr>
+                            </tfoot>
+                        </table>
+                        <EmptyState v-else class="m-4" title="Sin datos de recuperación por producto" />
                     </div>
                 </div>
 
@@ -1472,8 +1598,8 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                 <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Cobertura Crédito Grupal / Comadres</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosComadresBruto) }}</td></tr>
                                 <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE total</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosCreceBruto) }}</td></tr>
                                 <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE reconocido como ingreso MR Lana (30%)</td><td class="px-5 py-2.5 text-right font-black text-emerald-700">{{ money(segurosCrece30) }}</td></tr>
-                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE canalizado a Savehearts (70%)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosCrece70) }}</td></tr>
-                                <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">Total canalizado a Savehearts / aseguradora</td><td class="px-5 py-2.5 text-right font-black text-indigo-900">{{ money(segurosPuenteTotal) }}</td></tr>
+                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE canalizado a aseguradora (70%)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosCrece70) }}</td></tr>
+                                <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">Total canalizado a aseguradora</td><td class="px-5 py-2.5 text-right font-black text-indigo-900">{{ money(segurosPuenteTotal) }}</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -1685,7 +1811,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                     <!-- KPIs fondeo -->
                     <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
                         <KpiCard label="Fondeos entre sucursales" :value="money(fondeoDetalleTotal)" :icon="Landmark" tone="blue" />
-                        <KpiCard label="Excedente enviado a corporativo" :value="money(excedentesTotal)" :icon="Banknote" tone="amber" />
+                        <KpiCard label="Excedente enviado a corporativo" :value="money(excGlobal)" :icon="Banknote" tone="amber" />
                         <KpiCard label="Total movimientos" :value="num(fondeoDetalleRows.length)" :icon="Receipt" tone="neutral" />
                     </div>
                     <p class="rounded-xl bg-blue-50 px-4 py-2.5 text-xs text-blue-700 border border-blue-100">
@@ -1712,7 +1838,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                     <div v-if="corpFundingRows.length" class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
                         <div class="flex items-center justify-between px-5 py-3 border-b bg-amber-50/60">
                             <span class="font-bold text-sm text-amber-800">Excedente enviado a corporativo por sucursal</span>
-                            <span class="font-black text-sm text-amber-900">{{ money(excedentesTotal) }}</span>
+                            <span class="font-black text-sm text-amber-900">{{ money(excGlobal) }}</span>
                         </div>
                         <table class="w-full text-sm">
                             <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">

@@ -47,7 +47,8 @@ class RotacionExcelImportService
         $period    = $upload->period;
         $targetMes = $this->resolveTargetMes($period);
 
-        DB::table('fact_rotacion')->where('report_upload_id', $upload->id)->delete();
+        // Delete ALL rotación for this period regardless of which upload_id produced them
+        DB::table('fact_rotacion')->where('period_id', $upload->period_id)->delete();
 
         $inserted = 0;
         $skipped  = 0;
@@ -72,8 +73,18 @@ class RotacionExcelImportService
             $skipped  += $result['skipped'];
             $errors   += $result['errors'];
         } else {
-            // Strategy 2: scan every sheet for columns matching the target month
-            foreach ($spreadsheet->getWorksheetIterator() as $ws) {
+            // Strategy 2: scan every sheet for columns matching the target month.
+            // Prefer sheets whose name contains the period year (e.g. "SUCURSALES 2026" over "INDICADOR 2025").
+            $targetYear = (string) ($period?->year ?? date('Y'));
+            $allSheets  = iterator_to_array($spreadsheet->getWorksheetIterator());
+            usort($allSheets, static function ($a, $b) use ($targetYear) {
+                $aY = str_contains($a->getTitle(), $targetYear);
+                $bY = str_contains($b->getTitle(), $targetYear);
+                if ($aY !== $bY) return $aY ? -1 : 1;
+                return 0;
+            });
+
+            foreach ($allSheets as $ws) {
                 $rows   = $ws->toArray(null, true, true, false);
                 $result = $this->parseSheetMonthColumn($rows, $targetMes, $ws->getTitle(), $upload);
                 if ($result['inserted'] > 0) {
@@ -139,6 +150,15 @@ class RotacionExcelImportService
                 $skipped++;
                 continue;
             }
+
+            // Guard: reject metric-label names that are never real branch names
+            $sucNorm = strtr(mb_strtoupper($sucursal), ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U']);
+            $metricPfx = ['ALTA','BAJA','PLANTILL','ROTACI','PROMEDIO','INDICE'];
+            $isMetric = false;
+            foreach ($metricPfx as $pfx) {
+                if (str_starts_with($sucNorm, $pfx)) { $isMetric = true; break; }
+            }
+            if ($isMetric) { $skipped++; continue; }
 
             // Derive index if not present but bajas and promedio are
             if ($indice == 0.0 && $promedio > 0.0 && $bajas > 0) {
@@ -238,18 +258,22 @@ class RotacionExcelImportService
             }
             if ($targetCol === null) continue;
 
-            // Find sucursal name: scan up to 5 rows above for a non-empty, non-metric cell in col 0
+            // Find sucursal name: scan up to 5 rows above, checking ALL columns.
+            // Skip pure numbers and metric labels — branch names are always text.
             $sucursalName = null;
             for ($back = 1; $back <= 5; $back++) {
                 $prevIdx = $idx - $back;
                 if ($prevIdx < 0) break;
                 $prevRow = $rowsArr[$prevIdx] ?? [];
-                $firstCell = trim((string) ($prevRow[0] ?? ''));
-                if ($firstCell === '') continue;
-                if ($isMetricLabel($firstCell)) continue;
                 if ($isMonthHeaderRow($prevRow)) break;
-                $sucursalName = $firstCell;
-                break;
+                foreach ($prevRow as $cell) {
+                    $candidate = trim((string) $cell);
+                    if ($candidate === '') continue;
+                    if (is_numeric($candidate)) continue;
+                    if ($isMetricLabel($candidate)) continue;
+                    $sucursalName = $candidate;
+                    break 2;
+                }
             }
 
             if (!$sucursalName) continue;
@@ -339,21 +363,26 @@ class RotacionExcelImportService
             return 'ABRIL';
         }
 
-        // Try from period start_date month number
+        // First: use the period's month number field (most reliable — start_date can be in prior month)
+        if (!empty($period->month) && isset(self::MESES_ES[(int) $period->month])) {
+            return self::MESES_ES[(int) $period->month];
+        }
+
+        // Second: try from period name text (e.g. "Abril 2026")
+        $label = mb_strtoupper((string) ($period->name ?? $period->label ?? ''));
+        foreach (self::MESES_ES as $mes) {
+            $mesNorm = strtr($mes, ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U']);
+            if (str_contains($label, $mes) || str_contains($label, $mesNorm)) {
+                return $mes;
+            }
+        }
+
+        // Last: try from start_date (risky — monthly periods often start in prior month's last week)
         if ($period->start_date) {
             try {
                 $month = (int) \Carbon\Carbon::parse($period->start_date)->format('n');
                 return self::MESES_ES[$month] ?? 'ABRIL';
             } catch (\Throwable) {}
-        }
-
-        // Try from period label text
-        $label = mb_strtoupper((string) ($period->label ?? ''));
-        foreach (self::MESES_ES as $num => $mes) {
-            $mesNorm = strtr($mes, ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U']);
-            if (str_contains($label, $mes) || str_contains($label, $mesNorm)) {
-                return $mes;
-            }
         }
 
         return 'ABRIL';

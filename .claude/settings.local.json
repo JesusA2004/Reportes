@@ -116,7 +116,13 @@
       "Bash(taskkill *)",
       "Bash(xxd)",
       "Bash(npx vite *)",
-      "Bash(Select-Object -First 30)"
+      "Bash(Select-Object -First 30)",
+      "Bash(awk -F: '$1 < 2250')",
+      "Bash(awk '/private function buildGlobalSheet/,/private function buildValorCarteraSheet/' \"app/Services/Radiography/RadiographyWorkbookBuilder.php\")",
+      "Bash(awk 'NR>=1813 && NR<=2309' \"app/Services/Radiography/RadiographyWorkbookBuilder.php\")",
+      "Bash(awk 'NR>=1813 && NR<=2300' \"app/Services/Radiography/RadiographyWorkbookBuilder.php\")",
+      "Bash(awk 'NR>=4621 && NR<=4980' \"app/Services/Radiography/RadiographyWorkbookBuilder.php\")",
+      "Bash(git stash *)"
     ]
   }
 }

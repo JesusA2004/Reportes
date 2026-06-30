@@ -164,10 +164,12 @@ class RadiographyWorkbookBuilder
         $moraPct   = $carteraTotal > 0 ? round($moraTotal / $carteraTotal * 100, 2) : 0.0;
 
         // ── Ingresos / Cobranza — desglose completo ─────────────────────────────
-        $ingrSegExcluido = $brCalcGlobal ? (float)$brCalcGlobal['seguro_excluido_bruto']    : (float)($sum['recovery_seguro_excluido']  ?? 0.0);
+        $ingrSavehearts  = $brCalcGlobal ? (float)$brCalcGlobal['seguro_savehearts_bruto']  : 0.0;
+        $ingrComadres    = $brCalcGlobal ? (float)$brCalcGlobal['seguro_comadres_bruto']    : 0.0;
         $ingrCrece       = $brCalcGlobal ? (float)$brCalcGlobal['seguro_crece_bruto']       : (float)($sum['recovery_crece_bruto']      ?? 0.0);
         $ingrCrece30     = $brCalcGlobal ? (float)$brCalcGlobal['seguro_crece_reconocido']  : (float)($sum['recovery_crece_reconocido'] ?? 0.0);
         $ingrCrece70     = max(0.0, $ingrCrece - $ingrCrece30);
+        $ingrCanalizadoAseguradora = $ingrSavehearts + $ingrComadres + $ingrCrece70;
         $ingrTotal       = $recTotal; // recuperacion_total ya incluye el 30% CRECE
         // Componentes de recuperación final
         $ingrCapital     = $brCalcGlobal ? (float)$brCalcGlobal['capital_recuperado']   : 0.0;
@@ -176,15 +178,25 @@ class RadiographyWorkbookBuilder
         $ingrCharges     = $brCalcGlobal ? (float)$brCalcGlobal['charges']              : 0.0;
         $ingrCargosIni   = $brCalcGlobal ? (float)$brCalcGlobal['cargos_inicio']        : 0.0;
         $ingrComAper     = $brCalcGlobal ? (float)$brCalcGlobal['comision_apertura']    : 0.0;
-        // Desglose por componente de la recuperación final
+        $ingrCargosAdic  = $brCalcGlobal ? (float)$brCalcGlobal['cargos_adicionales']   : 0.0;
+        $ingrExcedRec    = $brCalcGlobal ? (float)$brCalcGlobal['excedente_recuperado'] : 0.0;
+        $ingrOtrosDet    = (array)($brCalcGlobal['otros_detalle'] ?? []);
+        // Desglose por componente de la recuperación final — TODOS los componentes reales,
+        // de forma que la suma cuadre exactamente contra $ingrTotal (Total Recuperación).
         $ingrItemsComp = [
-            ['Capital recuperado',     $ingrCapital,   'currency'],
-            ['Intereses',              $ingrInteres,   'currency'],
-            ['Impuestos',              $ingrImpuesto,  'currency'],
-            ['Moratorios / Multas',    $ingrCharges,   'currency'],
-            ['Cargos al inicio',       $ingrCargosIni, 'currency'],
-            ['Comisión por apertura',  $ingrComAper,   'currency'],
+            ['Capital recuperado',     $ingrCapital,    'currency'],
+            ['Intereses',              $ingrInteres,    'currency'],
+            ['Impuestos',              $ingrImpuesto,   'currency'],
+            ['Moratorios / Multas',    $ingrCharges,    'currency'],
+            ['Cargos al inicio',       $ingrCargosIni,  'currency'],
+            ['Comisión por apertura',  $ingrComAper,    'currency'],
+            ['Cargos adicionales',     $ingrCargosAdic, 'currency'],
+            ['Excedentes recuperados', $ingrExcedRec,   'currency'],
         ];
+        // "Otros" se desglosa por su concepto real de origen — nunca como bolsa genérica.
+        foreach ($ingrOtrosDet as $concept => $amount) {
+            $ingrItemsComp[] = [(string)$concept, (float)$amount, 'currency'];
+        }
 
         // ── Gastos operativos (totales primero, render después) ─────────────
         $globalGastosDetalle = (array)($brCalcGlobal['gastos_detalle'] ?? []);
@@ -261,19 +273,17 @@ class RadiographyWorkbookBuilder
         }
         $nomTotal = array_sum($nomDisplayOrder);
 
-        // ── Préstamos intersucursales ─────────────────────────────────────────
-        $loanTotal      = (float)($loans['total'] ?? 0);
-        $brGlobalFondea = $brCalcGlobal ? (float)$brCalcGlobal['prestamos_fondea'] : $loanTotal;
-        $brGlobalRecibe = (float) array_sum(array_column($loans['recibe'] ?? [], 'total'));
-        $brLoanNeto     = $brGlobalFondea - $brGlobalRecibe;
+        // ── Préstamos intersucursales — SOLO movimientos sucursal operativa → sucursal
+        // operativa. Activos (fondea) y Pasivos (recibe) son, por definición, el mismo
+        // conjunto de movimientos agrupado por origen y por destino: siempre son iguales.
+        // CORPORATIVO/excedentes NUNCA entran aquí (van en "Excedente enviado a corporativo").
+        $brGlobalFondea = $brCalcGlobal ? (float)$brCalcGlobal['prestamos_fondea'] : (float)($loans['operative_fondeos']['fondea_total'] ?? 0);
+        $brGlobalRecibe = $brGlobalFondea;
 
         // ── Tendencias / EBITDA (depende de gastosOpTotal y nomTotal ya conocidos) ──
-        $saldoInicial   = (float)($snap['saldo_inicial_caja'] ?? 0);
-        $saldoFinal     = $snap['saldo_final_caja'] ?? null;  // null = no configurado
         $excGlobal      = $brCalcGlobal ? (float)$brCalcGlobal['excedentes'] : $excedentes;
         $gastosTotal    = $gastosOpTotal + $nomTotal;
-        $utilidad       = $saldoInicial + $recTotal - $colTotal - $gastosTotal;
-        $diferencia = $utilidad - $excGlobal; // usado solo internamente, no se muestra en el reporte
+        $utilidad       = $recTotal - $colTotal - $gastosTotal;
 
         // ════════════════════════════════════════════════════════════════════
         // Layout: título(1) · subtítulo(2) · meta(3) · KPI band(4-7) · blank(8)
@@ -553,53 +563,110 @@ class RadiographyWorkbookBuilder
         $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
 
-        // B) Desglose por sucursal
+        // B) Desglose por sucursal — columnas suman exactamente el Total de cada fila.
+        // "Conceptos adicionales reales" = Excedentes recuperados + Otros conceptos reales
+        // (ver desglose A para el detalle por concepto real).
         RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'B) Desglose por sucursal');
         $sheet->getStyle("A{$r}")->getFont()->setBold(true);
-        $sheet->getStyle("A{$r}:H{$r}")->getFill()->setFillType(\PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID)->getStartColor()->setARGB(RadiographyStyleHelper::BG_GRAY);
+        $sheet->getStyle("A{$r}:J{$r}")->getFill()->setFillType(\PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID)->getStartColor()->setARGB(RadiographyStyleHelper::BG_GRAY);
         $r++;
         // Header row
-        $brIngrHeaders = ['Sucursal', 'Capital', 'Intereses', 'Impuestos', 'Moratorios', 'Cargos inicio', 'Com. apertura', 'Total'];
-        $brIngrCols    = ['A','B','C','D','E','F','G','H'];
+        $brIngrHeaders = ['Sucursal', 'Capital', 'Intereses', 'Impuestos', 'Moratorios', 'Cargos adicionales', 'Cargos al inicio', 'Com. apertura', 'Conceptos adicionales reales', 'Total'];
+        $brIngrCols    = ['A','B','C','D','E','F','G','H','I','J'];
         foreach ($brIngrHeaders as $ci => $hdr) {
             RadiographyStyleHelper::setCellValueSafe($sheet, "{$brIngrCols[$ci]}{$r}", $hdr);
         }
-        $sheet->getStyle("A{$r}:H{$r}")->getFont()->setBold(true);
-        $sheet->getStyle("A{$r}:H{$r}")->getFill()->setFillType(\PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID)->getStartColor()->setARGB(RadiographyStyleHelper::BG_LIGHT_BLUE);
+        $sheet->getStyle("A{$r}:J{$r}")->getFont()->setBold(true);
+        $sheet->getStyle("A{$r}:J{$r}")->getFill()->setFillType(\PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID)->getStartColor()->setARGB(RadiographyStyleHelper::BG_LIGHT_BLUE);
         $r++;
-        $sucIngrTotals = array_fill(0, 7, 0.0);
+        $sucIngrTotals = array_fill(0, 9, 0.0);
         foreach ($branchesList as $idx => $bBranch) {
             $bCap   = (float)($bBranch['capital_recuperado']  ?? 0);
             $bInt   = (float)($bBranch['interes_recuperado']  ?? 0);
             $bImp   = (float)($bBranch['impuesto_recuperado'] ?? 0);
             $bChg   = (float)($bBranch['charges']             ?? 0);
-            $bCar   = (float)($bBranch['cargos_inicio']       ?? 0);
+            $bCarAd = (float)($bBranch['cargos_adicionales']  ?? 0);
+            $bCarIni= (float)($bBranch['cargos_inicio']       ?? 0);
             $bCom   = (float)($bBranch['comision_apertura']   ?? 0);
+            $bOtros = (float)($bBranch['excedente_recuperado'] ?? 0) + (float)($bBranch['otros_recuperacion'] ?? 0);
             $bTot   = (float)($bBranch['recuperacion_total']  ?? 0);
-            $vals   = [$bCap, $bInt, $bImp, $bChg, $bCar, $bCom, $bTot];
+            $vals   = [$bCap, $bInt, $bImp, $bChg, $bCarAd, $bCarIni, $bCom, $bOtros, $bTot];
             RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", $bBranch['sucursal']);
-            foreach ([0,1,2,3,4,5,6] as $ci) {
+            foreach ([0,1,2,3,4,5,6,7,8] as $ci) {
                 $sheet->setCellValue("{$brIngrCols[$ci+1]}{$r}", $vals[$ci]);
                 RadiographyStyleHelper::applyCurrencyFormat($sheet, "{$brIngrCols[$ci+1]}{$r}");
                 $sucIngrTotals[$ci] += $vals[$ci];
             }
-            $this->dataRow($sheet, "A{$r}:H{$r}", $idx % 2 === 0);
+            $this->dataRow($sheet, "A{$r}:J{$r}", $idx % 2 === 0);
             $r++;
         }
         // Totals row
         RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'TOTAL');
-        $totCols = ['B','C','D','E','F','G','H'];
+        $totCols = ['B','C','D','E','F','G','H','I','J'];
         foreach ($totCols as $ci => $col) {
             $sheet->setCellValue("{$col}{$r}", $sucIngrTotals[$ci]);
             RadiographyStyleHelper::applyCurrencyFormat($sheet, "{$col}{$r}");
         }
-        $this->totalsRow($sheet, "A{$r}:H{$r}");
+        $this->totalsRow($sheet, "A{$r}:J{$r}");
         // Widen columns for this section
-        foreach (['E','F','G','H'] as $wCol) {
+        foreach (['E','F','G','H','I','J'] as $wCol) {
             if ((float)$sheet->getColumnDimension($wCol)->getWidth() < 16) {
                 $sheet->getColumnDimension($wCol)->setWidth(16);
             }
         }
+        $r += 2;
+
+        // C) Recuperación por producto — columnas suman exactamente el Total de cada fila.
+        RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'C) Recuperación por producto');
+        $sheet->getStyle("A{$r}")->getFont()->setBold(true);
+        $sheet->getStyle("A{$r}:H{$r}")->getFill()->setFillType(\PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID)->getStartColor()->setARGB(RadiographyStyleHelper::BG_GRAY);
+        $r++;
+        $prodHeaders = ['Producto', 'Capital', 'Intereses', 'Impuestos', 'Moratorios', 'Cargos adicionales', 'Com. apertura', 'Conceptos adicionales reales', 'Total'];
+        $prodCols    = ['A','B','C','D','E','F','G','H','I'];
+        foreach ($prodHeaders as $ci => $hdr) {
+            RadiographyStyleHelper::setCellValueSafe($sheet, "{$prodCols[$ci]}{$r}", $hdr);
+        }
+        $sheet->getStyle("A{$r}:I{$r}")->getFont()->setBold(true);
+        $sheet->getStyle("A{$r}:I{$r}")->getFill()->setFillType(\PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID)->getStartColor()->setARGB(RadiographyStyleHelper::BG_LIGHT_BLUE);
+        $r++;
+        $recoveryByProduct = $snap['sections']['recovery_by_product'] ?? ['rows' => [], 'total' => 0.0];
+        $prodIdx = 0;
+        foreach ($recoveryByProduct['rows'] as $pRow) {
+            $pVals = [
+                (float)$pRow['capital'], (float)$pRow['interes'], (float)$pRow['impuesto'],
+                (float)$pRow['moratorios'], (float)$pRow['cargos_adicionales'], (float)$pRow['comision_apertura'],
+                (float)$pRow['otros'], (float)$pRow['total'],
+            ];
+            RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", $pRow['product']);
+            foreach ([0,1,2,3,4,5,6,7] as $ci) {
+                $sheet->setCellValue("{$prodCols[$ci+1]}{$r}", $pVals[$ci]);
+                RadiographyStyleHelper::applyCurrencyFormat($sheet, "{$prodCols[$ci+1]}{$r}");
+            }
+            $this->dataRow($sheet, "A{$r}:I{$r}", $prodIdx % 2 === 0);
+            $prodIdx++;
+            $r++;
+        }
+        RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'TOTAL');
+        $sheet->setCellValue("I{$r}", (float)$recoveryByProduct['total']);
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "I{$r}");
+        $this->totalsRow($sheet, "A{$r}:I{$r}");
+        $r += 2;
+
+        // ── Seguros y coberturas canalizadas — informativo, no afecta recuperación,
+        // OPEX, nómina ni EBITDA. ────────────────────────────────────────────────
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", 'SEGUROS Y COBERTURAS CANALIZADAS');
+        $r++;
+        $r = $writeRows($r, array_filter([
+            $ingrSavehearts > 0 ? ['Cobertura Savehearts', $ingrSavehearts, 'currency', ''] : null,
+            $ingrComadres   > 0 ? ['Cobertura Crédito Grupal / Comadres', $ingrComadres, 'currency', ''] : null,
+            $ingrCrece      > 0 ? ['Seguro CRECE total', $ingrCrece, 'currency', ''] : null,
+            $ingrCrece30    > 0 ? ['Reconocido como ingreso MR Lana (30%)', $ingrCrece30, 'currency', ''] : null,
+            $ingrCrece70    > 0 ? ['Canalizado a aseguradora (70%)', $ingrCrece70, 'currency', ''] : null,
+        ]));
+        RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'Total canalizado a aseguradora');
+        $sheet->setCellValue("B{$r}", $ingrCanalizadoAseguradora);
+        $this->totalsRow($sheet, "A{$r}:D{$r}");
+        $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
 
         // ── 3. Gastos Operativos ──────────────────────────────────────────────
@@ -644,13 +711,35 @@ class RadiographyWorkbookBuilder
         $r += 2;
 
         // ── 5. Préstamos Intersucursales ──────────────────────────────────────
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '5. PRÉSTAMOS INTERSUCURSALES');
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '5. PRÉSTAMOS INTERSUCURSALES (solo sucursal operativa → sucursal operativa)');
         $r++;
         $r = $writeRows($r, [
             ['Activos (fondea)',  $brGlobalFondea, 'currency', ''],
             ['Pasivos (recibe)',  $brGlobalRecibe, 'currency', ''],
-            ['Total neto',       $brLoanNeto,      'currency', ''],
         ]);
+        $r++;
+
+        // ── 5b. Excedente enviado a corporativo (separado de préstamos intersucursales) ──
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '5B. EXCEDENTE ENVIADO A CORPORATIVO');
+        $r++;
+        RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'Total');
+        $sheet->setCellValue("B{$r}", $excGlobal);
+        $this->totalsRow($sheet, "A{$r}:D{$r}");
+        $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+        $r++;
+        $excIdx = 0;
+        $excBranchRanked = $branchesList;
+        usort($excBranchRanked, fn ($a, $b) => (float)($b['excedentes'] ?? 0) <=> (float)($a['excedentes'] ?? 0));
+        foreach ($excBranchRanked as $eb) {
+            $ebVal = (float)($eb['excedentes'] ?? 0);
+            if ($ebVal == 0.0) continue;
+            RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", $eb['sucursal']);
+            $sheet->setCellValue("B{$r}", $ebVal);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $excIdx % 2 === 0);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$r}");
+            $excIdx++;
+            $r++;
+        }
         $r++;
 
         // ── 6. Índice de rotación de personal ────────────────────────────────
@@ -664,28 +753,9 @@ class RadiographyWorkbookBuilder
         ]);
         $r++;
 
-        // ── 7. Análisis de Tendencias y Proyecciones ──────────────────────────
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES');
-        $r++;
-        $r = $writeRows($r, [
-            ['Ingresos Totales',                   $recTotal,             'currency', ''],
-            ['Otorgamientos',                      $colTotal,             'currency', ''],
-            ['Gastos Totales',                     $gastosTotal,          'currency', ''],
-            ['EBITDA',                             $utilidad,             'currency', ''],
-            ['Total neto préstamos inter suc.',    $brLoanNeto,           'currency', ''],
-            ['Excedente enviado a corporativo',    $excGlobal,            'currency', ''],
-            ['Mora de 0 a 30 días',                $mora0_30,      'currency', ''],
-            ['Mora de 31 a 60 días',               $mora31_60,     'currency', ''],
-            ['Mora de 61 a 90 días',               $mora61_90,     'currency', ''],
-            ['Mora de 91 a 120 días',              $mora91_120,    'currency', ''],
-            ['Mora 120+ días',                     $mora120p,      'currency', ''],
-            ['Valor cartera',                      $carteraTotal,  'currency', ''],
-        ]);
-        $r++;
-
-        // ── 8. EBITDA ─────────────────────────────────────────────────────────
+        // ── 7. EBITDA ─────────────────────────────────────────────────────────
         // EBITDA = Recuperación total − Colocación − Gastos Totales
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '8. EBITDA');
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '7. EBITDA');
         $r++;
         $r = $writeRows($r, [
             ['Recuperación total / Cobranza',              $recTotal,      'currency', ''],
@@ -705,7 +775,7 @@ class RadiographyWorkbookBuilder
         // Gastos/Nómina por sucursal) en la hoja CATEGORÍA EBITDA.
         RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", 'CATEGORÍA POR EBITDA (POR SUCURSAL)');
         $r++;
-        RadiographyStyleHelper::applyTableHeaderStyle($sheet, $r, ['A' => 'SUCURSAL', 'B' => 'EBITDA ESTIMADO', 'C' => 'CATEGORÍA', 'D' => '']);
+        RadiographyStyleHelper::applyTableHeaderStyle($sheet, $r, ['A' => 'SUCURSAL', 'B' => 'CATEGORÍA', 'C' => '', 'D' => '']);
         $r++;
         $catRankedBranches = $branchesList;
         usort($catRankedBranches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
@@ -715,11 +785,9 @@ class RadiographyWorkbookBuilder
             $cbCat    = RadiographyStyleHelper::ebitdaCategory($cbUtil);
             $cbColors = RadiographyStyleHelper::categoryColors($cbCat);
             RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", $cb['sucursal']);
-            $sheet->setCellValue("B{$r}", $cbUtil);
-            $sheet->setCellValue("C{$r}", $cbCat);
+            $sheet->setCellValue("B{$r}", $cbCat);
             $this->dataRow($sheet, "A{$r}:D{$r}", $catIdx % 2 === 0);
-            RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$r}");
-            $sheet->getStyle("C{$r}")->applyFromArray([
+            $sheet->getStyle("B{$r}")->applyFromArray([
                 'font'      => ['bold' => true, 'size' => 9, 'color' => ['argb' => $cbColors['fg']]],
                 'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $cbColors['bg']]],
                 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
@@ -727,24 +795,13 @@ class RadiographyWorkbookBuilder
             $catIdx++;
             $r++;
         }
-        RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'EBITDA estimado = Recuperación − Gastos − Nómina completa estimada por sucursal.');
-        RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:D{$r}");
-        $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(8)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
-        $r += 2;
+        $r++;
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, "A{$r}", '→ Ver detalle completo en hoja CATEGORÍA EBITDA', 'CATEGORÍA EBITDA');
         $sheet->getStyle("A{$r}")->getFont()->setSize(9);
         $r += 2;
 
-        // ── 9. Saldo Total Acumulado Cuentas ──────────────────────────────────
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '9. SALDO TOTAL ACUMULADO CUENTAS');
-        $r++;
-        $r = $writeRows($r, [
-            ['Total', 0, 'currency', ''],
-        ]);
-        $r++;
-
-        // ── 10. Observaciones y Notas ─────────────────────────────────────────
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '10. OBSERVACIONES Y NOTAS');
+        // ── 8. Observaciones y Notas ─────────────────────────────────────────
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '8. OBSERVACIONES Y NOTAS');
         $r++;
         foreach ([
             'Comentarios sobre el desempeño financiero:',
@@ -1255,7 +1312,7 @@ class RadiographyWorkbookBuilder
             'G' => 'EXCEDENTES',
             'H' => 'CARGOS INICIO',
             'I' => 'COM. APERTURA',
-            'J' => 'OTROS COBROS',
+            'J' => 'OTROS CONCEPTOS',
             'K' => 'TOTAL RECUPERACIÓN',
         ]);
         $r++;
@@ -1523,7 +1580,6 @@ class RadiographyWorkbookBuilder
             'B' => 'ERP OPEX',
             'C' => 'LENDUS OPEX',
             'D' => 'TOTAL OPEX',
-            'E' => 'CUADRE (D = B+C)',
         ]);
         $r++;
         $totErp = 0.0; $totLen = 0.0; $totOpe = 0.0;
@@ -1531,38 +1587,25 @@ class RadiographyWorkbookBuilder
             $erp  = (float)($b['gastos_erp_total']    ?? 0);
             $len  = (float)($b['gastos_lendus_total']  ?? 0);
             $ope  = (float)($b['gastos_operativos']    ?? 0);
-            $ck   = round($ope - $erp - $len, 2);
             $sheet->setCellValue("A{$r}", $b['sucursal']);
             foreach (['B'=>$erp,'C'=>$len,'D'=>$ope] as $col => $val) {
                 $sheet->setCellValue("{$col}{$r}", $val);
                 $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
                 $sheet->getStyle("{$col}{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
             }
-            $sheet->setCellValue("E{$r}", $ck);
-            $sheet->getStyle("E{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
-            $sheet->getStyle("E{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-            if (abs($ck) > 0.01) {
-                $sheet->getStyle("E{$r}")->getFont()->getColor()->setARGB(self::FG_RED);
-            }
-            $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
             $totErp += $erp; $totLen += $len; $totOpe += $ope;
             $r++;
         }
         $gErp  = (float)($global['gastos_erp_total']   ?? 0);
         $gLen  = (float)($global['gastos_lendus_total'] ?? 0);
         $gOpe  = (float)($global['gastos_operativos']   ?? 0);
-        $gCk   = round($gOpe - $gErp - $gLen, 2);
         $sheet->setCellValue("A{$r}", 'TOTAL');
         foreach (['B'=>$gErp,'C'=>$gLen,'D'=>$gOpe] as $col => $val) {
             $sheet->setCellValue("{$col}{$r}", $val);
             $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         }
-        $sheet->setCellValue("E{$r}", $gCk);
-        $sheet->getStyle("E{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
-        if (abs($gCk) > 0.01) {
-            $sheet->getStyle("E{$r}")->getFont()->getColor()->setARGB(self::FG_RED);
-        }
-        $this->totalsRow($sheet, "A{$r}:E{$r}");
+        $this->totalsRow($sheet, "A{$r}:D{$r}");
         $r += 2;
 
         // ── TABLA B: Gastos por categoría (GLOBAL) ──────────────────────────────
@@ -2155,7 +2198,6 @@ class RadiographyWorkbookBuilder
             $r++;
             foreach ([
                 ['Fondeo otorgado', $fondeoCalc, 'currency'],
-                ['Total', $fondeoCalc, 'currency'],
             ] as $i => [$label, $val, $fmt]) {
                 $sheet->setCellValue("A{$r}", $label);
                 $sheet->setCellValue("B{$r}", $val);
@@ -2181,37 +2223,12 @@ class RadiographyWorkbookBuilder
             }
             $r++;
 
-            // 7. Análisis de Tendencias
-            $this->sectionHeader($sheet, "A{$r}:C{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES');
-            $r++;
             $brGastosTotal    = $gopTotal + $brNomTotal;
             $brUtilidad       = $recB - $colB - $brGastosTotal;
-            $brFondeoB        = $calc ? (float)$calc['prestamos_fondea'] : $fondeoCalc;
             $brExcedCalc      = $calc ? (float)$calc['excedentes']       : $excedCalc;
-            foreach ([
-                ['Ingresos Totales',                   $recB,          'currency'],
-                ['Otorgamientos',                      $colB,          'currency'],
-                ['Gastos Totales',                     $brGastosTotal, 'currency'],
-                ['EBITDA',                             $brUtilidad,    'currency'],
-                ['Préstamos inter sucursales',         $brFondeoB,     'currency'],
-                ['Excedente enviado a corporativo',    $brExcedCalc,   'currency'],
-                ['Mora de 0 a 30 días',                $mora0_30,      'currency'],
-                ['Mora de 31 a 60 días',               $mora31_60,     'currency'],
-                ['Mora de 61 a 90 días',               $mora61_90,     'currency'],
-                ['Mora de 91 a 120 días',              $mora91120,     'currency'],
-                ['Mora 120+ días',                     $mora120p,      'currency'],
-                ['Valor cartera',                      $carteraB,      'currency'],
-            ] as $i => [$label, $val, $fmt]) {
-                $sheet->setCellValue("A{$r}", $label);
-                $sheet->setCellValue("B{$r}", $val);
-                $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
-                $this->applyFmt($sheet, "B{$r}", $fmt, $val);
-                $r++;
-            }
-            $r++;
 
-            // 8. EBITDA = Ingresos − Otorgamientos − Gastos Totales
-            $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. EBITDA');
+            // 7. EBITDA = Ingresos − Otorgamientos − Gastos Totales
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '7. EBITDA');
             $r++;
             foreach ([
                 ['Ingresos Totales',                          $recB,          'currency'],
@@ -2234,17 +2251,8 @@ class RadiographyWorkbookBuilder
             }
             $r += 2;
 
-            // 9. Saldo Total Acumulado Cuentas
-            $this->sectionHeader($sheet, "A{$r}:C{$r}", '9. SALDO TOTAL ACUMULADO CUENTAS');
-            $r++;
-            $sheet->setCellValue("A{$r}", 'Total');
-            $sheet->setCellValue("B{$r}", 0);
-            $this->dataRow($sheet, "A{$r}:C{$r}", true);
-            $this->applyFmt($sheet, "B{$r}", 'currency', 0);
-            $r += 2;
-
-            // 10. Observaciones y Notas
-            $this->sectionHeader($sheet, "A{$r}:C{$r}", '10. OBSERVACIONES Y NOTAS');
+            // 8. Observaciones y Notas
+            $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. OBSERVACIONES Y NOTAS');
             $r++;
             foreach ([
                 'Comentarios sobre el desempeño financiero:',
@@ -3169,7 +3177,7 @@ class RadiographyWorkbookBuilder
         $opFondeos   = $loans['operative_fondeos'] ?? [];
         $excedentes  = $loans['excedentes'] ?? [];
         $detail      = $loans['detail']     ?? [];
-        $total       = (float)($loans['total'] ?? 0);
+        $total       = (float)($opFondeos['fondea_total'] ?? 0) + (float)($excedentes['total'] ?? 0);
 
         $r = 3;
 
@@ -3717,43 +3725,33 @@ class RadiographyWorkbookBuilder
         $branches = $snap['branch_radiography']['branches'] ?? [];
         $label    = strtoupper($period->label);
 
-        $this->sheetTitle($sheet, 'A1:F1', 'CATEGORÍA POR EBITDA — ' . $label);
+        $this->sheetTitle($sheet, 'A1:B1', 'CATEGORÍA POR EBITDA — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
 
         if (empty($branches)) {
             $sheet->setCellValue('A3', 'Sin datos por sucursal para calcular categorías.');
-            $this->setColWidths($sheet, ['A' => 28, 'B' => 18, 'C' => 18, 'D' => 18, 'E' => 20, 'F' => 16]);
+            $this->setColWidths($sheet, ['A' => 28, 'B' => 18]);
             return;
         }
 
-        usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
-
-        $this->colHeaders($sheet, 4, [
-            'A' => 'SUCURSAL', 'B' => 'RECUPERACIÓN', 'C' => 'GASTOS', 'D' => 'NÓMINA',
-            'E' => 'EBITDA ESTIMADO', 'F' => 'CATEGORÍA',
-        ]);
-        $r = 5;
-        foreach ($branches as $i => $b) {
-            $nomina = (float)($b['nomina_total'] ?? 0) + (float)($b['comisiones'] ?? 0) + (float)($b['bonos'] ?? 0)
-                + (float)($b['vacaciones'] ?? 0) + (float)($b['prima_vacacional'] ?? 0)
-                + array_sum((array)($b['nomina_detalle'] ?? []));
-            $rec       = (float)($b['recuperacion_total'] ?? 0);
-            $gastos    = (float)($b['gastos_operativos'] ?? 0);
+        // Ordenado por nivel de categoría (mejor a peor), no por monto — el monto no se muestra.
+        $categoryRank = ['DIAMANTE' => 0, 'SENIOR' => 1, 'JUNIOR' => 2, 'MANTENIDO' => 3];
+        $rows = array_map(function ($b) {
             $utilidad  = RadiographyStyleHelper::branchEbitdaEstimate($b);
             $categoria = RadiographyStyleHelper::ebitdaCategory($utilidad);
-            $colors    = RadiographyStyleHelper::categoryColors($categoria);
+            return ['sucursal' => $b['sucursal'], 'categoria' => $categoria];
+        }, $branches);
+        usort($rows, fn ($a, $b) => ($categoryRank[$a['categoria']] ?? 99) <=> ($categoryRank[$b['categoria']] ?? 99)
+            ?: strcmp($a['sucursal'], $b['sucursal']));
 
-            $sheet->setCellValue("A{$r}", $b['sucursal']);
-            $sheet->setCellValue("B{$r}", $rec);
-            $sheet->setCellValue("C{$r}", $gastos);
-            $sheet->setCellValue("D{$r}", $nomina);
-            $sheet->setCellValue("E{$r}", $utilidad);
-            $sheet->setCellValue("F{$r}", $categoria);
-            $this->dataRow($sheet, "A{$r}:F{$r}", $i % 2 === 0);
-            foreach (['B', 'C', 'D', 'E'] as $col) {
-                RadiographyStyleHelper::applyCurrencyFormat($sheet, "{$col}{$r}");
-            }
-            $sheet->getStyle("F{$r}")->applyFromArray([
+        $this->colHeaders($sheet, 4, ['A' => 'SUCURSAL', 'B' => 'CATEGORÍA']);
+        $r = 5;
+        foreach ($rows as $i => $row) {
+            $colors = RadiographyStyleHelper::categoryColors($row['categoria']);
+            $sheet->setCellValue("A{$r}", $row['sucursal']);
+            $sheet->setCellValue("B{$r}", $row['categoria']);
+            $this->dataRow($sheet, "A{$r}:B{$r}", $i % 2 === 0);
+            $sheet->getStyle("B{$r}")->applyFromArray([
                 'font'      => ['bold' => true, 'size' => 9.5, 'color' => ['argb' => $colors['fg']]],
                 'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $colors['bg']]],
                 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
@@ -3762,12 +3760,8 @@ class RadiographyWorkbookBuilder
             $r++;
         }
 
-        $sheet->setCellValue("A{$r}", 'EBITDA estimado = Recuperación − Gastos − Nómina completa estimada por sucursal.');
-        RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:F{$r}");
-        $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(8)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
-
-        $this->setColWidths($sheet, ['A' => 26, 'B' => 18, 'C' => 16, 'D' => 16, 'E' => 18, 'F' => 14]);
-        $sheet->setAutoFilter('A4:F4');
+        $this->setColWidths($sheet, ['A' => 26, 'B' => 18]);
+        $sheet->setAutoFilter('A4:B4');
         $sheet->freezePane('A5');
     }
 
@@ -4206,29 +4200,8 @@ class RadiographyWorkbookBuilder
         $r++;
 
         $bwGastosTotal = $gopTotalBW + $nomTotal;
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES'); $r++;
-        foreach ([
-            ['Ingresos Totales',            $recB,          'currency'],
-            ['Otorgamientos',               $colB,          'currency'],
-            ['Gastos Totales',              $bwGastosTotal, 'currency'],
-            ['EBITDA',                      $utilidad,      'currency'],
-            ['Préstamos intersucursales',   $loanFondea,    'currency'],
-            ['Mora 0-30 días',              $mora0_30,      'currency'],
-            ['Mora 31-60 días',             $mora31_60,     'currency'],
-            ['Mora 61-90 días',             $mora61_90,     'currency'],
-            ['Mora 91-120 días',            $mora91120,     'currency'],
-            ['Mora 120+ días',              $mora120p,      'currency'],
-            ['Valor cartera',               $carteraB,      'currency'],
-        ] as $i => [$label, $val, $fmt]) {
-            $sheet->setCellValue("A{$r}", $label);
-            $sheet->setCellValue("B{$r}", $val);
-            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
-            $this->applyFmt($sheet, "B{$r}", $fmt, $val);
-            $r++;
-        }
-        $r++;
 
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '8. EBITDA'); $r++;
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '7. EBITDA'); $r++;
         foreach ([
             ['Ingresos Totales',             $recB,          'currency'],
             ['Menos: Otorgamientos',         $colB,          'currency'],
@@ -4245,7 +4218,7 @@ class RadiographyWorkbookBuilder
         }
         $r += 2;
 
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '9. SALDO TOTAL ACUMULADO CUENTAS'); $r++;
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '8. SALDO TOTAL ACUMULADO CUENTAS'); $r++;
         $sheet->setCellValue("A{$r}", 'Total'); $sheet->setCellValue("B{$r}", 0.0);
         $sheet->setCellValue("D{$r}", '—');
         $this->dataRow($sheet, "A{$r}:D{$r}", true);
@@ -4871,8 +4844,8 @@ class RadiographyWorkbookBuilder
         $this->dataRow($sheet, "A{$r}:G{$r}", true);
         $r += 2;
 
-        // ── Section 7: Tendencias ────────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:G{$r}", '7. ANÁLISIS DE TENDENCIAS Y PROYECCIONES'); $r++;
+        // ── Section 7: EBITDA (periodo anterior vs actual) ───────────────────
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '7. EBITDA'); $r++;
         foreach ([
             ['Recuperación',   'recuperacion'],
             ['Otorgamientos',  'colocacion'],
@@ -4886,15 +4859,8 @@ class RadiographyWorkbookBuilder
         $writeComp($r, 'EBITDA estimado', $utilPrev, $utilCurr, 'currency', true);
         $r++;
 
-        // ── Section 8: EBITDA ────────────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:G{$r}", '8. EBITDA'); $r++;
-        $writeComp($r, 'EBITDA estimado', $utilPrev, $utilCurr, 'currency', true);
-        $r++;
-
-        // ── Sections 9-10: N/A ───────────────────────────────────────────────
-        $this->sectionHeader($sheet, "A{$r}:G{$r}", '9. SALDO TOTAL ACUMULADO CUENTAS'); $r++;
-        $sheet->setCellValue("A{$r}", 'Sin datos disponibles'); $this->dataRow($sheet, "A{$r}:G{$r}", true); $r += 2;
-        $this->sectionHeader($sheet, "A{$r}:G{$r}", '10. OBSERVACIONES Y NOTAS'); $r++;
+        // ── Section 8: N/A ───────────────────────────────────────────────
+        $this->sectionHeader($sheet, "A{$r}:G{$r}", '8. OBSERVACIONES Y NOTAS'); $r++;
         $sheet->setCellValue("A{$r}", 'Comparativo generado automáticamente. Revisar con fuentes originales para detalles.');
         RadiographyStyleHelper::mergeCellsSafe($sheet,"A{$r}:G{$r}");
         $this->dataRow($sheet, "A{$r}:G{$r}", true);

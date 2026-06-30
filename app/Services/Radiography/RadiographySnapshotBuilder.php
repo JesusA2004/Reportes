@@ -234,6 +234,7 @@ class RadiographySnapshotBuilder
                 'expenses_matrix'            => $this->buildExpensesMatrix($period),
                 'interbranch_loans'          => $interbranchLoans,
                 'recovery_detail'            => $this->buildRecoveryDetail($period),
+                'recovery_by_product'        => $this->buildRecoveryByProduct($period),
                 'portfolio_by_branch_product' => $this->buildPortfolioByBranchProduct($period),
                 'mora_by_branch'             => $this->buildMoraByBranch($period),
                 'mora_by_product'            => $this->buildMoraByProduct($period),
@@ -1622,6 +1623,7 @@ class RadiographySnapshotBuilder
             ->where(function ($q) {
                 $q->whereRaw("UPPER(COALESCE(e.category,'')) LIKE '%FONDEO%'")
                   ->orWhereRaw("UPPER(COALESCE(e.category,'')) LIKE '%INTERSUCURSAL%'")
+                  ->orWhere('e.category', 'Envío de utilidad a corporativo')
                   ->orWhereRaw("UPPER(COALESCE(e.concept,'')) LIKE '%PRESTAMO INTERSUC%'")
                   ->orWhereRaw("UPPER(COALESCE(e.concept,'')) LIKE '%FONDEO%'");
             })
@@ -1632,6 +1634,7 @@ class RadiographySnapshotBuilder
             ->selectRaw("
                 e.id,
                 COALESCE(b.name, 'Sin sucursal') as branch,
+                COALESCE(e.category, '') as category,
                 COALESCE(e.concept, e.category, 'Préstamo intersucursal') as concept,
                 e.observations,
                 e.expense_date,
@@ -1688,14 +1691,17 @@ class RadiographySnapshotBuilder
         $detail    = [];
         $unmatched = [];
         $incidents = [];
-        $fondeaMap = [];
-        $recibeMap = [];
 
         foreach ($pdfRows as $pdfRow) {
             $pdfAmount = (float) $pdfRow->amount;
             $pdfDate   = $pdfRow->expense_date
                 ? \Carbon\Carbon::parse($pdfRow->expense_date)
                 : null;
+            $category  = (string) ($pdfRow->category ?? '');
+            // Source of truth for fondeo vs excedente: the PDF category itself, not
+            // destination-text guessing. 'Envío de utilidad a corporativo' is ALWAYS
+            // excedente — it has no operative destination branch.
+            $isExcedenteCat = $category === 'Envío de utilidad a corporativo';
 
             // Resolve from_branch — never expose routes
             $fromBranch = $resolver->resolveRealBranchFromRoute($pdfRow->branch) ?? 'No identificada';
@@ -1715,7 +1721,7 @@ class RadiographySnapshotBuilder
                 }
             }
 
-            $toBranch      = 'No identificada';
+            $toBranch      = $isExcedenteCat ? 'CORPORATIVO' : 'No identificada';
             $observation   = $pdfRow->observations ?? '';
             $justification = '';
             $source        = 'pdf';
@@ -1724,30 +1730,32 @@ class RadiographySnapshotBuilder
                 $usedExcelIds[] = $matchedExcel->id;
                 $payload        = $matchedExcel->decoded_payload;
 
-                // 1. Use branch_to_detected set by the Excel importer
-                $toBranchRaw = $payload['branch_to_detected'] ?? null;
-                if ($toBranchRaw) {
-                    $toBranch = $resolver->resolveRealBranchFromRoute($toBranchRaw) ?? $toBranchRaw;
-                }
+                if (!$isExcedenteCat) {
+                    // 1. Use branch_to_detected set by the Excel importer
+                    $toBranchRaw = $payload['branch_to_detected'] ?? null;
+                    if ($toBranchRaw) {
+                        $toBranch = $resolver->resolveRealBranchFromRoute($toBranchRaw) ?? $toBranchRaw;
+                    }
 
-                // 2. Fallback: pattern-detect from Excel text
-                if ($toBranch === 'No identificada') {
-                    $exText  = implode(' ', array_filter([$matchedExcel->concept, $matchedExcel->observations]));
-                    $detected = $this->detectBranchFromText($exText, $resolver);
-                    if ($detected) $toBranch = $detected;
+                    // 2. Fallback: pattern-detect from Excel text
+                    if ($toBranch === 'No identificada') {
+                        $exText  = implode(' ', array_filter([$matchedExcel->concept, $matchedExcel->observations]));
+                        $detected = $this->detectBranchFromText($exText, $resolver);
+                        if ($detected) $toBranch = $detected;
+                    }
                 }
 
                 $observation   = $matchedExcel->observations ?? $observation;
                 $justification = $payload['justification'] ?? '';
                 $source        = 'pdf+excel';
-            } else {
+            } elseif (!$isExcedenteCat) {
                 // No Excel match — try PDF concept/observation text
                 $pdfText  = implode(' ', array_filter([$pdfRow->concept, $pdfRow->observations]));
                 $detected = $this->detectBranchFromText($pdfText, $resolver);
                 if ($detected) $toBranch = $detected;
             }
 
-            if ($toBranch === 'No identificada') {
+            if (!$isExcedenteCat && $toBranch === 'No identificada') {
                 $unmatched[] = [
                     'date'        => $pdfDate ? $pdfDate->format('d/m/Y') : '—',
                     'from_branch' => $fromBranch,
@@ -1767,83 +1775,29 @@ class RadiographySnapshotBuilder
                 ];
             }
 
-            $fondeaMap[$fromBranch] = ($fondeaMap[$fromBranch] ?? 0.0) + $pdfAmount;
-            $recibeMap[$toBranch]   = ($recibeMap[$toBranch] ?? 0.0) + $pdfAmount;
-
             $detail[] = [
                 'date'          => $pdfDate ? $pdfDate->format('d/m/Y') : '—',
                 'from_branch'   => $fromBranch,
                 'to_branch'     => $toBranch,
                 'amount'        => $pdfAmount,
                 'concept'       => $pdfRow->concept,
+                'category'      => $category,
                 'observation'   => $observation,
                 'justification' => $justification,
                 'source'        => $source,
             ];
         }
 
-        // ── C: Excel rows not matched to any PDF row ──────────────────────────
-        // These represent intersucursal transactions from months not covered by the PDF.
-        // They have a known destination (branch_to_detected) but unknown from_branch.
-        foreach ($excelRows as $ex) {
-            if (in_array($ex->id, $usedExcelIds, true)) {
-                continue;
-            }
-            $payload   = $ex->decoded_payload;
-            $exAmount  = (float) $ex->amount;
-            $exDate    = $ex->expense_date ? \Carbon\Carbon::parse($ex->expense_date) : null;
-
-            $toBranch  = 'No identificada';
-            $toBranchRaw = $payload['branch_to_detected'] ?? null;
-            if ($toBranchRaw) {
-                $toBranch = $resolver->resolveRealBranchFromRoute($toBranchRaw) ?? $toBranchRaw;
-            }
-            if ($toBranch === 'No identificada') {
-                $exText   = implode(' ', array_filter([$ex->concept, $ex->observations]));
-                $detected = $this->detectBranchFromText($exText, $resolver);
-                if ($detected) $toBranch = $detected;
-            }
-
-            if ($ex->branch && $ex->branch !== '') {
-                $fromBranch = $resolver->resolveRealBranchFromRoute($ex->branch) ?? $ex->branch;
-            } else {
-                $fromBranch = 'Sin identificar';
-                $observ = trim($ex->observations ?? '');
-                if ($observ !== '') {
-                    $normName   = $this->canonicalizer->normalize($observ);
-                    $empBranch  = DB::table('employees as e')
-                        ->join('employee_branch_assignments as eba', 'e.id', '=', 'eba.employee_id')
-                        ->join('branches as b', 'eba.branch_id', '=', 'b.id')
-                        ->where('e.normalized_name', $normName)
-                        ->where('eba.period_id', $period->id)
-                        ->value('b.name');
-                    if ($empBranch) {
-                        $fromBranch = strtoupper($empBranch);
-                    }
-                }
-            }
-
-            $fondeaMap[$fromBranch] = ($fondeaMap[$fromBranch] ?? 0.0) + $exAmount;
-            $recibeMap[$toBranch]   = ($recibeMap[$toBranch]   ?? 0.0) + $exAmount;
-
-            $detail[] = [
-                'date'          => $exDate ? $exDate->format('d/m/Y') : '—',
-                'from_branch'   => $fromBranch,
-                'to_branch'     => $toBranch,
-                'amount'        => $exAmount,
-                'concept'       => $ex->concept,
-                'observation'   => $ex->observations ?? '',
-                'justification' => '',
-                'source'        => 'excel',
-            ];
-        }
+        // Nota: las filas de Excel sin par en el PDF NO se suman a los totales — el PDF
+        // (gastos_lendus) es la única fuente para activos/pasivos/excedentes; el Excel
+        // solo se usa arriba para enriquecer el destino de filas del PDF. Sumar filas de
+        // Excel no pareadas duplicaba/abultaba "Pasivos (recibe)" frente a "Activos (fondea)".
 
         // ── D: Classify each row as fondeo operativo or excedente ───────────────
-        // "Excedente" = to_branch is CORPORATIVO (money sent to corporate office).
-        // "Fondeo operativo" = everything else (operative-to-operative).
-        // Rule: operative fondeos must satisfy fondea_total == recibe_total (neto=$0).
-        $EXCEDENTE_DESTINATIONS = ['CORPORATIVO'];
-
+        // Fuente de verdad: la categoría del registro PDF (Préstamos Intersucursales
+        // vs Envío de utilidad a corporativo). El texto de destino solo enriquece el
+        // detalle visual — nunca decide si una fila es fondeo o excedente.
+        // Regla: fondeos operativos deben cumplir fondea_total == recibe_total (neto=$0).
         $fondeaOperMap   = [];
         $recibeOperMap   = [];
         $excedenteByMap  = [];
@@ -1852,14 +1806,21 @@ class RadiographySnapshotBuilder
         $detailExcedentes = [];
 
         foreach ($detail as $row) {
-            $tob = $row['to_branch'];
-            if (in_array($tob, $EXCEDENTE_DESTINATIONS, true)) {
+            $isExcedente = ($row['category'] ?? '') === 'Envío de utilidad a corporativo';
+            if ($isExcedente) {
                 $excedenteByMap[$row['from_branch']] = ($excedenteByMap[$row['from_branch']] ?? 0.0) + $row['amount'];
                 $row['type']      = 'excedente';
                 $detailExcedentes[] = $row;
             } else {
+                // Edge case: category is fondeo but destination text resolved to
+                // 'CORPORATIVO' (text false-positive) — keep the row as fondeo operativo
+                // (so totals match the category split) but never label a destino as
+                // CORPORATIVO inside the operative section.
+                if ($row['to_branch'] === 'CORPORATIVO') {
+                    $row['to_branch'] = 'No identificada';
+                }
                 $fondeaOperMap[$row['from_branch']] = ($fondeaOperMap[$row['from_branch']] ?? 0.0) + $row['amount'];
-                $recibeOperMap[$tob]               = ($recibeOperMap[$tob]               ?? 0.0) + $row['amount'];
+                $recibeOperMap[$row['to_branch']]  = ($recibeOperMap[$row['to_branch']]   ?? 0.0) + $row['amount'];
                 $row['type']      = 'fondeo';
                 $detailFondeos[]  = $row;
             }
@@ -1881,14 +1842,6 @@ class RadiographySnapshotBuilder
             ->map(fn ($v, $k) => ['branch' => $k, 'total' => $v])
             ->sortByDesc('total')->values()->all();
 
-        // Backward-compat: combined fondea/recibe (all rows)
-        $fondeaRows = collect($fondeaMap)
-            ->map(fn ($v, $k) => ['branch' => $k, 'total' => $v])
-            ->sortByDesc('total')->values()->all();
-        $recibeRows = collect($recibeMap)
-            ->map(fn ($v, $k) => ['branch' => $k, 'total' => $v])
-            ->sortByDesc('total')->values()->all();
-
         return [
             // Operative fondeos section (fondea = recibe, neto = $0)
             'operative_fondeos' => [
@@ -1904,11 +1857,11 @@ class RadiographySnapshotBuilder
                 'total'         => $totalExcedentes,
                 'detail'        => $detailExcedentes,
             ],
-            // Totals and combined detail (all rows)
-            'total'     => $total,
-            'fondea'    => $fondeaRows,
-            'recibe'    => $recibeRows,
-            'by_branch' => $fondeaRows,
+            // Backward-compat aliases — SIEMPRE operativo puro (nunca mezclan excedentes).
+            'total'     => $totalFondeoOper,
+            'fondea'    => $fondeaOperRows,
+            'recibe'    => $recibeOperRows,
+            'by_branch' => $fondeaOperRows,
             'detail'    => array_merge($detailFondeos, $detailExcedentes),
             'unmatched' => $unmatched,
             'incidents' => $incidents,
@@ -2304,25 +2257,30 @@ class RadiographySnapshotBuilder
 
     /**
      * Fondeos entre sucursales (Préstamos Intersucursales): solo rastreo de flujo, NO afecta EBITDA.
-     * Mismo query que reportes:audit-fondeos.
+     *
+     * Fuente autorizada: gastos_lendus_excel (tiene destino en branch_to_detected u observations).
+     * El PDF (gastos_lendus) solo se usa para construir el mapa empleado→sucursal_origen,
+     * ya que el PDF registra la sucursal de cargo (branch_id) pero no el destino.
      */
     private function buildFondeoDetalle(): array
     {
-        // Alias map: texto normalizado (sin acentos) → nombre oficial
+        // Alias map: texto normalizado (sin acentos) → nombre oficial de sucursal
         static $branchAliases = [
-            'CORDOBA'           => 'CÓRDOBA',
-            'SAN JUAN DEL RIO'  => 'SAN JUAN DEL RÍO',
-            'SAN JUAN'          => 'SAN JUAN DEL RÍO',
-            'SAN LUIS POTOSI'   => 'SAN LUIS POTOSÍ',
-            'TENANGO'           => 'TENANGO DEL VALLE',
-            'MIACATLAN'         => 'MIACATLÁN',
             'ATLACOMULCO'       => 'ATLACOMULCO',
             'ATLIXCO'           => 'ATLIXCO',
+            'CORDOBA'           => 'CÓRDOBA',
             'CUERNAVACA'        => 'CUERNAVACA',
             'HUAMANTLA'         => 'HUAMANTLA',
             'IXTLAHUACA'        => 'IXTLAHUACA',
+            'MIACATLAN'         => 'MIACATLÁN',
             'ORIZABA'           => 'ORIZABA',
+            'SAN JUAN DEL RIO'  => 'SAN JUAN DEL RÍO',
+            'SAN JUAN RIO'      => 'SAN JUAN DEL RÍO',
+            'SAN JUAN'          => 'SAN JUAN DEL RÍO',
+            'SAN LUIS POTOSI'   => 'SAN LUIS POTOSÍ',
+            'SAN LUIS'          => 'SAN LUIS POTOSÍ',
             'TENANGO DEL VALLE' => 'TENANGO DEL VALLE',
+            'TENANGO'           => 'TENANGO DEL VALLE',
             'TLAXCALA'          => 'TLAXCALA',
             'TULA'              => 'TULA',
         ];
@@ -2331,84 +2289,101 @@ class RadiographySnapshotBuilder
             return strtr(mb_strtoupper(trim($v)), ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U','Ü'=>'U','Ñ'=>'N']);
         };
 
-        // Solo fuente PDF (gastos_lendus). El Excel complementario (gastos_lendus_excel)
-        // se usa en buildInterbranchLoans() para el cruce destino. Aquí mostramos un registro
-        // por movimiento con origen ya resuelto, sin duplicados PDF+Excel.
-        $rows = DB::table('fact_expenses as e')
+        $resolveAlias = static function (string $text) use ($branchAliases, $normalize): string {
+            $norm = $normalize($text);
+            if (isset($branchAliases[$norm])) return $branchAliases[$norm];
+            // Partial scan: useful for "FONDEO A CUERNAVACA | ..." texts
+            foreach ($branchAliases as $keyword => $official) {
+                if (str_contains($norm, $keyword)) return $official;
+            }
+            return $text;
+        };
+
+        // Step 1: Build employee-name → origin-branch map from PDF records.
+        // PDF records have branch_id (origin) but no destination; observations = employee name.
+        $pdfRows = DB::table('fact_expenses as e')
             ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
             ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
             ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
             ->whereIn('e.period_id', $this->dataIds)
             ->where('e.category', 'Préstamos Intersucursales')
             ->where('ds.code', 'gastos_lendus')
-            ->select(
-                'e.id',
-                // Origen: branch resuelto en import; fallback a branch_origen del bloque PDF
-                DB::raw("COALESCE(b.name, JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.branch_origen'))) as sucursal_origen"),
-                'e.observations',
-                'e.expense_date as fecha',
-                'e.amount',
-                'e.paid_amount',
-                'ds.code as fuente',
-                // Destino: PDF usa fondeo_destino_sucursal; fallback al concepto raw si ambos fallan
-                DB::raw("COALESCE(
-                    NULLIF(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.fondeo_destino_sucursal')), 'No detectado'), 'null'),
-                    NULLIF(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.branch_to_detected')), 'No detectado'), 'null')
-                ) as sucursal_destino_raw"),
-                DB::raw("JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.fondeo_destino_texto')) as destino_texto"),
-                DB::raw("JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.justification')) as justification"),
-            )
-            ->orderBy('b.name')
+            ->whereNotNull('b.name')
+            ->select('e.observations', 'b.name as branch_name')
+            ->get();
+
+        // Map normalized employee → origin branch
+        $empToBranch = [];
+        foreach ($pdfRows as $pdf) {
+            if (!$pdf->branch_name || !$pdf->observations) continue;
+            $empToBranch[$normalize($pdf->observations)] = $pdf->branch_name;
+        }
+
+        // Step 2: Load Excel fondeos — these have the destination.
+        // Exclude EXCEDENTES (to CORPORATIVO) — those are tracked separately in buildCorporateFunding.
+        $xlRows = DB::table('fact_expenses as e')
+            ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+            ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
+            ->whereIn('e.period_id', $this->dataIds)
+            ->where('e.category', 'Préstamos Intersucursales')
+            ->where('ds.code', 'gastos_lendus_excel')
+            ->whereRaw("UPPER(COALESCE(e.concept,'')) NOT LIKE '%EXCEDENTE%'")
+            ->whereRaw("IFNULL(JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload,'$.branch_to_detected')),'') != 'CORPORATIVO'")
+            ->select('e.id', 'e.amount', 'e.paid_amount', 'e.observations', 'e.expense_date', 'e.raw_payload')
             ->orderByDesc('e.amount')
             ->get();
 
         $detail = [];
         $total  = 0.0;
-        foreach ($rows as $row) {
+
+        foreach ($xlRows as $row) {
             $monto = (float) ($row->paid_amount ?: $row->amount);
             $total += $monto;
 
-            // Normalize origen
-            $origen = (string) ($row->sucursal_origen ?? '');
-            if ($origen === '' || $origen === 'null') {
-                $origen = '(sin sucursal)';
+            $rp          = json_decode($row->raw_payload ?? '{}', true);
+            $solicitante = trim((string) ($rp['solicitante'] ?? ''));
+            $branchDet   = trim((string) ($rp['branch_to_detected'] ?? ''));
+
+            // Resolve DESTINATION
+            if ($branchDet !== '' && strtoupper($branchDet) !== 'CORPORATIVO') {
+                $destino = $resolveAlias($branchDet);
             } else {
-                $norm = $normalize($origen);
-                $origen = $branchAliases[$norm] ?? $origen;
+                // Parse from observations text (e.g. "FONDEO A CUERNAVACA | FONDEO A CUERNAVACA")
+                $destino = $resolveAlias((string) ($row->observations ?? ''));
+                if ($destino === $normalize((string) ($row->observations ?? ''))) {
+                    $destino = '—'; // could not resolve
+                }
             }
 
-            // Normalize destino — try raw field first, then scan free text
-            $destino = (string) ($row->sucursal_destino_raw ?? '');
-            if ($destino === '' || $destino === 'null') {
-                $textRaw = $normalize(
-                    (string)($row->destino_texto ?? '') . ' ' .
-                    (string)($row->observations ?? '') . ' ' .
-                    (string)($row->justification ?? '')
-                );
-                $resolved = null;
-                foreach ($branchAliases as $keyword => $official) {
-                    if (str_contains($textRaw, $keyword)) {
-                        $resolved = $official;
-                        break;
+            // Resolve ORIGIN from solicitante → employee→branch map
+            $origen = '—';
+            if ($solicitante !== '') {
+                $normSol = $normalize($solicitante);
+                if (isset($empToBranch[$normSol])) {
+                    $origen = $empToBranch[$normSol];
+                } else {
+                    // Starts-with match handles cases where PDF truncates the employee name
+                    foreach ($empToBranch as $empKey => $branchName) {
+                        if (str_starts_with($normSol, $empKey) || str_starts_with($empKey, $normSol)) {
+                            $origen = $branchName;
+                            break;
+                        }
                     }
                 }
-                $destino = $resolved ?? '—';
-            } else {
-                $norm = $normalize($destino);
-                $destino = $branchAliases[$norm] ?? $destino;
+                if ($origen !== '—') {
+                    $norm = $normalize($origen);
+                    $origen = $branchAliases[$norm] ?? $origen;
+                }
             }
-
-            // El empleado/responsable del PDF viene en observations (campo employee del PDF)
-            $responsable = (string) ($row->observations ?? '');
 
             $detail[] = [
                 'sucursal_origen'  => $origen,
                 'sucursal_destino' => $destino,
-                'responsable'      => $responsable,
+                'responsable'      => $solicitante,
                 'monto'            => $monto,
-                'observacion'      => (string) ($row->destino_texto ?? ''),
-                'fecha'            => $row->fecha,
-                'fuente'           => $row->fuente,
+                'observacion'      => (string) ($row->observations ?? ''),
+                'fecha'            => $row->expense_date,
+                'fuente'           => 'gastos_lendus_excel',
             ];
         }
 
@@ -2465,6 +2440,73 @@ class RadiographySnapshotBuilder
             'by_day'    => $byDay,
             'by_branch' => $byBranchResult,
         ];
+    }
+
+    /**
+     * Recuperación por producto — mismas exclusiones y componentes que
+     * BranchRadiographyCalculator::accumulateRecuperacion(), agrupados por producto en
+     * vez de por sucursal. La suma de todas las filas == recuperacion_total global.
+     */
+    private function buildRecoveryByProduct(Period $period): array
+    {
+        $maps           = $this->branchCalculator->buildBranchMap();
+        $corporativoIds = $maps['corporativo'] ?? [];
+
+        $excl = "WHEN is_savehearts = 1 THEN 0
+            WHEN transaction = 'CONDONACION' THEN 0
+            WHEN is_savehearts = 0 AND (
+                UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
+                OR UPPER(COALESCE(concept,'')) LIKE '%SEGURO%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%SEGURO%'
+                OR UPPER(COALESCE(concept,'')) LIKE '%UNIFICACION%'
+                OR UPPER(COALESCE(operation,'')) LIKE '%UNIFICACION%'
+            ) THEN 0";
+
+        $rows = DB::table('fact_recoveries')
+            ->whereIn('period_id', $this->dataIds)
+            ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
+            ->selectRaw("
+                COALESCE(NULLIF(TRIM(product_name), ''), 'Sin producto') as product,
+                SUM(CASE {$excl} ELSE total_amount END) as recovery,
+                SUM(CASE {$excl} ELSE capital END) as capital,
+                SUM(CASE {$excl} ELSE interest END) as interest,
+                SUM(CASE {$excl} ELSE tax END) as tax,
+                SUM(CASE {$excl} ELSE charges_due END) as moratorios,
+                SUM(CASE {$excl} ELSE charges END) as cargos_adicionales,
+                SUM(CASE WHEN operation = 'COMISIÓN POR APERTURA' THEN total_amount ELSE 0 END) as comision_apertura
+            ")
+            ->groupBy('product_name')
+            ->havingRaw('SUM(CASE ' . $excl . ' ELSE total_amount END) != 0')
+            ->orderByDesc('recovery')
+            ->get();
+
+        $result = [];
+        $total  = 0.0;
+        foreach ($rows as $r) {
+            $recovery   = (float) $r->recovery;
+            $capital    = (float) $r->capital;
+            $interest   = (float) $r->interest;
+            $tax        = (float) $r->tax;
+            $morat      = (float) $r->moratorios;
+            $cargosAdic = (float) $r->cargos_adicionales;
+            $comAp      = (float) $r->comision_apertura;
+            $otros      = round($recovery - $capital - $interest - $tax - $morat - $cargosAdic - $comAp, 2);
+            $result[] = [
+                'product'           => $r->product,
+                'capital'           => $capital,
+                'interes'           => $interest,
+                'impuesto'          => $tax,
+                'moratorios'        => $morat,
+                'cargos_adicionales'=> $cargosAdic,
+                'comision_apertura' => $comAp,
+                'otros'             => $otros,
+                'total'             => $recovery,
+            ];
+            $total += $recovery;
+        }
+
+        return ['rows' => $result, 'total' => round($total, 2)];
     }
 
     private function buildPlacementByBranchProduct(Period $period): array
