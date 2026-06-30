@@ -9,7 +9,7 @@ namespace App\Support;
 class ExpenseCategoryMapper
 {
     private const MAP = [
-        // Envío de utilidad a corporativo — must come before Emergentes fallback
+        // Excedente enviado a corporativo — must come before Emergentes fallback
         'EXCEDENTE'               => 'Envío de utilidad a corporativo',
 
         // Intersucursal / Fondeo — must come first (most specific)

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Head, Link } from '@inertiajs/vue3'
-import { CalendarRange, DatabaseZap, FileSpreadsheet, LayoutGrid, TrendingUp, Upload, Users } from 'lucide-vue-next'
+import { CalendarRange, DatabaseZap, FileSpreadsheet, FolderOpen, LayoutGrid, TrendingUp, Users } from 'lucide-vue-next'
 import { dashboard } from '@/routes'
 
 defineOptions({
@@ -10,7 +10,7 @@ defineOptions({
 })
 
 const quickLinks = [
-    { label: 'Histórico general', description: 'Carga fuentes, actualiza BD y genera reportes.', href: '/historico-general', icon: Upload, color: 'bg-indigo-500' },
+    { label: 'Carga de archivos', description: 'Carga fuentes, actualiza BD y genera radiografías.', href: '/historico-general', icon: FolderOpen, color: 'bg-indigo-500' },
     { label: 'Periodos', description: 'Gestiona semanas, meses y periodos agrupados.', href: '/periodos', icon: CalendarRange, color: 'bg-violet-500' },
     { label: 'Empleados', description: 'Consulta empleados, sucursales y asignaciones.', href: '/asignaciones-empleado-sucursal', icon: Users, color: 'bg-sky-500' },
     { label: 'Reportes mensuales', description: 'Descarga Excel y PDF de reportes generados.', href: '/reportes-mensuales', icon: FileSpreadsheet, color: 'bg-emerald-500' },
@@ -71,7 +71,7 @@ const quickLinks = [
                         Actualiza la BD desde Histórico General seleccionando un periodo y cargando NOI Nómina y Cobranza.
                     </p>
                     <Link href="/historico-general" class="mt-4 inline-flex items-center gap-1.5 rounded-xl bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700 transition hover:bg-indigo-100">
-                        Ir a Histórico General →
+                        Ir a Carga de archivos →
                     </Link>
                 </div>
 

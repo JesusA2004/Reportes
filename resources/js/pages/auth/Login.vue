@@ -41,8 +41,8 @@
                 <img src="/favicon.ico" alt="Reportes" class="fv-logo-img" draggable="false" />
                 </div>
 
-                <h1 class="fv-title">Bienvenido a Reportes</h1>
-                <p class="fv-subtitle">Accede a tu cuenta para entrar al panel.</p>
+                <h1 class="fv-title">Radiografía Financiera</h1>
+                <p class="fv-subtitle">Accede a tu cuenta para ver el panel de MR LANA.</p>
 
                 <div v-if="status" class="fv-status">
                 {{ status }}

@@ -2356,6 +2356,7 @@ class RadiographySnapshotBuilder
                     NULLIF(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.branch_to_detected')), 'No detectado'), 'null')
                 ) as sucursal_destino_raw"),
                 DB::raw("JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.fondeo_destino_texto')) as destino_texto"),
+                DB::raw("JSON_UNQUOTE(JSON_EXTRACT(e.raw_payload, '$.justification')) as justification"),
             )
             ->orderBy('b.name')
             ->orderByDesc('e.amount')
@@ -2376,10 +2377,22 @@ class RadiographySnapshotBuilder
                 $origen = $branchAliases[$norm] ?? $origen;
             }
 
-            // Normalize destino
+            // Normalize destino — try raw field first, then scan free text
             $destino = (string) ($row->sucursal_destino_raw ?? '');
             if ($destino === '' || $destino === 'null') {
-                $destino = 'No detectado';
+                $textRaw = $normalize(
+                    (string)($row->destino_texto ?? '') . ' ' .
+                    (string)($row->observations ?? '') . ' ' .
+                    (string)($row->justification ?? '')
+                );
+                $resolved = null;
+                foreach ($branchAliases as $keyword => $official) {
+                    if (str_contains($textRaw, $keyword)) {
+                        $resolved = $official;
+                        break;
+                    }
+                }
+                $destino = $resolved ?? '—';
             } else {
                 $norm = $normalize($destino);
                 $destino = $branchAliases[$norm] ?? $destino;
@@ -2512,6 +2525,7 @@ class RadiographySnapshotBuilder
                 'fr.promedio_personal',
                 'fr.indice_rotacion',
                 'fr.hoja_fuente',
+                'fr.raw_payload',
                 'b.name as branch_name',
             )
             ->orderBy('fr.sucursal_nombre')
@@ -2525,18 +2539,24 @@ class RadiographySnapshotBuilder
                 ? round($totalBajas / $totalPromedio * 100, 2)
                 : round($xlsxRows->avg('indice_rotacion') ?? 0.0, 2);
 
-            $porSucursal = $xlsxRows->map(fn ($r) => [
-                'sucursal'          => $r->sucursal_nombre,
-                'bajas'             => (int) $r->bajas,
-                'promedio_personal' => (float) $r->promedio_personal,
-                'indice_rotacion'   => (float) $r->indice_rotacion,
-                'mes'               => $r->mes,
-                'hoja_fuente'       => $r->hoja_fuente,
-            ])->values()->all();
+            $porSucursal = $xlsxRows->map(function ($r) {
+                $payload = json_decode((string)($r->raw_payload ?? '{}'), true) ?? [];
+                return [
+                    'sucursal'          => $r->sucursal_nombre,
+                    'altas'             => (int) ($payload['altas'] ?? 0),
+                    'bajas'             => (int) $r->bajas,
+                    'promedio_personal' => (float) $r->promedio_personal,
+                    'indice_rotacion'   => (float) $r->indice_rotacion,
+                    'mes'               => $r->mes,
+                ];
+            })->values()->all();
+
+            $totalAltas = array_sum(array_column($porSucursal, 'altas'));
 
             return [
                 'fuente'        => 'xlsx',
                 'mes'           => $mesUsado,
+                'altas'         => (int) $totalAltas,
                 'bajas'         => (int) $totalBajas,
                 'promedio'      => round((float) $totalPromedio, 2),
                 'indice'        => $indiceGlobal,

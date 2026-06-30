@@ -244,11 +244,10 @@ const fondeoOperDetalle = computed(() => {
     const detail = fondeoOperativo.value?.detail as any[] ?? []
     return detail.map((f: any) => ({
         sucursal_origen:  f.from_branch ?? '—',
-        sucursal_destino: f.to_branch   ?? 'No detectado',
+        sucursal_destino: f.to_branch && f.to_branch !== 'No identificada' && f.to_branch !== 'No detectado' ? f.to_branch : '—',
         monto:            f.amount       ?? 0,
         observacion:      [f.observation, f.justification].filter(Boolean).join(' | '),
         fecha:            f.date         ?? '',
-        fuente:           f.source       ?? '',
     }))
 })
 
@@ -272,12 +271,11 @@ const fondeoDetalle = computed(() => {
     const detail = loans.value?.detail as any[] ?? []
     return detail.map((f: any) => ({
         sucursal_origen:  f.from_branch ?? '—',
-        sucursal_destino: f.to_branch   ?? 'No detectado',
+        sucursal_destino: f.to_branch && f.to_branch !== 'No identificada' && f.to_branch !== 'No detectado' ? f.to_branch : '—',
         responsable:      f.observation ?? '',
         monto:            f.amount       ?? 0,
         observacion:      [f.observation, f.justification].filter(Boolean).join(' | '),
         fecha:            f.date         ?? '',
-        fuente:           f.source       ?? '',
         tipo:             f.type        ?? 'fondeo',
     }))
 })
@@ -542,6 +540,7 @@ const fondeosPorOrigenSeries  = computed(() => fondeosPorOrigen.value.map(r => r
 const rotacionData        = computed(() => snap.value?.sections?.rotation ?? null)
 const rotacionFuente      = computed(() => (rotacionData.value?.fuente) ?? 'noi')
 const rotacionMes         = computed(() => rotacionData.value?.mes ?? '')
+const rotacionAltas       = computed(() => Number(rotacionData.value?.altas) || 0)
 const rotacionBajas       = computed(() => Number(rotacionData.value?.bajas) || 0)
 const rotacionPromedio    = computed(() => Number(rotacionData.value?.promedio) || 0)
 const rotacionIndice      = computed(() => Number(rotacionData.value?.indice) || 0)
@@ -612,15 +611,8 @@ const kpiMoraLabel = computed(() => vfBucket.value ? `Mora · ${vfBucket.value}`
 const kpiUtilLabel = computed(() => vfBranchRow.value ? 'EBITDA estimado' : 'EBITDA')
 const vfActiveBadge = computed(() => vfBranchRow.value ? `Vista filtrada · ${vfBranch.value}` : null)
 
-// ── Alertas (Resumen) ─────────────────────────────────────────────────────────
-const alertas = computed(() => {
-    const list: { text: string; tone: 'red' | 'amber' }[] = []
-    if (kpiMoraPct.value > 25) list.push({ text: `Índice de mora alto: ${fmtPercent(kpiMoraPct.value)} de la cartera.`, tone: 'red' })
-    if (kpiUtil.value < 0) list.push({ text: `EBITDA negativo: ${money(kpiUtil.value)}.`, tone: 'red' })
-    const mantenidos = branchesFull.value.filter(b => b.categoria === 'MANTENIDO')
-    if (mantenidos.length > 0) list.push({ text: `${mantenidos.length} sucursal(es) en categoría MANTENIDO: ${mantenidos.map(b => b.nombre).join(', ')}.`, tone: 'amber' })
-    return list
-})
+// ── Alertas (Resumen) — vacías; colores suaves en cifras cubren el feedback visual
+const alertas = computed(() => [] as { text: string; tone: 'red' | 'amber' }[])
 
 // ── Filtros de tabla Empleados / Gestores ─────────────────────────────────────
 const searchEmp     = ref('')
@@ -687,12 +679,17 @@ const ecStatus = computed(() => {
     const ec = ecData.value
     if (!ec) return []
     return [
-        { key: 'vigente',  label: 'Vigente (DPD=0)', tone: 'green', ...ec['vigente']  },
-        { key: 'atrasado', label: 'Atrasado (1-90)', tone: 'amber', ...ec['atrasado'] },
-        { key: 'vencido',  label: 'Vencido (>90)',   tone: 'red',   ...ec['vencido']  },
+        { key: 'vigente',  label: 'Cobros de créditos vigentes',  tone: 'green', ...ec['vigente']  },
+        { key: 'atrasado', label: 'Cobros de créditos atrasados', tone: 'amber', ...ec['atrasado'] },
+        { key: 'vencido',  label: 'Cobros de créditos vencidos',  tone: 'red',   ...ec['vencido']  },
     ]
 })
 const ecTotal = computed(() => ecData.value?.total ?? { capital: 0, interes: 0, impuesto: 0, moratorios: 0, total: 0, contratos: 0 })
+const efectividadKpiPct = computed(() => {
+    const total = ecTotal.value.total
+    if (!ecData.value || total <= 0) return null
+    return ((ecData.value?.vigente?.total ?? 0) / total * 100)
+})
 
 const tabs: { key: TabKey; label: string }[] = [
     { key: 'resumen',    label: 'Resumen' },
@@ -910,7 +907,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                         <KpiCard :label="kpiUtilLabel" :value="money(kpiUtil)" :icon="Gauge" :tone="kpiUtil < 0 ? 'red' : 'green'" />
                         <KpiCard label="Margen EBITDA" :value="pct(margenEbitdaPct)" :icon="Percent" :tone="margenEbitdaPct < 0 ? 'red' : 'green'" />
                         <KpiCard label="Préstamo activo" :value="money(prestamoActivoKpi)" :icon="Banknote" tone="blue" />
-                        <KpiCard label="Efectividad cobranza" value="Pendiente" :icon="CheckCircle2" tone="neutral" />
+                        <KpiCard label="Efectividad cobranza" :value="efectividadKpiPct !== null ? pct(efectividadKpiPct) : '—'" :icon="CheckCircle2" :tone="efectividadKpiPct !== null ? (efectividadKpiPct >= 70 ? 'green' : 'amber') : 'neutral'" />
                     </div>
                 </div>
 
@@ -1070,41 +1067,15 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                 <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Cartera total</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(carteraGlobal) }}</td></tr>
                                 <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Cartera vencida / Mora total</td><td class="px-5 py-2.5 text-right font-black" :class="moraTotalGlobal > 0 ? 'text-red-700' : 'text-slate-950'">{{ money(moraTotalGlobal) }}</td></tr>
                                 <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Índice de mora</td><td class="px-5 py-2.5 text-right font-black" :class="kpiMoraPct > 25 ? 'text-red-700' : 'text-slate-950'">{{ pct(kpiMoraPct) }}</td></tr>
-                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">OPEX (gastos ERP + Lendus)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(brGlobalGastosTotal) }}</td></tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">OPEX</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(brGlobalGastosTotal) }}</td></tr>
                                 <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Nómina y Capital Humano</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(nomTotal) }}</td></tr>
                                 <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">EBITDA</td><td class="px-5 py-2.5 text-right font-black text-lg" :class="utilidadGlobal < 0 ? 'text-red-700' : 'text-indigo-900'">{{ money(utilidadGlobal) }}</td></tr>
                                 <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-500 font-medium">Margen EBITDA</td><td class="px-5 py-2.5 text-right font-black" :class="margenEbitdaPct < 0 ? 'text-red-700' : 'text-slate-950'">{{ pct(margenEbitdaPct) }}</td></tr>
-                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Envío de utilidad a corporativo</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(excGlobal) }}</td></tr>
+                                <tr class="border-b bg-amber-50/40"><td class="px-5 py-2.5 text-slate-700 font-semibold">Excedente enviado a corporativo</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(excGlobal) }}</td></tr>
                                 <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Fondeo entre sucursales (rastreo, no afecta EBITDA)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(fondeoGlobal) }}</td></tr>
-                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguros / Coberturas (puente, no se suman a recuperación ni gastos)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosPuenteTotal) }}</td></tr>
-                                <tr class="border-b"><td class="px-5 py-2.5 font-black text-slate-800">Diferencia</td><td class="px-5 py-2.5 text-right font-black" :class="diferencia < 0 ? 'text-red-700' : 'text-emerald-700'">{{ money(diferencia) }}</td></tr>
-                                <tr class="border-b bg-slate-50/60">
-                                    <td class="px-5 py-2.5 text-slate-600 font-medium">Saldo inicial en caja</td>
-                                    <td class="px-5 py-2.5 text-right">
-                                        <span v-if="!saldoInicialEditing" class="inline-flex items-center gap-2">
-                                            <span class="font-black text-slate-950">{{ money(saldoInicialCaja) }}</span>
-                                            <button type="button" class="text-xs font-bold text-indigo-600 hover:text-indigo-800" @click="startEditSaldoInicial">Editar</button>
-                                        </span>
-                                        <span v-else class="inline-flex items-center gap-2">
-                                            <input v-model="saldoInicialInput" type="number" step="0.01"
-                                                   class="w-36 rounded-lg border border-slate-200 px-2 py-1 text-right text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100" />
-                                            <button type="button" :disabled="saldoInicialSaving" class="rounded-lg bg-indigo-600 px-3 py-1 text-xs font-bold text-white hover:bg-indigo-500 disabled:opacity-50" @click="saveSaldoInicial">Guardar</button>
-                                            <button type="button" class="text-xs font-bold text-slate-400 hover:text-slate-600" @click="saldoInicialEditing = false">Cancelar</button>
-                                        </span>
-                                    </td>
-                                </tr>
-                                <tr>
-                                    <td class="px-5 py-2.5 text-slate-600 font-medium">Saldo final / saldo para siguiente periodo</td>
-                                    <td class="px-5 py-2.5 text-right font-black" :class="(saldoFinalCaja ?? diferencia) < 0 ? 'text-red-700' : 'text-slate-950'">
-                                        {{ saldoFinalCaja !== null ? money(saldoFinalCaja) : money(diferencia) }}
-                                        <span v-if="saldoFinalCaja === null" class="ml-1 text-[10.5px] font-normal text-slate-400">(= Diferencia, no configurado manualmente)</span>
-                                    </td>
-                                </tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguros y coberturas canalizadas</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosPuenteTotal) }}</td></tr>
                             </tbody>
                         </table>
-                        <p v-if="saldoInicialCaja === 0" class="border-t bg-amber-50 px-5 py-2.5 text-xs font-semibold text-amber-700">
-                            ⚠ Este periodo no tiene saldo inicial en caja capturado — el EBITDA se está calculando con $0.00. Captúralo arriba para un cálculo correcto.
-                        </p>
                     </div>
 
                     <!-- ── DESGLOSES DETALLADOS ─────────────────────────────────── -->
@@ -1127,13 +1098,6 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Cargos al inicio</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrCargosIni) }}</td></tr>
                                     <tr class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Comisión por apertura</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrComAper) }}</td></tr>
                                     <tr v-if="ingrOtros > 0" class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Otros cobros</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrOtros) }}</td></tr>
-                                    <tr class="border-b" :class="Math.abs(ingrSumaDesglose - recGlobal) < 1 ? 'bg-emerald-50/50' : 'bg-red-50'">
-                                        <td class="px-5 py-2 pl-8 text-xs font-semibold" :class="Math.abs(ingrSumaDesglose - recGlobal) < 1 ? 'text-emerald-700' : 'text-red-700'">= Suma desglose</td>
-                                        <td class="px-5 py-2 text-right text-xs font-semibold" :class="Math.abs(ingrSumaDesglose - recGlobal) < 1 ? 'text-emerald-700' : 'text-red-700'">{{ money(ingrSumaDesglose) }}</td>
-                                    </tr>
-                                    <tr class="border-b bg-amber-50/60"><td class="px-5 py-2 pl-8 text-amber-700 text-xs">Seguros excluidos (Savehearts)</td><td class="px-5 py-2 text-right text-xs font-semibold text-amber-700">{{ money(segurosSaveheartsBruto) }}</td></tr>
-                                    <tr class="border-b bg-amber-50/60"><td class="px-5 py-2 pl-8 text-amber-700 text-xs">Seguros excluidos (Comadres)</td><td class="px-5 py-2 text-right text-xs font-semibold text-amber-700">{{ money(segurosComadresBruto) }}</td></tr>
-                                    <tr class="bg-amber-50/60"><td class="px-5 py-2 pl-8 text-amber-700 text-xs">Seguro CRECE 70% excluido</td><td class="px-5 py-2 text-right text-xs font-semibold text-amber-700">{{ money(segurosCrece70) }}</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -1231,11 +1195,9 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">− Colocación del periodo</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(colGlobal) }}</td></tr>
                                     <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">− OPEX</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(brGlobalGastosTotal) }}</td></tr>
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">− Nómina y Capital Humano</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomTotal) }}</td></tr>
-                                    <tr v-if="saldoInicialCaja > 0" class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">+ Saldo inicial en caja</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(saldoInicialCaja) }}</td></tr>
                                     <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">EBITDA</td><td class="px-5 py-2.5 text-right font-black text-lg" :class="utilidadGlobal < 0 ? 'text-red-700' : 'text-indigo-900'">{{ money(utilidadGlobal) }}</td></tr>
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-500 font-medium">Margen EBITDA</td><td class="px-5 py-2 text-right font-black" :class="margenEbitdaPct < 0 ? 'text-red-700' : 'text-slate-950'">{{ pct(margenEbitdaPct) }}</td></tr>
-                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">− Envío de utilidad a corporativo</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(excGlobal) }}</td></tr>
-                                    <tr><td class="px-5 py-2.5 font-black text-slate-800">Diferencia / Saldo final</td><td class="px-5 py-2.5 text-right font-black" :class="diferencia < 0 ? 'text-red-700' : 'text-emerald-700'">{{ money(diferencia) }}</td></tr>
+                                    <tr><td class="px-5 py-2 text-slate-600 font-medium">Excedente enviado a corporativo (informativo)</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(excGlobal) }}</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -1365,41 +1327,33 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                 <div v-show="activeTab === 'gastos'" class="space-y-5">
                     <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
                         <KpiCard label="OPEX Total" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
-                        <KpiCard label="ERP final OPEX" :value="money(erpFinalOpex)" :icon="Receipt" tone="neutral" />
-                        <KpiCard label="Lendus final OPEX" :value="money(lendusFinalOpex)" :icon="Receipt" tone="neutral" />
+                        <KpiCard label="Gastos ERP" :value="money(erpFinalOpex)" :icon="Receipt" tone="neutral" />
+                        <KpiCard label="Gastos Lendus" :value="money(lendusFinalOpex)" :icon="Receipt" tone="neutral" />
                     </div>
 
                     <!-- Resumen integración OPEX -->
                     <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
                         <div class="border-b bg-amber-50 px-5 py-3">
-                            <h3 class="text-xs font-black uppercase tracking-wider text-amber-700">Resumen integración OPEX (ERP + Lendus)</h3>
+                            <h3 class="text-xs font-black uppercase tracking-wider text-amber-700">Desglose de gastos operativos</h3>
                         </div>
                         <div class="grid gap-0 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-slate-100">
                             <!-- ERP -->
                             <table class="w-full text-xs">
-                                <thead><tr class="border-b bg-slate-50"><th class="px-5 py-2 text-left font-bold text-slate-500 uppercase tracking-wider" colspan="2">ERP / Requisiciones</th></tr></thead>
+                                <thead><tr class="border-b bg-slate-50"><th class="px-5 py-2 text-left font-bold text-slate-500 uppercase tracking-wider" colspan="2">ERP</th></tr></thead>
                                 <tbody>
-                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600">ERP total cargado (fecha de pago)</td><td class="px-5 py-2 text-right font-semibold text-slate-800">{{ money(erpCargado) }}</td></tr>
-                                    <tr class="border-b bg-red-50/40"><td class="px-5 py-2 text-slate-600">(-) Reclasificado a Nómina</td><td class="px-5 py-2 text-right font-semibold text-red-700">{{ money(erpReclasificadoNomina) }}</td></tr>
-                                    <tr class="border-t-2 border-amber-200 bg-amber-50"><td class="px-5 py-2.5 font-black text-amber-900">(=) ERP final OPEX</td><td class="px-5 py-2.5 text-right font-black text-amber-900">{{ money(erpFinalOpex) }}</td></tr>
+                                    <tr class="border-t-2 border-amber-200 bg-amber-50"><td class="px-5 py-2.5 font-black text-amber-900">Gastos ERP</td><td class="px-5 py-2.5 text-right font-black text-amber-900">{{ money(erpFinalOpex) }}</td></tr>
                                 </tbody>
                             </table>
                             <!-- Lendus -->
                             <table class="w-full text-xs">
-                                <thead><tr class="border-b bg-slate-50"><th class="px-5 py-2 text-left font-bold text-slate-500 uppercase tracking-wider" colspan="2">Lendus (PDF)</th></tr></thead>
+                                <thead><tr class="border-b bg-slate-50"><th class="px-5 py-2 text-left font-bold text-slate-500 uppercase tracking-wider" colspan="2">Lendus</th></tr></thead>
                                 <tbody>
-                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600">Lendus total cargado</td><td class="px-5 py-2 text-right font-semibold text-slate-800">{{ money(lendusCargado) }}</td></tr>
-                                    <tr v-if="lendusExclFondeo > 0" class="border-b bg-red-50/40"><td class="px-5 py-2 text-slate-600">(-) Excluido: fondeos</td><td class="px-5 py-2 text-right font-semibold text-red-700">{{ money(lendusExclFondeo) }}</td></tr>
-                                    <tr v-if="lendusExclExcedentes > 0" class="border-b bg-red-50/40"><td class="px-5 py-2 text-slate-600">(-) Excluido: excedentes/corporativo</td><td class="px-5 py-2 text-right font-semibold text-red-700">{{ money(lendusExclExcedentes) }}</td></tr>
-                                    <tr v-if="lendusExclNomina > 0" class="border-b bg-red-50/40"><td class="px-5 py-2 text-slate-600">(-) Excluido: nómina real</td><td class="px-5 py-2 text-right font-semibold text-red-700">{{ money(lendusExclNomina) }}</td></tr>
-                                    <tr v-if="lendusReclasificadoNomina > 0" class="border-b bg-orange-50/40"><td class="px-5 py-2 text-slate-600">(-) Reclasificado a Nómina</td><td class="px-5 py-2 text-right font-semibold text-orange-600">{{ money(lendusReclasificadoNomina) }}</td></tr>
-                                    <tr v-if="lendusExclPolizas > 0" class="border-b bg-red-50/40"><td class="px-5 py-2 text-slate-600">(-) Excluido: pólizas/seguros</td><td class="px-5 py-2 text-right font-semibold text-red-700">{{ money(lendusExclPolizas) }}</td></tr>
-                                    <tr class="border-t-2 border-amber-200 bg-amber-50"><td class="px-5 py-2.5 font-black text-amber-900">(=) Lendus final OPEX</td><td class="px-5 py-2.5 text-right font-black text-amber-900">{{ money(lendusFinalOpex) }}</td></tr>
+                                    <tr class="border-t-2 border-amber-200 bg-amber-50"><td class="px-5 py-2.5 font-black text-amber-900">Gastos Lendus</td><td class="px-5 py-2.5 text-right font-black text-amber-900">{{ money(lendusFinalOpex) }}</td></tr>
                                 </tbody>
                             </table>
                         </div>
                         <div class="border-t-2 border-indigo-200 bg-indigo-50 px-5 py-3 flex items-center justify-between">
-                            <span class="text-sm font-black text-indigo-900">OPEX TOTAL (ERP final + Lendus final)</span>
+                            <span class="text-sm font-black text-indigo-900">OPEX TOTAL</span>
                             <span class="text-sm font-black text-indigo-900">{{ money(brGlobalGastosTotal) }}</span>
                         </div>
                     </div>
@@ -1458,7 +1412,6 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                         <th class="px-4 py-2 text-left font-bold">Fondea (origen)</th>
                                         <th class="px-4 py-2 text-left font-bold">Recibe (destino)</th>
                                         <th class="px-4 py-2 text-right font-bold">Monto</th>
-                                        <th class="px-4 py-2 text-left font-bold">Fuente</th>
                                         <th class="px-4 py-2 text-left font-bold">Observación</th>
                                     </tr>
                                 </thead>
@@ -1468,7 +1421,6 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                         <td class="px-4 py-1.5 text-slate-700 font-medium">{{ f.sucursal_origen }}</td>
                                         <td class="px-4 py-1.5 text-slate-700 font-medium">{{ f.sucursal_destino }}</td>
                                         <td class="px-4 py-1.5 text-right font-semibold text-slate-800">{{ money(f.monto) }}</td>
-                                        <td class="px-4 py-1.5 text-slate-400 text-xs">{{ f.fuente }}</td>
                                         <td class="px-4 py-1.5 text-slate-500 text-xs">{{ f.observacion || '—' }}</td>
                                     </tr>
                                 </tbody>
@@ -1481,8 +1433,8 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                     <div class="rounded-2xl border bg-white shadow-sm overflow-hidden" v-if="excedentesTotal > 0 || excedentesDetalle.length">
                         <div class="border-b bg-amber-50 px-5 py-3 flex items-center justify-between">
                             <div>
-                                <h3 class="text-xs font-black uppercase tracking-wider text-amber-700">Excedentes / Envío a CORPORATIVO</h3>
-                                <p class="text-xs text-amber-600 mt-0.5">No son fondeos entre sucursales — dinero enviado a corporativo</p>
+                                <h3 class="text-xs font-black uppercase tracking-wider text-amber-700">Excedente enviado a corporativo</h3>
+                                <p class="text-xs text-amber-600 mt-0.5">Movimientos de efectivo enviados a corporativo — no afectan EBITDA ni OPEX</p>
                             </div>
                             <span class="text-xs font-black text-amber-800">{{ money(excedentesTotal) }}</span>
                         </div>
@@ -1512,16 +1464,16 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
 
                     <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
                         <div class="border-b bg-slate-50 px-5 py-3">
-                            <h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Seguros / Coberturas (puente — no se suman a recuperación ni a gastos)</h3>
+                            <h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Seguros y coberturas canalizadas</h3>
                         </div>
                         <table class="w-full text-sm">
                             <tbody>
                                 <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Cobertura Savehearts</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosSaveheartsBruto) }}</td></tr>
                                 <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Cobertura Crédito Grupal / Comadres</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosComadresBruto) }}</td></tr>
-                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE bruto</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosCreceBruto) }}</td></tr>
-                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE 30% (reconocido como ingreso)</td><td class="px-5 py-2.5 text-right font-black text-emerald-700">{{ money(segurosCrece30) }}</td></tr>
-                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE 70% (puente, no reconocido)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosCrece70) }}</td></tr>
-                                <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">Total Seguros / Coberturas (puente)</td><td class="px-5 py-2.5 text-right font-black text-indigo-900">{{ money(segurosPuenteTotal) }}</td></tr>
+                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE total</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosCreceBruto) }}</td></tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE reconocido como ingreso MR Lana (30%)</td><td class="px-5 py-2.5 text-right font-black text-emerald-700">{{ money(segurosCrece30) }}</td></tr>
+                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguro CRECE canalizado a Savehearts (70%)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(segurosCrece70) }}</td></tr>
+                                <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">Total canalizado a Savehearts / aseguradora</td><td class="px-5 py-2.5 text-right font-black text-indigo-900">{{ money(segurosPuenteTotal) }}</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -1696,9 +1648,8 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                         </div>
 
                         <div class="rounded-2xl border bg-amber-50 px-5 py-4 text-sm text-amber-800">
-                            <strong>Nota metodológica:</strong> Los cobros se clasifican por los días de atraso del crédito al momento del cobro
-                            (DPD del archivo de cobros, con fallback a la cartera del mismo período). Excluye seguros (savehearts), condonaciones
-                            y coberturas — mismas exclusiones que la recuperación total.
+                            <strong>Nota metodológica:</strong> Los cobros se clasifican por los días de atraso del crédito al momento del cobro.
+                            No incluye seguros ni coberturas canalizadas — mismas reglas que la recuperación total.
                         </div>
                     </template>
                     <EmptyState v-else title="Sin datos de efectividad de cobranza" description="Genera el reporte para ver esta sección." />
@@ -1734,11 +1685,11 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                     <!-- KPIs fondeo -->
                     <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
                         <KpiCard label="Fondeos entre sucursales" :value="money(fondeoDetalleTotal)" :icon="Landmark" tone="blue" />
-                        <KpiCard label="Excedentes / Corporativo" :value="money(excedentesTotal)" :icon="Banknote" tone="amber" />
+                        <KpiCard label="Excedente enviado a corporativo" :value="money(excedentesTotal)" :icon="Banknote" tone="amber" />
                         <KpiCard label="Total movimientos" :value="num(fondeoDetalleRows.length)" :icon="Receipt" tone="neutral" />
                     </div>
                     <p class="rounded-xl bg-blue-50 px-4 py-2.5 text-xs text-blue-700 border border-blue-100">
-                        Los fondeos entre sucursales son movimientos de liquidez — <strong>no afectan el EBITDA ni el OPEX</strong>. Los excedentes/corporativo son envíos de utilidad.
+                        Los fondeos entre sucursales son movimientos de liquidez — <strong>no afectan el EBITDA ni el OPEX</strong>. Los excedentes enviados a corporativo se muestran como dato informativo.
                     </p>
                     <!-- Gráfica fondeos por origen -->
                     <div v-if="fondeosPorOrigen.length" class="grid gap-4 lg:grid-cols-2">
@@ -1760,7 +1711,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                     <!-- Excedentes por sucursal -->
                     <div v-if="corpFundingRows.length" class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
                         <div class="flex items-center justify-between px-5 py-3 border-b bg-amber-50/60">
-                            <span class="font-bold text-sm text-amber-800">Excedentes / Envío a corporativo por sucursal</span>
+                            <span class="font-bold text-sm text-amber-800">Excedente enviado a corporativo por sucursal</span>
                             <span class="font-black text-sm text-amber-900">{{ money(excedentesTotal) }}</span>
                         </div>
                         <table class="w-full text-sm">
@@ -1795,7 +1746,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                 <tr v-for="(f, i) in fondeoDetalleRows" :key="i" class="border-t hover:bg-slate-50" :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'">
                                     <td class="px-4 py-2 text-slate-500 text-xs">{{ f.fecha ?? '—' }}</td>
                                     <td class="px-4 py-2 font-semibold">{{ f.sucursal_origen ?? '—' }}</td>
-                                    <td class="px-4 py-2" :class="f.sucursal_destino === 'No detectado' ? 'text-red-600 italic' : ''">{{ f.sucursal_destino ?? '—' }}</td>
+                                    <td class="px-4 py-2">{{ f.sucursal_destino ?? '—' }}</td>
                                     <td class="px-4 py-2 text-xs text-slate-600">{{ f.responsable ?? '—' }}</td>
                                     <td class="px-4 py-2 text-right font-semibold">{{ money(f.monto) }}</td>
                                 </tr>
@@ -1808,48 +1759,45 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                 <!-- ══════════ ROTACIÓN DE PERSONAL ══════════ -->
                 <div v-show="activeTab === 'rotacion'" class="space-y-5">
                     <template v-if="rotacionData">
-                        <div v-if="rotacionFuente === 'xlsx'" class="rounded-xl bg-emerald-50 border border-emerald-100 px-4 py-2.5 text-xs text-emerald-700">
-                            Datos del archivo XLSX importado · Mes: <strong>{{ rotacionMes || 'N/D' }}</strong>
+                        <div v-if="rotacionFuente !== 'xlsx'" class="rounded-xl bg-amber-50 border border-amber-100 px-4 py-2.5 text-xs text-amber-700">
+                            No se encontró el archivo de rotación para este periodo. Los datos son una estimación a partir de nómina.
                         </div>
-                        <div v-else class="rounded-xl bg-amber-50 border border-amber-100 px-4 py-2.5 text-xs text-amber-700">
-                            Estimación calculada a partir de nómina (sin archivo de Rotación cargado para este periodo)
-                        </div>
-                        <div class="grid grid-cols-3 gap-3">
+                        <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                            <KpiCard label="Altas del periodo" :value="num(rotacionAltas)" :icon="TrendingUp" tone="green" />
                             <KpiCard label="Bajas del periodo" :value="num(rotacionBajas)" :icon="AlertTriangle" tone="red" />
-                            <KpiCard label="Promedio de personal" :value="num(rotacionPromedio)" :icon="Building2" tone="blue" />
+                            <KpiCard label="Plantilla" :value="num(rotacionPromedio)" :icon="Building2" tone="blue" />
                             <KpiCard label="Índice de rotación" :value="fmtPercent(rotacionIndice)" :icon="Percent" :tone="rotacionIndice > 5 ? 'red' : rotacionIndice > 2 ? 'amber' : 'teal'" />
                         </div>
                         <div v-if="rotacionPorSucursal.length" class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
-                            <div class="flex items-center justify-between px-5 py-3 border-b">
-                                <span class="font-bold text-sm">Índice de Rotación por Sucursal</span>
-                                <span class="text-xs text-slate-500">{{ rotacionFuente === 'xlsx' ? 'Archivo de rotación' : 'Estimación' }}</span>
+                            <div class="px-5 py-3 border-b">
+                                <span class="font-bold text-sm">Rotación de personal por sucursal</span>
                             </div>
                             <table class="w-full text-sm">
                                 <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
                                     <tr>
                                         <th class="px-4 py-3 text-left">Sucursal</th>
+                                        <th class="px-4 py-3 text-right">Altas</th>
                                         <th class="px-4 py-3 text-right">Bajas</th>
-                                        <th class="px-4 py-3 text-right">Promedio personal</th>
-                                        <th class="px-4 py-3 text-right">Índice rotación</th>
-                                        <th class="px-4 py-3 text-left">Mes registrado</th>
+                                        <th class="px-4 py-3 text-right">Plantilla</th>
+                                        <th class="px-4 py-3 text-right">Índice de rotación</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     <tr v-for="(r, i) in rotacionPorSucursal" :key="i" class="border-t hover:bg-slate-50" :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'">
                                         <td class="px-4 py-2.5 font-bold">{{ r.sucursal }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ r.bajas }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ Number(r.promedio_personal).toFixed(2) }}</td>
+                                        <td class="px-4 py-2.5 text-right text-emerald-700 font-medium">{{ r.altas ?? 0 }}</td>
+                                        <td class="px-4 py-2.5 text-right text-red-700 font-medium">{{ r.bajas }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ Number(r.promedio_personal).toFixed(0) }}</td>
                                         <td class="px-4 py-2.5 text-right font-semibold" :class="Number(r.indice_rotacion) > 5 ? 'text-red-700' : Number(r.indice_rotacion) > 2 ? 'text-amber-600' : 'text-emerald-700'">
                                             {{ Number(r.indice_rotacion).toFixed(2) }}%
                                         </td>
-                                        <td class="px-4 py-2.5 text-xs text-slate-500">{{ r.mes ?? r.hoja_fuente ?? '—' }}</td>
                                     </tr>
                                 </tbody>
                             </table>
                         </div>
                         <p v-else class="text-sm text-slate-500 italic text-center py-4">Sin desglose por sucursal disponible para este periodo.</p>
                     </template>
-                    <EmptyState v-else title="Sin datos de rotación" description="Sube el archivo de Índice de Rotación de Personal para este periodo." />
+                    <EmptyState v-else title="Sin datos de rotación" description="Carga el archivo de Rotación de Personal para ver esta sección." />
                 </div>
 
                 <!-- ══════════ CATEGORÍA EBITDA ══════════ -->

@@ -130,11 +130,12 @@ class RotacionExcelImportService
             if ($this->isEmptyRow($row)) { $skipped++; continue; }
 
             $sucursal  = $this->str($this->col($row, $colMap['sucursal']));
+            $altas     = (int) ($this->toDecimal($this->col($row, $colMap['altas'])) ?? 0);
             $bajas     = (int) ($this->toDecimal($this->col($row, $colMap['bajas'])) ?? 0);
             $promedio  = $this->toDecimal($this->col($row, $colMap['promedio'])) ?? 0.0;
             $indice    = $this->toDecimal($this->col($row, $colMap['indice'])) ?? 0.0;
 
-            if (!$sucursal || ($bajas === 0 && $promedio == 0.0 && $indice == 0.0)) {
+            if (!$sucursal || ($altas === 0 && $bajas === 0 && $promedio == 0.0 && $indice == 0.0)) {
                 $skipped++;
                 continue;
             }
@@ -162,7 +163,7 @@ class RotacionExcelImportService
                     'promedio_personal' => $promedio,
                     'indice_rotacion'  => $indice,
                     'hoja_fuente'      => $hoja,
-                    'raw_payload'      => json_encode(['row' => array_values($row)]),
+                    'raw_payload'      => json_encode(['altas' => $altas, 'plantilla' => $promedio]),
                     'created_at'       => now(),
                     'updated_at'       => now(),
                 ]);
@@ -176,7 +177,14 @@ class RotacionExcelImportService
     }
 
     /**
-     * Parse a sheet where months are columns — find the target month column.
+     * Parse a sheet where sucursal blocks are stacked vertically.
+     * Each block looks like:
+     *   Row N  : SUCURSAL_NAME (in col 0, standalone)
+     *   Row N+1: [empty] [ENERO] [FEB] [MAR] [ABR] ... (month headers)
+     *   Row N+2: ALTAS      | n | n | n | n |
+     *   Row N+3: BAJAS      | n | n | n | n |
+     *   Row N+4: PLANTILLA  | n | n | n | n |
+     *   Row N+5: ROTACIÓN   | n% | n% | n% | n% |
      */
     private function parseSheetMonthColumn(array $rows, string $targetMes, string $hoja, ReportUpload $upload): array
     {
@@ -184,48 +192,112 @@ class RotacionExcelImportService
         $skipped  = 0;
         $errors   = 0;
 
-        // Find row that has month names as column headers
-        $monthHeaderIdx = null;
-        $sucursalCol    = null;
-        $mesColSet      = []; // [bajas=>col, promedio=>col, indice=>col] for target month
+        $norm = static function (string $v): string {
+            return strtr(mb_strtoupper(trim($v)), ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U','Ü'=>'U','Ñ'=>'N']);
+        };
 
-        foreach (array_slice($rows, 0, 20, true) as $idx => $row) {
+        $allMonths = ['ENERO','FEBRERO','MARZO','ABRIL','MAYO','JUNIO',
+                      'JULIO','AGOSTO','SEPTIEMBRE','OCTUBRE','NOVIEMBRE','DICIEMBRE'];
+
+        $isMonthHeaderRow = function (array $row) use ($allMonths, $norm): bool {
+            $found = 0;
+            foreach ($row as $cell) {
+                $v = $norm((string) $cell);
+                foreach ($allMonths as $m) {
+                    if (str_contains($v, $m)) { $found++; break; }
+                }
+                if ($found >= 2) return true;
+            }
+            return false;
+        };
+
+        $metricPrefixes = ['ALTA', 'BAJA', 'PLANTILL', 'ROTACI', 'PROMEDIO', 'INDICE'];
+        $isMetricLabel = function (string $v) use ($metricPrefixes, $norm): bool {
+            $u = $norm($v);
+            foreach ($metricPrefixes as $p) {
+                if (str_starts_with($u, $p)) return true;
+            }
+            return false;
+        };
+
+        // Collect all month-header rows and their target-month column index
+        $rowsArr = array_values($rows);
+        $blocks  = []; // [{sucursal, targetCol, headerRowIdx}]
+
+        foreach ($rowsArr as $idx => $row) {
+            if (!$isMonthHeaderRow($row)) continue;
+
+            // Find target month column
+            $targetCol = null;
             foreach ($row as $colIdx => $cell) {
-                $norm = strtr(mb_strtoupper(trim((string) $cell)), ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U']);
-                if ($norm === $targetMes || str_contains($norm, $targetMes)) {
-                    $monthHeaderIdx = $idx;
-                    // The target month column block starts here; adjacent cols may be bajas/promedio/indice
-                    $mesColSet['month_col'] = $colIdx;
-                    break 2;
+                $v = $norm((string) $cell);
+                if ($v === $targetMes || str_contains($v, $targetMes)) {
+                    $targetCol = $colIdx;
+                    break;
                 }
             }
+            if ($targetCol === null) continue;
+
+            // Find sucursal name: scan up to 5 rows above for a non-empty, non-metric cell in col 0
+            $sucursalName = null;
+            for ($back = 1; $back <= 5; $back++) {
+                $prevIdx = $idx - $back;
+                if ($prevIdx < 0) break;
+                $prevRow = $rowsArr[$prevIdx] ?? [];
+                $firstCell = trim((string) ($prevRow[0] ?? ''));
+                if ($firstCell === '') continue;
+                if ($isMetricLabel($firstCell)) continue;
+                if ($isMonthHeaderRow($prevRow)) break;
+                $sucursalName = $firstCell;
+                break;
+            }
+
+            if (!$sucursalName) continue;
+
+            $blocks[] = ['sucursal' => $sucursalName, 'targetCol' => $targetCol, 'headerRow' => $idx];
         }
 
-        if ($monthHeaderIdx === null) {
+        if (empty($blocks)) {
             return ['inserted' => 0, 'skipped' => count($rows), 'errors' => 0];
         }
 
-        // Find sucursal column in the same header row or the row above
-        $hdrRow = $rows[$monthHeaderIdx];
-        foreach ($hdrRow as $colIdx => $cell) {
-            $norm = strtr(mb_strtolower(trim((string) $cell)), ['á'=>'a','é'=>'e','í'=>'i','ó'=>'o','ú'=>'u']);
-            if (str_contains($norm, 'sucursal') || str_contains($norm, 'unidad') || str_contains($norm, 'clasificaci')) {
-                $sucursalCol = $colIdx;
-                break;
+        foreach ($blocks as $block) {
+            $sucursal  = $block['sucursal'];
+            $targetCol = $block['targetCol'];
+            $hdrIdx    = $block['headerRow'];
+
+            $altas     = 0;
+            $bajas     = 0;
+            $plantilla = 0.0;
+            $indice    = 0.0;
+
+            // Read up to 7 metric rows below the month-header row
+            for ($ri = $hdrIdx + 1; $ri <= $hdrIdx + 7; $ri++) {
+                $mrow = $rowsArr[$ri] ?? null;
+                if ($mrow === null) break;
+                $label = $norm(trim((string) ($mrow[0] ?? '')));
+                if ($label === '') continue;
+                if ($isMonthHeaderRow($mrow)) break; // next block started
+
+                $val = $this->toDecimal($mrow[$targetCol] ?? null);
+
+                if (str_starts_with($label, 'ALTA')) {
+                    $altas = (int) ($val ?? 0);
+                } elseif (str_starts_with($label, 'BAJA')) {
+                    $bajas = (int) ($val ?? 0);
+                } elseif (str_starts_with($label, 'PLANTILL') || str_starts_with($label, 'PROMEDIO')) {
+                    $plantilla = (float) ($val ?? 0);
+                } elseif (str_starts_with($label, 'ROTACI') || str_starts_with($label, 'INDICE')) {
+                    $indice = (float) ($val ?? 0);
+                }
             }
-        }
 
-        if ($sucursalCol === null) $sucursalCol = 0;
+            // Derive index if missing
+            if ($indice == 0.0 && $plantilla > 0.0 && $bajas > 0) {
+                $indice = round($bajas / $plantilla * 100, 4);
+            }
 
-        $targetCol = $mesColSet['month_col'];
-
-        foreach (array_slice($rows, $monthHeaderIdx + 1) as $row) {
-            if ($this->isEmptyRow($row)) { $skipped++; continue; }
-
-            $sucursal = $this->str($this->col($row, $sucursalCol));
-            $valor    = $this->toDecimal($this->col($row, $targetCol));
-
-            if (!$sucursal || $valor === null || $valor <= 0) {
+            if ($altas === 0 && $bajas === 0 && $plantilla == 0.0 && $indice == 0.0) {
                 $skipped++;
                 continue;
             }
@@ -244,11 +316,11 @@ class RotacionExcelImportService
                     'sucursal_nombre'   => $sucursal,
                     'branch_id'         => $branchId,
                     'mes'               => $targetMes,
-                    'bajas'             => 0,
-                    'promedio_personal' => 0,
-                    'indice_rotacion'   => $valor,
+                    'bajas'             => $bajas,
+                    'promedio_personal' => $plantilla,
+                    'indice_rotacion'   => $indice,
                     'hoja_fuente'       => $hoja,
-                    'raw_payload'       => json_encode(['col_valor' => $targetCol]),
+                    'raw_payload'       => json_encode(['altas' => $altas, 'plantilla' => $plantilla, 'col_abr' => $targetCol]),
                     'created_at'        => now(),
                     'updated_at'        => now(),
                 ]);
@@ -305,15 +377,17 @@ class RotacionExcelImportService
 
     private function buildColMapRotacion(array $headers): array
     {
-        $map = ['sucursal' => 0, 'bajas' => null, 'promedio' => null, 'indice' => null];
+        $map = ['sucursal' => 0, 'altas' => null, 'bajas' => null, 'promedio' => null, 'indice' => null];
 
         foreach ($headers as $idx => $cell) {
             $norm = strtr(mb_strtolower(trim((string) $cell)), ['á'=>'a','é'=>'e','í'=>'i','ó'=>'o','ú'=>'u']);
             if (str_contains($norm, 'sucursal') || str_contains($norm, 'unidad') || str_contains($norm, 'clasificaci')) {
                 $map['sucursal'] = $idx;
+            } elseif ($map['altas'] === null && str_contains($norm, 'alta')) {
+                $map['altas'] = $idx;
             } elseif ($map['bajas'] === null && str_contains($norm, 'baja')) {
                 $map['bajas'] = $idx;
-            } elseif ($map['promedio'] === null && (str_contains($norm, 'promedio') || str_contains($norm, 'personal'))) {
+            } elseif ($map['promedio'] === null && (str_contains($norm, 'promedio') || str_contains($norm, 'personal') || str_contains($norm, 'plantilla'))) {
                 $map['promedio'] = $idx;
             } elseif ($map['indice'] === null && (str_contains($norm, 'indice') || str_contains($norm, 'rotaci') || str_contains($norm, 'tasa'))) {
                 $map['indice'] = $idx;

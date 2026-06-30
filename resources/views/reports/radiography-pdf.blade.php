@@ -138,7 +138,7 @@ $nomPrimaVac  = (float)($brGlobal['prima_vacacional'] ?? 0);
 $nomBonos     = (float)($brGlobal['bonos']            ?? 0);
 $nomDetalle   = (array)($brGlobal['nomina_detalle']   ?? []);
 $nomDetalleOrder = [
-    'IMSS','Descuentos Infonavit','Finiquito','Gastos médicos',
+    'IMSS','IMSS Patronal','Descuentos Infonavit','Finiquito','Gastos médicos',
     'Gasolina','Financiamiento de Motos','Financiamiento de Motos (desc.)',
     'Descuento Servicios Moto','Financiamiento Celular','Cascos',
     'Descuento de uniformes','Pensión Alimenticia','Préstamo Personal',
@@ -181,7 +181,7 @@ $moraBuckets = [
 ];
 $moraBucketMax = max(array_column($moraBuckets, 'valor')) ?: 1.0;
 
-// ── Utilidad / EBITDA global ───────────────────────────────────────────────────
+// ── EBITDA global ─────────────────────────────────────────────────────────────
 $noiDeducLabels = ['Descuentos Infonavit','Pensión Alimenticia','Descuento Servicios Moto',
     'Financiamiento de Motos (desc.)','Préstamo Personal','Subsidio para el Empleo APL',
     'Otros descuentos NOI','Descuento de uniformes'];
@@ -199,10 +199,6 @@ $gastosTotal    = $gastosOpTotal + $nomNeto;
 $saldoInicial   = (float)($snap['saldo_inicial_caja'] ?? 0);
 $saldoFinal     = $snap['saldo_final_caja'] ?? null; // null = no configurado manualmente
 $utilidad       = $saldoInicial + $recTotal - $colocacion - $gastosTotal;
-// Diferencia = EBITDA − Envío de utilidad a corporativo. Se muestra el valor real, puede ser
-// negativo — ese saldo es lo que se lleva como saldo inicial del siguiente periodo.
-$inconsistencia = $excedentes > $utilidad;
-$diferencia     = $utilidad - $excedentes;
 
 // ── Categoría por EBITDA — fórmula centralizada (idéntica al Excel) ───────────
 // EBITDA = Recuperación − Colocación − OPEX − Nómina
@@ -218,7 +214,7 @@ foreach ($brBranches as $b) {
         'colocacion'   => $bCol,
         'gastos'       => $bGas,
         'nomina'       => $bRec - $bCol - $bGas - $bUtil,
-        'utilidad'     => $bUtil,
+        'ebitda'       => $bUtil,
         'categoria'    => \App\Services\Radiography\RadiographyStyleHelper::ebitdaCategory($bUtil),
     ];
 }
@@ -348,16 +344,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         </td>
         <td class="colR">
             <div class="section-bar alt">Estado general</div>
-            @if($utilidad < 0)
-            <div class="alert-box">⚠ EBITDA negativo en el periodo ({{ $fmt0($utilidad) }}). Revisar gastos, nómina y colocación.</div>
-            @elseif($inconsistencia)
-            <div class="alert-box">⚠ El envío de utilidad a corporativo ({{ $fmt0($excedentes) }}) supera el EBITDA disponible ({{ $fmt0($utilidad) }}).</div>
-            @else
-            <div class="ok-box">✓ EBITDA positivo. Envío de utilidad a corporativo: {{ $fmt0($excedentes) }}. Diferencia / sobrante: {{ $fmt0($diferencia) }}.</div>
-            @endif
-            @if($moraPct > 25)
-            <div class="alert-box">⚠ Índice de mora alto: {{ $fmtp($moraPct) }} de la cartera total.</div>
-            @endif
+            <div class="ok-box">Excedente enviado a corporativo: {{ $fmt0($excedentes) }}</div>
             <div style="font-size:7.6pt; color:#475569; margin-top:6px;">
                 Préstamos intersucursales (fondea): <b>{{ $fmt0($fondeoTotal) }}</b>
             </div>
@@ -388,7 +375,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <td class="r">{{ $fmt($c['colocacion']) }}</td>
             <td class="r">{{ $fmt($c['gastos']) }}</td>
             <td class="r">{{ $fmt($c['nomina']) }}</td>
-            <td class="r b" @if($c['utilidad'] < 0) style="color:#b91c1c;" @endif>{{ $fmt($c['utilidad']) }}</td>
+            <td class="r b" @if($c['ebitda'] < 0) style="color:#b91c1c;" @endif>{{ $fmt($c['ebitda']) }}</td>
             <td class="c"><span class="badge {{ $cat($c['categoria']) }}">{{ $c['categoria'] }}</span></td>
         </tr>
         @endforeach
@@ -515,36 +502,80 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
 <div class="pagebreak"></div>
 <div class="section-bar">Ingresos / Recuperación</div>
 
-{{-- A) Conciliación de seguros --}}
-<div class="section-bar alt">A) Conciliación de seguros</div>
-<table class="tbl avoid">
-    <thead><tr><th>Concepto</th><th class="r">Monto</th></tr></thead>
-    <tbody>
-        @if($ingrBruta > 0)<tr><td>Recuperación bruta (total archivo)</td><td class="r">{{ $fmt($ingrBruta) }}</td></tr>@endif
-        @if($ingrSegExcluido > 0)<tr><td>(-) Seguros excluidos (no CRECE)</td><td class="r">- {{ $fmt($ingrSegExcluido) }}</td></tr>@endif
-        @if($ingrCondonacion > 0)<tr><td>(-) Condonaciones excluidas</td><td class="r">- {{ $fmt($ingrCondonacion) }}</td></tr>@endif
-        @if($ingrUnificacion > 0)<tr><td>(-) Unificaciones excluidas</td><td class="r">- {{ $fmt($ingrUnificacion) }}</td></tr>@endif
-        @if($ingrCrece > 0)<tr><td>Seguro CRECE bruto</td><td class="r">{{ $fmt($ingrCrece) }}</td></tr>@endif
-        @if($ingrCrece70 > 0)<tr><td>&nbsp;&nbsp;(-) No reconocido 70%</td><td class="r">- {{ $fmt($ingrCrece70) }}</td></tr>@endif
-        @if($ingrCrece30 > 0)<tr><td>&nbsp;&nbsp;(+) Reconocido 30%</td><td class="r">{{ $fmt($ingrCrece30) }}</td></tr>@endif
-    </tbody>
-    <tfoot><tr><td><b>Recuperación total reconocida</b></td><td class="r">{{ $fmt($ingrTotal) }}</td></tr></tfoot>
-</table>
-
-{{-- B) Desglose por componente --}}
+{{-- A) Desglose por componente --}}
 @if($ingrCapital > 0 || $ingrInteres > 0)
-<div class="section-bar alt">B) Desglose por componente</div>
+<div class="section-bar alt">A) Desglose por componente</div>
 <table class="tbl avoid">
     <thead><tr><th>Componente</th><th class="r">Monto</th></tr></thead>
     <tbody>
         @if($ingrCapital > 0)<tr><td>Capital recuperado</td><td class="r">{{ $fmt($ingrCapital) }}</td></tr>@endif
-        @if($ingrInteres > 0)<tr><td>Intereses cobrados</td><td class="r">{{ $fmt($ingrInteres) }}</td></tr>@endif
-        @if($ingrImpuesto > 0)<tr><td>Impuestos sobre intereses</td><td class="r">{{ $fmt($ingrImpuesto) }}</td></tr>@endif
-        @if($ingrCharges > 0)<tr><td>Moratorios / cargos</td><td class="r">{{ $fmt($ingrCharges) }}</td></tr>@endif
-        @if($ingrCargosIni > 0)<tr><td>Cargos de inicio</td><td class="r">{{ $fmt($ingrCargosIni) }}</td></tr>@endif
-        @if($ingrComAper > 0)<tr><td>Comisión de apertura</td><td class="r">{{ $fmt($ingrComAper) }}</td></tr>@endif
+        @if($ingrInteres > 0)<tr><td>Intereses</td><td class="r">{{ $fmt($ingrInteres) }}</td></tr>@endif
+        @if($ingrImpuesto > 0)<tr><td>Impuestos</td><td class="r">{{ $fmt($ingrImpuesto) }}</td></tr>@endif
+        @if($ingrCharges > 0)<tr><td>Moratorios / Multas</td><td class="r">{{ $fmt($ingrCharges) }}</td></tr>@endif
+        @if($ingrCargosIni > 0)<tr><td>Cargos al inicio</td><td class="r">{{ $fmt($ingrCargosIni) }}</td></tr>@endif
+        @if($ingrComAper > 0)<tr><td>Comisión por apertura</td><td class="r">{{ $fmt($ingrComAper) }}</td></tr>@endif
     </tbody>
-    <tfoot><tr><td><b>Total componentes</b></td><td class="r">{{ $fmt($ingrCapital + $ingrInteres + $ingrImpuesto + $ingrCharges + $ingrCargosIni + $ingrComAper) }}</td></tr></tfoot>
+    <tfoot><tr><td><b>Total Recuperación</b></td><td class="r">{{ $fmt($ingrTotal) }}</td></tr></tfoot>
+</table>
+@endif
+
+{{-- B) Desglose por sucursal --}}
+@if(!empty($brBranches))
+<div class="section-bar alt">B) Desglose por sucursal</div>
+<table class="tbl avoid">
+    <thead>
+        <tr>
+            <th>Sucursal</th>
+            <th class="r">Capital</th>
+            <th class="r">Intereses</th>
+            <th class="r">Impuestos</th>
+            <th class="r">Moratorios</th>
+            <th class="r">Cargos inicio</th>
+            <th class="r">Com. apertura</th>
+            <th class="r">Total</th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach($brBranches as $bi => $bb)
+        <tr @if($bi % 2 === 1) style="background:#f8fafc;" @endif>
+            <td class="b">{{ $bb['sucursal'] }}</td>
+            <td class="r">{{ $fmt((float)($bb['capital_recuperado'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($bb['interes_recuperado'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($bb['impuesto_recuperado'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($bb['charges'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($bb['cargos_inicio'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($bb['comision_apertura'] ?? 0)) }}</td>
+            <td class="r b">{{ $fmt((float)($bb['recuperacion_total'] ?? 0)) }}</td>
+        </tr>
+        @endforeach
+    </tbody>
+    <tfoot>
+        <tr>
+            <td>TOTAL</td>
+            <td class="r">{{ $fmt((float)($brGlobal['capital_recuperado'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($brGlobal['interes_recuperado'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($brGlobal['impuesto_recuperado'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($brGlobal['charges'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($brGlobal['cargos_inicio'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($brGlobal['comision_apertura'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt($ingrTotal) }}</td>
+        </tr>
+    </tfoot>
+</table>
+@endif
+
+{{-- C) Seguros y coberturas canalizadas --}}
+@if($ingrCrece > 0 || $ingrSegExcluido > 0)
+<div class="section-bar alt">Seguros y coberturas canalizadas</div>
+<table class="tbl avoid">
+    <thead><tr><th>Concepto</th><th class="r">Monto</th></tr></thead>
+    <tbody>
+        @if($ingrCrece > 0)<tr><td>Seguro CRECE total</td><td class="r">{{ $fmt($ingrCrece) }}</td></tr>@endif
+        @if($ingrCrece30 > 0)<tr style="background:#f8fafc;"><td>&nbsp;&nbsp;Reconocido como ingreso MR Lana (30%)</td><td class="r" style="color:#065f46;">{{ $fmt($ingrCrece30) }}</td></tr>@endif
+        @if($ingrCrece70 > 0)<tr><td>&nbsp;&nbsp;Canalizado a Savehearts (70%)</td><td class="r">{{ $fmt($ingrCrece70) }}</td></tr>@endif
+        @if($ingrSegExcluido > 0)<tr style="background:#f8fafc;"><td>Cobertura Savehearts / Crédito Grupal</td><td class="r">{{ $fmt($ingrSegExcluido) }}</td></tr>@endif
+    </tbody>
+    <tfoot><tr><td><b>Total canalizado a Savehearts / aseguradora</b></td><td class="r">{{ $fmt($ingrCrece70 + $ingrSegExcluido) }}</td></tr></tfoot>
 </table>
 @endif
 
@@ -555,7 +586,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
     <tbody>
         <tr><td>Préstamos intersucursales (fondea)</td><td class="r">{{ $fmt($fondeoTotal) }}</td></tr>
     </tbody>
-    <tfoot><tr><td>Colocación total (se resta del EBITDA)</td><td class="r">{{ $fmt($colocacion) }}</td></tr></tfoot>
+    <tfoot><tr><td>Total colocación</td><td class="r">{{ $fmt($colocacion) }}</td></tr></tfoot>
 </table>
 
 @if(!empty($productosRows))

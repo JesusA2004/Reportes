@@ -3,7 +3,7 @@ import { Link } from '@inertiajs/vue3';
 import {
     LayoutGrid,
     CalendarRange,
-    Upload,
+    FolderOpen,
     FileSpreadsheet,
     Settings,
 } from 'lucide-vue-next';
@@ -31,9 +31,9 @@ const mainNavItems: NavItem[] = [
         icon: LayoutGrid,
     },
     {
-        title: 'Histórico general',
+        title: 'Carga de archivos',
         href: '/historico-general',
-        icon: Upload,
+        icon: FolderOpen,
     },
     {
         title: 'Periodos',
