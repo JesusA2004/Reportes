@@ -56,10 +56,11 @@ class ReportUploadService
                     "Se reemplazó el archivo '{$file->getClientOriginalName()}' después de la última carga. Vuelve a ejecutar Cargar registros."
                 );
 
-                // Clear fact data for every old upload being replaced.
-                // This ensures there's no stale fact data from a file that no longer applies.
+                // Clear fact data for every old upload being replaced, and mark it as
+                // Replaced so it's never picked as the "vigente" upload nor reprocessed.
                 foreach ($existingUploads as $old) {
                     $this->cleaner->clearForUpload($old);
+                    $old->update(['status' => ReportUploadStatus::Replaced]);
                 }
             }
         }

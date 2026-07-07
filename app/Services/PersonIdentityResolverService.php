@@ -103,19 +103,58 @@ class PersonIdentityResolverService
     }
 
     /**
+     * Aggregate fact_recoveries contracts by normalized promoter name ONCE, scoped to
+     * the given period data ids. Pass the result to resolveBranchFromContractPrefix()
+     * and buildResolutionTrace() to avoid an unindexed LOWER(promoter_name) full-table
+     * scan per person — this was the main cause of "personas sin sucursal" hanging.
+     */
+    public function buildContractsIndex(array $dataIds): array
+    {
+        if (empty($dataIds)) {
+            return [];
+        }
+
+        $rows = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereNotNull('contract')
+            ->whereNotNull('promoter_name')
+            ->select('promoter_name', 'contract')
+            ->get();
+
+        $byName = [];
+        foreach ($rows as $r) {
+            $norm = $this->normalizePersonName((string) $r->promoter_name);
+            if ($norm === '') {
+                continue;
+            }
+            if (!isset($byName[$norm])) {
+                $byName[$norm] = [];
+            }
+            if (count($byName[$norm]) < 20 && !in_array($r->contract, $byName[$norm], true)) {
+                $byName[$norm][] = $r->contract;
+            }
+        }
+
+        return $byName;
+    }
+
+    /**
      * Infer branch from contract-number prefixes found in fact_recoveries
      * for rows where the promoter name matches the given person.
      */
-    public function resolveBranchFromContractPrefix(string $personName): ?int
+    public function resolveBranchFromContractPrefix(string $personName, ?array $contractsPreloaded = null): ?int
     {
         $normalized = $this->normalizePersonName($personName);
 
-        $contracts = DB::table('fact_recoveries')
-            ->whereRaw('LOWER(promoter_name) = ?', [$normalized])
-            ->whereNotNull('contract')
-            ->pluck('contract')
-            ->unique()
-            ->take(20);
+        $contracts = $contractsPreloaded !== null
+            ? ($contractsPreloaded[$normalized] ?? [])
+            : DB::table('fact_recoveries')
+                ->whereRaw('LOWER(promoter_name) = ?', [$normalized])
+                ->whereNotNull('contract')
+                ->pluck('contract')
+                ->unique()
+                ->take(20)
+                ->all();
 
         // Sort prefixes longest-first to avoid ATLA shadowing ATLIX
         $prefixes = self::CONTRACT_PREFIXES;
@@ -239,8 +278,16 @@ class PersonIdentityResolverService
      * Build a full resolution trace for an employee that ended up sin sucursal.
      * Accepts pre-loaded collections to avoid N+1 queries.
      *
+     * Performance: when called in a loop (one call per unassigned person), ALWAYS pass
+     * $candidateBranchesPreloaded / $placementsPreloaded / $lendusPreloaded computed ONCE
+     * outside the loop — otherwise each call repeats a full-table query per person, which
+     * is what previously made the "personas sin sucursal" panel hang on "Cargando personas…".
+     *
      * @param  \Illuminate\Support\Collection $allEmployees  All employees (id, full_name, normalized_name)
      * @param  \Illuminate\Support\Collection $sampleMovs    NOI movements for this employee (movement_date, concept, amount, raw_payload, source)
+     * @param  array<int,string>|null $candidateBranchesPreloaded  employee_id => branch_name, for ALL employees
+     * @param  \Illuminate\Support\Collection|null $placementsPreloaded  keyed by normalized_promoter_name
+     * @param  \Illuminate\Support\Collection|null $lendusPreloaded  all operational lendus_employee_directory rows
      */
     public function buildResolutionTrace(
         int $employeeId,
@@ -250,6 +297,10 @@ class PersonIdentityResolverService
         ?string $employeeCode = null,
         ?string $historicalBranch = null,
         ?array $dataIds = null,
+        ?array $candidateBranchesPreloaded = null,
+        ?\Illuminate\Support\Collection $placementsPreloaded = null,
+        ?\Illuminate\Support\Collection $lendusPreloaded = null,
+        ?array $contractsPreloaded = null,
     ): array {
         $normalized = $this->normalizePersonName($fullName);
 
@@ -278,17 +329,21 @@ class PersonIdentityResolverService
 
         // ── Fuzzy candidates ─────────────────────────────────────────────
         // Pre-load one branch per candidate for the description
-        $allCandidateIds = $allEmployees->pluck('id')->filter(fn ($id) => (int) $id !== $employeeId)->all();
-        $candidateBranches = empty($allCandidateIds) ? [] : DB::table('employee_branch_assignments as eba')
-            ->join('branches as b', 'eba.branch_id', '=', 'b.id')
-            ->whereIn('eba.employee_id', $allCandidateIds)
-            ->whereNotNull('eba.branch_id')
-            ->orderByDesc('eba.period_id')
-            ->select('eba.employee_id', 'b.name as branch_name')
-            ->get()
-            ->unique('employee_id')
-            ->pluck('branch_name', 'employee_id')
-            ->all();
+        if ($candidateBranchesPreloaded !== null) {
+            $candidateBranches = $candidateBranchesPreloaded;
+        } else {
+            $allCandidateIds = $allEmployees->pluck('id')->filter(fn ($id) => (int) $id !== $employeeId)->all();
+            $candidateBranches = empty($allCandidateIds) ? [] : DB::table('employee_branch_assignments as eba')
+                ->join('branches as b', 'eba.branch_id', '=', 'b.id')
+                ->whereIn('eba.employee_id', $allCandidateIds)
+                ->whereNotNull('eba.branch_id')
+                ->orderByDesc('eba.period_id')
+                ->select('eba.employee_id', 'b.name as branch_name')
+                ->get()
+                ->unique('employee_id')
+                ->pluck('branch_name', 'employee_id')
+                ->all();
+        }
 
         $seen = [];
         foreach ($allEmployees as $c) {
@@ -326,7 +381,7 @@ class PersonIdentityResolverService
 
         // ── Contract prefix ──────────────────────────────────────────────
         $trace['checked_contract_prefix'] = true;
-        $branchFromContract = $this->resolveBranchFromContractPrefix($fullName);
+        $branchFromContract = $this->resolveBranchFromContractPrefix($fullName, $contractsPreloaded);
         if ($branchFromContract) {
             $branchName = DB::table('branches')->where('id', $branchFromContract)->value('name');
             $trace['detected_codes']['contract_prefix'] = (string) $branchName;
@@ -334,12 +389,14 @@ class PersonIdentityResolverService
                 $trace['detected_codes']['branch_hint'] = (string) $branchName;
             }
         } else {
-            $contracts = DB::table('fact_recoveries')
-                ->whereRaw('LOWER(promoter_name) = ?', [$normalized])
-                ->whereNotNull('contract')
-                ->pluck('contract')
-                ->take(3)
-                ->toArray();
+            $contracts = $contractsPreloaded !== null
+                ? array_slice($contractsPreloaded[$normalized] ?? [], 0, 3)
+                : DB::table('fact_recoveries')
+                    ->whereRaw('LOWER(promoter_name) = ?', [$normalized])
+                    ->whereNotNull('contract')
+                    ->pluck('contract')
+                    ->take(3)
+                    ->toArray();
             if (!empty($contracts)) {
                 $trace['detected_codes']['raw_clues'][] = 'Contratos en cobranza: ' . implode(', ', $contracts) . ' — sin prefijo de sucursal reconocido';
             }
@@ -349,7 +406,7 @@ class PersonIdentityResolverService
         $trace['checked_ministraciones'] = !empty($dataIds);
         $placementMatch = null;
         if (!empty($dataIds)) {
-            $promoterRows = DB::table('fact_placements')
+            $promoterRows = $placementsPreloaded ?? DB::table('fact_placements')
                 ->whereIn('period_id', $dataIds)
                 ->whereNotNull('branch_id')
                 ->selectRaw('normalized_promoter_name, MAX(promoter_code) as promoter_code, MAX(branch_id) as branch_id')
@@ -391,7 +448,7 @@ class PersonIdentityResolverService
         $lendusMatch = null;
 
         // Load all operational records (no inferred_branch_id filter — resolve from codigo if needed)
-        $allLendus = DB::table('lendus_employee_directory')
+        $allLendus = $lendusPreloaded ?? DB::table('lendus_employee_directory')
             ->where('is_operational', true)
             ->whereNotNull('normalized_name')
             ->get(['id', 'codigo', 'nombre', 'normalized_name', 'puesto', 'estatus', 'inferred_branch_id', 'inferred_branch_name']);

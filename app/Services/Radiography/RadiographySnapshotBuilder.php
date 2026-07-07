@@ -155,7 +155,11 @@ class RadiographySnapshotBuilder
         }
 
         // ── EBITDA, Venta y Margen EBITDA ────────────────────────────────────
-        $saldoInicialParaEbitda = (float) ($period->saldo_inicial_caja ?? 0);
+        // Percepciones/Deducciones/Neto pagado: cifra informativa de "lo que el trabajador
+        // recibió", distinta de Nómina y Capital Humano (que es un concepto de gasto de la
+        // empresa). Las deducciones se muestran para explicar el neto — nunca se vuelven a
+        // sumar como gasto adicional.
+        $noiPercepDeducc = $this->branchCalculator->computeNoiPercepcionesDeducciones($this->dataIds);
         $nominaDetalleSuma      = array_sum(array_values((array) ($branchCalcGlobal['nomina_detalle'] ?? [])));
         $nominaParaEbitda       = (float) ($branchCalcGlobal['nomina_total'] ?? 0)
                                 + (float) ($branchCalcGlobal['comisiones'] ?? 0)
@@ -164,11 +168,25 @@ class RadiographySnapshotBuilder
                                 + (float) ($branchCalcGlobal['prima_vacacional'] ?? 0)
                                 + $nominaDetalleSuma;
         $opexParaEbitda         = (float) ($branchCalcGlobal['gastos_operativos'] ?? 0);
+        // EBITDA = Recuperación − Colocación − OPEX − Nómina y Capital Humano.
+        // Colocación es una salida de capital (dinero prestado a clientes), no un ingreso —
+        // se resta, igual que OPEX y Nómina. saldo_inicial_caja es un saldo de caja, no un
+        // componente operativo del periodo, y no participa en este cálculo.
         $totalGastosEbitda      = $opexParaEbitda + $nominaParaEbitda;
-        $ebitdaGlobal           = $saldoInicialParaEbitda + $calcRecuperacion + $calcColocacion - $totalGastosEbitda;
+        $ebitdaGlobal           = $calcRecuperacion - $calcColocacion - $totalGastosEbitda;
         $capitalRecuperado      = (float) ($branchCalcGlobal['capital_recuperado'] ?? 0);
         $impuestoRecuperado     = (float) ($branchCalcGlobal['impuesto_recuperado'] ?? 0);
-        $ventaGlobal            = max(0.0, $calcRecuperacion - $capitalRecuperado - $impuestoRecuperado);
+        // Venta (para Margen EBITDA) = componentes sin capital ni impuestos: interés +
+        // cargos de inicio/comisión + cargos calendario + cargos vencimiento/moratorios +
+        // excedente de recuperación + seguro CRECE reconocido (30%).
+        $interesRecuperado      = (float) ($branchCalcGlobal['interes_recuperado'] ?? 0);
+        $cargosInicioComision   = (float) ($branchCalcGlobal['comision_apertura'] ?? 0);
+        $cargosCalendario       = (float) ($branchCalcGlobal['cargos_adicionales'] ?? 0);
+        $cargosVencimiento      = (float) ($branchCalcGlobal['charges'] ?? 0);
+        $excedenteRecuperado    = (float) ($branchCalcGlobal['excedente_recuperado'] ?? 0);
+        $seguroCreceReconocido  = (float) ($branchCalcGlobal['seguro_crece_reconocido'] ?? 0);
+        $ventaGlobal            = $interesRecuperado + $cargosInicioComision + $cargosCalendario
+                                + $cargosVencimiento + $excedenteRecuperado + $seguroCreceReconocido;
         $margenEbitda           = $ventaGlobal > 0 ? round($ebitdaGlobal / $ventaGlobal * 100, 2) : 0.0;
 
         return [
@@ -210,7 +228,15 @@ class RadiographySnapshotBuilder
                 'fondeo_total'                 => (float)($gm['fondeo_total'] ?? 0),
                 'payroll_total'                => $payroll['pagos'] + $payroll['bonos'],
                 'net_payroll'                  => $payroll['neto'],
+                // Percepciones/Deducciones/Neto pagado a trabajadores — informativo,
+                // distinto de "Nómina y Capital Humano" (concepto de gasto de la empresa).
+                'noi_percepciones'             => $noiPercepDeducc['percepciones'],
+                'noi_deducciones'              => $noiPercepDeducc['deducciones'],
+                'noi_neto_pagado'              => $noiPercepDeducc['neto_pagado'],
                 'opex_total'                   => $opexParaEbitda,
+                // "Nómina y Capital Humano" — nombre completo del KPI (gasto de la empresa,
+                // NUNCA llamarlo solo "Nómina").
+                'nomina_capital_humano_total'  => $nominaParaEbitda,
                 'nomina_ebitda_total'          => $nominaParaEbitda,
                 'total_gastos_ebitda'          => $totalGastosEbitda,
                 'ebitda_global'                => $ebitdaGlobal,

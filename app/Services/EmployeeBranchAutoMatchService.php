@@ -6,10 +6,8 @@ use App\Enums\MatchType;
 use App\Enums\SourceType;
 use App\Models\Employee;
 use App\Models\EmployeeBranchAssignment;
-use App\Models\Expense;
 use App\Models\NoiMovement;
 use App\Models\Period;
-use App\Models\Recovery;
 use App\Models\ReportUpload;
 use App\Services\BranchResolverService;
 use App\Services\PersonIdentityResolverService;
@@ -17,6 +15,18 @@ use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
+/**
+ * Resolves branch assignments for employees detected in NOI / NOI Fiscal.
+ *
+ * Performance contract: this service must run in O(cobranza_rows + placements_rows +
+ * portfolios_rows + expenses_rows + employees) per period — NEVER O(employees × cobranza_rows).
+ * All candidate sources (cobranza, colocación, cartera, gastos, directorio Lendus,
+ * histórico, alias, empleados canónicos) are preindexed ONCE before the employee loop.
+ * The employee loop itself performs only in-memory hash lookups and, as a last resort,
+ * fuzzy comparisons against a small reduced candidate pool (distinct normalized names
+ * seen in cobranza/colocación/directorio — typically a few hundred, never the raw
+ * row count).
+ */
 class EmployeeBranchAutoMatchService
 {
     public function __construct(
@@ -24,7 +34,7 @@ class EmployeeBranchAutoMatchService
         private BranchResolverService $branchResolver,
     ) {}
 
-    public function handle(?int $periodId = null): array
+    public function handle(?int $periodId = null, ?callable $progress = null): array
     {
         $periods = Period::query()
             ->when($periodId, fn ($query) => $query->whereKey($periodId))
@@ -33,178 +43,448 @@ class EmployeeBranchAutoMatchService
             ->orderByDesc('sequence')
             ->get();
 
-        $processed = 0;
-        $matched = 0;
-        $unmatched = 0;
-        $manualKept = 0;
+        $totals = $this->emptyStats();
+        $start  = microtime(true);
+
+        // Scoped query counting via Laravel's query log (not DB::listen — a permanent
+        // listener would leak memory across repeated calls in a long-lived worker process).
+        $wasLogging = DB::logging();
+        if (!$wasLogging) {
+            DB::enableQueryLog();
+        }
+        $queryCountBefore = count(DB::getQueryLog());
 
         foreach ($periods as $period) {
-            $result = $this->processPeriod($period);
-
-            $processed += $result['processed'];
-            $matched += $result['matched'];
-            $unmatched += $result['unmatched'];
-            $manualKept += $result['manual_kept'];
+            $result = $this->processPeriod($period, $progress);
+            foreach ($result as $key => $value) {
+                if (array_key_exists($key, $totals)) {
+                    $totals[$key] += $value;
+                }
+            }
         }
 
+        $totals['duration_ms'] = (int) round((microtime(true) - $start) * 1000);
+        $totals['query_count'] = count(DB::getQueryLog()) - $queryCountBefore;
+        if (!$wasLogging) {
+            DB::disableQueryLog();
+        }
+
+        return $totals;
+    }
+
+    private function emptyStats(): array
+    {
         return [
-            'processed' => $processed,
-            'matched' => $matched,
-            'unmatched' => $unmatched,
-            'manual_kept' => $manualKept,
+            'processed'        => 0,
+            'unique_persons'   => 0,
+            'matched'          => 0,
+            'unmatched'        => 0,
+            'ambiguous'        => 0,
+            'manual_kept'      => 0,
+            'exact_identifier' => 0,
+            'historical'       => 0,
+            'exact_name'       => 0,
+            'majority'         => 0,
+            'fuzzy'            => 0,
+            'duration_ms'      => 0,
+            'query_count'      => 0,
         ];
     }
 
-    private function processPeriod(Period $period): array
+    private function processPeriod(Period $period, ?callable $progress = null): array
     {
-        $coveredWeekIds     = $this->resolveCoveredWeekIds($period);
-        $noiUploadIds       = $this->resolveUploadIdsForSource('noi_nomina', $coveredWeekIds);
-        $fiscalUploadIds    = $this->resolveUploadIdsForSource('noi_nomina_fiscal', $coveredWeekIds);
-        $cobranzaUploadIds  = $this->resolveUploadIdsForSource('lendus_ingresos_cobranza', $coveredWeekIds);
+        $stats = $this->emptyStats();
 
-        $allNoiUploadIds    = array_values(array_unique(array_merge($noiUploadIds, $fiscalUploadIds)));
+        $coveredWeekIds    = $this->resolveCoveredWeekIds($period);
+        $noiUploadIds      = $this->resolveUploadIdsForSource('noi_nomina', $coveredWeekIds);
+        $fiscalUploadIds   = $this->resolveUploadIdsForSource('noi_nomina_fiscal', $coveredWeekIds);
+        $cobranzaUploadIds = $this->resolveUploadIdsForSource('lendus_ingresos_cobranza', $coveredWeekIds);
+        $allNoiUploadIds   = array_values(array_unique(array_merge($noiUploadIds, $fiscalUploadIds)));
+
         $employees = $this->resolveEmployeesForPeriod($period, $allNoiUploadIds);
 
-        $processed = 0;
-        $matched = 0;
-        $unmatched = 0;
-        $manualKept = 0;
+        if ($employees->isEmpty()) {
+            return $stats;
+        }
 
-        // Load cobranza recoveries ONCE outside the loop — prevents 168× repeated 61K-row queries.
-        $cachedRecoveries = !empty($cobranzaUploadIds)
-            ? Recovery::query()
-                ->with('branch:id,name,normalized_name')
-                ->whereIn('report_upload_id', $cobranzaUploadIds)
-                ->whereNotNull('branch_id')
-                ->get()
-            : collect();
+        $employeeIds    = $employees->pluck('id')->all();
+        $operativeNames = array_map('strtoupper', $this->branchResolver->operativeFinancialBranches());
 
-        foreach ($employees as $employee) {
-            $processed++;
+        $progress && $progress(55, 'Preparando índices', 'Agrupando cobranza, colocación, cartera y directorio Lendus una sola vez para todo el periodo.');
 
-            $existing = EmployeeBranchAssignment::query()
-                ->where('period_id', $period->id)
-                ->where('employee_id', $employee->id)
+        // ── Preindex every candidate source ONCE (no per-employee queries beyond this point) ──
+        $existingAssignments = EmployeeBranchAssignment::query()
+            ->where('period_id', $period->id)
+            ->whereIn('employee_id', $employeeIds)
+            ->get()
+            ->keyBy('employee_id');
+
+        $cobranzaIndex   = $this->buildCobranzaIndex($cobranzaUploadIds, $operativeNames);
+        $placementsIndex = $this->buildPlacementsIndex($period->id);
+        $portfoliosIndex = $this->buildPortfoliosIndex($period->id, $operativeNames);
+        $expensesIndex   = $this->buildExpensesIndex($period->id, $employeeIds, $operativeNames);
+        $lendusIndex     = $this->buildLendusIndex();
+        $historicalIndex = $this->buildHistoricalIndex($period->id, $employeeIds, $operativeNames);
+        $aliasIndex      = $this->buildAliasIndex($employees, $operativeNames);
+        $canonicalIndex  = $this->buildCanonicalIndex($employees, $operativeNames);
+
+        $progress && $progress(65, 'Coincidencias exactas', 'Resolviendo por historial confirmado y nombre exacto.');
+
+        // ── Unify NOI + NOI Fiscal duplicates: resolve branch ONCE per real person ──
+        $groups = $employees->groupBy(fn (Employee $e) => $e->normalized_name ?: ('id:' . $e->id));
+
+        $upserts     = [];
+        $groupsDone  = 0;
+        $totalGroups = max(1, $groups->count());
+
+        foreach ($groups as $normName => $groupEmployees) {
+            $stats['processed'] += $groupEmployees->count();
+            $stats['unique_persons']++;
+            $groupsDone++;
+
+            if ($progress && $groupsDone % 40 === 0) {
+                $pct = 65 + (int) round(($groupsDone / $totalGroups) * 20); // 65..85
+                $progress(min(85, $pct), 'Resolviendo asignaciones', "Procesadas {$groupsDone}/{$totalGroups} personas.");
+            }
+
+            // A) Preserve any existing manual/confirmed assignment in the group.
+            $manual = $groupEmployees
+                ->map(fn (Employee $e) => $existingAssignments->get($e->id))
+                ->filter(fn ($a) => $a && $a->was_manual_reviewed && $a->match_type?->value === MatchType::Manual->value && $a->branch_id)
                 ->first();
 
-            if (
-                $existing &&
-                $existing->was_manual_reviewed &&
-                $existing->match_type?->value === MatchType::Manual->value &&
-                $existing->branch_id
-            ) {
-                $manualKept++;
+            if ($manual) {
+                foreach ($groupEmployees as $e) {
+                    $existing = $existingAssignments->get($e->id);
+                    if ($existing && $existing->was_manual_reviewed && $existing->match_type?->value === MatchType::Manual->value && $existing->branch_id) {
+                        $stats['manual_kept']++;
+                        continue; // untouched — never overwrite a manual assignment
+                    }
+                    $upserts[] = $this->buildUpsertRow(
+                        $period->id, $e->id, $manual->branch_id, SourceType::Manual,
+                        "heredado de asignación manual del empleado #{$manual->employee_id}",
+                        MatchType::Manual, 1.00,
+                        'Sucursal heredada de una asignación manual confirmada para la misma persona.',
+                    );
+                    $stats['matched']++;
+                }
                 continue;
             }
 
-            $candidate = $this->resolveBranchCandidate($period, $employee, $cobranzaUploadIds, $cachedRecoveries);
+            $candidate = $this->resolveCandidateForGroup(
+                $normName,
+                $groupEmployees,
+                $cobranzaIndex,
+                $placementsIndex,
+                $portfoliosIndex,
+                $expensesIndex,
+                $lendusIndex,
+                $historicalIndex,
+                $aliasIndex,
+                $canonicalIndex,
+            );
 
-            if (!$candidate) {
-                $candidate = $this->resolveCandidateFromPlacements($period, $employee);
-            }
+            $isAmbiguous = is_array($candidate) && $candidate['branch_id'] === null;
+            $isMatched   = is_array($candidate) && $candidate['branch_id'] !== null;
 
-            if (!$candidate) {
-                $candidate = $this->resolveCandidateFromPortfolios($period, $employee);
-            }
-
-            if (!$candidate) {
-                $candidate = $this->resolveCandidateFromExpenses($period, $employee);
-            }
-
-            if (!$candidate) {
-                $candidate = $this->resolveCandidateFromLendusDirectory($employee);
-            }
-
-            // Historical fallback: re-use the most recent assignment from a prior period
-            if (!$candidate) {
-                $historicalBranchId = $this->resolver->resolveBranchFromExistingAssignments($employee->id);
-                if ($historicalBranchId) {
-                    $candidate = [
-                        'branch_id'        => $historicalBranchId,
-                        'source_type'      => SourceType::Lendus,
-                        'source_reference' => 'employee_branch_assignments',
-                        'match_type'       => MatchType::Normalized,
-                        'confidence'       => 0.70,
-                        'notes'            => 'Sucursal heredada de asignación histórica de un periodo anterior.',
-                    ];
+            foreach ($groupEmployees as $e) {
+                if ($isMatched) {
+                    $upserts[] = $this->buildUpsertRow(
+                        $period->id, $e->id, $candidate['branch_id'], $candidate['source_type'],
+                        $candidate['source_reference'], $candidate['match_type'], $candidate['confidence'],
+                        $candidate['notes'],
+                    );
+                } else {
+                    $notes = $isAmbiguous
+                        ? $candidate['notes']
+                        : 'No se encontró sucursal clara para el colaborador en cobranza u operación. Requiere revisión manual.';
+                    $upserts[] = $this->buildUpsertRow(
+                        $period->id, $e->id, null, SourceType::Lendus, null, MatchType::Unmatched, 0, $notes,
+                    );
                 }
             }
 
-            // Alias fallback: if this person was confirmed as an alias of another employee
-            if (!$candidate) {
-                $aliasBranchId = $this->resolver->resolveBranchFromAlias($employee);
-                if ($aliasBranchId) {
-                    $candidate = [
-                        'branch_id'        => $aliasBranchId,
-                        'source_type'      => SourceType::Lendus,
-                        'source_reference' => 'employee_aliases',
-                        'match_type'       => MatchType::Normalized,
-                        'confidence'       => 0.95,
-                        'notes'            => 'Sucursal heredada de alias de persona confirmado.',
-                    ];
-                }
-            }
-
-            // Canonical same-name fallback: another employee record with identical normalized name already has a branch
-            if (!$candidate) {
-                $canonicalBranchId = $this->resolver->resolveBranchFromCanonicalEmployee($employee);
-                if ($canonicalBranchId) {
-                    $candidate = [
-                        'branch_id'        => $canonicalBranchId,
-                        'source_type'      => SourceType::Lendus,
-                        'source_reference' => 'employees.normalized_name',
-                        'match_type'       => MatchType::CanonicalSameName,
-                        'confidence'       => 0.98,
-                        'notes'            => 'Sucursal heredada de otro registro con el mismo nombre normalizado.',
-                    ];
-                }
-            }
-
-            if ($candidate) {
-                EmployeeBranchAssignment::query()->updateOrCreate(
-                    [
-                        'period_id' => $period->id,
-                        'employee_id' => $employee->id,
-                    ],
-                    [
-                        'branch_id' => $candidate['branch_id'],
-                        'source_type' => $candidate['source_type'],
-                        'source_reference' => $candidate['source_reference'],
-                        'match_type' => $candidate['match_type'],
-                        'confidence' => $candidate['confidence'],
-                        'was_manual_reviewed' => false,
-                        'notes' => $candidate['notes'],
-                    ],
-                );
-
-                $matched++;
+            if ($isMatched) {
+                $stats['matched']++;
+                $stats[$candidate['stat_key']] = ($stats[$candidate['stat_key']] ?? 0) + 1;
+            } elseif ($isAmbiguous) {
+                $stats['ambiguous']++;
             } else {
-                EmployeeBranchAssignment::query()->updateOrCreate(
-                    [
-                        'period_id' => $period->id,
-                        'employee_id' => $employee->id,
-                    ],
-                    [
-                        'branch_id' => null,
-                        'source_type' => SourceType::Lendus,
-                        'source_reference' => null,
-                        'match_type' => MatchType::Unmatched,
-                        'confidence' => 0,
-                        'was_manual_reviewed' => false,
-                        'notes' => 'No se encontró sucursal clara para el colaborador en cobranza u operación. Requiere revisión manual.',
-                    ],
-                );
-
-                $unmatched++;
+                $stats['unmatched']++;
             }
         }
 
+        $progress && $progress(95, 'Guardando asignaciones', 'Escribiendo asignaciones automáticas en lote.');
+
+        foreach (array_chunk($upserts, 200) as $chunk) {
+            EmployeeBranchAssignment::query()->upsert(
+                $chunk,
+                ['period_id', 'employee_id'],
+                ['branch_id', 'source_type', 'source_reference', 'match_type', 'confidence', 'was_manual_reviewed', 'notes', 'updated_at'],
+            );
+        }
+
+        $progress && $progress(100, 'Automatch completado', 'Asignaciones guardadas.');
+
+        return $stats;
+    }
+
+    private function buildUpsertRow(
+        int $periodId,
+        int $employeeId,
+        ?int $branchId,
+        SourceType $sourceType,
+        ?string $sourceReference,
+        MatchType $matchType,
+        float $confidence,
+        string $notes,
+    ): array {
         return [
-            'processed' => $processed,
-            'matched' => $matched,
-            'unmatched' => $unmatched,
-            'manual_kept' => $manualKept,
+            'period_id'           => $periodId,
+            'employee_id'         => $employeeId,
+            'branch_id'           => $branchId,
+            'source_type'         => $sourceType->value,
+            'source_reference'    => $sourceReference,
+            'match_type'          => $matchType->value,
+            'confidence'          => $confidence,
+            'was_manual_reviewed' => false,
+            'notes'               => $notes,
+            'created_at'          => now(),
+            'updated_at'          => now(),
         ];
+    }
+
+    /**
+     * @return array{branch_id:int,source_type:SourceType,source_reference:string,match_type:MatchType,confidence:float,notes:string,stat_key:string}|null
+     */
+    private function resolveCandidateForGroup(
+        string $normName,
+        Collection $groupEmployees,
+        array $cobranzaIndex,
+        array $placementsIndex,
+        array $portfoliosIndex,
+        array $expensesIndex,
+        array $lendusIndex,
+        array $historicalIndex,
+        array $aliasIndex,
+        array $canonicalIndex,
+    ): ?array {
+        // D) Historical confirmed branch from a prior period — unambiguous by construction
+        // (we only ever store the single most recent operative branch per employee).
+        foreach ($groupEmployees as $e) {
+            if (isset($historicalIndex[$e->id])) {
+                return [
+                    'branch_id'        => $historicalIndex[$e->id],
+                    'source_type'      => SourceType::Lendus,
+                    'source_reference' => 'employee_branch_assignments (histórico)',
+                    'match_type'       => MatchType::Historical,
+                    'confidence'       => 0.85,
+                    'notes'            => 'Sucursal heredada de la última asignación confirmada en un periodo anterior.',
+                    'stat_key'         => 'historical',
+                ];
+            }
+        }
+
+        $ambiguous = false;
+
+        // E/F) Cobranza — exact name, then clear majority
+        if (isset($cobranzaIndex['byName'][$normName])) {
+            $branches = $cobranzaIndex['byName'][$normName];
+            arsort($branches);
+            $branchIds   = array_keys($branches);
+            $topBranch   = $branchIds[0];
+            $topCount    = $branches[$topBranch];
+            $secondCount = isset($branchIds[1]) ? $branches[$branchIds[1]] : 0;
+
+            if (count($branches) === 1) {
+                return [
+                    'branch_id' => $topBranch, 'source_type' => SourceType::Lendus,
+                    'source_reference' => 'fact_recoveries', 'match_type' => MatchType::Exact,
+                    'confidence' => 1.00, 'stat_key' => 'exact_name',
+                    'notes' => "Coincidencia exacta por nombre en cobranza ({$topCount} registro(s), sucursal única).",
+                ];
+            }
+
+            if ($topCount > $secondCount) {
+                return [
+                    'branch_id' => $topBranch, 'source_type' => SourceType::Lendus,
+                    'source_reference' => 'fact_recoveries', 'match_type' => MatchType::Majority,
+                    'confidence' => 0.85, 'stat_key' => 'majority',
+                    'notes' => "Sucursal dominante en cobranza: {$topCount} registro(s) contra {$secondCount} del segundo lugar.",
+                ];
+            }
+
+            $ambiguous = true; // tie between top branches — don't guess, try other sources
+        }
+
+        // G) Colocación (placements) — exact name, clear majority
+        if (isset($placementsIndex['byName'][$normName])) {
+            $list   = $placementsIndex['byName'][$normName];
+            $top    = $list[0];
+            $second = $list[1] ?? null;
+            if (!$second || $top['cnt'] > $second['cnt']) {
+                return [
+                    'branch_id' => $top['branch_id'], 'source_type' => SourceType::Lendus,
+                    'source_reference' => 'fact_placements', 'match_type' => MatchType::Majority,
+                    'confidence' => 0.82, 'stat_key' => 'majority',
+                    'notes' => 'Sucursal asignada con base en colocación del periodo.',
+                ];
+            }
+            $ambiguous = true;
+        }
+
+        // Cartera (portfolios)
+        if (isset($portfoliosIndex['byName'][$normName])) {
+            $list   = $portfoliosIndex['byName'][$normName];
+            $top    = $list[0];
+            $second = $list[1] ?? null;
+            if (!$second || $top['cnt'] > $second['cnt']) {
+                return [
+                    'branch_id' => $top['branch_id'], 'source_type' => SourceType::Lendus,
+                    'source_reference' => 'fact_portfolios', 'match_type' => MatchType::Majority,
+                    'confidence' => 0.82, 'stat_key' => 'majority',
+                    'notes' => 'Sucursal asignada con base en cartera del periodo.',
+                ];
+            }
+            $ambiguous = true;
+        }
+
+        // Gastos (expenses) — keyed by employee_id, not name
+        foreach ($groupEmployees as $e) {
+            if (isset($expensesIndex['byEmployee'][$e->id])) {
+                $list   = $expensesIndex['byEmployee'][$e->id];
+                $top    = $list[0];
+                $second = $list[1] ?? null;
+                if (!$second || $top['cnt'] > $second['cnt']) {
+                    return [
+                        'branch_id' => $top['branch_id'], 'source_type' => SourceType::Lendus,
+                        'source_reference' => 'fact_expenses', 'match_type' => MatchType::Majority,
+                        'confidence' => 0.80, 'stat_key' => 'majority',
+                        'notes' => 'Sucursal asignada con base en gastos del periodo.',
+                    ];
+                }
+                $ambiguous = true;
+            }
+        }
+
+        // Directorio Lendus — exact name
+        if (isset($lendusIndex['byName'][$normName])) {
+            $record = $lendusIndex['byName'][$normName];
+            if ($record->inferred_branch_id) {
+                return [
+                    'branch_id' => (int) $record->inferred_branch_id, 'source_type' => SourceType::Lendus,
+                    'source_reference' => 'lendus_employee_directory', 'match_type' => MatchType::Exact,
+                    'confidence' => 0.88, 'stat_key' => 'exact_name',
+                    'notes' => "Sucursal del directorio Lendus. Código: {$record->codigo}, Puesto: {$record->puesto}.",
+                ];
+            }
+            if ($record->codigo) {
+                $branchName = $this->branchResolver->resolveBranchNameFromCode((string) $record->codigo);
+                if ($branchName) {
+                    $branchId = DB::table('branches')->whereRaw('UPPER(TRIM(name)) = ?', [strtoupper(trim($branchName))])->value('id');
+                    if ($branchId) {
+                        return [
+                            'branch_id' => (int) $branchId, 'source_type' => SourceType::Lendus,
+                            'source_reference' => 'lendus_employee_directory', 'match_type' => MatchType::Exact,
+                            'confidence' => 0.85, 'stat_key' => 'exact_name',
+                            'notes' => "Sucursal por código {$record->codigo} → {$branchName}. Puesto: {$record->puesto}.",
+                        ];
+                    }
+                }
+            }
+        }
+
+        // Alias confirmado / empleado canónico con mismo nombre normalizado
+        if (isset($aliasIndex[$normName])) {
+            return [
+                'branch_id' => $aliasIndex[$normName], 'source_type' => SourceType::Lendus,
+                'source_reference' => 'employee_aliases', 'match_type' => MatchType::Normalized,
+                'confidence' => 0.95, 'stat_key' => 'exact_name',
+                'notes' => 'Sucursal heredada de alias de persona confirmado.',
+            ];
+        }
+        if (isset($canonicalIndex[$normName])) {
+            return [
+                'branch_id' => $canonicalIndex[$normName], 'source_type' => SourceType::Lendus,
+                'source_reference' => 'employees.normalized_name', 'match_type' => MatchType::CanonicalSameName,
+                'confidence' => 0.98, 'stat_key' => 'exact_name',
+                'notes' => 'Sucursal heredada de otro registro con el mismo nombre normalizado.',
+            ];
+        }
+
+        // G) Fuzzy — last resort, against a REDUCED candidate pool only (never raw rows).
+        $pool = array_unique(array_merge(
+            $cobranzaIndex['distinctNames'] ?? [],
+            $placementsIndex['distinctNames'] ?? [],
+            $lendusIndex['distinctNames'] ?? [],
+        ));
+
+        if (!empty($pool)) {
+            // Cheap bucket by first token to shrink the comparison set further.
+            $firstToken = strtok($normName, ' ') ?: $normName;
+            $bucket = array_filter($pool, function ($candidateName) use ($firstToken, $normName) {
+                $candidateFirstToken = strtok($candidateName, ' ') ?: $candidateName;
+                return $candidateFirstToken === $firstToken
+                    || str_starts_with($candidateName, $firstToken)
+                    || str_starts_with($normName, $candidateFirstToken);
+            });
+            $searchPool = !empty($bucket) ? $bucket : $pool;
+
+            $bestName = null;
+            $bestScore = 0.0;
+            $secondScore = 0.0;
+
+            foreach ($searchPool as $candidateName) {
+                $score = $this->resolver->scoreNameSimilarity($normName, $candidateName);
+                if ($score > $bestScore) {
+                    $secondScore = $bestScore;
+                    $bestScore   = $score;
+                    $bestName    = $candidateName;
+                } elseif ($score > $secondScore) {
+                    $secondScore = $score;
+                }
+            }
+
+            if ($bestName && $bestScore >= 85.0 && ($bestScore - $secondScore) >= 8.0) {
+                $branchInfo = $cobranzaIndex['byName'][$bestName] ?? null;
+                if ($branchInfo) {
+                    arsort($branchInfo);
+                    $branchId = array_key_first($branchInfo);
+                    $scoreLabel = round($bestScore, 1);
+
+                    return [
+                        'branch_id' => $branchId, 'source_type' => SourceType::Lendus,
+                        'source_reference' => 'fact_recoveries (fuzzy)', 'match_type' => MatchType::Fuzzy,
+                        'confidence' => round($bestScore / 100, 2), 'stat_key' => 'fuzzy',
+                        'notes' => "Coincidencia fuzzy con \"{$bestName}\" ({$scoreLabel}%), candidato siguiente al {$secondScore}%.",
+                    ];
+                }
+
+                $lendusRecord = $lendusIndex['byName'][$bestName] ?? null;
+                if ($lendusRecord && $lendusRecord->inferred_branch_id) {
+                    $scoreLabel = round($bestScore, 1);
+
+                    return [
+                        'branch_id' => (int) $lendusRecord->inferred_branch_id, 'source_type' => SourceType::Lendus,
+                        'source_reference' => 'lendus_employee_directory (fuzzy)', 'match_type' => MatchType::Fuzzy,
+                        'confidence' => round($bestScore / 100, 2), 'stat_key' => 'fuzzy',
+                        'notes' => "Coincidencia fuzzy con directorio Lendus \"{$bestName}\" ({$scoreLabel}%).",
+                    ];
+                }
+            } elseif ($bestName && $bestScore >= 70.0) {
+                $ambiguous = true; // there's a plausible-but-not-confident candidate — flag, don't guess
+            }
+        }
+
+        if ($ambiguous) {
+            return [
+                'branch_id' => null,
+                'stat_key'  => 'ambiguous',
+                'notes'     => 'Se detectaron varias sucursales candidatas sin mayoría clara (cobranza, colocación, cartera o gastos empatados, o similitud de nombre insuficiente). Requiere revisión manual.',
+            ];
+        }
+
+        return null;
     }
 
     private function resolveCoveredWeekIds(Period $period): array
@@ -263,10 +543,7 @@ class EmployeeBranchAutoMatchService
             );
         }
 
-        $employeeIds = $employeeIds
-            ->filter()
-            ->unique()
-            ->values();
+        $employeeIds = $employeeIds->filter()->unique()->values();
 
         if ($employeeIds->isEmpty()) {
             return collect();
@@ -278,348 +555,249 @@ class EmployeeBranchAutoMatchService
             ->get();
     }
 
-    private function resolveBranchCandidate(
-        Period $period,
-        Employee $employee,
-        array $cobranzaUploadIds,
-        ?\Illuminate\Support\Collection $cachedRecoveries = null
-    ): ?array {
+    /**
+     * Aggregate the full cobranza row set (tens of thousands of rows) into a
+     * normalized-name → [branch_id => count] map, computed exactly once per period.
+     */
+    private function buildCobranzaIndex(array $cobranzaUploadIds, array $operativeNames): array
+    {
         if (empty($cobranzaUploadIds)) {
-            return null;
+            return ['byName' => [], 'distinctNames' => []];
         }
 
-        // Use pre-loaded collection if available (avoids repeating 61K-row query per employee).
-        $recoveries = $cachedRecoveries ?? Recovery::query()
-            ->with('branch:id,name,normalized_name')
-            ->whereIn('report_upload_id', $cobranzaUploadIds)
-            ->whereNotNull('branch_id')
+        $rows = DB::table('fact_recoveries as r')
+            ->join('branches as b', 'r.branch_id', '=', 'b.id')
+            ->whereIn('r.report_upload_id', $cobranzaUploadIds)
+            ->whereNotNull('r.branch_id')
+            ->whereIn(DB::raw('UPPER(TRIM(b.name))'), $operativeNames)
+            ->select('r.raw_payload', 'r.branch_id')
             ->get();
 
-        if ($recoveries->isEmpty()) {
-            return null;
-        }
+        $byName = [];
 
-        $normalizedEmployee = self::normalizeHumanName($employee->full_name);
-
-        $matches = $recoveries->filter(function (Recovery $recovery) use ($normalizedEmployee) {
-            $payload = $recovery->raw_payload ?? [];
-
-            // Prefer pre-normalized key; fall back to raw promoter_name normalized on the fly.
-            $promoter = $payload['__promoter_normalized']
-                ?? (isset($payload['promoter_name'])
-                    ? self::normalizeHumanName($payload['promoter_name'])
-                    : null);
-
-            if (!$promoter) {
-                return false;
+        foreach ($rows as $row) {
+            $payload = is_string($row->raw_payload) ? json_decode($row->raw_payload, true) : (array) $row->raw_payload;
+            $promoterRaw = $payload['promoter_name'] ?? null;
+            if (!$promoterRaw) {
+                continue;
             }
 
-            if ($promoter === $normalizedEmployee) {
-                return true;
+            $norm = self::normalizeHumanName($promoterRaw);
+            if ($norm === '') {
+                continue;
             }
 
-            return $this->isLikelySamePerson($promoter, $normalizedEmployee);
-        });
-
-        if ($matches->isEmpty()) {
-            return null;
+            $byName[$norm][$row->branch_id] = ($byName[$norm][$row->branch_id] ?? 0) + 1;
         }
 
-        // Only operative branches — filter out routes, zones, and non-operative locations
-        $operativeNames = array_map('strtoupper', $this->branchResolver->operativeFinancialBranches());
-
-        $grouped = $matches
-            ->filter(fn (Recovery $recovery) => $recovery->branch !== null)
-            ->filter(fn (Recovery $recovery) => in_array(
-                strtoupper(trim($recovery->branch->name ?? '')),
-                $operativeNames,
-                true,
-            ))
-            ->groupBy('branch_id')
-            ->map(function (Collection $items) use ($employee) {
-                /** @var Recovery $first */
-                $first = $items->first();
-
-                return [
-                    'branch_id' => $first->branch_id,
-                    'branch_name' => $first->branch?->name,
-                    'count' => $items->count(),
-                    'employee_name' => $employee->full_name,
-                    'normalized_name' => $employee->normalized_name,
-                ];
-            })
-            ->sortByDesc('count')
-            ->values();
-
-        if ($grouped->isEmpty()) {
-            return null;
-        }
-
-        $top = $grouped->first();
-        $second = $grouped->get(1);
-
-        $matchType = MatchType::Exact;
-        $confidence = 1.00;
-        $notes = 'Sucursal asignada automáticamente con base en cobranza de Lendus del periodo.';
-
-        if ($second && $top['count'] === $second['count']) {
-            $matchType = MatchType::Normalized;
-            $confidence = 0.65;
-            $notes = 'Se detectó más de una sucursal con el mismo peso en cobranza. Conviene revisar manualmente.';
-        } elseif (($top['count'] ?? 0) === 1) {
-            $matchType = MatchType::Normalized;
-            $confidence = 0.82;
-            $notes = 'Coincidencia por nombre normalizado del promotor en cobranza. Conviene validar.';
-        }
-
-        return [
-            'branch_id' => $top['branch_id'],
-            'source_type' => SourceType::Lendus,
-            'source_reference' => 'fact_recoveries',
-            'match_type' => $matchType,
-            'confidence' => $confidence,
-            'notes' => $notes,
-        ];
+        return ['byName' => $byName, 'distinctNames' => array_keys($byName)];
     }
 
-    private function resolveCandidateFromPlacements(Period $period, Employee $employee): ?array
+    private function buildPlacementsIndex(int $periodId): array
     {
-        $normalizedName = $employee->normalized_name;
-
-        // Load all distinct promoter→branch rows for this period (90 rows max per period)
-        $promoterMap = DB::table('fact_placements as p')
-            ->join('branches as b', 'p.branch_id', '=', 'b.id')
-            ->where('p.period_id', $period->id)
+        $rows = DB::table('fact_placements as p')
+            ->where('p.period_id', $periodId)
             ->whereNotNull('p.branch_id')
-            ->selectRaw('p.normalized_promoter_name, p.promoter_code, p.branch_id, b.name as branch_name, COUNT(*) as cnt')
-            ->groupBy('p.normalized_promoter_name', 'p.promoter_code', 'p.branch_id', 'b.name')
-            ->orderByDesc('cnt')
-            ->get()
-            ->groupBy('normalized_promoter_name');
+            ->whereNotNull('p.normalized_promoter_name')
+            ->selectRaw('p.normalized_promoter_name, p.branch_id, COUNT(*) as cnt')
+            ->groupBy('p.normalized_promoter_name', 'p.branch_id')
+            ->get();
 
-        if ($promoterMap->isEmpty()) {
-            return null;
+        $byName = [];
+        foreach ($rows as $r) {
+            $byName[$r->normalized_promoter_name][] = ['branch_id' => (int) $r->branch_id, 'cnt' => (int) $r->cnt];
+        }
+        foreach ($byName as $k => $list) {
+            usort($list, fn ($a, $b) => $b['cnt'] <=> $a['cnt']);
+            $byName[$k] = $list;
         }
 
-        // 1. Exact name match
-        $exactRows = $promoterMap->get($normalizedName);
-        if ($exactRows && $exactRows->isNotEmpty()) {
-            return $this->buildPlacementCandidate($exactRows->sortByDesc('cnt')->first(), 0.90, 'Sucursal asignada con base en colocación del periodo.');
-        }
-
-        // 2. Fuzzy fallback — accept only very high similarity (≥95%) to catch single-character typos
-        $bestScore = 0.0;
-        $bestRow   = null;
-        foreach ($promoterMap as $pname => $rows) {
-            similar_text($normalizedName, $pname, $pct);
-            if ($pct > $bestScore) {
-                $bestScore = $pct;
-                $bestRow   = $rows->sortByDesc('cnt')->first();
-            }
-        }
-
-        if ($bestScore >= 95.0 && $bestRow) {
-            $scoreLabel = round($bestScore, 1);
-            return $this->buildPlacementCandidate($bestRow, 0.85, "Sucursal inferida por colocación (variante de nombre, similitud {$scoreLabel}%). Código promotor: {$bestRow->promoter_code}.");
-        }
-
-        return null;
+        return ['byName' => $byName, 'distinctNames' => array_keys($byName)];
     }
 
-    private function buildPlacementCandidate(object $row, float $confidence, string $notes): array
+    private function buildPortfoliosIndex(int $periodId, array $operativeNames): array
     {
-        return [
-            'branch_id'        => $row->branch_id,
-            'source_type'      => SourceType::Lendus,
-            'source_reference' => 'fact_placements',
-            'match_type'       => MatchType::Normalized,
-            'confidence'       => $confidence,
-            'notes'            => $notes,
-        ];
-    }
-
-    private function resolveCandidateFromPortfolios(Period $period, Employee $employee): ?array
-    {
-        // Only assign operative branches — never routes, zones or non-operative offices
-        $operativeNames = array_map('strtoupper', $this->branchResolver->operativeFinancialBranches());
-
         $rows = DB::table('fact_portfolios as p')
             ->join('branches as b', 'p.branch_id', '=', 'b.id')
-            ->where('p.period_id', $period->id)
-            ->whereRaw('LOWER(p.promoter_name) = ?', [$employee->normalized_name])
+            ->where('p.period_id', $periodId)
             ->whereNotNull('p.branch_id')
+            ->whereNotNull('p.promoter_name')
             ->whereIn(DB::raw('UPPER(TRIM(b.name))'), $operativeNames)
-            ->selectRaw('p.branch_id, b.name as branch_name, COUNT(*) as cnt, SUM(p.balance) as balance')
-            ->groupBy('p.branch_id', 'b.name')
-            ->orderByDesc('balance')
+            ->selectRaw('p.promoter_name, p.branch_id, COUNT(*) as cnt')
+            ->groupBy('p.promoter_name', 'p.branch_id')
             ->get();
 
-        if ($rows->isEmpty()) {
-            return null;
+        $byName = [];
+        foreach ($rows as $r) {
+            $norm = self::normalizeHumanName($r->promoter_name);
+            if ($norm === '') {
+                continue;
+            }
+            $byName[$norm][] = ['branch_id' => (int) $r->branch_id, 'cnt' => (int) $r->cnt];
+        }
+        foreach ($byName as $k => $list) {
+            usort($list, fn ($a, $b) => $b['cnt'] <=> $a['cnt']);
+            $byName[$k] = $list;
         }
 
-        $top    = $rows->first();
-        $second = $rows->get(1);
-        $tie    = $second && $top->cnt === $second->cnt;
-
-        return [
-            'branch_id'        => $top->branch_id,
-            'source_type'      => SourceType::Lendus,
-            'source_reference' => 'fact_portfolios',
-            'match_type'       => $tie ? MatchType::Normalized : MatchType::Normalized,
-            'confidence'       => $tie ? 0.65 : 0.82,
-            'notes'            => $tie
-                ? 'Sucursal inferida por cartera (empate). Conviene validar.'
-                : 'Sucursal asignada con base en cartera del periodo.',
-        ];
+        return ['byName' => $byName];
     }
 
-    private function resolveCandidateFromExpenses(Period $period, Employee $employee): ?array
+    private function buildExpensesIndex(int $periodId, array $employeeIds, array $operativeNames): array
     {
-        // Only consider operative branches — exclude routes, zones, non-operative offices
-        $operativeNames = array_map('strtoupper', $this->branchResolver->operativeFinancialBranches());
+        if (empty($employeeIds)) {
+            return ['byEmployee' => []];
+        }
 
-        $expenses = Expense::query()
-            ->with('branch:id,name,normalized_name')
-            ->where('period_id', $period->id)
-            ->where('employee_id', $employee->id)
-            ->whereNotNull('branch_id')
+        $rows = DB::table('fact_expenses as e')
+            ->join('branches as b', 'e.branch_id', '=', 'b.id')
+            ->where('e.period_id', $periodId)
+            ->whereIn('e.employee_id', $employeeIds)
+            ->whereNotNull('e.branch_id')
+            ->whereIn(DB::raw('UPPER(TRIM(b.name))'), $operativeNames)
+            ->selectRaw('e.employee_id, e.branch_id, COUNT(*) as cnt')
+            ->groupBy('e.employee_id', 'e.branch_id')
             ->get();
 
-        if ($expenses->isEmpty()) {
-            return null;
+        $byEmployee = [];
+        foreach ($rows as $r) {
+            $byEmployee[$r->employee_id][] = ['branch_id' => (int) $r->branch_id, 'cnt' => (int) $r->cnt];
+        }
+        foreach ($byEmployee as $k => $list) {
+            usort($list, fn ($a, $b) => $b['cnt'] <=> $a['cnt']);
+            $byEmployee[$k] = $list;
         }
 
-        $grouped = $expenses
-            ->filter(fn (Expense $expense) => $expense->branch !== null)
-            ->filter(fn (Expense $expense) => in_array(
-                strtoupper(trim($expense->branch->name ?? '')),
-                $operativeNames,
-                true,
-            ))
-            ->groupBy('branch_id')
-            ->map(function (Collection $items) use ($employee) {
-                /** @var Expense $first */
-                $first = $items->first();
-
-                return [
-                    'branch_id' => $first->branch_id,
-                    'branch_name' => $first->branch?->name,
-                    'count' => $items->count(),
-                    'employee_name' => $employee->full_name,
-                    'normalized_name' => $employee->normalized_name,
-                ];
-            })
-            ->sortByDesc('count')
-            ->values();
-
-        if ($grouped->isEmpty()) {
-            return null;
-        }
-
-        $top = $grouped->first();
-        $second = $grouped->get(1);
-
-        $matchType = MatchType::Exact;
-        $confidence = 1.00;
-        $notes = 'Sucursal asignada automáticamente con base en gastos del periodo.';
-
-        if ($second && $top['count'] === $second['count']) {
-            $matchType = MatchType::Normalized;
-            $confidence = 0.65;
-            $notes = 'Se detectó más de una sucursal con el mismo peso en gastos. Conviene revisar manualmente.';
-        } elseif (($top['count'] ?? 0) === 1) {
-            $matchType = MatchType::Normalized;
-            $confidence = 0.80;
-            $notes = 'Coincidencia operativa con una sola referencia en gastos. Conviene validar.';
-        }
-
-        return [
-            'branch_id' => $top['branch_id'],
-            'source_type' => SourceType::Lendus,
-            'source_reference' => 'fact_expenses',
-            'match_type' => $matchType,
-            'confidence' => $confidence,
-            'notes' => $notes,
-        ];
+        return ['byEmployee' => $byEmployee];
     }
 
-    private function resolveCandidateFromLendusDirectory(Employee $employee): ?array
+    private function buildLendusIndex(): array
     {
-        $normalized = $employee->normalized_name;
-        if (!$normalized) return null;
-
-        // Load all operational directory entries once for both exact and fuzzy checks.
-        $allRecords = DB::table('lendus_employee_directory')
+        $rows = DB::table('lendus_employee_directory')
             ->where('is_operational', true)
             ->whereNotNull('normalized_name')
-            ->get(['id', 'codigo', 'nombre', 'normalized_name', 'puesto', 'inferred_branch_id']);
+            ->get(['codigo', 'nombre', 'normalized_name', 'puesto', 'inferred_branch_id']);
 
-        if ($allRecords->isEmpty()) return null;
-
-        // ── Step 1: Exact name match ───────────────────────────────────────────
-        $record = $allRecords->first(fn ($r) => $r->normalized_name === $normalized);
-
-        // ── Step 2: Fuzzy name match ≥85% ─────────────────────────────────────
-        if (!$record) {
-            $bestScore  = 0.0;
-            $bestRecord = null;
-            foreach ($allRecords as $rec) {
-                similar_text($normalized, $rec->normalized_name, $pct);
-                if ($pct > $bestScore) {
-                    $bestScore  = $pct;
-                    $bestRecord = $rec;
-                }
-            }
-            if ($bestScore >= 85.0 && $bestRecord) {
-                $record = $bestRecord;
-            }
+        $byName = [];
+        foreach ($rows as $r) {
+            $byName[$r->normalized_name] = $r;
         }
 
-        if (!$record) return null;
-
-        $scoreLabel = isset($bestScore) && $bestScore < 100.0 ? " (similitud " . round($bestScore, 1) . "%)" : '';
-
-        // ── Step 3: Use inferred_branch_id if available ────────────────────────
-        if ($record->inferred_branch_id) {
-            return [
-                'branch_id'        => $record->inferred_branch_id,
-                'source_type'      => SourceType::Lendus,
-                'source_reference' => 'lendus_employee_directory',
-                'match_type'       => MatchType::Normalized,
-                'confidence'       => 0.88,
-                'notes'            => "Sucursal inferida del directorio Lendus{$scoreLabel}. Código: {$record->codigo}, Puesto: {$record->puesto}.",
-            ];
-        }
-
-        // ── Step 4: Resolve branch directly from CODIGO prefix ─────────────────
-        // Handles the case where inferred_branch_id was not set during import
-        // (e.g., branch didn't exist in DB at import time).
-        if ($record->codigo) {
-            $branchName = $this->branchResolver->resolveBranchNameFromCode($record->codigo);
-            if ($branchName) {
-                $branchId = DB::table('branches')
-                    ->whereRaw('UPPER(TRIM(name)) = ?', [strtoupper(trim($branchName))])
-                    ->value('id');
-                if ($branchId) {
-                    return [
-                        'branch_id'        => (int) $branchId,
-                        'source_type'      => SourceType::Lendus,
-                        'source_reference' => 'lendus_employee_directory',
-                        'match_type'       => MatchType::Normalized,
-                        'confidence'       => 0.85,
-                        'notes'            => "Sucursal por código {$record->codigo} → {$branchName}{$scoreLabel}. Puesto: {$record->puesto}.",
-                    ];
-                }
-            }
-        }
-
-        return null;
+        return ['byName' => $byName, 'distinctNames' => array_keys($byName)];
     }
 
-    private function isLikelySamePerson(string $left, string $right): bool
+    /**
+     * Most recent operative branch_id per employee from a PRIOR period (never the
+     * period being processed, to avoid a run feeding off its own not-yet-saved result).
+     */
+    private function buildHistoricalIndex(int $currentPeriodId, array $employeeIds, array $operativeNames): array
     {
-        return $this->resolver->isLikelySamePerson($left, $right, 80.0);
+        if (empty($employeeIds)) {
+            return [];
+        }
+
+        $operativeIds = DB::table('branches')->whereIn(DB::raw('UPPER(TRIM(name))'), $operativeNames)->pluck('id')->all();
+        if (empty($operativeIds)) {
+            return [];
+        }
+
+        $rows = DB::table('employee_branch_assignments')
+            ->whereIn('employee_id', $employeeIds)
+            ->where('period_id', '!=', $currentPeriodId)
+            ->whereNotNull('branch_id')
+            ->whereIn('branch_id', $operativeIds)
+            ->orderByDesc('period_id')
+            ->select('employee_id', 'branch_id')
+            ->get();
+
+        $byEmployee = [];
+        foreach ($rows as $r) {
+            if (!isset($byEmployee[$r->employee_id])) {
+                $byEmployee[$r->employee_id] = (int) $r->branch_id; // first hit = most recent (orderByDesc)
+            }
+        }
+
+        return $byEmployee;
+    }
+
+    private function buildAliasIndex(Collection $employees, array $operativeNames): array
+    {
+        $normNames = $employees->pluck('normalized_name')->filter()->unique()->values()->all();
+        if (empty($normNames)) {
+            return [];
+        }
+
+        $aliasRows = DB::table('employee_aliases')
+            ->whereIn('normalized_alias', $normNames)
+            ->select('normalized_alias', 'employee_id')
+            ->get();
+
+        if ($aliasRows->isEmpty()) {
+            return [];
+        }
+
+        $operativeIds = DB::table('branches')->whereIn(DB::raw('UPPER(TRIM(name))'), $operativeNames)->pluck('id')->all();
+        $canonicalIds = $aliasRows->pluck('employee_id')->unique()->all();
+
+        $branchByCanonical = DB::table('employee_branch_assignments')
+            ->whereIn('employee_id', $canonicalIds)
+            ->whereNotNull('branch_id')
+            ->whereIn('branch_id', $operativeIds)
+            ->orderByDesc('period_id')
+            ->select('employee_id', 'branch_id')
+            ->get()
+            ->groupBy('employee_id')
+            ->map(fn ($g) => (int) $g->first()->branch_id);
+
+        $byNormName = [];
+        foreach ($aliasRows as $a) {
+            $branchId = $branchByCanonical[$a->employee_id] ?? null;
+            if ($branchId) {
+                $byNormName[$a->normalized_alias] = $branchId;
+            }
+        }
+
+        return $byNormName;
+    }
+
+    /**
+     * Other Employee rows sharing the same normalized_name (duplicate records from
+     * NOI vs NOI Fiscal that were never unified) that already carry a branch.
+     */
+    private function buildCanonicalIndex(Collection $employees, array $operativeNames): array
+    {
+        $normNames = $employees->pluck('normalized_name')->filter()->unique()->values()->all();
+        if (empty($normNames)) {
+            return [];
+        }
+
+        $operativeIds = DB::table('branches')->whereIn(DB::raw('UPPER(TRIM(name))'), $operativeNames)->pluck('id')->all();
+
+        $siblings   = DB::table('employees')->whereIn('normalized_name', $normNames)->select('id', 'normalized_name')->get();
+        $idsByName  = $siblings->groupBy('normalized_name')->map(fn ($g) => $g->pluck('id')->all());
+        $allIds     = $siblings->pluck('id')->all();
+
+        $branchByEmployee = DB::table('employee_branch_assignments')
+            ->whereIn('employee_id', $allIds)
+            ->whereNotNull('branch_id')
+            ->whereIn('branch_id', $operativeIds)
+            ->orderByDesc('period_id')
+            ->select('employee_id', 'branch_id')
+            ->get()
+            ->groupBy('employee_id')
+            ->map(fn ($g) => (int) $g->first()->branch_id);
+
+        $byNormName = [];
+        foreach ($idsByName as $norm => $ids) {
+            foreach ($ids as $id) {
+                if (isset($branchByEmployee[$id])) {
+                    $byNormName[$norm] = $branchByEmployee[$id];
+                    break;
+                }
+            }
+        }
+
+        return $byNormName;
     }
 
     public static function normalizeHumanName(?string $value): string

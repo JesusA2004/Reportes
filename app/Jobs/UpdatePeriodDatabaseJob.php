@@ -81,14 +81,18 @@ class UpdatePeriodDatabaseJob implements ShouldQueue
                 );
             }
 
+            $failedSources = $run->fresh()->metadata['stats']['import_error_sources'] ?? [];
+
             $run->update([
                 'status'      => 'success',
                 'finished_at' => now(),
-                'log'         => 'Base de datos actualizada correctamente. Todos los archivos importados y uploads procesados.',
+                'log'         => empty($failedSources)
+                    ? 'Base de datos actualizada correctamente. Todos los archivos importados y uploads procesados.'
+                    : 'Base de datos actualizada con errores en: ' . implode(', ', $failedSources) . '.',
             ]);
 
-            $emailNote = $this->notifyUser('success', $period, $run, $warnings);
-            $run->update(['log' => 'Base de datos actualizada correctamente. Todos los archivos importados y uploads procesados. ' . $emailNote]);
+            $emailNote = $this->notifyUser('success', $period, $run, $warnings, '', $failedSources);
+            $run->update(['log' => $run->fresh()->log . ' ' . $emailNote]);
         } catch (\Throwable $exception) {
             // Don't overwrite a manual cancel
             $run->refresh();
@@ -119,6 +123,7 @@ class UpdatePeriodDatabaseJob implements ShouldQueue
         PeriodDatabaseUpdateRun $run,
         array $stats = [],
         string $errorMessage = '',
+        array $failedSources = [],
     ): string {
         if (!$this->userId) {
             return 'Sin usuario asignado — correo no enviado.';
@@ -137,7 +142,7 @@ class UpdatePeriodDatabaseJob implements ShouldQueue
         try {
             if ($result === 'success') {
                 Mail::to($user->email)->send(
-                    new DatabaseUpdateCompletedMail($period, $user, $run, $stats)
+                    new DatabaseUpdateCompletedMail($period, $user, $run, $stats, $failedSources)
                 );
             } else {
                 Mail::to($user->email)->send(

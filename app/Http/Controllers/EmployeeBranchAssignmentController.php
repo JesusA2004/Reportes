@@ -278,7 +278,7 @@ class EmployeeBranchAssignmentController extends Controller
     {
         $validated = $request->validate([
             'branch_id' => ['nullable', 'exists:branches,id'],
-            'match_type' => ['nullable', 'in:exact,normalized,manual,unmatched'],
+            'match_type' => ['nullable', 'in:exact,normalized,manual,unmatched,canonical_same_name,historical,majority,fuzzy'],
             'confidence' => ['nullable', 'numeric', 'min:0', 'max:1'],
             'was_manual_reviewed' => ['nullable', 'boolean'],
             'notes' => ['nullable', 'string', 'max:1000'],
@@ -382,6 +382,10 @@ class EmployeeBranchAssignmentController extends Controller
         if ($assignment->branch_id && in_array($matchType, [
             MatchType::Exact->value,
             MatchType::Normalized->value,
+            MatchType::Historical->value,
+            MatchType::Majority->value,
+            MatchType::Fuzzy->value,
+            MatchType::CanonicalSameName->value,
         ], true)) {
             return 'matched';
         }
@@ -410,6 +414,10 @@ class EmployeeBranchAssignmentController extends Controller
             MatchType::Normalized->value => 'Normalizado',
             MatchType::Manual->value => 'Manual',
             MatchType::Unmatched->value => 'Sin match',
+            MatchType::Historical->value => 'Histórico',
+            MatchType::Majority->value => 'Mayoría',
+            MatchType::Fuzzy->value => 'Aproximado',
+            MatchType::CanonicalSameName->value => 'Mismo nombre',
             default => 'Pendiente',
         };
     }
@@ -421,6 +429,10 @@ class EmployeeBranchAssignmentController extends Controller
             MatchType::Normalized->value => 'Coincidencia normalizada. Conviene revisar acentos, mayúsculas o variaciones menores.',
             MatchType::Manual->value => 'Asignación validada manualmente.',
             MatchType::Unmatched->value => 'No se logró determinar una sucursal con suficiente confianza.',
+            MatchType::Historical->value => 'Sucursal heredada de la última asignación confirmada en un periodo anterior.',
+            MatchType::Majority->value => 'Sucursal dominante entre varios candidatos (cobranza, colocación, cartera o gastos).',
+            MatchType::Fuzzy->value => 'Coincidencia aproximada de nombre. Conviene validar.',
+            MatchType::CanonicalSameName->value => 'Sucursal heredada de otro registro con el mismo nombre normalizado.',
             default => 'Pendiente de revisión.',
         };
     }

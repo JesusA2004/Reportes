@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\DataSourceCode;
+use App\Enums\ReportUploadStatus;
 use App\Models\Period;
 use App\Models\PeriodDatabaseUpdateRun;
 use App\Models\PeriodIncident;
@@ -95,21 +96,49 @@ class DatabaseUpdateService
         $this->progress($run, 'Importando archivos a tablas de hechos (fact_*)…', 62);
         $this->checkCancelled($run);
 
-        $allUploads   = ReportUpload::query()->with('dataSource')
+        $allUploads = ReportUpload::query()->with('dataSource')
             ->where('period_id', $period->id)
+            ->where('status', '!=', ReportUploadStatus::Replaced)
             ->get();
-        $importErrors = [];
 
+        // Only the vigente (most recent) upload per data source must be imported.
+        // Older uploads for the same source are superseded — reprocessing them would
+        // silently reintroduce data from a file the user already replaced.
+        $latestByCode = [];
         foreach ($allUploads as $upload) {
             $code = $upload->dataSource?->code ?? '';
-            if (!$code || !$upload->stored_path || !Storage::disk('public')->exists($upload->stored_path)) {
+            if (!$code) {
+                continue;
+            }
+            if (!isset($latestByCode[$code]) || $upload->id > $latestByCode[$code]->id) {
+                $latestByCode[$code] = $upload;
+            }
+        }
+
+        $staleIds = $allUploads->pluck('id')->diff(collect($latestByCode)->pluck('id'));
+        if ($staleIds->isNotEmpty()) {
+            ReportUpload::query()->whereIn('id', $staleIds)->update(['status' => ReportUploadStatus::Replaced]);
+        }
+
+        $importErrors = [];
+        $importErrorDetails = [];
+
+        foreach ($latestByCode as $code => $upload) {
+            if (!$upload->stored_path || !Storage::disk('public')->exists($upload->stored_path)) {
                 continue;
             }
             $this->checkCancelled($run);
             try {
                 $this->reportAnalysisService->analyze($upload);
             } catch (\Throwable $e) {
-                $importErrors[] = ($upload->dataSource?->name ?? $code) . ': ' . mb_strimwidth($e->getMessage(), 0, 120);
+                $message = mb_strimwidth($e->getMessage(), 0, 120);
+                $importErrors[] = ($upload->dataSource?->name ?? $code) . ': ' . $message;
+                $importErrorDetails[] = [
+                    'code'      => $code,
+                    'name'      => $upload->dataSource?->name ?? $code,
+                    'upload_id' => $upload->id,
+                    'error'     => $message,
+                ];
                 Log::warning('DatabaseUpdateService: error importing upload', [
                     'upload_id'  => $upload->id,
                     'source'     => $code,
@@ -181,7 +210,16 @@ class DatabaseUpdateService
             ->where('type', 'like', 'db_update.%')
             ->delete();
 
-        $allIncidents = array_merge($noiResult['incidents'] ?? [], $cobranzaResult['incidents'] ?? []);
+        $importFailureIncidents = array_map(fn (array $d) => [
+            'type'     => 'import_error.' . $d['code'],
+            // 'high' (not 'critical') matches ReportUploadController::resolveWorkflowState()'s
+            // $pendingCritical gate, which only counts severity === 'high'.
+            'severity' => 'high',
+            'message'  => "Fallo al importar {$d['name']} (upload #{$d['upload_id']}): {$d['error']}",
+            'context'  => ['upload_id' => $d['upload_id'], 'source' => $d['code']],
+        ], $importErrorDetails);
+
+        $allIncidents = array_merge($noiResult['incidents'] ?? [], $cobranzaResult['incidents'] ?? [], $importFailureIncidents);
         foreach ($allIncidents as $incident) {
             PeriodIncident::query()->create([
                 'period_summary_id' => $summary->id,
@@ -205,6 +243,7 @@ class DatabaseUpdateService
             'critical_incidents' => $criticalCount,
             'warnings'           => $warningCount,
             'import_errors'      => count($importErrors),
+            'import_error_sources' => array_map(fn (array $d) => $d['name'], $importErrorDetails),
         ];
 
         $this->progress($run, 'Actualización completada.', 100, $stats);

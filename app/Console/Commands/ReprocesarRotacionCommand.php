@@ -14,7 +14,7 @@ class ReprocesarRotacionCommand extends Command
     protected $signature = 'reportes:reprocesar-rotacion
                                 {period_id : ID del periodo mensual}';
 
-    protected $description = 'Limpia fact_rotacion del periodo y re-importa desde el archivo ya cargado. Valida que no existan etiquetas de métrica como sucursal.';
+    protected $description = 'Limpia fact_rotacion del periodo y re-importa desde el archivo ya cargado (PDF, XLS, XLSX o XLSM). Valida que no existan etiquetas de métrica como sucursal.';
 
     public function handle(BranchResolverService $branchResolver): int
     {

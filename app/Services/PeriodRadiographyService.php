@@ -239,6 +239,19 @@ class PeriodRadiographyService
         // ── Payroll aggregates (for preview cards) ──
         $payroll = $this->payrollMetrics($period, $dataIds);
 
+        // Nómina y Capital Humano (KPI card / Resumen Ejecutivo): MUST come from the same
+        // authoritative BranchRadiographyCalculator total used by Excel/PDF/GLOBAL — never
+        // from payrollMetrics()'s naive per-employee expense sum, which mixes in unrelated
+        // categories (excedentes, préstamos intersucursales, etc.) whenever they happen to
+        // carry an employee_id, and previously inflated this figure well beyond the real total.
+        $nominaCapitalHumanoTotal = (float) ($branchCalcGlobal['nomina_total'] ?? 0)
+            + (float) ($branchCalcGlobal['comisiones'] ?? 0)
+            + (float) ($branchCalcGlobal['bonos'] ?? 0)
+            + (float) ($branchCalcGlobal['bonos_aceleradores'] ?? 0)
+            + (float) ($branchCalcGlobal['vacaciones'] ?? 0)
+            + (float) ($branchCalcGlobal['prima_vacacional'] ?? 0)
+            + array_sum(array_values((array) ($branchCalcGlobal['nomina_detalle'] ?? [])));
+
         // Always use gastos_lendus (PDF) — XLS rows have all NULL branch_id and get filtered
         // out by the branch filter, producing $0 Lendus; PDF has proper branch_ids per row.
         $lendusPdfId    = DB::table('data_sources')->where('code', 'gastos_lendus')->value('id');
@@ -271,7 +284,7 @@ class PeriodRadiographyService
             'pagos_total'      => $payroll['pagos'],
             'bonos_total'      => $payroll['bonos'],
             'descuentos_total' => $payroll['descuentos'],
-            'gastos_nomina'    => $payroll['gastos'],
+            'gastos_nomina'    => $nominaCapitalHumanoTotal,
             'neto_total'       => $payroll['neto'],
         ];
     }

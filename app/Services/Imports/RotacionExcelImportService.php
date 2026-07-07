@@ -4,9 +4,12 @@ namespace App\Services\Imports;
 
 use App\Models\ReportUpload;
 use App\Services\BranchResolverService;
+use App\Services\Imports\Support\PdfCoordinateExtractor;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use PhpOffice\PhpSpreadsheet\IOFactory;
+use Smalot\PdfParser\Parser;
 
 /**
  * Importa el archivo ÍNDICE DE ROTACIÓN DE PERSONAL 2026.
@@ -24,6 +27,33 @@ class RotacionExcelImportService
         9 => 'SEPTIEMBRE', 10 => 'OCTUBRE', 11 => 'NOVIEMBRE', 12 => 'DICIEMBRE',
     ];
 
+    // El PDF de rotación abrevia los últimos cuatro meses en su fila de encabezados.
+    private const PDF_MONTH_HEADER = [
+        1 => 'ENERO', 2 => 'FEBRERO', 3 => 'MARZO', 4 => 'ABRIL',
+        5 => 'MAYO', 6 => 'JUNIO', 7 => 'JULIO', 8 => 'AGOSTO',
+        9 => 'SEPT', 10 => 'OCT', 11 => 'NOV', 12 => 'DIC',
+    ];
+
+    private const ALL_MONTH_HEADER_TOKENS = [
+        'ENERO', 'FEBRERO', 'MARZO', 'ABRIL', 'MAYO', 'JUNIO',
+        'JULIO', 'AGOSTO', 'SEPT', 'OCT', 'NOV', 'DIC',
+    ];
+
+    private const METRIC_LABEL_PREFIXES = ['ALTA', 'BAJA', 'PLANTILL', 'ROTACI', 'PROMEDIO', 'INDICE'];
+
+    // Alias de sucursal específicos de Rotación (ver spec sección 6). Se resuelven
+    // ANTES de caer a BranchResolverService::resolveRealBranchFromRoute(), porque
+    // ese resolver exige coincidencia exacta y no conoce variantes como "SAN LUIS" a secas.
+    private const SUCURSAL_ALIASES = [
+        'SAN LUIS P'         => 'SAN LUIS POTOSI',
+        'SAN LUIS'           => 'SAN LUIS POTOSI',
+        'SAN LUIS POTOSI'    => 'SAN LUIS POTOSI',
+        'TENANGO'            => 'TENANGO DEL VALLE',
+        'TENANGO DEL VALLE'  => 'TENANGO DEL VALLE',
+        'CORDOBA'            => 'CORDOBA',
+        'CÓRDOBA'            => 'CORDOBA',
+    ];
+
     public function __construct(private readonly BranchResolverService $branchResolver) {}
 
     public function handle(ReportUpload $upload, ?callable $progress = null): array
@@ -39,9 +69,20 @@ class RotacionExcelImportService
         @set_time_limit(0);
 
         $absolutePath = Storage::disk('public')->path($upload->stored_path);
-        $reader       = IOFactory::createReaderForFile($absolutePath);
+        $extension    = strtolower(pathinfo($absolutePath, PATHINFO_EXTENSION));
+
+        if ($extension === 'pdf') {
+            return $this->handlePdf($absolutePath, $upload, $progress);
+        }
+
+        return $this->handleExcel($absolutePath, $upload, $progress);
+    }
+
+    private function handleExcel(string $absolutePath, ReportUpload $upload, ?callable $progress = null): array
+    {
+        $reader      = IOFactory::createReaderForFile($absolutePath);
         $reader->setReadDataOnly(true);
-        $spreadsheet  = $reader->load($absolutePath);
+        $spreadsheet = $reader->load($absolutePath);
 
         // Determine target month from period
         $period    = $upload->period;
@@ -166,8 +207,8 @@ class RotacionExcelImportService
             }
 
             try {
-                $branchId = null;
-                $branchNorm = $this->branchResolver->resolveRealBranchFromRoute($sucursal);
+                $branchId   = null;
+                $branchNorm = $this->resolveCanonicalSucursal($sucursal);
                 if ($branchNorm) {
                     $branch = $this->branchResolver->findOrCreateBranchByName($branchNorm);
                     $branchId = $branch?->id;
@@ -176,11 +217,13 @@ class RotacionExcelImportService
                 DB::table('fact_rotacion')->insert([
                     'period_id'        => $upload->period_id,
                     'report_upload_id' => $upload->id,
-                    'sucursal_nombre'  => $sucursal,
+                    'sucursal_nombre'  => $branchNorm ?? $sucursal,
                     'branch_id'        => $branchId,
                     'mes'              => $mes,
+                    'altas'            => $altas,
                     'bajas'            => $bajas,
                     'promedio_personal' => $promedio,
+                    'plantilla_maxima' => null,
                     'indice_rotacion'  => $indice,
                     'hoja_fuente'      => $hoja,
                     'raw_payload'      => json_encode(['altas' => $altas, 'plantilla' => $promedio]),
@@ -328,7 +371,7 @@ class RotacionExcelImportService
 
             try {
                 $branchId   = null;
-                $branchNorm = $this->branchResolver->resolveRealBranchFromRoute($sucursal);
+                $branchNorm = $this->resolveCanonicalSucursal($sucursal);
                 if ($branchNorm) {
                     $branch   = $this->branchResolver->findOrCreateBranchByName($branchNorm);
                     $branchId = $branch?->id;
@@ -337,11 +380,13 @@ class RotacionExcelImportService
                 DB::table('fact_rotacion')->insert([
                     'period_id'         => $upload->period_id,
                     'report_upload_id'  => $upload->id,
-                    'sucursal_nombre'   => $sucursal,
+                    'sucursal_nombre'   => $branchNorm ?? $sucursal,
                     'branch_id'         => $branchId,
                     'mes'               => $targetMes,
+                    'altas'             => $altas,
                     'bajas'             => $bajas,
                     'promedio_personal' => $plantilla,
+                    'plantilla_maxima'  => null,
                     'indice_rotacion'   => $indice,
                     'hoja_fuente'       => $hoja,
                     'raw_payload'       => json_encode(['altas' => $altas, 'plantilla' => $plantilla, 'col_abr' => $targetCol]),
@@ -386,6 +431,226 @@ class RotacionExcelImportService
         }
 
         return 'ABRIL';
+    }
+
+    /**
+     * Resuelve el nombre canónico de sucursal para Rotación: alias explícitos
+     * primero (SAN LUIS → SAN LUIS POTOSI, TENANGO → TENANGO DEL VALLE, etc.),
+     * luego el resolver general de rutas/sucursales.
+     */
+    private function resolveCanonicalSucursal(string $raw): ?string
+    {
+        $norm = strtr(mb_strtoupper(trim($raw)), ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U','Ü'=>'U','Ñ'=>'N']);
+        $norm = (string) preg_replace('/\s+/', ' ', $norm);
+
+        if (isset(self::SUCURSAL_ALIASES[$norm])) {
+            return self::SUCURSAL_ALIASES[$norm];
+        }
+
+        return $this->branchResolver->resolveRealBranchFromRoute($raw);
+    }
+
+    // ── PDF parsing ──────────────────────────────────────────────────────────
+    //
+    // El PDF "ROTACIÓN POR SUCURSALES 2026" trae 12 bloques (uno por sucursal)
+    // apilados verticalmente. Algunos extractores de texto plano envían los
+    // nombres de sucursal al final del documento fuera de orden, por lo que
+    // usamos coordenadas (PdfCoordinateExtractor) para reconstruir cada fila
+    // y ubicar el nombre de sucursal justo encima de su bloque de meses.
+
+    private function handlePdf(string $absolutePath, ReportUpload $upload, ?callable $progress = null): array
+    {
+        $period    = $upload->period;
+        $targetMes = $this->resolveTargetMes($period);
+        $monthNum  = array_search($targetMes, self::MESES_ES, true) ?: null;
+        $headerTok = $monthNum ? (self::PDF_MONTH_HEADER[$monthNum] ?? $targetMes) : $targetMes;
+
+        DB::table('fact_rotacion')->where('period_id', $upload->period_id)->delete();
+
+        $parser = new Parser();
+        $pdfDoc = $parser->parseFile($absolutePath);
+
+        $inserted = 0;
+        $skipped  = 0;
+        $errors   = 0;
+        $blocksSeen = [];
+
+        $norm = static fn (string $v): string => PdfCoordinateExtractor::normalizeUpper($v);
+
+        foreach ($pdfDoc->getPages() as $page) {
+            $rows = PdfCoordinateExtractor::extractRows($page);
+            if (empty($rows)) {
+                continue;
+            }
+
+            // 1. Detect month-header rows (>=6 month tokens) and the target month's column X.
+            $headerBlocks = [];
+            foreach ($rows as $idx => $row) {
+                $hits = 0;
+                $targetX = null;
+                foreach ($row['tokens'] as $tok) {
+                    $tn = $norm($tok['text']);
+                    if (in_array($tn, self::ALL_MONTH_HEADER_TOKENS, true)) {
+                        $hits++;
+                        if ($tn === $headerTok) {
+                            $targetX = $tok['x'];
+                        }
+                    }
+                }
+                if ($hits >= 6 && $targetX !== null) {
+                    $headerBlocks[] = ['idx' => $idx, 'x' => $targetX];
+                }
+            }
+
+            foreach ($headerBlocks as $block) {
+                $hdrIdx  = $block['idx'];
+                $targetX = $block['x'];
+
+                // 2. Sucursal name: nearest non-metric text row above the header row.
+                $sucursalRaw = null;
+                for ($j = $hdrIdx - 1; $j >= 0 && $j >= $hdrIdx - 5; $j--) {
+                    $gap = $rows[$j]['y'] - $rows[$hdrIdx]['y'];
+                    if ($gap > 20) break;
+                    $cand = trim($rows[$j]['text']);
+                    if ($cand === '' || is_numeric($cand)) continue;
+                    if ($this->isMetricLabel($cand)) continue;
+                    $sucursalRaw = $cand;
+                    break;
+                }
+
+                if (!$sucursalRaw) {
+                    $skipped++;
+                    continue;
+                }
+
+                // 3. Metric rows: ALTAS, BAJAS, PLANTILLA (+ isolated plantilla máxima), ROTACIÓN.
+                $altas = 0;
+                $bajas = 0;
+                $plantilla = 0.0;
+                $plantillaMax = null;
+                $indice = null;
+
+                $k = $hdrIdx + 1;
+                $limit = min($hdrIdx + 9, count($rows) - 1);
+                while ($k <= $limit) {
+                    $row = $rows[$k];
+                    if (empty($row['tokens'])) { $k++; continue; }
+                    $label = $norm($row['tokens'][0]['text']);
+                    if (in_array($label, self::ALL_MONTH_HEADER_TOKENS, true)) {
+                        break; // reached the next block's header
+                    }
+
+                    if (str_starts_with($label, 'ALTA')) {
+                        $val = PdfCoordinateExtractor::nearestToken($row, $targetX);
+                        $altas = (int) ($this->toDecimal($val) ?? 0);
+                    } elseif (str_starts_with($label, 'BAJA')) {
+                        $val = PdfCoordinateExtractor::nearestToken($row, $targetX);
+                        $bajas = (int) ($this->toDecimal($val) ?? 0);
+                    } elseif (str_starts_with($label, 'PLANTILL')) {
+                        $val = PdfCoordinateExtractor::nearestToken($row, $targetX);
+                        $plantilla = (float) ($this->toDecimal($val) ?? 0);
+
+                        // El número aislado (plantilla máxima/autorizada) vive en la fila
+                        // inmediatamente siguiente, con un único token numérico.
+                        $peek = $rows[$k + 1] ?? null;
+                        if ($peek && count($peek['tokens']) === 1 && is_numeric(trim($peek['tokens'][0]['text']))) {
+                            $plantillaMax = (float) $peek['tokens'][0]['text'];
+                            $k++;
+                        }
+                    } elseif (str_starts_with($label, 'ROTACI')) {
+                        $val = PdfCoordinateExtractor::nearestToken($row, $targetX);
+                        $indice = $this->toDecimal($val);
+                        $k++;
+                        break; // metrics for this block are complete
+                    }
+                    $k++;
+                }
+
+                if ($indice === null) {
+                    $indice = ($plantilla > 0.0) ? round($bajas / $plantilla * 100, 4) : 0.0;
+                }
+
+                $branchNorm = $this->resolveCanonicalSucursal($sucursalRaw);
+                if (!$branchNorm) {
+                    Log::warning('RotacionExcelImportService (PDF): sucursal no reconocida.', ['raw' => $sucursalRaw]);
+                    $errors++;
+                    continue;
+                }
+
+                // Evitar duplicados si el mismo bloque se detecta dos veces (p.ej. reintentos de layout).
+                if (isset($blocksSeen[$branchNorm])) {
+                    continue;
+                }
+                $blocksSeen[$branchNorm] = true;
+
+                try {
+                    $branch   = $this->branchResolver->findOrCreateBranchByName($branchNorm);
+                    $branchId = $branch?->id;
+
+                    DB::table('fact_rotacion')->insert([
+                        'period_id'         => $upload->period_id,
+                        'report_upload_id'  => $upload->id,
+                        'sucursal_nombre'   => $branchNorm,
+                        'branch_id'         => $branchId,
+                        'mes'               => $targetMes,
+                        'altas'             => $altas,
+                        'bajas'             => $bajas,
+                        'promedio_personal' => $plantilla,
+                        'plantilla_maxima'  => $plantillaMax,
+                        'indice_rotacion'   => $indice,
+                        'hoja_fuente'       => 'PDF',
+                        'raw_payload'       => json_encode([
+                            'altas' => $altas, 'plantilla' => $plantilla, 'plantilla_maxima' => $plantillaMax,
+                            'sucursal_raw' => $sucursalRaw,
+                        ]),
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                    $inserted++;
+                } catch (\Throwable $e) {
+                    Log::warning('RotacionExcelImportService (PDF): error al insertar fila.', ['error' => $e->getMessage(), 'sucursal' => $branchNorm]);
+                    $errors++;
+                }
+            }
+        }
+
+        if ($inserted === 0) {
+            throw new \RuntimeException("No se pudo extraer ningún bloque de sucursal del PDF de rotación para el mes {$targetMes}. Verifica que el archivo tenga el formato esperado (ROTACIÓN POR SUCURSALES).");
+        }
+
+        $log = sprintf(
+            'Rotación importada desde PDF. Mes: %s. Sucursales detectadas: %d, omitidas: %d, errores: %d.',
+            $targetMes, $inserted, $skipped, $errors
+        );
+
+        if ($progress) {
+            $progress([
+                'rows_read'        => $inserted + $skipped,
+                'rows_inserted'    => $inserted,
+                'rows_skipped'     => $skipped,
+                'rows_with_errors' => $errors,
+                'log'              => $log,
+            ]);
+        }
+
+        return [
+            'rows_read'        => $inserted + $skipped,
+            'rows_inserted'    => $inserted,
+            'rows_skipped'     => $skipped,
+            'rows_with_errors' => $errors,
+            'log'              => $log,
+        ];
+    }
+
+    private function isMetricLabel(string $value): bool
+    {
+        $norm = strtr(mb_strtoupper(trim($value)), ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U','Ü'=>'U','Ñ'=>'N']);
+        foreach (self::METRIC_LABEL_PREFIXES as $pfx) {
+            if (str_starts_with($norm, $pfx)) return true;
+        }
+        if (str_contains($norm, 'SUCURSALES') && str_contains($norm, 'ROTACI')) return true; // título del PDF
+
+        return false;
     }
 
     private function detectHeaderRow(array $rows): ?int

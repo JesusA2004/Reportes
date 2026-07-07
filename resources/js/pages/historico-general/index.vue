@@ -293,6 +293,27 @@ const processPendingSources = async () => {
     })
 }
 
+const reprocessFailedSources = async () => {
+    if (!selectedPeriodId.value) return
+    const failedCount = grouped.value?.failed_count ?? 0
+    if (!failedCount) return Swal.fire({ title: 'Sin fuentes con error', text: 'No hay archivos en error en este periodo.', icon: 'info', confirmButtonText: 'Entendido' })
+    const result = await Swal.fire({
+        title: 'Reprocesar fuentes con error',
+        html: `Se reprocesarán únicamente las fuentes vigentes que estén en error (NOI Nómina, NOI Fiscal, Rotación e IMSS si su auditoría falla). No se tocará Cobranza, Cartera, Colocación ni Gastos.`,
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonText: 'Reprocesar',
+        cancelButtonText: 'Cancelar',
+        reverseButtons: true,
+    })
+    if (!result.isConfirmed) return
+    router.post(`/historico-general/${selectedPeriodId.value}/reprocesar-fuentes-con-error`, {}, {
+        preserveScroll: true,
+        onSuccess: () => Swal.fire({ title: 'Reprocesamiento enviado', text: 'Las fuentes con error están en cola. Recibirás correo cuando terminen.', icon: 'success', confirmButtonText: 'Entendido' }),
+        onError:   () => Swal.fire('No se pudo iniciar', 'Verifica que haya fuentes en error y vuelve a intentarlo.', 'error'),
+    })
+}
+
 const requeueRun = async () => {
     if (!selectedPeriodId.value) return
     router.post(`/historico-general/${selectedPeriodId.value}/actualizacion-bd/reencolar`, {}, {
@@ -662,6 +683,15 @@ const processGenerationNow = async () => {
                                 >
                                     <svg class="size-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z" /></svg>
                                     Procesar fuentes pendientes ({{ grouped?.pending_count }})
+                                </button>
+                                <button
+                                    v-if="(grouped?.failed_count ?? 0) > 0"
+                                    type="button"
+                                    class="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700 transition hover:bg-rose-100"
+                                    @click="reprocessFailedSources"
+                                >
+                                    <svg class="size-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
+                                    Reprocesar fuentes con error ({{ grouped?.failed_count }})
                                 </button>
                             </div>
                             <button

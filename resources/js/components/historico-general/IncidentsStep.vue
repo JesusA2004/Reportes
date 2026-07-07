@@ -404,7 +404,7 @@ const LOCATION_ACTIONS = [
                             <!-- unique_persons_count = grouped persons; count = raw records -->
                             <strong>{{ employeesIncident.context?.unique_persons_count ?? employeesIncident.context?.count ?? 0 }}</strong> persona(s) agrupada(s) sin sucursal
                             <template v-if="(employeesIncident.context?.count ?? 0) > (employeesIncident.context?.unique_persons_count ?? employeesIncident.context?.count ?? 0)">
-                                · <strong>{{ employeesIncident.context.count }}</strong> registros afectados (NOI regular + NOI fiscal)
+                                · <strong>{{ employeesIncident.context.count }}</strong> registros afectados (nómina + nómina fiscal)
                             </template>
                             <template v-if="(employeesIncident.context?.monto ?? 0) > 0">
                                 · Impacto: <strong>${{ Number(employeesIncident.context.monto).toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) }}</strong>
@@ -451,7 +451,7 @@ const LOCATION_ACTIONS = [
                                                     :key="fuente"
                                                     class="inline-flex rounded-lg px-2 py-0.5 text-xs font-bold"
                                                     :class="fuente === 'noi_nomina_fiscal' ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-600'"
-                                                >{{ fuente === 'noi_nomina_fiscal' ? 'NOI FISCAL' : fuente.replace('noi_nomina', 'NOI REGULAR') }}</span>
+                                                >{{ fuente === 'noi_nomina_fiscal' ? 'NÓMINA FISCAL' : fuente.replace('noi_nomina', 'NÓMINA REGULAR') }}</span>
                                             </div>
                                         </td>
                                         <td class="py-2.5 pr-3 text-right text-slate-700">{{ emp.movimientos }}</td>

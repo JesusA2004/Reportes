@@ -93,7 +93,9 @@ class GenerateRadiographyJob implements ShouldQueue
             // Skip if every relevant employee already has an EBA — avoids 168×61K-row scan.
             $this->updateProgress($run, 55, 'Revisando asignaciones de sucursales', 'Verificando y refinando asignaciones automáticas de empleados por cobranza, colocación y cartera.');
             if ($this->shouldRunAutomatch($period->id)) {
-                $branchAutoMatch->handle($period->id);
+                $branchAutoMatch->handle($period->id, function (int $percent, string $step, string $log) use ($run) {
+                    $this->updateProgress($run, $percent, $step, $log);
+                });
             } else {
                 $this->updateProgress($run, 66, 'Asignaciones verificadas', 'Todos los empleados ya tienen sucursal — omitiendo auto-asignación.');
             }

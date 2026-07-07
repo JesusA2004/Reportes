@@ -20,12 +20,13 @@ class NoiMovement extends Model {
         'payroll_type',
         'movement_date',
         'raw_row_hash',
+        'source_row_key',
         'raw_payload',
     ];
 
     protected $casts = [
-        'amount' => 'decimal:2',
-        'quantity' => 'decimal:2',
+        'amount' => 'decimal:4',
+        'quantity' => 'decimal:4',
         'movement_date' => 'date',
         'raw_payload' => 'array',
     ];

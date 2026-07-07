@@ -326,9 +326,14 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
     </tr>
     <tr>
         <td class="kpi"><div class="kpi-label">Gastos</div><div class="kpi-value">{{ $fmt0($gastosOpTotal) }}</div></td>
-        <td class="kpi"><div class="kpi-label">Nómina</div><div class="kpi-value">{{ $fmt0($nomTotal) }}</div></td>
+        <td class="kpi"><div class="kpi-label">Nómina y Capital Humano</div><div class="kpi-value">{{ $fmt0($nomTotal) }}</div></td>
         <td class="kpi"><div class="kpi-label">EBITDA</div><div class="kpi-value @if($utilidad < 0) neg @endif">{{ $fmt0($utilidad) }}</div></td>
         <td class="kpi"><div class="kpi-label">Mora %</div><div class="kpi-value @if($moraPct > 25) neg @endif">{{ $fmtp($moraPct) }}</div></td>
+    </tr>
+    <tr>
+        <td class="kpi"><div class="kpi-label">Percepciones</div><div class="kpi-value">{{ $fmt0((float)($snap['summary']['noi_percepciones'] ?? 0)) }}</div></td>
+        <td class="kpi"><div class="kpi-label">Deducciones</div><div class="kpi-value">{{ $fmt0((float)($snap['summary']['noi_deducciones'] ?? 0)) }}</div></td>
+        <td class="kpi" colspan="2"><div class="kpi-label">Neto pagado a trabajadores</div><div class="kpi-value">{{ $fmt0((float)($snap['summary']['noi_neto_pagado'] ?? 0)) }}</div></td>
     </tr>
 </table>
 

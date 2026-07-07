@@ -15,8 +15,17 @@ const dragActive = ref(false)
 const inputRef = ref<HTMLInputElement | null>(null)
 
 const isPdf = computed(() => props.source.code === 'gastos_lendus')
-const acceptAttr = computed(() => isPdf.value ? '.pdf' : '.xls,.xlsx,.xlsm')
-const acceptText = computed(() => isPdf.value ? '.pdf' : '.xls, .xlsx, .xlsm')
+const isMultiFormat = computed(() => ['imss', 'rotacion'].includes(props.source.code))
+const acceptAttr = computed(() => {
+    if (isPdf.value) return '.pdf'
+    if (isMultiFormat.value) return '.pdf,.xls,.xlsx,.xlsm'
+    return '.xls,.xlsx,.xlsm'
+})
+const acceptText = computed(() => {
+    if (isPdf.value) return '.pdf'
+    if (isMultiFormat.value) return '.pdf, .xls, .xlsx, .xlsm'
+    return '.xls, .xlsx, .xlsm'
+})
 const isRequiredForDb      = computed(() => Boolean(props.source.is_required_for_bd))
 const isRequiredForReport  = computed(() => Boolean(props.source.is_required_for_report))
 const status = computed(() => props.upload?.status ?? 'pending')
@@ -26,11 +35,15 @@ const assignFile = async (selected: File | null) => {
     if (!selected) return
     const valid = isPdf.value
         ? /\.pdf$/i.test(selected.name)
-        : /\.(xls|xlsx|xlsm)$/i.test(selected.name)
+        : isMultiFormat.value
+            ? /\.(pdf|xls|xlsx|xlsm)$/i.test(selected.name)
+            : /\.(xls|xlsx|xlsm)$/i.test(selected.name)
     if (!valid) {
         const msg = isPdf.value
             ? 'Carga únicamente archivos PDF para esta fuente.'
-            : 'Carga únicamente archivos Excel: xls, xlsx o xlsm.'
+            : isMultiFormat.value
+                ? 'Carga únicamente archivos PDF, xls, xlsx o xlsm.'
+                : 'Carga únicamente archivos Excel: xls, xlsx o xlsm.'
         await Swal.fire({ title: 'Formato no válido', text: msg, icon: 'error', confirmButtonText: 'Entendido' })
         return
     }
@@ -95,7 +108,7 @@ const doUpload = () => {
             @drop.prevent="onDrop"
         >
             <UploadCloud class="mx-auto size-7 text-indigo-500" />
-            <p class="mt-2 text-sm font-bold text-slate-800">{{ isPdf ? 'Arrastra el PDF aquí' : 'Arrastra el Excel aquí' }}</p>
+            <p class="mt-2 text-sm font-bold text-slate-800">{{ isPdf ? 'Arrastra el PDF aquí' : isMultiFormat ? 'Arrastra el PDF o Excel aquí' : 'Arrastra el Excel aquí' }}</p>
             <p class="mt-1 text-xs text-slate-500">{{ acceptText }}</p>
             <button type="button" class="mt-3 rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 transition hover:border-indigo-200 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50" :disabled="disabled" @click="inputRef?.click()">Seleccionar archivo</button>
             <input ref="inputRef" type="file" class="hidden" :accept="acceptAttr" @change="assignFile(($event.target as HTMLInputElement).files?.[0] ?? null)" />

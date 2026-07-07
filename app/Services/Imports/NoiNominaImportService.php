@@ -38,6 +38,7 @@ class NoiNominaImportService
         }
 
         $rows = $sheets[0];
+        $sheetName = $this->firstSheetName($absolutePath);
         $headerRowIndex = $this->detectHeaderRowIndex($rows);
         $headerRow = $rows[$headerRowIndex] ?? null;
 
@@ -75,13 +76,14 @@ class NoiNominaImportService
         $currentEmployeeName = null;
         $currentEmployeeCode = null;
 
-        foreach (array_slice($rows, $headerRowIndex + 1) as $row) {
+        foreach (array_slice($rows, $headerRowIndex + 1, null, true) as $rowIndex => $row) {
             if (!is_array($row) || $this->isEmptyRow($row)) {
                 $rowsSkipped++;
                 continue;
             }
 
             $rowsRead++;
+            $sourceRowNumber = $rowIndex + 1;
 
             try {
                 $mapped = $this->mapRow($row, $headerMap);
@@ -122,6 +124,8 @@ class NoiNominaImportService
                     continue;
                 }
 
+                $normalizedRow = json_encode($mapped['raw_payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
                 NoiMovement::query()->create([
                     'period_id' => $upload->period_id,
                     'employee_id' => $employee->id,
@@ -132,10 +136,13 @@ class NoiNominaImportService
                     'quantity' => 1,
                     'payroll_type' => $mapped['payroll_type'] ?: 'NOI',
                     'movement_date' => $mapped['movement_date'] ?? now()->toDateString(),
-                    'raw_row_hash' => hash(
-                        'sha256',
-                        json_encode($mapped['raw_payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
-                    ),
+                    'raw_row_hash' => hash('sha256', $normalizedRow),
+                    'source_row_key' => hash('sha256', implode('|', [
+                        $upload->id,
+                        $sheetName,
+                        $sourceRowNumber,
+                        $normalizedRow,
+                    ])),
                     'raw_payload' => $mapped['raw_payload'],
                 ]);
 
@@ -351,6 +358,18 @@ class NoiNominaImportService
         ];
     }
 
+    private function firstSheetName(string $absolutePath): string
+    {
+        try {
+            $reader = IOFactory::createReaderForFile($absolutePath);
+            $sheetsInfo = $reader->listWorksheetInfo($absolutePath);
+
+            return $sheetsInfo[0]['worksheetName'] ?? 'Sheet1';
+        } catch (\Throwable) {
+            return 'Sheet1';
+        }
+    }
+
     private function detectHeaderRowIndex(array $rows): int
     {
         $bestIndex = 0;
@@ -524,11 +543,6 @@ class NoiNominaImportService
         $concept = $this->normalizeText($mapped['concept']);
 
         if (in_array($concept, ['acumulado', 'total', 'totales', 'subtotal', 'sub_total'], true)) {
-            return false;
-        }
-
-        // P107 MONTO MAXIMO DIARIO is a system reference value, not a financial payment
-        if (preg_match('/^p107\b/i', $concept)) {
             return false;
         }
 

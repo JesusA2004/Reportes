@@ -10,6 +10,7 @@ use App\Jobs\UpdatePeriodDatabaseJob;
 use App\Models\Branch;
 use App\Models\DataSource;
 use App\Models\Employee;
+use App\Models\Expense;
 use App\Models\Period;
 use App\Models\PeriodDatabaseUpdateRun;
 use App\Models\PeriodIncident;
@@ -532,7 +533,44 @@ class ReportUploadController extends Controller {
         /** @var \App\Services\PersonIdentityResolverService $resolver */
         $resolver = app(\App\Services\PersonIdentityResolverService::class);
 
-        $items = $items->map(function ($item) use ($resolver, $allEmployees, $rawMovements, $historicalBranches, $dataIds) {
+        // ── Preload everything buildResolutionTrace() would otherwise re-query PER ITEM ──
+        // With 100+ unassigned people this turned "personas sin sucursal" into hundreds
+        // of repeated full-table queries — the root cause of the endpoint hanging on
+        // "Cargando personas…". Compute once here, reuse for every item below.
+        $allEmployeeIdsGlobal = $allEmployees->pluck('id')->all();
+        $candidateBranchesGlobal = empty($allEmployeeIdsGlobal) ? [] : DB::table('employee_branch_assignments as eba')
+            ->join('branches as b', 'eba.branch_id', '=', 'b.id')
+            ->whereIn('eba.employee_id', $allEmployeeIdsGlobal)
+            ->whereNotNull('eba.branch_id')
+            ->orderByDesc('eba.period_id')
+            ->select('eba.employee_id', 'b.name as branch_name')
+            ->get()
+            ->unique('employee_id')
+            ->pluck('branch_name', 'employee_id')
+            ->all();
+
+        $placementsPreloaded = empty($dataIds) ? collect() : DB::table('fact_placements')
+            ->whereIn('period_id', $dataIds)
+            ->whereNotNull('branch_id')
+            ->selectRaw('normalized_promoter_name, MAX(promoter_code) as promoter_code, MAX(branch_id) as branch_id')
+            ->groupBy('normalized_promoter_name')
+            ->get()
+            ->keyBy('normalized_promoter_name');
+
+        $lendusPreloaded = DB::table('lendus_employee_directory')
+            ->where('is_operational', true)
+            ->whereNotNull('normalized_name')
+            ->get(['id', 'codigo', 'nombre', 'normalized_name', 'puesto', 'estatus', 'inferred_branch_id', 'inferred_branch_name']);
+
+        // fact_recoveries has no usable index for LOWER(promoter_name) — this was the
+        // actual root cause of the endpoint hanging (a full scan of tens of thousands
+        // of rows PER unassigned person). Aggregate once, scoped to this period.
+        $contractsPreloaded = $resolver->buildContractsIndex($dataIds);
+
+        $items = $items->map(function ($item) use (
+            $resolver, $allEmployees, $rawMovements, $historicalBranches, $dataIds,
+            $candidateBranchesGlobal, $placementsPreloaded, $lendusPreloaded, $contractsPreloaded,
+        ) {
             // Merge sample movements across all employee_ids in the group
             $sampleMovs = collect(array_merge(
                 ...array_map(fn ($eid) => ($rawMovements[(int) $eid] ?? collect())->all(), $item->employee_ids)
@@ -546,6 +584,10 @@ class ReportUploadController extends Controller {
                 employeeCode:     $item->employee_code ?? null,
                 historicalBranch: $historicalBranches[(int) $item->employee_id]->branch_name ?? null,
                 dataIds:          $dataIds,
+                candidateBranchesPreloaded: $candidateBranchesGlobal,
+                placementsPreloaded: $placementsPreloaded,
+                lendusPreloaded: $lendusPreloaded,
+                contractsPreloaded: $contractsPreloaded,
             );
             $item->diagnosis = $diagnosis;
 
@@ -1117,6 +1159,52 @@ class ReportUploadController extends Controller {
         $names = $pendingUploads->map(fn ($u) => $u->dataSource?->name ?? $u->id)->implode(', ');
 
         return back()->with('success', "Se enviaron {$count} fuente(s) a procesamiento: {$names}. Recibirás un correo cuando terminen.");
+    }
+
+    public function reprocessFailedSources(Period $period): RedirectResponse
+    {
+        $targetCodes = ['noi_nomina', 'noi_nomina_fiscal', 'rotacion'];
+
+        $latestByCode = ReportUpload::query()
+            ->with('dataSource')
+            ->where('period_id', $period->id)
+            ->whereIn('status', ['failed', 'processed'])
+            ->get()
+            ->groupBy(fn ($u) => $u->dataSource?->code)
+            ->map(fn ($group) => $group->sortByDesc('id')->first());
+
+        $toReprocess = collect();
+
+        foreach ($targetCodes as $code) {
+            $upload = $latestByCode->get($code);
+            $status = (string) ($upload?->status?->value ?? $upload?->status);
+            if ($upload && $status === 'failed') {
+                $toReprocess->push($upload);
+            }
+        }
+
+        $imssUpload = $latestByCode->get('imss');
+        if ($imssUpload) {
+            $imssStatus    = (string) ($imssUpload->status?->value ?? $imssUpload->status);
+            $imssQuery     = Expense::query()->where('period_id', $period->id)->where('category', 'IMSS');
+            $imssSum       = (float) (clone $imssQuery)->sum('amount');
+            $hasUnassigned = (clone $imssQuery)->whereNull('branch_id')->exists();
+            if ($imssStatus === 'failed' || ($imssStatus === 'processed' && ($imssSum <= 0 || $hasUnassigned))) {
+                $toReprocess->push($imssUpload);
+            }
+        }
+
+        if ($toReprocess->isEmpty()) {
+            return back()->with('info', 'No hay fuentes en error para reprocesar (NOI Nómina, NOI Fiscal, Rotación e IMSS están correctas).');
+        }
+
+        foreach ($toReprocess as $upload) {
+            ReprocessReportUploadJob::dispatch($upload->id, auth()->id());
+        }
+
+        $names = $toReprocess->map(fn ($u) => $u->dataSource?->name ?? $u->id)->implode(', ');
+
+        return back()->with('success', "Se enviaron {$toReprocess->count()} fuente(s) con error a reprocesamiento: {$names}. Recibirás un correo cuando terminen.");
     }
 
     public function analyze(ReportUpload $reportUpload): RedirectResponse

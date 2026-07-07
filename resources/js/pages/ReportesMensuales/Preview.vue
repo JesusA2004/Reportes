@@ -268,6 +268,20 @@ const nomTotal = computed(() => nomNomina.value + nomComis.value + nomVac.value 
 const nomDescuentosNOI = computed(() => nomDetalle.value.filter(r => NOI_DEDUCTION_LABELS.has(r.label)).reduce((s, r) => s + r.value, 0))
 const nomNeto = computed(() => nomTotal.value - nomDescuentosNOI.value)
 
+// Percepciones/Deducciones/Neto pagado a trabajadores: informativo — "lo que el trabajador
+// recibió", distinto de Nómina y Capital Humano (concepto de gasto de la empresa).
+const noiPercepciones = computed(() => Number(snap.value?.summary?.noi_percepciones) || 0)
+const noiDeducciones = computed(() => Number(snap.value?.summary?.noi_deducciones) || 0)
+const noiNetoPagado = computed(() => Number(snap.value?.summary?.noi_neto_pagado) || 0)
+
+// Capital Humano no operativo / pendiente de clasificación: explica peso por peso la
+// diferencia entre la suma de sucursales operativas y el total global de Nómina y Capital
+// Humano (IMSS de sucursales no operativas + partidas sin sucursal resuelta). Nunca se oculta.
+const capitalHumanoNoOperativo = computed<{ concepto: string; empleado: string | null; sucursal: string | null; fuente: string; monto: number; motivo: string }[]>(() =>
+    (snap.value?.branch_radiography?.unassigned?.capital_humano_no_operativo ?? []) as any[]
+)
+const capitalHumanoNoOperativoTotal = computed(() => capitalHumanoNoOperativo.value.reduce((s, r) => s + (Number(r.monto) || 0), 0))
+
 // ── Préstamos intersucursales ─────────────────────────────────────────────────
 const fondeoGlobal = computed(() => Number(brGlobal.value?.prestamos_fondea) || 0)
 const loans = computed(() => snap.value?.sections?.interbranch_loans ?? {})
@@ -536,13 +550,14 @@ const activeLoansTotals = computed(() => {
     return { count, saldo, vencido, pct: saldo > 0 ? (vencido / saldo) * 100 : 0 }
 })
 
-// Préstamo activo = SUM(capital_activo) donde dias_vencidos = 0.
-// Distinto de Valor cartera (que usa saldo_activo de todos los contratos).
+// Préstamo activo = SUM(Saldo actual) donde dias_vencidos = 0, excluyendo Aguascalientes.
+// "Saldo actual" es saldo_activo (fact_portfolios.balance) — NO capital_activo ("Capital"),
+// que es una columna distinta del mismo Excel y no es la regla de negocio vigente.
 const prestamoActivoKpi = computed(() => {
     const rows = (snap.value?.sections?.active_loans ?? []) as any[]
     return rows
         .filter((al: any) => Number(al.dias_vencidos) === 0)
-        .reduce((sum: number, al: any) => sum + (Number(al.capital_activo) || 0), 0)
+        .reduce((sum: number, al: any) => sum + (Number(al.saldo_activo) || 0), 0)
 })
 
 // ── Productos ──────────────────────────────────────────────────────────────────
@@ -938,10 +953,15 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                         <KpiCard label="Cartera vencida" :value="money(kpiMora)" :icon="AlertTriangle" :tone="kpiMoraPct > 25 ? 'red' : 'amber'" />
                         <KpiCard label="Mora %" :value="pct(kpiMoraPct)" :icon="Percent" :tone="kpiMoraPct > 25 ? 'red' : 'teal'" />
                         <KpiCard label="OPEX" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
-                        <KpiCard label="Nómina" :value="money(kpiNomina)" :icon="Wallet" tone="blue" />
+                        <KpiCard label="Nómina y Capital Humano" :value="money(kpiNomina)" :icon="Wallet" tone="blue" />
                         <KpiCard :label="kpiUtilLabel" :value="money(kpiUtil)" :icon="Gauge" :tone="kpiUtil < 0 ? 'red' : 'green'" />
                         <KpiCard label="Margen EBITDA" :value="pct(margenEbitdaPct)" :icon="Percent" :tone="margenEbitdaPct < 0 ? 'red' : 'green'" />
                         <KpiCard label="Préstamo activo" :value="money(prestamoActivoKpi)" :icon="Banknote" tone="blue" />
+                    </div>
+                    <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                        <KpiCard label="Percepciones" :value="money(noiPercepciones)" :icon="Wallet" tone="teal" />
+                        <KpiCard label="Deducciones" :value="money(noiDeducciones)" :icon="Receipt" tone="amber" />
+                        <KpiCard label="Neto pagado a trabajadores" :value="money(noiNetoPagado)" :icon="HandCoins" tone="blue" />
                     </div>
                 </div>
 
@@ -1219,6 +1239,38 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                     <tr class="border-t-2 border-blue-200 bg-blue-50"><td class="px-5 py-2.5 font-black text-blue-900">Total Nómina y Capital Humano</td><td class="px-5 py-2.5 text-right font-black text-blue-900">{{ money(nomTotal) }}</td></tr>
                                 </tbody>
                             </table>
+                        </div>
+                        <!-- Capital Humano no operativo / pendiente de clasificación -->
+                        <div v-if="capitalHumanoNoOperativo.length" class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                            <div class="border-b bg-amber-50 px-5 py-3 flex items-center justify-between">
+                                <h3 class="text-xs font-black uppercase tracking-wider text-amber-700">Capital Humano no operativo / pendiente de clasificación</h3>
+                                <span class="font-black text-amber-800">{{ money(capitalHumanoNoOperativoTotal) }}</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <thead>
+                                    <tr class="border-b bg-slate-50 text-xs uppercase text-slate-500">
+                                        <th class="px-5 py-2 text-left">Concepto</th>
+                                        <th class="px-5 py-2 text-left">Empleado / registro</th>
+                                        <th class="px-5 py-2 text-left">Sucursal</th>
+                                        <th class="px-5 py-2 text-left">Fuente</th>
+                                        <th class="px-5 py-2 text-right">Monto</th>
+                                        <th class="px-5 py-2 text-left">Motivo</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="(row, i) in capitalHumanoNoOperativo" :key="i" class="border-b" :class="i % 2 === 0 ? '' : 'bg-slate-50/60'">
+                                        <td class="px-5 py-2 text-slate-700">{{ row.concepto }}</td>
+                                        <td class="px-5 py-2 text-slate-500 text-xs">{{ row.empleado ?? '-' }}</td>
+                                        <td class="px-5 py-2 text-slate-500 text-xs">{{ row.sucursal ?? '-' }}</td>
+                                        <td class="px-5 py-2 text-slate-500 text-xs">{{ row.fuente }}</td>
+                                        <td class="px-5 py-2 text-right font-semibold text-slate-900">{{ money(row.monto) }}</td>
+                                        <td class="px-5 py-2 text-slate-500 text-xs">{{ row.motivo }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            <div class="border-t bg-slate-50 px-5 py-2 text-xs text-slate-500">
+                                Suma sucursales operativas ({{ money(nomTotal - capitalHumanoNoOperativoTotal) }}) + Capital Humano no operativo ({{ money(capitalHumanoNoOperativoTotal) }}) = Total Nómina y Capital Humano ({{ money(nomTotal) }})
+                            </div>
                         </div>
                         <!-- F) EBITDA -->
                         <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
@@ -1608,10 +1660,15 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                 <!-- ══════════ NÓMINA ══════════ -->
                 <div v-show="activeTab === 'nomina'" class="space-y-5">
                     <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                        <KpiCard label="Nómina total" :value="money(kpiNomina)" :icon="Wallet" tone="blue" />
+                        <KpiCard label="Nómina y Capital Humano" :value="money(kpiNomina)" :icon="Wallet" tone="blue" />
                         <KpiCard label="Sueldos" :value="money(nomNomina)" tone="teal" />
                         <KpiCard label="Comisiones" :value="money(nomComis)" tone="teal" />
                         <KpiCard label="Bonos" :value="money(nomBonos)" tone="teal" />
+                    </div>
+                    <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                        <KpiCard label="Percepciones" :value="money(noiPercepciones)" tone="teal" />
+                        <KpiCard label="Deducciones" :value="money(noiDeducciones)" tone="amber" />
+                        <KpiCard label="Neto pagado a trabajadores" :value="money(noiNetoPagado)" tone="blue" />
                     </div>
                     <ChartCard title="Nómina por sucursal" :series="nominaPorSucursalSeries" :options="nominaPorSucursalOptions" type="donut" :height="320" />
 

@@ -14,16 +14,26 @@
       <tr>
         <td style="background:#0f172a;padding:28px 36px;">
           <p style="margin:0 0 6px;color:#64748b;font-size:11px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;">Sistema Reportes</p>
-          <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:900;line-height:1.3;">Registros cargados correctamente</h1>
+          <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:900;line-height:1.3;">
+            {{ !empty($failedSources) ? 'Registros cargados con errores' : 'Registros cargados correctamente' }}
+          </h1>
         </td>
       </tr>
 
       <!-- Status banner -->
+      @if(!empty($failedSources))
+      <tr>
+        <td style="background:#fef2f2;padding:14px 36px;border-bottom:1px solid #fecaca;">
+          <p style="margin:0;color:#b91c1c;font-size:13px;font-weight:700;">⚠ &nbsp;Carga de registros completada con errores</p>
+        </td>
+      </tr>
+      @else
       <tr>
         <td style="background:#dcfce7;padding:14px 36px;border-bottom:1px solid #bbf7d0;">
           <p style="margin:0;color:#15803d;font-size:13px;font-weight:700;">✓ &nbsp;Carga de registros completada</p>
         </td>
       </tr>
+      @endif
 
       <!-- Body -->
       <tr>
@@ -31,10 +41,31 @@
           <p style="margin:0 0 20px;color:#334155;font-size:15px;line-height:1.7;">
             Hola{{ $user?->name ? ', ' . $user->name : '' }},
           </p>
+          @if(!empty($failedSources))
+          <p style="margin:0 0 28px;color:#334155;font-size:15px;line-height:1.7;">
+            Los registros base del periodo <strong style="color:#0f172a;">{{ $period->label }}</strong> se cargaron, pero
+            <strong style="color:#b91c1c;">{{ count($failedSources) }} fuente(s) fallaron</strong> y no se actualizaron:
+          </p>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;overflow:hidden;margin-bottom:24px;">
+            <tr>
+              <td style="padding:16px 18px;">
+                <ul style="margin:0;padding-left:18px;font-size:13px;color:#7f1d1d;line-height:1.8;">
+                  @foreach($failedSources as $source)
+                  <li>{{ $source }}</li>
+                  @endforeach
+                </ul>
+              </td>
+            </tr>
+          </table>
+          <p style="margin:0 0 28px;color:#334155;font-size:15px;line-height:1.7;">
+            El reporte permanecerá bloqueado hasta reprocesar las fuentes con error.
+          </p>
+          @else
           <p style="margin:0 0 28px;color:#334155;font-size:15px;line-height:1.7;">
             Los registros base del periodo <strong style="color:#0f172a;">{{ $period->label }}</strong> fueron cargados correctamente.
             Revisa las incidencias detectadas antes de generar el reporte.
           </p>
+          @endif
 
           <!-- Info del proceso -->
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;margin-bottom:24px;">

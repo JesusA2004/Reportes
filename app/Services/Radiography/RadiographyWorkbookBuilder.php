@@ -67,6 +67,7 @@ class RadiographyWorkbookBuilder
             ['buildIngresosSheet',         'INGRESOS'],
             ['buildGastosSheet',           'GASTOS'],
             ['buildNominaSheet',           'NÓMINA'],
+            ['buildCapitalHumanoNoOperativoSheet', 'CAP. HUMANO NO OPERATIVO'],
             // PRÉSTAMOS ACTIVOS: eliminada por decisión de negocio (jun 2026)
             // MORA DETALLE: consolidada en hoja MORAS
             // VAL. CART: consolidada en hoja VALOR CARTERA
@@ -313,6 +314,14 @@ class RadiographyWorkbookBuilder
             ['Otorgamientos',        $colTotal,     'currency', 'Mora total',                  $moraTotal,  'currency'],
             ['Mora %',               $moraPct,      'percent',  'Gastos totales',               $gastosTotal,'currency'],
             ['Nómina y Capital Humano', $nomTotal,  'currency', 'EBITDA', $utilidad,   'currency'],
+            [
+                'Percepciones', (float) ($snap['summary']['noi_percepciones'] ?? 0), 'currency',
+                'Deducciones', (float) ($snap['summary']['noi_deducciones'] ?? 0), 'currency',
+            ],
+            [
+                'Neto pagado a trabajadores', (float) ($snap['summary']['noi_neto_pagado'] ?? 0), 'currency',
+                'Margen EBITDA', (float) ($snap['summary']['margen_ebitda'] ?? 0), 'percent',
+            ],
         ];
         $kpiRow = 4;
         $kpiCardBorder = ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => RadiographyStyleHelper::BG_ACCENT]];
@@ -1810,6 +1819,98 @@ class RadiographyWorkbookBuilder
         }
     }
 
+    // ── CAPITAL HUMANO NO OPERATIVO ──────────────────────────────────────────
+    //
+    // Explains, peso por peso, the gap between SUM(sucursales operativas) and the
+    // GLOBAL Nómina y Capital Humano total: IMSS de sucursales no operativas
+    // (CORPORATIVO/TULANCINGO) + partidas de Gastos Lendus (Financiamiento de
+    // Motos/Cascos) cuyo colaborador no pudo resolverse a una sucursal operativa.
+    // Nunca se oculta esta diferencia — debe cumplirse:
+    //   SUM(sucursales operativas) + CAPITAL HUMANO NO OPERATIVO = TOTAL GLOBAL.
+    private function buildCapitalHumanoNoOperativoSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet = $ss->createSheet()->setTitle('CAP. HUMANO NO OPERATIVO');
+        $rows  = $snap['branch_radiography']['unassigned']['capital_humano_no_operativo'] ?? [];
+
+        $label = strtoupper($period->label ?? ($period->code ?: 'Periodo'));
+        $this->sheetTitle($sheet, 'A1:F1', 'CAPITAL HUMANO NO OPERATIVO / PENDIENTE DE CLASIFICACIÓN — ' . $label);
+
+        $sheet->setCellValue('A2', '← GLOBAL');
+        $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
+        $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
+        $sheet->setCellValue('B2', 'Explica la diferencia entre la suma de sucursales operativas y el total global de Nómina y Capital Humano. No se oculta ningún monto.');
+        $this->metaStyle($sheet, 'B2:F2');
+        RadiographyStyleHelper::mergeCellsSafe($sheet, 'B2:F2');
+
+        $r = 4;
+        $this->colHeaders($sheet, $r, [
+            'A' => 'CONCEPTO', 'B' => 'EMPLEADO / REGISTRO', 'C' => 'SUCURSAL',
+            'D' => 'FUENTE', 'E' => 'MONTO', 'F' => 'MOTIVO',
+        ]);
+        $r++;
+
+        $total = 0.0;
+        if (empty($rows)) {
+            $sheet->setCellValue("A{$r}", 'Sin montos pendientes de clasificación para este periodo.');
+            RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:F{$r}");
+            $r++;
+        } else {
+            foreach ($rows as $i => $row) {
+                $monto = (float) ($row['monto'] ?? 0);
+                RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", (string) ($row['concepto'] ?? ''));
+                RadiographyStyleHelper::setCellValueSafe($sheet, "B{$r}", mb_substr((string) ($row['empleado'] ?? '-'), 0, 60));
+                RadiographyStyleHelper::setCellValueSafe($sheet, "C{$r}", (string) ($row['sucursal'] ?? '-'));
+                RadiographyStyleHelper::setCellValueSafe($sheet, "D{$r}", (string) ($row['fuente'] ?? ''));
+                $sheet->setCellValue("E{$r}", $monto);
+                RadiographyStyleHelper::setCellValueSafe($sheet, "F{$r}", (string) ($row['motivo'] ?? ''));
+                $this->dataRow($sheet, "A{$r}:F{$r}", $i % 2 === 0);
+                RadiographyStyleHelper::applyCurrencyFormat($sheet, "E{$r}");
+                $total += $monto;
+                $r++;
+            }
+
+            $sheet->setCellValue("A{$r}", 'TOTAL CAPITAL HUMANO NO OPERATIVO');
+            $sheet->setCellValue("E{$r}", $total);
+            $this->totalsRow($sheet, "A{$r}:F{$r}");
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "E{$r}");
+            $r++;
+        }
+
+        $r++;
+        $brCalcGlobal = $snap['branch_radiography']['global'] ?? [];
+        $branchesList = $snap['branch_radiography']['branches'] ?? [];
+        $branchTotal  = fn (array $b) => (float) ($b['nomina_total'] ?? 0) + (float) ($b['comisiones'] ?? 0)
+            + (float) ($b['bonos'] ?? 0) + (float) ($b['vacaciones'] ?? 0) + (float) ($b['prima_vacacional'] ?? 0)
+            + array_sum(array_values((array) ($b['nomina_detalle'] ?? [])));
+        $sumSucursales = 0.0;
+        foreach ($branchesList as $b) {
+            $sumSucursales += $branchTotal($b);
+        }
+        $globalTotal = (float) ($brCalcGlobal['nomina_total'] ?? 0) + (float) ($brCalcGlobal['comisiones'] ?? 0)
+            + (float) ($brCalcGlobal['bonos'] ?? 0) + (float) ($brCalcGlobal['vacaciones'] ?? 0)
+            + (float) ($brCalcGlobal['prima_vacacional'] ?? 0)
+            + array_sum(array_values((array) ($brCalcGlobal['nomina_detalle'] ?? [])));
+
+        $this->sectionHeader($sheet, "A{$r}:F{$r}", 'CONCILIACIÓN');
+        $r++;
+        $sheet->setCellValue("A{$r}", 'Suma sucursales operativas');
+        $sheet->setCellValue("E{$r}", $sumSucursales);
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "E{$r}");
+        $r++;
+        $sheet->setCellValue("A{$r}", '+ Capital Humano no operativo');
+        $sheet->setCellValue("E{$r}", $total);
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "E{$r}");
+        $r++;
+        RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", '= Total Nómina y Capital Humano (GLOBAL)');
+        $sheet->setCellValue("E{$r}", $globalTotal);
+        $this->totalsRow($sheet, "A{$r}:F{$r}");
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "E{$r}");
+
+        foreach (['A' => 22, 'B' => 40, 'C' => 16, 'D' => 32, 'E' => 16, 'F' => 55] as $col => $width) {
+            $sheet->getColumnDimension($col)->setWidth($width);
+        }
+    }
+
     // ── PER-BRANCH SHEETS ────────────────────────────────────────────────────
 
     /**
@@ -2824,7 +2925,7 @@ class RadiographyWorkbookBuilder
         $this->sheetTitle($sheet, 'A1:C1', 'NÓMINA — ' . strtoupper($period->label));
 
         if (empty($byBrCon)) {
-            $sheet->setCellValue('A2', 'Sin movimientos NOI para este periodo.');
+            $sheet->setCellValue('A2', 'Sin movimientos de nómina para este periodo.');
             return;
         }
 
@@ -2899,7 +3000,7 @@ class RadiographyWorkbookBuilder
 
         $friendlyType = [
             'empleados_sin_sucursal'     => 'Empleados sin sucursal',
-            'gestores_sin_match_noi'     => 'Gestores sin coincidencia NOI',
+            'gestores_sin_match_noi'     => 'Gestores sin coincidencia de nómina',
             'cartera_sin_producto'       => 'Contratos sin producto',
             'cartera_vencida_recalculada'=> 'Cartera vencida recalculada',
             'nombre_fusionado'           => 'Nombre fusionado (variante)',
@@ -4556,7 +4657,7 @@ class RadiographyWorkbookBuilder
             $noiSheet->getStyle("C{$nr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
             $nr++;
         }
-        if ($noiRows->isEmpty()) { $noiSheet->setCellValue('A3', 'Sin movimientos de nómina NOI para este empleado en el periodo.'); }
+        if ($noiRows->isEmpty()) { $noiSheet->setCellValue('A3', 'Sin movimientos de nómina para este empleado en el periodo.'); }
         $this->setColWidths($noiSheet, ['A' => 38, 'B' => 16, 'C' => 18, 'D' => 16, 'E' => 20]);
 
         // ── Sheet 3: COLOCACIÓN ──────────────────────────────────────────────

@@ -20,12 +20,15 @@ class DatabaseUpdateCompletedMail extends Mailable
         public ?User $user,
         public PeriodDatabaseUpdateRun $run,
         public array $stats = [],
+        public array $failedSources = [],
     ) {}
 
     public function envelope(): Envelope
     {
+        $suffix = !empty($this->failedSources) ? ' con errores' : '';
+
         return new Envelope(
-            subject: 'Carga de registros completada — ' . $this->period->label,
+            subject: 'Carga de registros completada' . $suffix . ' — ' . $this->period->label,
         );
     }
 

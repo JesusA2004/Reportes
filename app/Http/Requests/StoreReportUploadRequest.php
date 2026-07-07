@@ -52,6 +52,9 @@ class StoreReportUploadRequest extends FormRequest
         if ($source?->code === 'gastos_lendus') {
             return 'mimes:pdf';
         }
+        if (in_array($source?->code, ['imss', 'rotacion'], true)) {
+            return 'mimes:pdf,xls,xlsx,xlsm';
+        }
         return 'mimes:xls,xlsx,xlsm';
     }
 
@@ -116,7 +119,7 @@ class StoreReportUploadRequest extends FormRequest
             'covered_period_ids.min'      => 'Selecciona al menos una semana.',
             'data_source_id.required'     => 'Debes seleccionar una fuente.',
             'file.required'               => 'Debes seleccionar un archivo.',
-            'file.mimes'                  => 'El archivo no tiene el formato correcto. Gastos Lendus requiere PDF; las demás fuentes requieren XLS/XLSX.',
+            'file.mimes'                  => 'El archivo no tiene el formato correcto. Gastos Lendus requiere PDF; IMSS y Rotación de Personal aceptan PDF, XLS, XLSX o XLSM; las demás fuentes requieren XLS/XLSX/XLSM.',
         ];
     }
 }

@@ -8,5 +8,6 @@ enum ReportUploadStatus: string {
     case Processing = 'processing';
     case Processed = 'processed';
     case Failed = 'failed';
+    case Replaced = 'replaced';
 
 }

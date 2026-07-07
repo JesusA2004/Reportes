@@ -14,12 +14,12 @@ class PeriodConsolidationService
 {
     public function consolidate(Period $period): array
     {
-        // For compound periods (monthly, etc.) fact data lives on base weekly period IDs.
+        // Fact data (NOI, Expenses) is stored under the period actually uploaded to — for
+        // monthly periods that's the monthly period_id itself, not its weekly components.
+        // Compound periods may ALSO have data on their base weekly IDs, so include both.
         $allPeriods = Period::all();
-        $dataIds = $period->resolveBaseWeeklyIds($allPeriods);
-        if (empty($dataIds)) {
-            $dataIds = [$period->id];
-        }
+        $weeklyIds  = $period->resolveBaseWeeklyIds($allPeriods);
+        $dataIds    = array_values(array_unique(array_merge($weeklyIds, [$period->id])));
 
         return DB::transaction(function () use ($period, $dataIds) {
             MonthlyEmployeeSummary::query()
