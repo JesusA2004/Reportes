@@ -78,12 +78,23 @@ class PersonIdentityResolverService
             return ['employee' => $exact, 'method' => 'exact_name', 'score' => 100.0];
         }
 
-        // 2. Fuzzy match — similar_text ≥ 80%
         $candidates = Employee::query()
             ->whereNotNull('normalized_name')
             ->when($excludeId, fn ($q) => $q->where('id', '!=', $excludeId))
             ->get(['id', 'full_name', 'normalized_name']);
 
+        // 2. Same words, different order (ej. apellidos invertidos: "PEREA REYES" vs
+        // "REYES PEREA"). Exige el MISMO conjunto exacto de palabras — nunca una persona
+        // distinta — así que se trata como una coincidencia de confianza equivalente a exacta.
+        $normalizedWords = collect(explode(' ', $normalized))->filter()->sort()->values();
+        foreach ($candidates as $c) {
+            $candidateWords = collect(explode(' ', (string) $c->normalized_name))->filter()->sort()->values();
+            if ($normalizedWords->count() > 1 && $normalizedWords->all() === $candidateWords->all()) {
+                return ['employee' => $c, 'method' => 'exact_name_reordered', 'score' => 100.0];
+            }
+        }
+
+        // 3. Fuzzy match — similar_text ≥ 80%
         $bestScore = 0.0;
         $bestMatch = null;
 

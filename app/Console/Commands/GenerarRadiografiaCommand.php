@@ -5,9 +5,11 @@ namespace App\Console\Commands;
 use App\Models\Period;
 use App\Models\PeriodRadiographyExport;
 use App\Services\EmployeeBranchAutoMatchService;
+use App\Services\FinanciamientoMotosAssignmentService;
 use App\Services\PeriodConsolidationService;
 use App\Services\PeriodDerivedDataCleaner;
 use App\Services\PeriodRadiographyService;
+use App\Services\Radiography\RadiographySnapshotBuilder;
 use App\Services\RadiografiaExportService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
@@ -25,6 +27,8 @@ class GenerarRadiografiaCommand extends Command
         private readonly PeriodConsolidationService    $consolidationService,
         private readonly PeriodDerivedDataCleaner      $cleaner,
         private readonly EmployeeBranchAutoMatchService $branchAutoMatch,
+        private readonly FinanciamientoMotosAssignmentService $motosAssignment,
+        private readonly RadiographySnapshotBuilder $snapshotBuilder,
     ) {
         parent::__construct();
     }
@@ -61,6 +65,12 @@ class GenerarRadiografiaCommand extends Command
         } else {
             $this->line('  <fg=green>✓ Auto-asignación omitida — todos los empleados ya tienen asignación. Usa --force-automatch para forzar.<//>');
         }
+
+        $this->line('  3b. Resolviendo Financiamiento de Motos/Cascos (empleado → sucursal)...');
+        $dataIds = $this->snapshotBuilder->resolveDataIdsPublic($period);
+        $motosResults = $this->motosAssignment->assignForPeriodOrFail($period, $dataIds);
+        $motosResueltos = count(array_filter($motosResults, fn (array $r) => $r['estado'] !== 'ya_asignado'));
+        $this->line("  <fg=green>✓ {$motosResueltos} registro(s) nuevos resueltos (" . count($motosResults) . ' en total, 0 sin asignar).</>');
 
         $this->line('  4. Consolidando empleados...');
         $this->consolidationService->consolidate($period);

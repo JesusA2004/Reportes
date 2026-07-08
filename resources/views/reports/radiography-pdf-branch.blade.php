@@ -81,6 +81,7 @@ $ingrCargosIni  = (float)($branchRow['cargos_inicio']         ?? 0);
 $ingrComAper    = (float)($branchRow['comision_apertura']     ?? 0);
 $ingrCargosAdic = (float)($branchRow['cargos_adicionales']    ?? 0);
 $ingrExcedRec   = (float)($branchRow['excedente_recuperado']  ?? 0);
+$ingrCrece30    = (float)($branchRow['seguro_crece_reconocido'] ?? 0);
 $ingrOtrosDet   = (array)($branchRow['otros_detalle']         ?? []);
 
 $gastosDetalle = (array)($branchRow['gastos_detalle'] ?? []);
@@ -132,6 +133,7 @@ $excedente  = (float)($branchRow['excedentes']       ?? 0);
         @if($ingrComAper > 0)<tr><td>Comisión por apertura</td><td class="r">{{ $fmt($ingrComAper) }}</td></tr>@endif
         @if($ingrCargosAdic > 0)<tr><td>Cargos adicionales</td><td class="r">{{ $fmt($ingrCargosAdic) }}</td></tr>@endif
         @if($ingrExcedRec > 0)<tr><td>Excedentes recuperados</td><td class="r">{{ $fmt($ingrExcedRec) }}</td></tr>@endif
+        @if($ingrCrece30 > 0)<tr><td>Seguro CRECE reconocido (30%)</td><td class="r">{{ $fmt($ingrCrece30) }}</td></tr>@endif
         @foreach($ingrOtrosDet as $otrosLabel => $otrosVal)
             @if($otrosVal != 0)<tr><td>{{ $otrosLabel }}</td><td class="r">{{ $fmt($otrosVal) }}</td></tr>@endif
         @endforeach

@@ -16,6 +16,7 @@ use App\Models\Placement;
 use App\Models\Portfolio;
 use App\Models\Recovery;
 use App\Models\ReportUpload;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
@@ -35,6 +36,7 @@ class PeriodDerivedDataCleaner
         Recovery::query()->where('period_id', $period->id)->delete();
         Portfolio::query()->where('period_id', $period->id)->delete();
         Expense::query()->where('period_id', $period->id)->delete();
+        DB::table('fact_rotacion')->where('period_id', $period->id)->delete();
 
         // ── 2. Consolidated employee summaries ──────────────────────────────
         MonthlyEmployeeSummary::query()->where('period_id', $period->id)->delete();
@@ -77,6 +79,7 @@ class PeriodDerivedDataCleaner
         Portfolio::query()->where('report_upload_id', $upload->id)->delete();
         Expense::query()->where('report_upload_id', $upload->id)->delete();
         LendusEmployeeDirectory::query()->where('report_upload_id', $upload->id)->delete();
+        DB::table('fact_rotacion')->where('report_upload_id', $upload->id)->delete();
 
         Log::info('PeriodDerivedDataCleaner: clearForUpload done', ['upload_id' => $upload->id]);
     }

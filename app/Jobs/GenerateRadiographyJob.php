@@ -10,9 +10,11 @@ use App\Models\PeriodRadiographyRun;
 use App\Models\PeriodSummary;
 use App\Models\User;
 use App\Services\EmployeeBranchAutoMatchService;
+use App\Services\FinanciamientoMotosAssignmentService;
 use App\Services\PeriodConsolidationService;
 use App\Services\PeriodDerivedDataCleaner;
 use App\Services\PeriodRadiographyService;
+use App\Services\Radiography\RadiographySnapshotBuilder;
 use App\Services\RadiografiaExportService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -47,6 +49,8 @@ class GenerateRadiographyJob implements ShouldQueue
         PeriodConsolidationService $consolidationService,
         PeriodDerivedDataCleaner $cleaner,
         EmployeeBranchAutoMatchService $branchAutoMatch,
+        FinanciamientoMotosAssignmentService $motosAssignment,
+        RadiographySnapshotBuilder $snapshotBuilder,
     ): void {
         @ini_set('memory_limit', '1024M');
         @ini_set('max_execution_time', '1800');
@@ -99,6 +103,14 @@ class GenerateRadiographyJob implements ShouldQueue
             } else {
                 $this->updateProgress($run, 66, 'Asignaciones verificadas', 'Todos los empleados ya tienen sucursal — omitiendo auto-asignación.');
             }
+
+            // ── 3b. Resolve Financiamiento de Motos/Cascos → employee_id/branch_id ─────
+            // Persisted directly on fact_expenses, never left in a "sin asignar" bucket.
+            // Throws (stopping generation) if any record can't be tied to a real employee
+            // and operative branch — see FinanciamientoMotosAssignmentService.
+            $this->updateProgress($run, 67, 'Resolviendo Financiamiento de Motos', 'Vinculando cada movimiento de Financiamiento de Motos/Cascos con su empleado y sucursal.');
+            $dataIds = $snapshotBuilder->resolveDataIdsPublic($period);
+            $motosAssignment->assignForPeriodOrFail($period, $dataIds);
 
             // ── 4. Consolidate employee summaries (populates fact_period_employee_summary) ──
             $this->updateProgress($run, 68, 'Consolidando resumen de empleados', 'Calculando totales de nómina, percepciones y deducciones por persona y sucursal.');

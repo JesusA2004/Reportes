@@ -25,9 +25,9 @@ class BranchRadiographyCalculator
     //     covered by NOI and by the official IMSS file — excluded everywhere, never counted.
     //   - PAGO FINANCIAMIENTO MOTO / COMPRA DE CASCOS: real operational expenses, but they're
     //     already reclassified into nomina_detalle by the dedicated per-employee block in
-    //     accumulateNomina() (branch_id is always NULL on this file, so branch must be resolved
-    //     via the employee name in `observations`). Counting them here too would double-count
-    //     them in both OPEX and Nómina y Capital Humano.
+    //     accumulateNomina(), reading the branch_id that FinanciamientoMotosAssignmentService
+    //     persists on these rows. Counting them here too would double-count them in both
+    //     OPEX and Nómina y Capital Humano.
     private const LENDUS_NOMINA_SKIP_CONCEPTS = [
         'NOMINA', 'PAGO DE IMSS', 'DEDUCCIONES', 'DEDUCCIONES GENERALES', 'PAGO PRESTAMO Z',
         'PAGO FINANCIAMIENTO MOTO', 'COMPRA DE CASCOS',
@@ -381,18 +381,54 @@ class BranchRadiographyCalculator
     // duplicar: si ya viene con transaction=CONDONACION, esa única exclusión la cubre.
     // Coincide exacto con la referencia validada manualmente: $18,324,971.76.
 
-    private function accumulateRecuperacion(array $dataIds, array $branchIds, array $operativeMap, array &$summaries, array $corporativoIds = []): void
+    /**
+     * ÚNICA fuente de verdad para las reglas de inclusión/exclusión de Recuperación.
+     * Usada por accumulateRecuperacion() (global/sucursal) y por
+     * RadiographySnapshotBuilder::buildRecoveryByProduct() (por producto) — ambas
+     * consultas DEBEN compartir exactamente estas mismas condiciones SQL para que
+     * global == sucursales == productos siempre, sin excepción ni parche por periodo.
+     *
+     * Reglas:
+     *  - Recuperación = únicamente transaction IN ('PAGO','DESCUENTO'). Todo lo demás
+     *    (CONDONACION, etc.) queda fuera por definición de transacción, no por texto de
+     *    concepto/operación.
+     *  - Seguros no-CRECE (is_savehearts=1 con savehearts_crece_share=0: Savehearts,
+     *    Cobertura Crédito Grupal/Comadres) se excluyen 100% — ni como componente ni
+     *    como recovery.
+     *  - Seguro CRECE (is_savehearts=1 con savehearts_crece_share>0) aporta ÚNICAMENTE
+     *    el 30% reconocido (savehearts_crece_share) al total de recovery; sus columnas
+     *    de componente (capital/interest/tax/etc.) se excluyen igual que cualquier
+     *    seguro, porque una prima de seguro no es capital/interés/impuesto de crédito.
+     *
+     * @return array{components: string, recovery: string}
+     */
+    public static function recoveryExclusionSql(): array
+    {
+        // `transaction` va entre backticks: es palabra reservada en SQLite (usada también
+        // en tests con RefreshDatabase) aunque no lo sea en MySQL — SQLite acepta backticks
+        // como identificador por compatibilidad, así que esto funciona en ambos motores.
+        return [
+            'components' => "WHEN `transaction` NOT IN ('PAGO', 'DESCUENTO') THEN 0
+                WHEN is_savehearts = 1 THEN 0",
+            'recovery'   => "WHEN `transaction` NOT IN ('PAGO', 'DESCUENTO') THEN 0
+                WHEN is_savehearts = 1 THEN COALESCE(savehearts_crece_share, 0)",
+        ];
+    }
+
+    /**
+     * Público (en vez de privado) para permitir pruebas unitarias dirigidas de las
+     * reglas de Recuperación sin pasar por buildBranches() completo, que también
+     * ejecuta accumulateColocacion() y otras consultas con funciones MySQL-only
+     * (JSON_EXTRACT, LEFT) no portables a SQLite (usado por la suite de pruebas).
+     */
+    public function accumulateRecuperacion(array $dataIds, array $branchIds, array $operativeMap, array &$summaries, array $corporativoIds = []): void
     {
         // Recuperación = únicamente Transacción PAGO/DESCUENTO. Todo lo demás (CONDONACION,
         // UNIFICACION DE CARTERA, etc.) queda fuera por definición de transacción, no por
         // texto de concepto/operación. Seguros no-CRECE (is_savehearts=1, crece_share=0)
         // se excluyen por completo; Seguro CRECE solo aporta el 30% reconocido
         // (savehearts_crece_share), nunca el 100% del bruto.
-        $exclComponents = "WHEN transaction NOT IN ('PAGO', 'DESCUENTO') THEN 0
-            WHEN is_savehearts = 1 THEN 0";
-
-        $exclRecovery = "WHEN transaction NOT IN ('PAGO', 'DESCUENTO') THEN 0
-            WHEN is_savehearts = 1 THEN COALESCE(savehearts_crece_share, 0)";
+        ['components' => $exclComponents, 'recovery' => $exclRecovery] = self::recoveryExclusionSql();
 
         $recoverySql = "SUM(CASE {$exclRecovery} ELSE total_amount END) as recovery,
         SUM(total_amount) as bruto,
@@ -410,7 +446,11 @@ class BranchRadiographyCalculator
               OR UPPER(COALESCE(operation,'')) LIKE '%GRUPAL%')
             THEN total_amount ELSE 0 END) as seguro_savehearts,
         SUM(CASE WHEN is_savehearts = 1 AND savehearts_crece_share > 0 THEN total_amount ELSE 0 END) as crece_bruto,
-        SUM(COALESCE(savehearts_crece_share, 0)) as crece_reconocido,
+        -- crece_reconocido debe reflejar EXACTAMENTE lo que entra a `recovery` arriba
+        -- (mismo filtro de transaction) para que nunca se pueda restar de más/menos en
+        -- el residual: una fila de CRECE condonada (transaction fuera de PAGO/DESCUENTO)
+        -- no debe aportar su 30% aquí tampoco, aunque tenga savehearts_crece_share > 0.
+        SUM(CASE WHEN `transaction` IN ('PAGO', 'DESCUENTO') THEN COALESCE(savehearts_crece_share, 0) ELSE 0 END) as crece_reconocido,
         SUM(CASE {$exclComponents} ELSE capital END) as capital,
         SUM(CASE {$exclComponents} ELSE interest END) as interest,
         SUM(CASE {$exclComponents} ELSE tax END) as tax,
@@ -420,8 +460,8 @@ class BranchRadiographyCalculator
         -- unificacion_excluida es INFORMATIVO: subconjunto de condonacion_excluida (operation
         -- 'UNIFICACION DE CARTERA' dentro de transaction='CONDONACION'). NO se resta aparte —
         -- ya está cubierta por la exclusión de transaction='CONDONACION' arriba (evita doble resta).
-        SUM(CASE WHEN transaction = 'CONDONACION' AND UPPER(COALESCE(operation,'')) LIKE '%UNIFICACION%' THEN total_amount ELSE 0 END) as unificacion_excluida,
-        SUM(CASE WHEN transaction = 'CONDONACION' THEN total_amount ELSE 0 END) as condonacion_excluida";
+        SUM(CASE WHEN `transaction` = 'CONDONACION' AND UPPER(COALESCE(operation,'')) LIKE '%UNIFICACION%' THEN total_amount ELSE 0 END) as unificacion_excluida,
+        SUM(CASE WHEN `transaction` = 'CONDONACION' THEN total_amount ELSE 0 END) as condonacion_excluida";
 
         // Pass 1: branches already mapped to an operative sucursal via branch_id
         $rows = DB::table('fact_recoveries')
@@ -453,16 +493,26 @@ class BranchRadiographyCalculator
             $summaries[$suc]['condonacion_excluida']    += (float) ($row->condonacion_excluida ?? 0);
         }
 
+        // Fallback rows (branch_id not in the operative map) are resolved via contract/
+        // accredited_name prefix in Pass 2/4/6 below. When there are none for this
+        // period, skip building those queries entirely — cheap existence check first,
+        // avoids running the heavier LEFT()/JSON_EXTRACT() fallback SQL for nothing.
+        $hasFallbackRows = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->whereNotIn('branch_id', $branchIds)
+            ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
+            ->exists();
+
         // Pass 2: route branches not in operativeMap (e.g. CUITLAHUAC, ATOTONILCO…)
         // Resolve to operative sucursal via contract prefix.
         // CORPORATIVO branches are explicitly excluded.
-        $fallback = DB::table('fact_recoveries')
+        $fallback = $hasFallbackRows ? DB::table('fact_recoveries')
             ->whereIn('period_id', $dataIds)
             ->whereNotIn('branch_id', $branchIds)
             ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
             ->selectRaw("branch_id, contract, {$recoverySql}")
             ->groupBy('branch_id', 'contract')
-            ->get();
+            ->get() : collect();
 
         foreach ($fallback as $row) {
             $suc = $this->resolver->resolveBranchNameFromCode((string) $row->contract);
@@ -502,14 +552,14 @@ class BranchRadiographyCalculator
         }
 
         // Pass 4: COMISIÓN POR APERTURA (fallback route branches)
-        $comApFb = DB::table('fact_recoveries')
+        $comApFb = $hasFallbackRows ? DB::table('fact_recoveries')
             ->whereIn('period_id', $dataIds)
             ->whereNotIn('branch_id', $branchIds)
             ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
             ->where('operation', 'COMISIÓN POR APERTURA')
             ->selectRaw("branch_id, LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3) AS prefix3, SUM(total_amount) AS comision")
             ->groupByRaw("branch_id, LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3)")
-            ->get();
+            ->get() : collect();
 
         foreach ($comApFb as $row) {
             $prefix3 = strtoupper(trim((string) $row->prefix3));
@@ -538,7 +588,7 @@ class BranchRadiographyCalculator
         }
 
         // Pass 6: ACUERDO CON CLIENTE (fallback route branches) — same exclusion filter
-        $acuerdosFb = DB::table('fact_recoveries')
+        $acuerdosFb = $hasFallbackRows ? DB::table('fact_recoveries')
             ->whereIn('period_id', $dataIds)
             ->whereNotIn('branch_id', $branchIds)
             ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
@@ -548,7 +598,7 @@ class BranchRadiographyCalculator
             ->where('is_savehearts', '!=', 1)
             ->selectRaw("branch_id, LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3) AS prefix3, SUM(charges_due) AS cargos")
             ->groupByRaw("branch_id, LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.accredited_name')), 3)")
-            ->get();
+            ->get() : collect();
 
         foreach ($acuerdosFb as $row) {
             $prefix3 = strtoupper(trim((string) $row->prefix3));
@@ -560,7 +610,7 @@ class BranchRadiographyCalculator
         // Pass 7: "Otros" desglosado por concepto real — mismas filas que componen el
         // residual (ningún componente nombrado las explica), agrupadas por su concepto
         // real de origen en vez de una bolsa genérica "Otros cobros".
-        $otrosCond = "transaction IN ('PAGO', 'DESCUENTO')
+        $otrosCond = "`transaction` IN ('PAGO', 'DESCUENTO')
             AND is_savehearts != 1
             AND operation != 'COMISIÓN POR APERTURA'
             AND COALESCE(capital,0) = 0 AND COALESCE(interest,0) = 0 AND COALESCE(tax,0) = 0
@@ -602,6 +652,12 @@ class BranchRadiographyCalculator
         // Residual: amounts in recuperacion_total not explained by any named component
         // (e.g. GASTOS DE COBRANZA rows where all 6 component columns are zero).
         // Ensures SUM(all components) == recuperacion_total exactly.
+        // IMPORTANTE: seguro_crece_reconocido (30% de CRECE) SÍ forma parte de
+        // recuperacion_total (ver $exclRecovery arriba) pero NO es uno de los 6
+        // componentes de fact_recoveries (capital/interest/tax/charges/etc. vienen en 0
+        // para esas filas de seguro) — debe restarse aquí como componente propio, si no,
+        // el residual lo absorbe en silencio y "otros_recuperacion" queda inflado con un
+        // monto que en realidad es Seguro CRECE reconocido, no un concepto desconocido.
         foreach ($summaries as $suc => &$sum) {
             $sum['otros_recuperacion'] = round(
                 $sum['recuperacion_total']
@@ -612,11 +668,83 @@ class BranchRadiographyCalculator
                 - $sum['cargos_adicionales']
                 - $sum['excedente_recuperado']
                 - $sum['cargos_inicio']
-                - $sum['comision_apertura'],
+                - $sum['comision_apertura']
+                - $sum['seguro_crece_reconocido'],
                 2
             );
         }
         unset($sum);
+    }
+
+    /**
+     * Recuperación por producto — usa la MISMA fuente canónica de reglas que
+     * accumulateRecuperacion() vía recoveryExclusionSql() (nunca una copia de texto
+     * divergente), agrupada por producto en vez de por sucursal. La suma de todas las
+     * filas == recuperacion_total global, siempre, incluyendo el 30% reconocido de
+     * Seguro CRECE como columna propia (nunca oculto dentro de un residual "otros").
+     */
+    public function buildRecoveryByProduct(array $dataIds): array
+    {
+        $maps           = $this->buildBranchMap();
+        $corporativoIds = $maps['corporativo'] ?? [];
+
+        ['components' => $excl, 'recovery' => $exclRecovery] = self::recoveryExclusionSql();
+
+        $rows = DB::table('fact_recoveries')
+            ->whereIn('period_id', $dataIds)
+            ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
+            ->selectRaw("
+                COALESCE(NULLIF(TRIM(product_name), ''), 'Sin producto') as product,
+                SUM(CASE {$exclRecovery} ELSE total_amount END) as recovery,
+                SUM(CASE {$excl} ELSE capital END) as capital,
+                SUM(CASE {$excl} ELSE interest END) as interest,
+                SUM(CASE {$excl} ELSE tax END) as tax,
+                SUM(CASE {$excl} ELSE charges_due END) as moratorios,
+                SUM(CASE {$excl} ELSE charges END) as cargos_adicionales,
+                SUM(CASE {$excl} ELSE excedente END) as excedente,
+                SUM(CASE WHEN operation = 'COMISIÓN POR APERTURA' THEN total_amount ELSE 0 END) as comision_apertura,
+                SUM(CASE WHEN operation = 'ACUERDO CON CLIENTE' AND charges_due > 0
+                    AND `transaction` IN ('PAGO', 'DESCUENTO') AND is_savehearts != 1
+                    THEN charges_due ELSE 0 END) as cargos_inicio,
+                SUM(CASE WHEN `transaction` IN ('PAGO', 'DESCUENTO') THEN COALESCE(savehearts_crece_share, 0) ELSE 0 END) as seguro_crece_reconocido
+            ")
+            ->groupBy('product_name')
+            ->havingRaw('SUM(CASE ' . $exclRecovery . ' ELSE total_amount END) != 0')
+            ->orderByDesc('recovery')
+            ->get();
+
+        $result = [];
+        $total  = 0.0;
+        foreach ($rows as $r) {
+            $recovery   = (float) $r->recovery;
+            $capital    = (float) $r->capital;
+            $interest   = (float) $r->interest;
+            $tax        = (float) $r->tax;
+            $morat      = (float) $r->moratorios;
+            $cargosAdic = (float) $r->cargos_adicionales;
+            $excedente  = (float) $r->excedente;
+            $comAp      = (float) $r->comision_apertura;
+            $cargosIni  = (float) $r->cargos_inicio;
+            $crece30    = (float) $r->seguro_crece_reconocido;
+            $otros      = round($recovery - $capital - $interest - $tax - $morat - $cargosAdic - $excedente - $comAp - $cargosIni - $crece30, 2);
+            $result[] = [
+                'product'                => $r->product,
+                'capital'                => $capital,
+                'interes'                => $interest,
+                'impuesto'               => $tax,
+                'moratorios'             => $morat,
+                'cargos_adicionales'     => $cargosAdic,
+                'excedente_recuperado'   => $excedente,
+                'comision_apertura'      => $comAp,
+                'cargos_inicio'          => $cargosIni,
+                'seguro_crece_reconocido'=> $crece30,
+                'otros'                  => $otros,
+                'total'                  => $recovery,
+            ];
+            $total += $recovery;
+        }
+
+        return ['rows' => $result, 'total' => round($total, 2)];
     }
 
     // ── Mora por bucket — FUENTE ÚNICA para cartera/mora (UI, Excel, PDF, dashboard) ──
@@ -1071,72 +1199,33 @@ class BranchRadiographyCalculator
             // operativa. (Antes se sumaba vía unassigned; eso inflaba el total.)
 
             // ── PAGO FINANCIAMIENTO MOTO / COMPRA DE CASCOS: existen ÚNICAMENTE en
-            //    gastos_lendus_excel (branch_id siempre NULL en ese archivo) — el PDF Lendus
-            //    no trae estos dos conceptos. NO se incluye PAGO FINANCIAMIENTO CELULAR de este
-            //    archivo (Financiamiento Celular target = $0.00 para Abril 2026).
+            //    gastos_lendus_excel. branch_id/employee_id se resuelven y PERSISTEN una sola
+            //    vez por FinanciamientoMotosAssignmentService::assignForPeriodOrFail(), como
+            //    paso obligatorio del pipeline de generación (antes de exportar Excel/PDF) —
+            //    aquí solo se lee branch_id, igual que cualquier otro gasto ya clasificado.
+            //    Si esta consulta corre sobre un periodo que nunca pasó por ese paso (ej. un
+            //    comando de auditoría suelto en datos antiguos), el monto cae a 'unassigned'
+            //    en vez de romper — el hard-stop real vive en el pipeline, no aquí.
             $lendusExcelId = DB::table('data_sources')->where('code', 'gastos_lendus_excel')->value('id');
             if ($lendusExcelId) {
-                // Build employee normalized_name → operative branch map for cross-reference.
-                // Motos/Cascos rows in gastos_lendus_excel always have branch_id=NULL because the
-                // Excel file has no sucursal column. The observation field contains the employee name,
-                // which we use to route each row to the correct operative branch.
-                $operativeBranchNames = array_keys($summaries);
-                $empBranchLookup = DB::table('employee_branch_assignments as eba')
-                    ->join('employees as e', 'eba.employee_id', '=', 'e.id')
-                    ->join('branches as b', 'eba.branch_id', '=', 'b.id')
-                    ->whereIn('b.name', $operativeBranchNames)
-                    ->select('e.normalized_name', DB::raw('b.name as branch_name'))
-                    ->get()
-                    ->mapWithKeys(fn ($r) => [$r->normalized_name => $r->branch_name])
-                    ->toArray();
-
-                $normalizeEmpName = function (string $raw): string {
-                    $s = mb_strtolower(trim($raw));
-                    $s = preg_replace('/[^a-záéíóúüñ\s]/u', ' ', $s);
-                    $map = ['á'=>'a','é'=>'e','í'=>'i','ó'=>'o','ú'=>'u','ü'=>'u','ñ'=>'n'];
-                    $s = strtr($s, $map);
-                    return preg_replace('/\s+/', ' ', trim($s));
-                };
-
                 $motoCascoRows = DB::table('fact_expenses as e')
                     ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
                     ->whereIn('e.period_id', $dataIds)
                     ->where('ru.data_source_id', $lendusExcelId)
                     ->where('e.category', self::NOMINA_CAT)
                     ->whereIn(DB::raw("UPPER(TRIM(COALESCE(e.concept,'')))"), ['PAGO FINANCIAMIENTO MOTO', 'COMPRA DE CASCOS'])
-                    ->selectRaw("UPPER(TRIM(COALESCE(e.concept,''))) as concept, COALESCE(NULLIF(e.paid_amount,0), e.amount) as amount, COALESCE(e.observations,'') as observations")
+                    ->selectRaw("UPPER(TRIM(COALESCE(e.concept,''))) as concept, COALESCE(NULLIF(e.paid_amount,0), e.amount) as amount, e.branch_id")
                     ->get();
 
                 foreach ($motoCascoRows as $row) {
                     $label  = str_contains((string) $row->concept, 'CASCO') ? 'Cascos' : 'Financiamiento de Motos';
                     $amount = (float) $row->amount;
 
-                    // Try to resolve branch via employee name in observations
-                    $resolvedBranch = null;
-                    $obsNorm = $normalizeEmpName((string) $row->observations);
-                    if ($obsNorm !== '') {
-                        foreach ($empBranchLookup as $empNorm => $branchName) {
-                            if ($empNorm !== '' && (str_contains($obsNorm, $empNorm) || str_contains($empNorm, $obsNorm))) {
-                                if (isset($summaries[$branchName])) {
-                                    $resolvedBranch = $branchName;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if ($resolvedBranch !== null) {
-                        $summaries[$resolvedBranch]['nomina_detalle'][$label] = ($summaries[$resolvedBranch]['nomina_detalle'][$label] ?? 0.0) + $amount;
+                    $suc = $row->branch_id ? ($operativeMap[(int) $row->branch_id] ?? null) : null;
+                    if ($suc && isset($summaries[$suc])) {
+                        $summaries[$suc]['nomina_detalle'][$label] = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amount;
                     } else {
                         $unassigned['nomina_detalle'][$label] = ($unassigned['nomina_detalle'][$label] ?? 0.0) + $amount;
-                        $unassigned['capital_humano_no_operativo'][] = [
-                            'concepto'  => $label,
-                            'empleado'  => trim((string) $row->observations) ?: 'Sin identificar',
-                            'sucursal'  => null,
-                            'fuente'    => 'Gastos Lendus (Nómina y Capital Humano)',
-                            'monto'     => $amount,
-                            'motivo'    => 'No se pudo determinar la sucursal del colaborador a partir del nombre en observaciones.',
-                        ];
                     }
                 }
             }
@@ -1238,22 +1327,18 @@ class BranchRadiographyCalculator
             if ($suc && isset($summaries[$suc])) {
                 $summaries[$suc]['nomina_detalle']['IMSS Patronal'] = ($summaries[$suc]['nomina_detalle']['IMSS Patronal'] ?? 0.0) + $amount;
             } else {
+                // Sucursal no operativa (CORPORATIVO/TULANCINGO/etc., no forma parte de las
+                // sucursales del reporte) — el monto se suma al total GLOBAL de Nómina y
+                // Capital Humano vía sumGlobal(), solo no se desglosa por sucursal.
                 $unassigned['nomina_detalle']['IMSS Patronal'] = ($unassigned['nomina_detalle']['IMSS Patronal'] ?? 0.0) + $amount;
-                $unassigned['capital_humano_no_operativo'][] = [
-                    'concepto'  => 'IMSS Patronal',
-                    'empleado'  => null,
-                    'sucursal'  => $row->branch_name ?? 'Sin sucursal',
-                    'fuente'    => 'Archivo IMSS oficial',
-                    'monto'     => $amount,
-                    'motivo'    => 'Sucursal no operativa (no forma parte de las 12 sucursales del reporte).',
-                ];
             }
         }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private function emptyBranchSummary(string $sucursal): array
+    /** Público para permitir pruebas unitarias dirigidas (ver accumulateRecuperacion()). */
+    public function emptyBranchSummary(string $sucursal): array
     {
         return [
             'sucursal'            => $sucursal,
@@ -1526,7 +1611,6 @@ class BranchRadiographyCalculator
             'pension_alimenticia_detectada' => 0.0, // D010 — auditoría, NO se suma a Nómina y Capital Humano
             'prestamo_personal_detectado'   => 0.0, // D004 — auditoría, NO se suma a Nómina y Capital Humano
             'deducciones_no_sumadas'        => [],  // label => amount — demás D-codes, solo auditoría
-            'capital_humano_no_operativo'   => [],  // detalle: concepto/empleado/sucursal/fuente/monto/motivo
         ];
     }
 }

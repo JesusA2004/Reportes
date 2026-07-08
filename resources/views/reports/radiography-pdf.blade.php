@@ -525,6 +525,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         @if($ingrComAper > 0)<tr><td>Comisión por apertura</td><td class="r">{{ $fmt($ingrComAper) }}</td></tr>@endif
         @if($ingrCargosAdic > 0)<tr><td>Cargos adicionales</td><td class="r">{{ $fmt($ingrCargosAdic) }}</td></tr>@endif
         @if($ingrExcedRec > 0)<tr><td>Excedentes recuperados</td><td class="r">{{ $fmt($ingrExcedRec) }}</td></tr>@endif
+        @if($ingrCrece30 > 0)<tr><td>Seguro CRECE reconocido (30%)</td><td class="r">{{ $fmt($ingrCrece30) }}</td></tr>@endif
         @foreach($ingrOtrosDet as $otrosLabel => $otrosVal)
             @if($otrosVal != 0)<tr><td>{{ $otrosLabel }}</td><td class="r">{{ $fmt($otrosVal) }}</td></tr>@endif
         @endforeach
@@ -547,15 +548,14 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <th class="r">Cargos adic.</th>
             <th class="r">Cargos inicio</th>
             <th class="r">Com. apertura</th>
-            <th class="r">Conceptos adic.</th>
+            <th class="r">Excedentes</th>
+            <th class="r">Seguro CRECE 30%</th>
+            <th class="r">Otros</th>
             <th class="r">Total</th>
         </tr>
     </thead>
     <tbody>
         @foreach($brBranches as $bi => $bb)
-        @php
-            $bbOtros = (float)($bb['excedente_recuperado'] ?? 0) + (float)($bb['otros_recuperacion'] ?? 0);
-        @endphp
         <tr @if($bi % 2 === 1) style="background:#f8fafc;" @endif>
             <td class="b">{{ $bb['sucursal'] }}</td>
             <td class="r">{{ $fmt((float)($bb['capital_recuperado'] ?? 0)) }}</td>
@@ -565,15 +565,14 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <td class="r">{{ $fmt((float)($bb['cargos_adicionales'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($bb['cargos_inicio'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($bb['comision_apertura'] ?? 0)) }}</td>
-            <td class="r">{{ $fmt($bbOtros) }}</td>
+            <td class="r">{{ $fmt((float)($bb['excedente_recuperado'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($bb['seguro_crece_reconocido'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($bb['otros_recuperacion'] ?? 0)) }}</td>
             <td class="r b">{{ $fmt((float)($bb['recuperacion_total'] ?? 0)) }}</td>
         </tr>
         @endforeach
     </tbody>
     <tfoot>
-        @php
-            $globalOtros = (float)($brGlobal['excedente_recuperado'] ?? 0) + (float)($brGlobal['otros_recuperacion'] ?? 0);
-        @endphp
         <tr>
             <td>TOTAL</td>
             <td class="r">{{ $fmt((float)($brGlobal['capital_recuperado'] ?? 0)) }}</td>
@@ -583,7 +582,9 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <td class="r">{{ $fmt((float)($brGlobal['cargos_adicionales'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($brGlobal['cargos_inicio'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($brGlobal['comision_apertura'] ?? 0)) }}</td>
-            <td class="r">{{ $fmt($globalOtros) }}</td>
+            <td class="r">{{ $fmt((float)($brGlobal['excedente_recuperado'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($brGlobal['seguro_crece_reconocido'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($brGlobal['otros_recuperacion'] ?? 0)) }}</td>
             <td class="r">{{ $fmt($ingrTotal) }}</td>
         </tr>
     </tfoot>
@@ -604,7 +605,9 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <th class="r">Moratorios</th>
             <th class="r">Cargos adic.</th>
             <th class="r">Com. apertura</th>
-            <th class="r">Conceptos adic.</th>
+            <th class="r">Excedentes</th>
+            <th class="r">Seguro CRECE 30%</th>
+            <th class="r">Otros</th>
             <th class="r">Total</th>
         </tr>
     </thead>
@@ -618,6 +621,8 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <td class="r">{{ $fmt((float)($pr['moratorios'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($pr['cargos_adicionales'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($pr['comision_apertura'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($pr['excedente_recuperado'] ?? 0)) }}</td>
+            <td class="r">{{ $fmt((float)($pr['seguro_crece_reconocido'] ?? 0)) }}</td>
             <td class="r">{{ $fmt((float)($pr['otros'] ?? 0)) }}</td>
             <td class="r b">{{ $fmt((float)($pr['total'] ?? 0)) }}</td>
         </tr>
@@ -626,8 +631,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
     <tfoot>
         <tr>
             <td>TOTAL</td>
-            <td colspan="6"></td>
-            <td></td>
+            <td colspan="8"></td>
             <td class="r">{{ $fmt($ingrTotal) }}</td>
         </tr>
     </tfoot>
@@ -792,7 +796,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         @foreach($activeLoansByBranch as $alBranchName => $alData)
         @php $alPct = $alData['saldo'] > 0 ? round($alData['vencido'] / $alData['saldo'] * 100, 2) : 0; @endphp
         <tr>
-            <td class="b">{{ $alBranchName }}</td>
+            <td class="b">{{ $alBranchName === 'Sin sucursal' ? '—' : $alBranchName }}</td>
             <td class="r">{{ $fmtn($alData['count']) }}</td>
             <td class="r">{{ $fmt($alData['saldo']) }}</td>
             <td class="r" @if($alData['vencido'] > 0) style="color:#b91c1c;" @endif>{{ $fmt($alData['vencido']) }}</td>

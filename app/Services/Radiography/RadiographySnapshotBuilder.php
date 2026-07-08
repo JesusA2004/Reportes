@@ -189,7 +189,7 @@ class RadiographySnapshotBuilder
                                 + $cargosVencimiento + $excedenteRecuperado + $seguroCreceReconocido;
         $margenEbitda           = $ventaGlobal > 0 ? round($ebitdaGlobal / $ventaGlobal * 100, 2) : 0.0;
 
-        return [
+        $snapshot = [
             'period' => [
                 'id'         => $period->id,
                 'label'      => $period->label,
@@ -260,7 +260,7 @@ class RadiographySnapshotBuilder
                 'expenses_matrix'            => $this->buildExpensesMatrix($period),
                 'interbranch_loans'          => $interbranchLoans,
                 'recovery_detail'            => $this->buildRecoveryDetail($period),
-                'recovery_by_product'        => $this->buildRecoveryByProduct($period),
+                'recovery_by_product'        => $recoveryByProduct = $this->buildRecoveryByProduct($period),
                 'portfolio_by_branch_product' => $this->buildPortfolioByBranchProduct($period),
                 'mora_by_branch'             => $this->buildMoraByBranch($period),
                 'mora_by_product'            => $this->buildMoraByProduct($period),
@@ -281,6 +281,56 @@ class RadiographySnapshotBuilder
                 'portfolio_by_branch'     => $this->chartByBranch($period, 'cartera'),
             ],
         ];
+
+        $this->assertRecoveryReconciles($branchCalcGlobal, $branchCalcBranches, $recoveryByProduct);
+
+        return $snapshot;
+    }
+
+    /**
+     * Guardia de cuadre obligatoria: Recuperación global == suma por componentes ==
+     * suma por sucursales == suma por productos, con tolerancia máxima $0.01. Se
+     * ejecuta en cada generación de reporte (todos los periodos, no solo Junio) para
+     * que un futuro archivo con formato distinto NUNCA produzca un reporte descuadrado
+     * en silencio — si algo no cuadra, se detiene la generación aquí mismo.
+     */
+    private function assertRecoveryReconciles(array $global, array $branches, array $recoveryByProduct): void
+    {
+        $globalTotal = round((float) ($global['recuperacion_total'] ?? 0), 2);
+
+        $componentSum = round(
+            (float) ($global['capital_recuperado']      ?? 0)
+            + (float) ($global['interes_recuperado']     ?? 0)
+            + (float) ($global['impuesto_recuperado']    ?? 0)
+            + (float) ($global['charges']                ?? 0)
+            + (float) ($global['cargos_adicionales']     ?? 0)
+            + (float) ($global['excedente_recuperado']   ?? 0)
+            + (float) ($global['cargos_inicio']          ?? 0)
+            + (float) ($global['comision_apertura']      ?? 0)
+            + (float) ($global['seguro_crece_reconocido'] ?? 0)
+            + (float) ($global['otros_recuperacion']     ?? 0),
+            2
+        );
+
+        $branchSum = round(array_sum(array_map(
+            fn ($b) => (float) ($b['recuperacion_total'] ?? 0),
+            $branches
+        )), 2);
+
+        $productSum = round((float) ($recoveryByProduct['total'] ?? 0), 2);
+
+        $tolerance = 0.01;
+        $diffComponents = round($globalTotal - $componentSum, 2);
+        $diffBranches   = round($globalTotal - $branchSum, 2);
+        $diffProducts   = round($globalTotal - $productSum, 2);
+
+        if (abs($diffComponents) > $tolerance || abs($diffBranches) > $tolerance || abs($diffProducts) > $tolerance) {
+            throw new \RuntimeException(sprintf(
+                'Recuperación descuadrada: global=%.2f, componentes=%.2f (diff %.2f), sucursales=%.2f (diff %.2f), productos=%.2f (diff %.2f). '
+                . 'No se generó el reporte — revisar accumulateRecuperacion()/buildRecoveryByProduct() antes de reintentar.',
+                $globalTotal, $componentSum, $diffComponents, $branchSum, $diffBranches, $productSum, $diffProducts
+            ));
+        }
     }
 
     // ── PERIOD IDS RESOLVER ───────────────────────────────────────────────────
@@ -2469,70 +2519,12 @@ class RadiographySnapshotBuilder
     }
 
     /**
-     * Recuperación por producto — mismas exclusiones y componentes que
-     * BranchRadiographyCalculator::accumulateRecuperacion(), agrupados por producto en
-     * vez de por sucursal. La suma de todas las filas == recuperacion_total global.
+     * Recuperación por producto — delega en BranchRadiographyCalculator, que es dueño
+     * de la única fuente de verdad de reglas de Recuperación (recoveryExclusionSql()).
      */
     private function buildRecoveryByProduct(Period $period): array
     {
-        $maps           = $this->branchCalculator->buildBranchMap();
-        $corporativoIds = $maps['corporativo'] ?? [];
-
-        $excl = "WHEN is_savehearts = 1 THEN 0
-            WHEN transaction = 'CONDONACION' THEN 0
-            WHEN is_savehearts = 0 AND (
-                UPPER(COALESCE(concept,'')) LIKE '%COBERTURA%'
-                OR UPPER(COALESCE(operation,'')) LIKE '%COBERTURA%'
-                OR UPPER(COALESCE(concept,'')) LIKE '%SEGURO%'
-                OR UPPER(COALESCE(operation,'')) LIKE '%SEGURO%'
-                OR UPPER(COALESCE(concept,'')) LIKE '%UNIFICACION%'
-                OR UPPER(COALESCE(operation,'')) LIKE '%UNIFICACION%'
-            ) THEN 0";
-
-        $rows = DB::table('fact_recoveries')
-            ->whereIn('period_id', $this->dataIds)
-            ->when(!empty($corporativoIds), fn ($q) => $q->whereNotIn('branch_id', $corporativoIds))
-            ->selectRaw("
-                COALESCE(NULLIF(TRIM(product_name), ''), 'Sin producto') as product,
-                SUM(CASE {$excl} ELSE total_amount END) as recovery,
-                SUM(CASE {$excl} ELSE capital END) as capital,
-                SUM(CASE {$excl} ELSE interest END) as interest,
-                SUM(CASE {$excl} ELSE tax END) as tax,
-                SUM(CASE {$excl} ELSE charges_due END) as moratorios,
-                SUM(CASE {$excl} ELSE charges END) as cargos_adicionales,
-                SUM(CASE WHEN operation = 'COMISIÓN POR APERTURA' THEN total_amount ELSE 0 END) as comision_apertura
-            ")
-            ->groupBy('product_name')
-            ->havingRaw('SUM(CASE ' . $excl . ' ELSE total_amount END) != 0')
-            ->orderByDesc('recovery')
-            ->get();
-
-        $result = [];
-        $total  = 0.0;
-        foreach ($rows as $r) {
-            $recovery   = (float) $r->recovery;
-            $capital    = (float) $r->capital;
-            $interest   = (float) $r->interest;
-            $tax        = (float) $r->tax;
-            $morat      = (float) $r->moratorios;
-            $cargosAdic = (float) $r->cargos_adicionales;
-            $comAp      = (float) $r->comision_apertura;
-            $otros      = round($recovery - $capital - $interest - $tax - $morat - $cargosAdic - $comAp, 2);
-            $result[] = [
-                'product'           => $r->product,
-                'capital'           => $capital,
-                'interes'           => $interest,
-                'impuesto'          => $tax,
-                'moratorios'        => $morat,
-                'cargos_adicionales'=> $cargosAdic,
-                'comision_apertura' => $comAp,
-                'otros'             => $otros,
-                'total'             => $recovery,
-            ];
-            $total += $recovery;
-        }
-
-        return ['rows' => $result, 'total' => round($total, 2)];
+        return $this->branchCalculator->buildRecoveryByProduct($this->dataIds);
     }
 
     private function buildPlacementByBranchProduct(Period $period): array
