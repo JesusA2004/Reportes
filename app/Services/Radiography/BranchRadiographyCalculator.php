@@ -39,6 +39,28 @@ class BranchRadiographyCalculator
     // flow into gastos_erp_total normally.
     private const SEGUROS_LENDUS_CATS = ['Pólizas'];
 
+    // Labels shown in the Nómina y Capital Humano table for transparency but NOT summed into
+    // the employer cost total. Includes:
+    //   - Descuento* = employee withholdings (not a company cost)
+    //   - IMSS = patronal cost audited separately via reportes:audit-imss and
+    //     accumulateImssPatronal(); excluded here to avoid double-counting in gastosTotal.
+    // Shared with WorkbookBuilder and Vue (must be kept in sync with NOI_DEDUCTION_LABELS in JS).
+    public const NOMINA_DEDUCTION_LABELS = [
+        'IMSS',
+        'Descuentos Infonavit',
+        'Descuento Servicios Moto',
+        'Financiamiento Celular',
+        'Descuento de uniformes',
+        'Descuento gastos sin comprobar',
+        'Descuento extravío tarjeta de circulación',
+        'Descuentos Tienda Mr Lana',
+        'Descuento Servicios Automóvil',
+        'Descuento faltante en caja',
+        'Anticipo de nómina',
+        'Pensión Alimenticia',
+        'Descuentos FONACOT',
+    ];
+
 
     public function __construct(private readonly BranchResolverService $resolver) {}
 
@@ -916,7 +938,7 @@ class BranchRadiographyCalculator
                     $summaries[$suc]['gastos_operativos'] += $amt;
                     $summaries[$suc]['gastos_erp_total']  += $amt;
                     $concept   = (string) ($row->concept ?? '');
-                    $canonical = $this->canonicalGastoConcept($cat, $concept);
+                    $canonical = $this->canonicalGastoConcept($cat, $concept) ?? $this->unmappedGastoLabel($cat, $concept);
                     $summaries[$suc]['gastos_detalle'][$canonical] = ($summaries[$suc]['gastos_detalle'][$canonical] ?? 0.0) + $amt;
                     continue;
                 }
@@ -927,23 +949,20 @@ class BranchRadiographyCalculator
                 $conceptUp = strtoupper(trim((string) ($row->concept ?? '')));
                 $conceptUp = preg_replace('/\s+/u', ' ', $conceptUp) ?? $conceptUp;
 
-                // The PDF (gastos_lendus) report genuinely records these three concepts with
-                // only a generic label — "PAGO", "COMPRA DE", "ANTICIPO DE" — under category
-                // "Gastos Operativos" (PDF column "PAGOS Y SERVICIOS"); it does not carry the
-                // full description. Cross-checked against the Excel export of the same period
-                // (gastos_lendus_excel, which DOES carry the full concept "PAGO FINANCIAMIENTO
-                // MOTO" / "COMPRA DE CASCOS" / "ANTICIPO DE NOMINA" per employee): the totals
-                // and per-employee amounts match exactly, confirming these are the SAME
-                // transactions reported twice, not distinct expenses. Since the Excel file
-                // already contributes them correctly to Nómina y Capital Humano via
-                // accumulateNomina(), excluding them here avoids double-counting in OPEX.
+                // The PDF (gastos_lendus) records some concepts with only a generic label under
+                // "Gastos Operativos". Cross-checked against the Excel for the same period:
                 //
-                // Risk for future periods: if Lendus ever reuses "PAGO"/"COMPRA DE" under
-                // "Gastos Operativos" for something unrelated to financing, this would
-                // wrongly exclude it from OPEX. `reportes:audit-nomina-periodo` cross-checks
-                // this exclusion against the Excel motos/cascos total every run and flags a
-                // mismatch — always review that warning after loading a new month's files.
-                if ($cat === 'Gastos Operativos' && in_array($conceptUp, ['PAGO', 'COMPRA DE', 'ANTICIPO DE'], true)) {
+                // "PAGO" = PAGO FINANCIAMIENTO MOTO → real operational expense (vendor payment
+                //   for employee moto financing). Goes to OPEX here; the Excel counterpart goes
+                //   to nomina_detalle['Financiamiento de Motos'] via accumulateNomina() as a
+                //   labor benefit cost. Both are intentionally shown in their respective sections.
+                //
+                // "COMPRA DE" = COMPRA DE CASCOS → nómina labor cost, already handled by
+                //   accumulateNomina() motos section from Excel. Excluded here to avoid double-count.
+                //
+                // "ANTICIPO DE" = ANTICIPO DE NOMINA → handled via isNominaReclass or
+                //   accumulateNomina() expRows from Excel. Excluded here to avoid double-count.
+                if ($cat === 'Gastos Operativos' && in_array($conceptUp, ['COMPRA DE', 'ANTICIPO DE'], true)) {
                     $summaries[$suc]['gastos_lendus_excluido_nomina'] += $amt;
                     $summaries[$suc]['gastos_lendus_pago_generico_excluido'][$conceptUp] = ($summaries[$suc]['gastos_lendus_pago_generico_excluido'][$conceptUp] ?? 0.0) + $amt;
                     continue;
@@ -961,11 +980,19 @@ class BranchRadiographyCalculator
                 }
                 $isNominaExpense = in_array($cat, self::NOMINA_EXPENSE_CATS, true);
                 $isSegurosPuente = in_array($cat, self::SEGUROS_LENDUS_CATS, true);
-                // FINIQUITO / GASTOS MEDICOS bajo 'Nómina y Capital Humano': operacionales (no están
-                // en LENDUS_NOMINA_SKIP_CONCEPTS) pero ligados a empleados — se reclasifican a
-                // Nómina y Capital Humano en vez de OPEX, para no duplicar el gasto.
+                // Conceptos bajo 'Nómina y Capital Humano' en Lendus que no son nómina pura
+                // (no están en LENDUS_NOMINA_SKIP_CONCEPTS) pero deben ir al apartado de
+                // Nómina y Capital Humano, no a OPEX: Finiquito, Gastos médicos, FONACOT,
+                // anticipo de nómina, y demás deducciones al empleado.
                 $isNominaReclass = $cat === self::NOMINA_CAT && !$isNomina && (
-                    str_contains($conceptUp, 'FINIQUITO') || str_contains($conceptUp, 'MEDICO') || str_contains($conceptUp, 'MÉDICO')
+                    str_contains($conceptUp, 'FINIQUITO')
+                    || str_contains($conceptUp, 'MEDICO')
+                    || str_contains($conceptUp, 'MÉDICO')
+                    || str_contains($conceptUp, 'FONACOT')
+                    || str_contains($conceptUp, 'INFONAVIT')
+                    || str_contains($conceptUp, 'UNIFORME')
+                    || str_contains($conceptUp, 'PENSION')
+                    || str_contains($conceptUp, 'PENSIÓN')
                 );
 
                 if ($isExcedente) {
@@ -988,7 +1015,7 @@ class BranchRadiographyCalculator
                     $summaries[$suc]['gastos_operativos']  += $amt;
                     $summaries[$suc]['gastos_lendus_total'] += $amt;
                     $concept   = (string) ($row->concept ?? '');
-                    $canonical = $this->canonicalGastoConcept($cat, $concept);
+                    $canonical = $this->canonicalGastoConcept($cat, $concept) ?? $this->unmappedGastoLabel($cat, $concept);
                     $summaries[$suc]['gastos_detalle'][$canonical] = ($summaries[$suc]['gastos_detalle'][$canonical] ?? 0.0) + $amt;
                 }
             }
@@ -1100,34 +1127,33 @@ class BranchRadiographyCalculator
                 continue;
             }
 
-            // D010 Pensión Alimenticia: detectado en NOI pero el target de Abril 2026 lo deja
-            // en blanco/cero. NO se suma al total de Nómina y Capital Humano — se registra
-            // aparte (pension_alimenticia_detectada) únicamente para auditoría.
-            if (str_starts_with($concept, 'D010')) {
-                $unassigned['pension_alimenticia_detectada'] += $amount;
-                continue;
-            }
-
-            // D004 Préstamo Personal: detectado en NOI pero NO forma parte del listado/total
-            // validado de Nómina y Capital Humano para Abril 2026. Se registra aparte
-            // (prestamo_personal_detectado) únicamente para auditoría, igual que D010.
+            // D004 Préstamo Personal: no forma parte del listado de Nómina y Capital Humano.
+            // Se registra solo para auditoría.
             if (str_starts_with($concept, 'D004')) {
                 $unassigned['prestamo_personal_detectado'] += $amount;
                 continue;
             }
 
-            // Todas las demás deducciones NOI (D003 Anticipo, D094/092/105/129 Infonavit,
-            // D113 Servicio de Moto, D123/128 Préstamo Moto, D002/009 IMSS trabajador,
-            // D125 Financiamiento Celular, D112/114/117/118/119/122/126/127, etc.) son
-            // descuentos AL TRABAJADOR — explican su neto, pero NO son un gasto adicional
-            // de la empresa y NO se suman a Nómina y Capital Humano (mismo criterio que
-            // D004/D010). D123 en particular duplicaría PAGO FINANCIAMIENTO MOTO de Gastos
-            // Lendus si se sumara aquí. Se registran para auditoría, nunca en nomina_detalle.
+            // D002/D009 IMSS trabajador: deducción al empleado, informativa pero NO es el
+            // costo patronal IMSS (ese viene del archivo IMSS vía accumulateImssPatronal).
+            // Se omite del display para no confundir con el renglón 'IMSS' patronal.
+            if ((bool) preg_match('/^D(002|009)/', $concept)) {
+                continue;
+            }
+
+            // Resto de deducciones NOI: se muestran en la tabla (nomina_detalle) por
+            // transparencia, pero son descuentos AL TRABAJADOR — NO se suman al total del
+            // empleador. El WorkbookBuilder y la UI los excluyen del Total usando
+            // NOMINA_DEDUCTION_LABELS. D123/D128 Préstamo Moto se omiten porque duplicarían
+            // PAGO FINANCIAMIENTO MOTO del Excel Lendus ya contado en nomina_detalle.
+            if ((bool) preg_match('/^D(123|128)/', $concept)) {
+                continue; // Préstamo Moto — ya contado vía Lendus Excel en accumulateNomina
+            }
+
             $label = match (true) {
+                str_starts_with($concept, 'D010')                    => 'Pensión Alimenticia',
                 (bool) preg_match('/^D(092|094|105|129)/', $concept) => 'Descuentos Infonavit',
                 str_starts_with($concept, 'D113')                    => 'Descuento Servicios Moto',
-                (bool) preg_match('/^D(123|128)/', $concept)         => 'Préstamo Moto (deducción NOI)',
-                (bool) preg_match('/^D(002|009)/', $concept)         => 'IMSS trabajador (deducción NOI)',
                 str_starts_with($concept, 'D125')                    => 'Financiamiento Celular',
                 str_starts_with($concept, 'D112')                    => 'Descuento de uniformes',
                 str_starts_with($concept, 'D119')                    => 'Descuento gastos sin comprobar',
@@ -1136,10 +1162,16 @@ class BranchRadiographyCalculator
                 str_starts_with($concept, 'D114')                    => 'Descuento Servicios Automóvil',
                 str_starts_with($concept, 'D118')                    => 'Descuento faltante en caja',
                 str_starts_with($concept, 'D003')                    => 'Anticipo de nómina',
-                default                           => "Deducción NOI {$concept}",
+                default                                              => "Deducción NOI {$concept}",
             };
 
-            $unassigned['deducciones_no_sumadas'][$label] = ($unassigned['deducciones_no_sumadas'][$label] ?? 0.0) + $amount;
+            // Route per-branch (or unassigned) — displayed in table, excluded from Total
+            $suc = ($branchId !== -1) ? ($operativeMap[$branchId] ?? null) : null;
+            if ($suc && isset($summaries[$suc])) {
+                $summaries[$suc]['nomina_detalle'][$label] = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amount;
+            } else {
+                $unassigned['nomina_detalle'][$label] = ($unassigned['nomina_detalle'][$label] ?? 0.0) + $amount;
+            }
         }
 
         // ── Gastos de nómina desde fact_expenses (por sucursal): Gasolina, Finiquito,
@@ -1320,17 +1352,17 @@ class BranchRadiographyCalculator
             ->get();
 
         foreach ($rows as $row) {
-            $branchId = (int) $row->branch_id;
-            $amount   = (float) $row->total;
+            $branchId   = (int)    $row->branch_id;
+            $branchName = (string) ($row->branch_name ?? 'Sin nombre');
+            $amount     = (float)  $row->total;
 
             $suc = $operativeMap[$branchId] ?? null;
             if ($suc && isset($summaries[$suc])) {
-                $summaries[$suc]['nomina_detalle']['IMSS Patronal'] = ($summaries[$suc]['nomina_detalle']['IMSS Patronal'] ?? 0.0) + $amount;
+                $summaries[$suc]['nomina_detalle']['IMSS'] = ($summaries[$suc]['nomina_detalle']['IMSS'] ?? 0.0) + $amount;
             } else {
-                // Sucursal no operativa (CORPORATIVO/TULANCINGO/etc., no forma parte de las
-                // sucursales del reporte) — el monto se suma al total GLOBAL de Nómina y
-                // Capital Humano vía sumGlobal(), solo no se desglosa por sucursal.
-                $unassigned['nomina_detalle']['IMSS Patronal'] = ($unassigned['nomina_detalle']['IMSS Patronal'] ?? 0.0) + $amount;
+                // Non-operative (CORPORATIVO, TULANCINGO, etc.): excluded from the report.
+                // Tracked in imss_excluido for audit but NOT added to unassigned/global totals.
+                $unassigned['imss_excluido'][$branchName] = ($unassigned['imss_excluido'][$branchName] ?? 0.0) + $amount;
             }
         }
     }
@@ -1462,7 +1494,6 @@ class BranchRadiographyCalculator
             return 'Financiamiento Celular';
         }
         return match (true) {
-            str_contains($con, 'IMSS')                                                              => 'IMSS',
             str_contains($con, 'CASCO')                                                             => 'Cascos',
             str_contains($con, 'MEDICO') || str_contains($con, 'MÉDICO')                           => 'Gastos médicos',
             str_contains($con, 'FINIQUITO')                                                         => 'Finiquito',
@@ -1470,6 +1501,7 @@ class BranchRadiographyCalculator
             str_contains($con, 'FINANCIAMIENTO MOTO') || str_contains($con, 'MOTO')                => 'Financiamiento de Motos',
             str_contains($con, 'UNIFORME')                                                          => 'Descuento de uniformes',
             str_contains($con, 'INFONAVIT')                                                         => 'Descuentos Infonavit',
+            str_contains($con, 'FONACOT')                                                           => 'Descuentos FONACOT',
             str_contains($con, 'PENSION') || str_contains($con, 'PENSIÓN')                         => 'Pensión Alimenticia',
             str_contains($con, 'MR LANA') || str_contains($con, 'TIENDA')                          => 'Descuentos Tienda Mr Lana',
             str_contains($con, 'PRESTAMO Z') || str_contains($con, 'PRÉSTAMO Z')                   => 'Anticipo de nómina',
@@ -1509,9 +1541,9 @@ class BranchRadiographyCalculator
     /**
      * Maps a raw DB expense category + concept to the canonical display name used in the Excel.
      * Concept is used when category is generic (e.g. 'Gastos Operativos').
-     * Unrecognized categories fall back to 'Emergentes' so no amount is lost.
+     * Unrecognized concepts return null — caller routes them to an audit bucket.
      */
-    private function canonicalGastoConcept(string $category, string $concept = ''): string
+    private function canonicalGastoConcept(string $category, string $concept = ''): ?string
     {
         $cat  = strtoupper(trim($category));
         $con  = strtoupper(trim($concept));
@@ -1520,7 +1552,20 @@ class BranchRadiographyCalculator
 
         // Exact category matches first (most specific)
         return match (true) {
+            // --- Lendus PDF truncated concepts under 'Gastos Operativos' ---
+            // The PDF omits the full description; matched against the Excel export same period.
+            $cat === 'GASTOS OPERATIVOS' && $con === 'GASTOS'          => 'Emergentes',
+            $cat === 'GASTOS OPERATIVOS' && $con === 'PAGO'            => 'Financiamiento de Motos',
+            $cat === 'GASTOS OPERATIVOS' && $con === 'SERVICIOS DE'    => 'Señora Limpieza',
+            $cat === 'GASTOS OPERATIVOS' && $con === 'ENGANCHE DE'     => 'Servicios de Motocicletas',
+            $cat === 'GASTOS OPERATIVOS' && $con === 'GASTOS POR'      => 'Transportes',
+            $cat === 'GASTOS OPERATIVOS' && $con === 'INSUMOS DE'      => 'Insumos de Papelería',
+            $cat === 'GASTOS OPERATIVOS' && $con === 'COMISIONES POR'  => 'Comisiones Oxxo',
+            // --- ERP concept-level matches (full concept, specific enough) ---
+            str_contains($con, 'INSUMOS SUCURSALES')                   => 'Insumos de Cafetería',
+            str_contains($con, 'FLYERS') || str_contains($con, 'VINIL') => 'Publicidad',
             // --- Category-level direct matches ---
+            str_contains($cat, 'GASTOS EMERGENTES') || $cat === 'EMERGENTES'                                => 'Emergentes',
             str_contains($cat, 'INSUMOS DE CAFETERIA') || str_contains($cat, 'INSUMOS DE CAFETERÍA')        => 'Insumos de Cafetería',
             str_contains($cat, 'INSUMOS DE LIMPIEZA')                                                        => 'Insumos de Limpieza',
             str_contains($cat, 'INSUMOS DE PAPELERIA') || str_contains($cat, 'INSUMOS DE PAPELERÍA')        => 'Insumos de Papelería',
@@ -1551,6 +1596,7 @@ class BranchRadiographyCalculator
             $cat === 'LUZ'                                                                                    => 'Luz',
             $cat === 'AGUA'                                                                                   => 'Agua',
             // --- Concept-level matching for generic categories (e.g. 'Gastos Operativos') ---
+            str_contains($both, 'EMERGENTE')                                                                 => 'Emergentes',
             str_contains($both, 'CAFETERIA') || str_contains($both, 'CAFETERÍA')                            => 'Insumos de Cafetería',
             str_contains($both, 'LIMPIEZA') && str_contains($both, 'SEÑORA')                                 => 'Señora Limpieza',
             str_contains($both, 'LIMPIEZA')                                                                  => 'Insumos de Limpieza',
@@ -1558,7 +1604,7 @@ class BranchRadiographyCalculator
             str_contains($both, 'RENTA') && str_contains($both, 'BODEGA')                                   => 'Renta de Bodegas',
             str_contains($both, 'RENTA') && !str_contains($both, 'BODEGA')                                  => 'Renta Oficina',
             str_contains($both, 'OXXO') || str_contains($both, 'TRANSACCION')                               => 'Comisiones Oxxo',
-            str_contains($both, 'MOTOCICLETA') || str_contains($both, 'MOTO') && str_contains($both, 'SERVICIO') => 'Servicios de Motocicletas',
+            str_contains($both, 'MOTOCICLETA') || (str_contains($both, 'MOTO') && str_contains($both, 'SERVICIO')) => 'Servicios de Motocicletas',
             str_contains($both, 'POLIZA ANUAL') || str_contains($both, 'PÓLIZA ANUAL') || str_contains($both, 'SOFTWARE') || str_contains($both, 'LICENCIA') => 'Software Póliza Anual',
             str_contains($both, 'POLIZA') || str_contains($both, 'PÓLIZA') || str_contains($both, 'SEGURO') => 'Pólizas',
             str_contains($both, 'RECARGA')                                                                   => 'Recargas Telefónicas',
@@ -1580,8 +1626,18 @@ class BranchRadiographyCalculator
             str_contains($both, 'FORMATERIA') || str_contains($both, 'FORMATERÍA')                          => 'Formatería',
             str_contains($both, 'EVENTO')                                                                    => 'Eventos',
             str_contains($both, 'LEGAL') || str_contains($both, 'DOMINIO')                                  => 'Gastos legales',
-            default                                                                                          => 'Emergentes',
+            default                                                                                          => null,
         };
+    }
+
+    private function unmappedGastoLabel(string $category, string $concept): string
+    {
+        $text = trim($concept) !== '' ? trim($concept) : trim($category);
+        \Illuminate\Support\Facades\Log::warning('Concepto de gasto operativo sin mapeo canónico — revisar canonicalGastoConcept().', [
+            'category' => $category,
+            'concept'  => $concept,
+        ]);
+        return 'Sin clasificar: ' . $text;
     }
 
     private function emptyUnassigned(): array
@@ -1608,9 +1664,9 @@ class BranchRadiographyCalculator
             'seguros_lendus_puente'              => 0.0,
             'empleados'          => [],   // per-employee detail for SIN ASIGNAR sheet
             'gastos_items'       => [],   // per-gasto detail for SIN ASIGNAR sheet
-            'pension_alimenticia_detectada' => 0.0, // D010 — auditoría, NO se suma a Nómina y Capital Humano
+            'pension_alimenticia_detectada' => 0.0, // D010 — auditoría, de respaldo (va a nomina_detalle)
             'prestamo_personal_detectado'   => 0.0, // D004 — auditoría, NO se suma a Nómina y Capital Humano
-            'deducciones_no_sumadas'        => [],  // label => amount — demás D-codes, solo auditoría
+            'imss_excluido'                 => [],  // branch_name => amount — IMSS de sucursales no operativas (CORPORATIVO/TULANCINGO), excluido del global
         ];
     }
 }

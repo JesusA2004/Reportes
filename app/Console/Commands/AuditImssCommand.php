@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\Period;
+use App\Services\BranchResolverService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -16,7 +17,7 @@ class AuditImssCommand extends Command
 
     protected $description = 'Auditoría IMSS por sucursal: cuota patronal mensual, total global, incluido/excluido';
 
-    public function handle(): int
+    public function handle(BranchResolverService $resolver): int
     {
         $period = Period::find($this->argument('period_id'));
         if (!$period) {
@@ -29,6 +30,15 @@ class AuditImssCommand extends Command
         $dataIds    = array_values(array_unique(array_merge(
             empty($weeklyIds) ? [] : $weeklyIds, [$period->id]
         )));
+
+        // Build operative map to identify included vs excluded branches
+        $operativeMap = [];
+        foreach (DB::table('branches')->get() as $b) {
+            $real = $resolver->resolveRealBranchFromRoute($b->name);
+            if ($real && $resolver->isSheetBranch($real)) {
+                $operativeMap[(int) $b->id] = strtoupper(trim($real));
+            }
+        }
 
         $imssSourceId = DB::table('data_sources')->where('code', 'imss')->value('id');
 
@@ -71,57 +81,76 @@ class AuditImssCommand extends Command
             return 0;
         }
 
-        $totalGlobal  = 0.0;
-        $porSucursal  = [];
-        $sinSucursal  = 0.0;
-        $detailRows   = [];
+        $totalIncluido = 0.0;
+        $totalExcluido = 0.0;
+        $porSucursal   = [];
+        $excluidos     = [];
+        $sinSucursal   = 0.0;
+        $detailRows    = [];
 
         foreach ($rows as $row) {
-            $monto    = (float) ($row->paid_amount ?: $row->amount);
-            $suc      = (string) ($row->sucursal_nombre ?? 'Sin sucursal');
-            $payload  = is_string($row->raw_payload) ? (json_decode($row->raw_payload, true) ?? []) : (array)($row->raw_payload ?? []);
+            $monto      = (float) ($row->paid_amount ?: $row->amount);
+            $suc        = (string) ($row->sucursal_nombre ?? 'Sin sucursal');
+            $branchId   = (int) ($row->branch_id ?? 0);
+            $payload    = is_string($row->raw_payload) ? (json_decode($row->raw_payload, true) ?? []) : (array)($row->raw_payload ?? []);
 
-            $incluido = !empty($row->branch_id);
-            $motivo   = $incluido
-                ? "Incluido en Nómina y Capital Humano (IMSS patronal — {$suc})"
-                : 'Sin branch_id — sucursal no reconocida en el archivo';
+            $isOperative = $branchId > 0 && isset($operativeMap[$branchId]);
 
-            $totalGlobal += $monto;
-            if ($incluido) {
+            if ($isOperative) {
+                $incluido = 'Sí';
+                $motivo   = "Incluido — sucursal operativa ({$suc})";
+                $totalIncluido += $monto;
                 $porSucursal[$suc] = ($porSucursal[$suc] ?? 0.0) + $monto;
+            } elseif ($branchId > 0) {
+                // Has branch_id but NOT operative (CORPORATIVO, TULANCINGO, etc.)
+                $incluido = 'No';
+                $motivo   = "Excluido — sucursal no operativa en el reporte ({$suc})";
+                $totalExcluido += $monto;
+                $excluidos[$suc] = ($excluidos[$suc] ?? 0.0) + $monto;
             } else {
+                $incluido = 'No';
+                $motivo   = 'Sin branch_id — sucursal no reconocida en el archivo';
                 $sinSucursal += $monto;
             }
 
             $detailRows[] = [
                 'id'             => $row->id,
                 'sucursal'       => $suc,
-                'branch_id'      => $row->branch_id ?? null,
+                'branch_id'      => $branchId ?: null,
                 'nss'            => $payload['nss_ejemplo'] ?? '',
                 'empleado'       => $payload['empleado_ejemplo'] ?? (string)($row->observations ?? ''),
                 'cuota_mensual'  => $monto,
                 'hoja'           => $payload['hoja'] ?? '',
-                'incluido'       => $incluido ? 'Sí' : 'No',
+                'incluido'       => $incluido,
                 'motivo'         => $motivo,
                 'suc_normalizada' => $suc,
             ];
         }
 
+        $totalArchivo = $totalIncluido + $totalExcluido + $sinSucursal;
+
         // ── Resumen ──────────────────────────────────────────────────────────
         $this->line('');
         $this->info('════ RESUMEN ════');
-        $this->line(str_pad('Total filas IMSS',    44) . count($rows));
-        $this->line(str_pad('Sucursales con datos', 44) . count($porSucursal));
+        $this->line(str_pad('Total filas IMSS',              44) . count($rows));
+        $this->line(str_pad('Sucursales operativas',         44) . count($porSucursal));
         $this->line(str_repeat('─', 60));
-        $this->info(str_pad('TOTAL IMSS PATRONAL (GLOBAL)', 44) . '$' . number_format($totalGlobal, 2));
+        $this->line(str_pad('Total archivo IMSS',            44) . '$' . number_format($totalArchivo, 2));
+        $this->info(str_pad('IMSS incluido en reporte',      44) . '$' . number_format($totalIncluido, 2));
+        if ($totalExcluido > 0) {
+            $this->warn(str_pad('IMSS excluido (no operativas)', 44) . '$' . number_format($totalExcluido, 2));
+            foreach ($excluidos as $excSuc => $excAmt) {
+                $this->warn('  → ' . str_pad($excSuc, 40) . '$' . number_format($excAmt, 2));
+            }
+        }
         if ($sinSucursal > 0) {
-            $this->warn(str_pad('Sin sucursal reconocida', 44) . '$' . number_format($sinSucursal, 2));
+            $this->warn(str_pad('Sin sucursal reconocida',    44) . '$' . number_format($sinSucursal, 2));
         }
 
         // ── Por sucursal ─────────────────────────────────────────────────────
         if (!empty($porSucursal)) {
             $this->line('');
-            $this->info('════ IMSS POR SUCURSAL ════');
+            $this->info('════ IMSS POR SUCURSAL OPERATIVA ════');
             $this->line(str_pad('Sucursal', 30) . 'Cuota mensual');
             $this->line(str_repeat('─', 50));
             arsort($porSucursal);
@@ -129,7 +158,7 @@ class AuditImssCommand extends Command
                 $this->line(str_pad($suc, 30) . '$' . number_format($amt, 2));
             }
             $this->line(str_repeat('─', 50));
-            $this->info(str_pad('TOTAL', 30) . '$' . number_format($totalGlobal, 2));
+            $this->info(str_pad('TOTAL INCLUIDO', 30) . '$' . number_format($totalIncluido, 2));
         }
 
         // ── Detalle ──────────────────────────────────────────────────────────
@@ -161,13 +190,13 @@ class AuditImssCommand extends Command
 
         // ── Export ───────────────────────────────────────────────────────────
         if ($this->option('export')) {
-            $this->exportCsv($period->id, $detailRows, $porSucursal, $totalGlobal);
+            $this->exportCsv($period->id, $detailRows, $porSucursal, $totalIncluido, $totalExcluido, $excluidos);
         }
 
         return 0;
     }
 
-    private function exportCsv(int $periodId, array $rows, array $porSucursal, float $total): void
+    private function exportCsv(int $periodId, array $rows, array $porSucursal, float $totalIncluido, float $totalExcluido = 0.0, array $excluidos = []): void
     {
         $dir  = 'auditorias';
         $file = "imss_periodo_{$periodId}_" . now()->format('Ymd_His') . '.csv';
@@ -192,11 +221,19 @@ class AuditImssCommand extends Command
         }
 
         $lines[] = '';
-        $lines[] = '"=== POR SUCURSAL ==="';
+        $lines[] = '"=== INCLUIDAS (OPERATIVAS) ==="';
         foreach ($porSucursal as $suc => $amt) {
             $lines[] = $csv($suc) . ',' . number_format($amt, 2, '.', '');
         }
-        $lines[] = '"TOTAL GLOBAL",' . number_format($total, 2, '.', '');
+        $lines[] = '"TOTAL INCLUIDO",' . number_format($totalIncluido, 2, '.', '');
+        if (!empty($excluidos)) {
+            $lines[] = '';
+            $lines[] = '"=== EXCLUIDAS (NO OPERATIVAS) ==="';
+            foreach ($excluidos as $suc => $amt) {
+                $lines[] = $csv($suc) . ',' . number_format($amt, 2, '.', '');
+            }
+            $lines[] = '"TOTAL EXCLUIDO",' . number_format($totalExcluido, 2, '.', '');
+        }
 
         Storage::disk('local')->makeDirectory($dir);
         Storage::disk('local')->put($path, implode("\n", $lines));

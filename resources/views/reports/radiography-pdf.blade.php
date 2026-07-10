@@ -191,12 +191,19 @@ $moraBucketMax = max(array_column($moraBuckets, 'valor')) ?: 1.0;
 $noiDeducLabels = ['Descuentos Infonavit','Pensión Alimenticia','Descuento Servicios Moto',
     'Financiamiento de Motos (desc.)','Préstamo Personal','Subsidio para el Empleo APL',
     'Otros descuentos NOI','Descuento de uniformes'];
+// Informative items: shown in the table but neither summed into nomNeto nor subtracted.
+// IMSS patronal is audited separately by reportes:audit-imss — excluded here to avoid
+// double-counting in gastosTotal. Not in noiDeducLabels because that would incorrectly
+// subtract them from nomNeto (deduction labels are subtracted, not just excluded).
+$nomInfomativo = ['IMSS', 'IMSS Patronal'];
 $nomDescuentosNOI = 0.0;
 foreach ($noiDeducLabels as $lbl) { $nomDescuentosNOI += (float)($nomDetalle[$lbl] ?? 0); }
 $nomPercep      = $nomNomina + $nomComis + $nomVac + $nomPrimaVac + $nomBonos;
 $nomExtraExp    = 0.0;
 foreach ($nomDetalle as $dk => $dv) {
-    if (!in_array($dk, $noiDeducLabels, true)) { $nomExtraExp += max(0.0, (float)$dv); }
+    if (!in_array($dk, $noiDeducLabels, true) && !in_array($dk, $nomInfomativo, true)) {
+        $nomExtraExp += max(0.0, (float)$dv);
+    }
 }
 $nomNeto        = $nomPercep + $nomExtraExp - $nomDescuentosNOI;
 $gastosTotal    = $gastosOpTotal + $nomNeto;

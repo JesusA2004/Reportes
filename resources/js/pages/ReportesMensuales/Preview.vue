@@ -257,21 +257,39 @@ const nomPrimaVac = computed(() => Number(brGlobal.value?.prima_vacacional)|| 0)
 const nomBonos    = computed(() => Number(brGlobal.value?.bonos)           || 0)
 const nomBonosAcel= computed(() => Number(brGlobal.value?.bonos_aceleradores) || 0)
 
-const NOI_DEDUCTION_LABELS = new Set(['Descuentos Infonavit', 'Pensión Alimenticia', 'Descuento Servicios Moto',
-    'Financiamiento de Motos (desc.)', 'Préstamo Personal', 'Subsidio para el Empleo APL',
-    'Otros descuentos NOI', 'Descuento de uniformes', 'IMSS', 'Financiamiento Celular',
-    'Descuento gastos sin comprobar', 'Descuento extravío tarjeta de circulación',
-    'Descuentos Tienda Mr Lana', 'Descuento Servicios Automóvil', 'Descuento faltante en caja',
-    'Anticipo de nómina'])
+// Labels shown in the table but NOT counted in employer cost Total. Includes:
+//   - Descuento* = employee withholdings (descuentos al trabajador)
+//   - IMSS = patronal cost audited separately; excluded to avoid double-counting in gastosTotal
+// Must stay in sync with BranchRadiographyCalculator::NOMINA_DEDUCTION_LABELS (PHP).
+const NOI_DEDUCTION_LABELS = new Set([
+    'IMSS',
+    'Descuentos Infonavit',
+    'Descuento Servicios Moto',
+    'Financiamiento Celular',
+    'Descuento de uniformes',
+    'Descuento gastos sin comprobar',
+    'Descuento extravío tarjeta de circulación',
+    'Descuentos Tienda Mr Lana',
+    'Descuento Servicios Automóvil',
+    'Descuento faltante en caja',
+    'Anticipo de nómina',
+    'Pensión Alimenticia',
+    'Descuentos FONACOT',
+])
 
 const nomDetalle = computed<{ label: string; value: number }[]>(() => {
     const det = brGlobal.value?.nomina_detalle as Record<string, number> | undefined
     if (!det) return []
     return Object.entries(det).filter(([, v]) => Number(v) > 0).map(([label, v]) => ({ label, value: Number(v) }))
 })
-const nomTotal = computed(() => nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value + nomBonosAcel.value + nomDetalle.value.reduce((s, r) => s + r.value, 0))
+// Total = employer costs only. Deduction rows (NOI_DEDUCTION_LABELS) are shown in the table
+// for transparency but are employee withholdings — NOT an additional cost for the company.
 const nomDescuentosNOI = computed(() => nomDetalle.value.filter(r => NOI_DEDUCTION_LABELS.has(r.label)).reduce((s, r) => s + r.value, 0))
-const nomNeto = computed(() => nomTotal.value - nomDescuentosNOI.value)
+const nomTotal = computed(() =>
+    nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value + nomBonosAcel.value
+    + nomDetalle.value.filter(r => !NOI_DEDUCTION_LABELS.has(r.label)).reduce((s, r) => s + r.value, 0)
+)
+const nomNeto = computed(() => nomTotal.value)
 
 // Percepciones/Deducciones/Neto pagado a trabajadores: informativo — "lo que el trabajador
 // recibió", distinto de Nómina y Capital Humano (concepto de gasto de la empresa).

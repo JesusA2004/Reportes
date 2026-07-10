@@ -206,10 +206,11 @@ class RadiographyWorkbookBuilder
             'Renta Oficina','Luz','Agua','Teléfono e Internet','Insumos de Cafetería',
             'Insumos de Limpieza','Insumos de Papelería','Mobiliario y Equipo','Mantenimiento',
             'Renta de Bodegas','Señora Limpieza','Eventos','Paquetería','Trámites Gubernamentales',
-            'Publicidad','Mecánicos','Servicios de Motocicletas','Software Póliza Anual','Pólizas',
+            'Publicidad','Mecánicos','Servicios de Motocicletas','Financiamiento de Motos',
+            'Software Póliza Anual','Pólizas',
             'Recargas Telefónicas','Emergentes','Comisiones Oxxo','Multas e Infracciones',
             'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
-            'Gastos legales','Financiamiento de Motos',
+            'Gastos legales',
         ];
         $gastosOpTotal = 0.0;
         foreach ($gastosOp as $gasto) {
@@ -225,6 +226,9 @@ class RadiographyWorkbookBuilder
         $globalNomDet    = (array)($brCalcGlobal['nomina_detalle'] ?? []);
 
         // 24 mandatory rows — always shown even if $0
+        // 'IMSS' = costo patronal (del archivo IMSS vía accumulateImssPatronal).
+        // Los renglones de deducciones (Infonavit, FONACOT, etc.) se muestran para
+        // transparencia pero NO se suman al Total del empleador.
         $nomDisplayOrder = [
             'Nómina'                                    => $globalNomina,
             'Comisiones'                                => $globalComisions,
@@ -233,7 +237,6 @@ class RadiographyWorkbookBuilder
             'Bonos'                                     => $globalBonos,
             'Bonos Aceleradores'                        => 0.0,
             'IMSS'                                      => 0.0,
-            'IMSS Patronal'                             => 0.0,
             'Descuentos Infonavit'                      => 0.0,
             'Finiquito'                                 => 0.0,
             'Gastos médicos'                            => 0.0,
@@ -243,9 +246,9 @@ class RadiographyWorkbookBuilder
             'Financiamiento Celular'                    => 0.0,
             'Cascos'                                    => 0.0,
             'Descuento de uniformes'                    => 0.0,
-            'Descuento gastos sin comprobar'            => 0.0,
+            'Descuentos FONACOT'                        => 0.0,
             'Descuento extravío tarjeta de circulación' => 0.0,
-            'Descuento tienda Mr Lana'                  => 0.0,
+            'Descuentos Tienda Mr Lana'                 => 0.0,
             'Descuento Servicios Automóvil'             => 0.0,
             'Descuento faltante en caja'                => 0.0,
             'Anticipo de nómina'                        => 0.0,
@@ -254,8 +257,9 @@ class RadiographyWorkbookBuilder
         ];
         // Aliases: calculator key → canonical display label
         $nomDetAlias = [
-            'Financiamiento de Motos'   => 'Financiamiento De Motos',
-            'Descuentos Tienda Mr Lana' => 'Descuento tienda Mr Lana',
+            'Financiamiento de Motos' => 'Financiamiento De Motos',
+            // 'Descuento tienda Mr Lana' renamed to 'Descuentos Tienda Mr Lana' for consistency
+            'Descuento tienda Mr Lana' => 'Descuentos Tienda Mr Lana',
         ];
         $mandatory24 = array_keys($nomDisplayOrder);
         $claimed = [];
@@ -272,7 +276,15 @@ class RadiographyWorkbookBuilder
                 $nomDisplayOrder[$detKey] = ($nomDisplayOrder[$detKey] ?? 0.0) + (float) $detVal;
             }
         }
-        $nomTotal = array_sum($nomDisplayOrder);
+        // Total = ONLY employer costs — deduction rows are shown for transparency but NOT summed.
+        // NOMINA_DEDUCTION_LABELS defines which nomina_detalle keys are employee withholdings.
+        $deductionSet = array_flip(BranchRadiographyCalculator::NOMINA_DEDUCTION_LABELS);
+        $nomTotal = 0.0;
+        foreach ($nomDisplayOrder as $rowKey => $rowVal) {
+            if (!isset($deductionSet[$rowKey])) {
+                $nomTotal += (float) $rowVal;
+            }
+        }
 
         // ── Préstamos intersucursales — SOLO movimientos sucursal operativa → sucursal
         // operativa. Activos (fondea) y Pasivos (recibe) son, por definición, el mismo
@@ -1400,7 +1412,8 @@ class RadiographyWorkbookBuilder
             'Renta Oficina','Luz','Agua','Teléfono e Internet','Insumos de Cafetería',
             'Insumos de Limpieza','Insumos de Papelería','Mobiliario y Equipo','Mantenimiento',
             'Renta de Bodegas','Señora Limpieza','Eventos','Paquetería','Trámites Gubernamentales',
-            'Publicidad','Mecánicos','Servicios de Motocicletas','Software Póliza Anual','Pólizas',
+            'Publicidad','Mecánicos','Servicios de Motocicletas','Financiamiento de Motos',
+            'Software Póliza Anual','Pólizas',
             'Recargas Telefónicas','Emergentes','Comisiones Oxxo','Multas e Infracciones',
             'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
             'Gastos legales',
