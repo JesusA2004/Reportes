@@ -137,30 +137,27 @@ $gastosTopN    = array_slice($gastosDetalle, 0, 10, true);
 $gastosOtros   = array_sum(array_slice($gastosDetalle, 10, null, true));
 
 // ── Nómina ─────────────────────────────────────────────────────────────────────
+// Fuente única: BranchRadiographyCalculator::nominaTotalFor() — NOI neto (percepciones
+// − deducciones). nomina_detalle (deducciones, ya restadas) y nomina_informativo
+// (IMSS/Gasolina/Motos/Cascos/Finiquito/Médicos/Formatería) son SIEMPRE informativos.
 $nomNomina    = (float)($brGlobal['nomina_total']     ?? 0);
 $nomComis     = (float)($brGlobal['comisiones']       ?? 0);
 $nomVac       = (float)($brGlobal['vacaciones']       ?? 0);
 $nomPrimaVac  = (float)($brGlobal['prima_vacacional'] ?? 0);
 $nomBonos     = (float)($brGlobal['bonos']            ?? 0);
 $nomDetalle   = (array)($brGlobal['nomina_detalle']   ?? []);
-$nomDetalleOrder = [
-    'IMSS','IMSS Patronal','Descuentos Infonavit','Finiquito','Gastos médicos',
-    'Gasolina','Financiamiento de Motos','Financiamiento de Motos (desc.)',
-    'Descuento Servicios Moto','Financiamiento Celular','Cascos',
-    'Descuento de uniformes','Pensión Alimenticia','Préstamo Personal',
-    'Anticipo de nómina',
-];
+$nomInformativoDet = (array)($brGlobal['nomina_informativo'] ?? []);
+$nomTotal = \App\Services\Radiography\BranchRadiographyCalculator::nominaTotalFor($brGlobal ?? []);
 $nomDisplay = [
     'Nómina' => $nomNomina, 'Comisiones' => $nomComis, 'Vacaciones' => $nomVac,
     'Prima vacacional' => $nomPrimaVac, 'Bonos' => $nomBonos,
 ];
-foreach ($nomDetalleOrder as $dk) {
-    if (isset($nomDetalle[$dk]) && $nomDetalle[$dk] > 0) $nomDisplay[$dk] = $nomDetalle[$dk];
-}
 foreach ($nomDetalle as $dk => $dv) {
-    if (!isset($nomDisplay[$dk]) && $dv > 0) $nomDisplay[$dk] = $dv;
+    if ($dv > 0) $nomDisplay[$dk] = ($nomDisplay[$dk] ?? 0) + $dv;
 }
-$nomTotal = array_sum(array_filter($nomDisplay, fn($v) => $v > 0));
+foreach ($nomInformativoDet as $dk => $dv) {
+    if ($dv > 0) $nomDisplay[$dk] = ($nomDisplay[$dk] ?? 0) + $dv;
+}
 
 // ── Préstamos intersucursales ──────────────────────────────────────────────────
 $fondeoTotal = (float)($brGlobal['prestamos_fondea'] ?? ($snap['sections']['interbranch_loans']['total'] ?? 0));
@@ -188,25 +185,11 @@ $moraBuckets = [
 $moraBucketMax = max(array_column($moraBuckets, 'valor')) ?: 1.0;
 
 // ── EBITDA global ─────────────────────────────────────────────────────────────
-$noiDeducLabels = ['Descuentos Infonavit','Pensión Alimenticia','Descuento Servicios Moto',
-    'Financiamiento de Motos (desc.)','Préstamo Personal','Subsidio para el Empleo APL',
-    'Otros descuentos NOI','Descuento de uniformes'];
-// Informative items: shown in the table but neither summed into nomNeto nor subtracted.
-// IMSS patronal is audited separately by reportes:audit-imss — excluded here to avoid
-// double-counting in gastosTotal. Not in noiDeducLabels because that would incorrectly
-// subtract them from nomNeto (deduction labels are subtracted, not just excluded).
-$nomInfomativo = ['IMSS', 'IMSS Patronal'];
-$nomDescuentosNOI = 0.0;
-foreach ($noiDeducLabels as $lbl) { $nomDescuentosNOI += (float)($nomDetalle[$lbl] ?? 0); }
-$nomPercep      = $nomNomina + $nomComis + $nomVac + $nomPrimaVac + $nomBonos;
-$nomExtraExp    = 0.0;
-foreach ($nomDetalle as $dk => $dv) {
-    if (!in_array($dk, $noiDeducLabels, true) && !in_array($dk, $nomInfomativo, true)) {
-        $nomExtraExp += max(0.0, (float)$dv);
-    }
-}
-$nomNeto        = $nomPercep + $nomExtraExp - $nomDescuentosNOI;
-$gastosTotal    = $gastosOpTotal + $nomNeto;
+// $nomTotal ya es el neto canónico (percepciones − deducciones NOI). $nomDescuentosNOI es
+// solo informativo (para explicar el neto), nunca se vuelve a restar aquí.
+$nomDescuentosNOI = array_sum(array_values($nomDetalle));
+$nomNeto          = $nomTotal;
+$gastosTotal      = $gastosOpTotal + $nomNeto;
 // EBITDA = Recuperación/Cobranza − Colocación − Gastos totales.
 // Misma fórmula que Excel (RadiographyWorkbookBuilder::buildGlobalSheet).
 $utilidad       = $recTotal - $colocacion - $gastosTotal;
@@ -236,9 +219,7 @@ $sucursalRows = [];
 foreach ($brBranches as $b) {
     $moraSumB = (float)($b['mora_0_30']??0)+(float)($b['mora_31_60']??0)+(float)($b['mora_61_90']??0)+(float)($b['mora_91_120']??0)+(float)($b['mora_120_plus']??0);
     $cartValB = (float)($b['valor_cartera']??0);
-    $bNomB    = (float)($b['nomina_total']??0)+(float)($b['comisiones']??0)+(float)($b['bonos']??0)
-              + (float)($b['vacaciones']??0)+(float)($b['prima_vacacional']??0)
-              + array_sum((array)($b['nomina_detalle']??[]));
+    $bNomB    = \App\Services\Radiography\BranchRadiographyCalculator::nominaTotalFor($b);
     $sucursalRows[] = [
         'sucursal'     => $b['sucursal'],
         'recuperacion' => (float)($b['recuperacion_total']??0),
@@ -271,24 +252,23 @@ usort($gastosPorSucursal, fn($x, $y) => $y['monto'] <=> $x['monto']);
 $gastosPorSucursalMax = !empty($gastosPorSucursal) ? max(array_column($gastosPorSucursal, 'monto')) : 1.0;
 
 // ── Nómina por sucursal — resumen ejecutivo (página 6) ────────────────────────
+// 'neto' es el KPI real (nominaTotalFor). 'total'/'descuentos' son solo para explicar el
+// neto (percepciones brutas y deducciones NOI ya restadas) — nunca se re-suman a nada.
 $nomPorSucursal = [];
 foreach ($brBranches as $b) {
     $bDetalle    = (array)($b['nomina_detalle'] ?? []);
-    $bDescuentos = 0.0;
-    foreach ($noiDeducLabels as $lbl) { $bDescuentos += (float)($bDetalle[$lbl] ?? 0); }
-    $bSueldos    = (float)($b['nomina_total'] ?? 0);
+    $bDescuentos = array_sum(array_values($bDetalle));
+    $bSueldos    = (float)($b['nomina_total'] ?? 0) + $bDescuentos; // bruto antes de deducciones
     $bComisiones = (float)($b['comisiones'] ?? 0);
     $bBonos      = (float)($b['bonos'] ?? 0);
     $bOtros      = (float)($b['vacaciones'] ?? 0) + (float)($b['prima_vacacional'] ?? 0);
-    foreach ($bDetalle as $dk => $dv) {
-        if (!in_array($dk, $noiDeducLabels, true)) { $bOtros += max(0.0, (float)$dv); }
-    }
+    $bNeto       = \App\Services\Radiography\BranchRadiographyCalculator::nominaTotalFor($b);
     $bTotalBruto = $bSueldos + $bComisiones + $bBonos + $bOtros;
     if ($bTotalBruto <= 0) continue;
     $nomPorSucursal[] = [
         'sucursal' => $b['sucursal'], 'sueldos' => $bSueldos, 'comisiones' => $bComisiones,
         'bonos' => $bBonos, 'otros' => $bOtros, 'descuentos' => $bDescuentos,
-        'total' => $bTotalBruto, 'neto' => $bTotalBruto - $bDescuentos,
+        'total' => $bTotalBruto, 'neto' => $bNeto,
     ];
 }
 usort($nomPorSucursal, fn($x, $y) => strcmp($x['sucursal'], $y['sucursal']));

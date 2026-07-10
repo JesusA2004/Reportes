@@ -223,7 +223,18 @@ class RadiographyWorkbookBuilder
         $globalBonos     = $brCalcGlobal ? (float)$brCalcGlobal['bonos']            : (float)$pay['bonos'];
         $globalVacac     = $brCalcGlobal ? (float)$brCalcGlobal['vacaciones']       : 0.0;
         $globalPrimaVac  = $brCalcGlobal ? (float)$brCalcGlobal['prima_vacacional'] : 0.0;
-        $globalNomDet    = (array)($brCalcGlobal['nomina_detalle'] ?? []);
+        // nomina_detalle (deducciones NOI, YA restadas de nomina_total) + nomina_informativo
+        // (IMSS/Gasolina/Motos/Cascos/Finiquito/Médicos/Formatería, JAMÁS sumados) — se
+        // muestran juntos en la tabla por transparencia, el Total real viene de nominaTotalFor().
+        // Suma aditiva (no array_merge) porque una misma etiqueta puede existir en ambos
+        // (ej. "Financiamiento Celular": deducción NOI D125 + gasto ERP, son montos distintos).
+        $globalNomDet = [];
+        foreach ((array)($brCalcGlobal['nomina_detalle'] ?? []) as $k => $v) {
+            $globalNomDet[$k] = ($globalNomDet[$k] ?? 0.0) + (float) $v;
+        }
+        foreach ((array)($brCalcGlobal['nomina_informativo'] ?? []) as $k => $v) {
+            $globalNomDet[$k] = ($globalNomDet[$k] ?? 0.0) + (float) $v;
+        }
 
         // 24 mandatory rows — always shown even if $0
         // 'IMSS' = costo patronal (del archivo IMSS vía accumulateImssPatronal).
@@ -276,15 +287,10 @@ class RadiographyWorkbookBuilder
                 $nomDisplayOrder[$detKey] = ($nomDisplayOrder[$detKey] ?? 0.0) + (float) $detVal;
             }
         }
-        // Total = ONLY employer costs — deduction rows are shown for transparency but NOT summed.
-        // NOMINA_DEDUCTION_LABELS defines which nomina_detalle keys are employee withholdings.
-        $deductionSet = array_flip(BranchRadiographyCalculator::NOMINA_DEDUCTION_LABELS);
-        $nomTotal = 0.0;
-        foreach ($nomDisplayOrder as $rowKey => $rowVal) {
-            if (!isset($deductionSet[$rowKey])) {
-                $nomTotal += (float) $rowVal;
-            }
-        }
+        // Total = fuente única BranchRadiographyCalculator::nominaTotalFor(). Las filas de la
+        // tabla (deducciones NOI + informativos ERP/Lendus/IMSS) son SIEMPRE transparencia,
+        // nunca se vuelven a sumar aquí.
+        $nomTotal = $brCalcGlobal ? BranchRadiographyCalculator::nominaTotalFor($brCalcGlobal) : (float) $pay['pagos'];
 
         // ── Préstamos intersucursales — SOLO movimientos sucursal operativa → sucursal
         // operativa. Activos (fondea) y Pasivos (recibe) son, por definición, el mismo
@@ -1716,9 +1722,7 @@ class RadiographyWorkbookBuilder
             'Descuento de uniformes', 'Anticipo de nómina', 'Pensión Alimenticia', 'Préstamo Personal',
         ];
         $isDeduction = fn (string $label) => (bool) preg_match('/Descuento|Pensión Alimenticia|Anticipo/i', $label);
-        $branchTotal = fn (array $b) => (float)($b['nomina_total'] ?? 0) + (float)($b['comisiones'] ?? 0)
-            + (float)($b['bonos'] ?? 0) + (float)($b['vacaciones'] ?? 0)
-            + (float)($b['prima_vacacional'] ?? 0) + array_sum(array_values((array)($b['nomina_detalle'] ?? [])));
+        $branchTotal = fn (array $b) => BranchRadiographyCalculator::nominaTotalFor($b);
 
         usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
         $groups = $branches;
@@ -1739,7 +1743,13 @@ class RadiographyWorkbookBuilder
             $sheet->getRowDimension($r)->setRowHeight(19);
             $r++;
 
-            $det = (array)($g['nomina_detalle'] ?? []);
+            $det = [];
+            foreach ((array)($g['nomina_detalle'] ?? []) as $k => $v) {
+                $det[$k] = ($det[$k] ?? 0.0) + (float) $v;
+            }
+            foreach ((array)($g['nomina_informativo'] ?? []) as $k => $v) {
+                $det[$k] = ($det[$k] ?? 0.0) + (float) $v;
+            }
             $detKeys = array_unique(array_merge($detOrder, array_keys($det)));
             $i = 0;
             foreach ($scalarFields as $concept => $field) {
@@ -2152,7 +2162,13 @@ class RadiographyWorkbookBuilder
             $brBonAcel   = $calc ? (float)$calc['bonos_aceleradores']  : 0.0;
             $brVacac     = $calc ? (float)$calc['vacaciones']          : 0.0;
             $brPrimaVac  = $calc ? (float)$calc['prima_vacacional']    : 0.0;
-            $brNomDet    = (array)($calc['nomina_detalle'] ?? []);
+            $brNomDet = [];
+            foreach ((array)($calc['nomina_detalle'] ?? []) as $k => $v) {
+                $brNomDet[$k] = ($brNomDet[$k] ?? 0.0) + (float) $v;
+            }
+            foreach ((array)($calc['nomina_informativo'] ?? []) as $k => $v) {
+                $brNomDet[$k] = ($brNomDet[$k] ?? 0.0) + (float) $v;
+            }
 
             // 24 mandatory rows — always shown even if $0
             $brNomDisplay = [
@@ -2200,7 +2216,9 @@ class RadiographyWorkbookBuilder
                 }
             }
 
-            $brNomTotal = 0.0;
+            // Total = fuente única BranchRadiographyCalculator::nominaTotalFor() — las filas de
+            // abajo (deducciones NOI + informativos ERP/Lendus/IMSS) son SIEMPRE transparencia.
+            $brNomTotal = $calc ? BranchRadiographyCalculator::nominaTotalFor($calc) : 0.0;
             $i2         = 0;
             foreach ($brNomDisplay as $nomName => $nomVal) {
                 if ($nomVal == 0.0 && !in_array($nomName, $brMandatory24)) continue;
@@ -2208,7 +2226,6 @@ class RadiographyWorkbookBuilder
                 $sheet->setCellValue("B{$r}", $nomVal);
                 $this->dataRow($sheet, "A{$r}:C{$r}", $i2 % 2 === 0);
                 $this->applyFmt($sheet, "B{$r}", 'currency', $nomVal);
-                $brNomTotal += $nomVal;
                 $i2++;
                 $r++;
             }
@@ -3798,22 +3815,11 @@ class RadiographyWorkbookBuilder
     }
 
     /**
-     * Total Nómina y Capital Humano = suma de todos los conceptos configurados (todos positivos).
-     * Regla contable: las D de NOI que aparecen en la radiografía se suman, no se restan.
+     * Total Nómina y Capital Humano — fuente única, ver BranchRadiographyCalculator::nominaTotalFor().
      */
     private function calcNomTotal(array $calc): float
     {
-        $total = (float)($calc['nomina_total']      ?? 0)
-               + (float)($calc['comisiones']        ?? 0)
-               + (float)($calc['bonos']             ?? 0)
-               + (float)($calc['vacaciones']        ?? 0)
-               + (float)($calc['prima_vacacional']  ?? 0);
-
-        foreach ((array)($calc['nomina_detalle'] ?? []) as $val) {
-            $total += (float)$val;
-        }
-
-        return $total;
+        return BranchRadiographyCalculator::nominaTotalFor($calc);
     }
 
     // ── Style helpers ─────────────────────────────────────────────────────────

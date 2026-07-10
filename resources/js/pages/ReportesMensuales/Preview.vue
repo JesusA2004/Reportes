@@ -257,13 +257,12 @@ const nomPrimaVac = computed(() => Number(brGlobal.value?.prima_vacacional)|| 0)
 const nomBonos    = computed(() => Number(brGlobal.value?.bonos)           || 0)
 const nomBonosAcel= computed(() => Number(brGlobal.value?.bonos_aceleradores) || 0)
 
-// Labels shown in the table but NOT counted in employer cost Total. Includes:
-//   - Descuento* = employee withholdings (descuentos al trabajador)
-//   - IMSS = patronal cost audited separately; excluded to avoid double-counting in gastosTotal
-// Must stay in sync with BranchRadiographyCalculator::NOMINA_DEDUCTION_LABELS (PHP).
+// Deducciones NOI (ya restadas de nomina_total en backend) — SOLO informativo, filas rojas.
+// Debe reflejar exactamente BranchRadiographyCalculator::accumulateNomina()'s deduction labels.
 const NOI_DEDUCTION_LABELS = new Set([
-    'IMSS',
+    'Pensión Alimenticia',
     'Descuentos Infonavit',
+    'Descuentos FONACOT',
     'Descuento Servicios Moto',
     'Financiamiento Celular',
     'Descuento de uniformes',
@@ -273,21 +272,27 @@ const NOI_DEDUCTION_LABELS = new Set([
     'Descuento Servicios Automóvil',
     'Descuento faltante en caja',
     'Anticipo de nómina',
-    'Pensión Alimenticia',
-    'Descuentos FONACOT',
+    'Préstamo Personal',
+    'Financiamiento de Motos (NOI)',
+    'Diferencia NF',
 ])
 
+// nomina_detalle: deducciones NOI, ya restadas de nomina_total — informativo.
+// nomina_informativo: IMSS/Gasolina/Motos/Cascos/Finiquito/Médicos/Formatería — informativo,
+// JAMÁS se suma al KPI Nómina (ya contado en OPEX, salvo IMSS que no se cuenta en ningún lado).
 const nomDetalle = computed<{ label: string; value: number }[]>(() => {
-    const det = brGlobal.value?.nomina_detalle as Record<string, number> | undefined
-    if (!det) return []
-    return Object.entries(det).filter(([, v]) => Number(v) > 0).map(([label, v]) => ({ label, value: Number(v) }))
+    const det = (brGlobal.value?.nomina_detalle ?? {}) as Record<string, number>
+    const info = (brGlobal.value?.nomina_informativo ?? {}) as Record<string, number>
+    const merged: Record<string, number> = {}
+    for (const [k, v] of Object.entries(det)) merged[k] = (merged[k] ?? 0) + (Number(v) || 0)
+    for (const [k, v] of Object.entries(info)) merged[k] = (merged[k] ?? 0) + (Number(v) || 0)
+    return Object.entries(merged).filter(([, v]) => Number(v) > 0).map(([label, v]) => ({ label, value: Number(v) }))
 })
-// Total = employer costs only. Deduction rows (NOI_DEDUCTION_LABELS) are shown in the table
-// for transparency but are employee withholdings — NOT an additional cost for the company.
+// Total = fuente única (percepciones NOI − deducciones NOI, ya neteado en backend). Las filas
+// de nomDetalle son SIEMPRE transparencia — nunca se vuelven a sumar aquí.
 const nomDescuentosNOI = computed(() => nomDetalle.value.filter(r => NOI_DEDUCTION_LABELS.has(r.label)).reduce((s, r) => s + r.value, 0))
 const nomTotal = computed(() =>
     nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value + nomBonosAcel.value
-    + nomDetalle.value.filter(r => !NOI_DEDUCTION_LABELS.has(r.label)).reduce((s, r) => s + r.value, 0)
 )
 const nomNeto = computed(() => nomTotal.value)
 
@@ -477,17 +482,17 @@ function saveSaldoInicial() {
 }
 
 // ── Sucursales — fuente canónica única (branch_radiography.branches) ─────────
-// nominaFull replica exactamente RadiographyStyleHelper::branchEbitdaEstimate():
-// nomina_total + comisiones + bonos + vacaciones + prima_vacacional + detalle.
-// Así el EBITDA/categoría por sucursal coincide siempre con Excel y PDF.
+// nominaFull replica exactamente BranchRadiographyCalculator::nominaTotalFor(): NOI neto
+// (percepciones − deducciones). nomina_detalle/nomina_informativo son SIEMPRE informativos,
+// nunca se suman aquí. Así el EBITDA/categoría por sucursal coincide siempre con Excel y PDF.
 const branchesFull = computed(() => {
     return brRaw.value.map((b: any) => {
         const moraSum = (Number(b.mora_0_30) || 0) + (Number(b.mora_31_60) || 0) + (Number(b.mora_61_90) || 0) + (Number(b.mora_91_120) || 0) + (Number(b.mora_120_plus) || 0)
         const cartera = Number(b.valor_cartera) || 0
         const bonos   = Number(b.bonos) || 0
         const nominaFull = (Number(b.nomina_total) || 0) + (Number(b.comisiones) || 0) + bonos
+            + (Number(b.bonos_aceleradores) || 0)
             + (Number(b.vacaciones) || 0) + (Number(b.prima_vacacional) || 0)
-            + Object.values((b.nomina_detalle ?? {}) as Record<string, number>).reduce((s: number, v: any) => s + (Number(v) || 0), 0)
         const recuperacion    = Number(b.recuperacion_total) || 0
         const colocacion      = Number(b.colocacion ?? b.colocacion_total ?? b.otorgamientos ?? 0) || 0
         const capitalRec      = Number(b.capital_recuperado) || 0
@@ -704,10 +709,13 @@ const gastosTree = computed(() => {
 const expandedGastosBranch = ref<string | null>(null)
 
 // ── Nómina: tabla jerárquica (sucursal padre + conceptos hijos) ──────────────
+// b.nomina (de branchesFull) YA es el neto (nominaTotalFor) — nunca se vuelve a restar aquí.
 const nominaTree = computed(() => {
     return branchesFull.value.map(b => {
         const raw = brRaw.value.find((r: any) => r.sucursal === b.nombre)
-        const det = (raw?.nomina_detalle ?? {}) as Record<string, number>
+        const det: Record<string, number> = {}
+        for (const [k, v] of Object.entries((raw?.nomina_detalle ?? {}) as Record<string, number>)) det[k] = (det[k] ?? 0) + (Number(v) || 0)
+        for (const [k, v] of Object.entries((raw?.nomina_informativo ?? {}) as Record<string, number>)) det[k] = (det[k] ?? 0) + (Number(v) || 0)
         const base = [
             { concepto: 'Sueldos',          total: Number(raw?.nomina_total) || 0 },
             { concepto: 'Comisiones',       total: Number(raw?.comisiones) || 0 },
@@ -717,7 +725,7 @@ const nominaTree = computed(() => {
             ...Object.entries(det).filter(([, v]) => Number(v) > 0).map(([concepto, total]) => ({ concepto, total: Number(total) })),
         ].filter(c => c.total > 0)
         const descuentos = base.filter(c => NOI_DEDUCTION_LABELS.has(c.concepto)).reduce((s, c) => s + c.total, 0)
-        return { sucursal: b.nombre, total: b.nomina, neto: b.nomina - descuentos, descuentos, conceptos: base }
+        return { sucursal: b.nombre, total: b.nomina + descuentos, neto: b.nomina, descuentos, conceptos: base }
     }).filter(n => n.total > 0)
 })
 const expandedNominaBranch = ref<string | null>(null)
@@ -1230,13 +1238,21 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">Prima vacacional</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomPrimaVac) }}</td></tr>
                                     <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Bonos</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomBonos) }}</td></tr>
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">Bonos aceleradores</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomBonosAcel) }}</td></tr>
-                                    <template v-for="(item, i) in nomDetalle.filter(r => !NOI_DEDUCTION_LABELS.has(r.label))" :key="item.label">
+                                    <tr class="border-b bg-red-50/50"><td class="px-5 py-1.5 pl-5 text-red-700 text-[11px] font-semibold uppercase tracking-wide" colspan="2">Deducciones NOI (ya restadas del total)</td></tr>
+                                    <template v-for="(item, i) in nomDetalle.filter(r => NOI_DEDUCTION_LABELS.has(r.label))" :key="'ded-'+item.label">
+                                        <tr :class="i % 2 === 0 ? '' : 'bg-slate-50/60'" class="border-b">
+                                            <td class="px-5 py-1.5 pl-8 text-red-600 text-xs">{{ item.label }}</td>
+                                            <td class="px-5 py-1.5 text-right text-xs font-semibold text-red-600">− {{ money(item.value) }}</td>
+                                        </tr>
+                                    </template>
+                                    <tr class="border-t-2 border-blue-200 bg-blue-50"><td class="px-5 py-2.5 font-black text-blue-900">Total Nómina y Capital Humano</td><td class="px-5 py-2.5 text-right font-black text-blue-900">{{ money(nomTotal) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-1.5 pl-5 text-slate-500 text-[11px] font-semibold uppercase tracking-wide" colspan="2">Gastos informativos / operativos (NO suman al total — ya contados en OPEX)</td></tr>
+                                    <template v-for="(item, i) in nomDetalle.filter(r => !NOI_DEDUCTION_LABELS.has(r.label))" :key="'info-'+item.label">
                                         <tr :class="i % 2 === 0 ? '' : 'bg-slate-50/60'" class="border-b">
                                             <td class="px-5 py-1.5 pl-8 text-slate-500 text-xs">{{ item.label }}</td>
                                             <td class="px-5 py-1.5 text-right text-xs font-semibold text-slate-700">{{ money(item.value) }}</td>
                                         </tr>
                                     </template>
-                                    <tr class="border-t-2 border-blue-200 bg-blue-50"><td class="px-5 py-2.5 font-black text-blue-900">Total Nómina y Capital Humano</td><td class="px-5 py-2.5 text-right font-black text-blue-900">{{ money(nomTotal) }}</td></tr>
                                 </tbody>
                             </table>
                         </div>

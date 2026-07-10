@@ -135,7 +135,9 @@
       "Bash(python3 -c ' *)",
       "PowerShell(Get-CimInstance *)",
       "Bash(tee \"C:\\\\Users\\\\Jesus\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--wamp64-www-Reportes\\\\0fddefb1-2079-4d48-94c2-b7a4f68eba16\\\\scratchpad\\\\gen21_v2.log\")",
-      "Bash(python3 -)"
+      "Bash(python3 -)",
+      "Bash(git *)",
+      "Bash(npx vue-tsc *)"
     ]
   }
 }

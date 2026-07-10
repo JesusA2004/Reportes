@@ -244,13 +244,9 @@ class PeriodRadiographyService
         // from payrollMetrics()'s naive per-employee expense sum, which mixes in unrelated
         // categories (excedentes, préstamos intersucursales, etc.) whenever they happen to
         // carry an employee_id, and previously inflated this figure well beyond the real total.
-        $nominaCapitalHumanoTotal = (float) ($branchCalcGlobal['nomina_total'] ?? 0)
-            + (float) ($branchCalcGlobal['comisiones'] ?? 0)
-            + (float) ($branchCalcGlobal['bonos'] ?? 0)
-            + (float) ($branchCalcGlobal['bonos_aceleradores'] ?? 0)
-            + (float) ($branchCalcGlobal['vacaciones'] ?? 0)
-            + (float) ($branchCalcGlobal['prima_vacacional'] ?? 0)
-            + array_sum(array_values((array) ($branchCalcGlobal['nomina_detalle'] ?? [])));
+        // Fuente única: BranchRadiographyCalculator::nominaTotalFor() — NOI neto (percepciones
+        // − deducciones). nomina_detalle/nomina_informativo son informativos, NUNCA se suman.
+        $nominaCapitalHumanoTotal = BranchRadiographyCalculator::nominaTotalFor($branchCalcGlobal);
 
         // Always use gastos_lendus (PDF) — XLS rows have all NULL branch_id and get filtered
         // out by the branch filter, producing $0 Lendus; PDF has proper branch_ids per row.

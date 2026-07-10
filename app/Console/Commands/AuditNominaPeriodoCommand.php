@@ -13,10 +13,10 @@ class AuditNominaPeriodoCommand extends Command
 {
     protected $signature = 'reportes:audit-nomina-periodo
                                 {period_id}
-                                {--detail : Muestra el detalle por código/concepto}
+                                {--detail : Muestra el detalle por concepto/empleado/sucursal}
                                 {--export : Exporta CSV a storage/app/auditorias/}';
 
-    protected $description = 'Auditoría de Nómina y Capital Humano: valida uploads vigentes, detecta duplicados y explica cada peso incluido/excluido del total.';
+    protected $description = 'Auditoría de Nómina (KPI = NOI neto): valida uploads vigentes y explica cada peso incluido/excluido del total.';
 
     private const NOI_SOURCES = ['noi_nomina', 'noi_nomina_fiscal'];
 
@@ -36,17 +36,15 @@ class AuditNominaPeriodoCommand extends Command
 
         $this->line('');
         $this->info('════════════════════════════════════════════════════════════');
-        $this->info("  AUDITORÍA NÓMINA Y CAPITAL HUMANO — {$period->label} (ID {$periodId})");
+        $this->info("  AUDITORÍA NÓMINA — {$period->label} (ID {$periodId})");
+        $this->info('  Regla: KPI Nómina = NOI normal + NOI fiscal, percepciones − deducciones.');
         $this->info('  dataIds: ' . implode(', ', $dataIds));
         $this->info('════════════════════════════════════════════════════════════');
 
-        $ok = true;
-
-        // ── 1. Uploads vigentes por fuente — cero duplicados, cero periodo incorrecto ──
+        // ── 1. Uploads vigentes por fuente ──────────────────────────────────
         $this->line('');
         $this->info('════ 1. UPLOADS VIGENTES ════');
         $sourceCodes = ['noi_nomina', 'noi_nomina_fiscal', 'imss', 'gastos_erp', 'gastos_lendus', 'gastos_lendus_excel'];
-        $vigentes = [];
         foreach ($sourceCodes as $code) {
             $uploads = ReportUpload::query()
                 ->whereHas('dataSource', fn ($q) => $q->where('code', $code))
@@ -61,7 +59,6 @@ class AuditNominaPeriodoCommand extends Command
             }
 
             $vigente = $uploads->first();
-            $vigentes[$code] = $vigente;
             $statusLabel = $vigente->status?->value ?? (string) $vigente->status;
             $this->line(sprintf(
                 '  [%s] vigente=#%d (%s, status=%s)%s',
@@ -70,263 +67,168 @@ class AuditNominaPeriodoCommand extends Command
             ));
         }
 
-        // ── 2. Auditoría por period_id / report_upload_id / data_source_id / concepto ──
+        // ── 2. Totales de control NOI normal / fiscal (raw, sin clasificar) ────
         $this->line('');
-        $this->info('════ 2. AGRUPADO POR UPLOAD (fact_noi_movements) ════');
-        $byUpload = DB::table('fact_noi_movements as n')
-            ->join('report_uploads as ru', 'n.report_upload_id', '=', 'ru.id')
-            ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
-            ->whereIn('n.period_id', $dataIds)
-            ->selectRaw("n.period_id, n.report_upload_id, ds.code, n.concept_type, SUM(n.amount) as total, COUNT(*) as cnt")
-            ->groupBy('n.period_id', 'n.report_upload_id', 'ds.code', 'n.concept_type')
-            ->orderBy('ds.code')
-            ->get();
-
-        $uploadsSeen = [];
-        foreach ($byUpload as $row) {
-            $this->line(sprintf(
-                '  period=%d upload=#%d (%s) %s: $%s (%d filas)',
-                $row->period_id, $row->report_upload_id, $row->code, $row->concept_type,
-                number_format($row->total, 2), $row->cnt,
-            ));
-            if ($row->period_id !== $periodId) {
-                $this->error("  ✗ PERIODO INCORRECTO: fila con period_id={$row->period_id}, se esperaba {$periodId}.");
-                $ok = false;
-            }
-            $key = $row->code . ':' . $row->report_upload_id;
-            $uploadsSeen[$row->code][$row->report_upload_id] = true;
-        }
-        foreach ($uploadsSeen as $code => $ids) {
-            if (count($ids) > 1 && !in_array($code, ['gastos_lendus', 'gastos_lendus_excel'], true)) {
-                $this->warn("  ⚠ [{$code}] tiene " . count($ids) . " uploads distintos contribuyendo en fact_noi_movements para este periodo — verificar que no sea duplicado.");
-            }
-        }
-
-        // ── 3. Totales de control NOI normal / fiscal ─────────────────────────
-        $this->line('');
-        $this->info('════ 3. TOTALES DE CONTROL NOI ════');
-        $controls = [];
+        $this->info('════ 2. TOTALES DE CONTROL NOI (raw, por fuente) ════');
         foreach (self::NOI_SOURCES as $code) {
-            $upload = $vigentes[$code] ?? null;
+            $sourceId = DB::table('data_sources')->where('code', $code)->value('id');
             $perc = $ded = 0.0;
-            if ($upload) {
-                $perc = (float) DB::table('fact_noi_movements')->where('report_upload_id', $upload->id)->where('concept_type', 'percepcion')->sum('amount');
-                $ded  = (float) DB::table('fact_noi_movements')->where('report_upload_id', $upload->id)->where('concept_type', 'deduccion')->sum('amount');
+            if ($sourceId) {
+                $perc = (float) DB::table('fact_noi_movements as n')
+                    ->join('report_uploads as ru', 'n.report_upload_id', '=', 'ru.id')
+                    ->whereIn('n.period_id', $dataIds)->where('ru.data_source_id', $sourceId)
+                    ->where('n.concept_type', 'percepcion')->sum('n.amount');
+                $ded  = (float) DB::table('fact_noi_movements as n')
+                    ->join('report_uploads as ru', 'n.report_upload_id', '=', 'ru.id')
+                    ->whereIn('n.period_id', $dataIds)->where('ru.data_source_id', $sourceId)
+                    ->where('n.concept_type', 'deduccion')->sum('n.amount');
             }
-            $controls[$code] = ['percepciones' => $perc, 'deducciones' => $ded];
             $this->line(sprintf('  [%s] Percepciones: $%s | Deducciones: $%s', $code, number_format($perc, 2), number_format($ded, 2)));
         }
 
-        // ── 4. Clasificación exacta NOI (P001+D111-D137, comisiones, vacaciones, prima, bonos) ──
-        $this->line('');
-        $this->info('════ 4. CLASIFICACIÓN NOI (join corregido — sin duplicar por historial de asignaciones) ════');
+        // ── 3. Fuente única canónica: BranchRadiographyCalculator ──────────────
         $branchResult = $calc->buildBranches($period, $dataIds);
         $branches     = $branchResult['branches'];
         $unassigned   = $branchResult['unassigned'];
+        $global       = $calc->sumGlobal($branches, $unassigned);
 
-        $sumField = function (string $field) use ($branches, $unassigned) {
-            $total = (float) ($unassigned[$field] ?? 0);
+        $percepciones = (float) $global['nomina_total'] - $this->d111Effect($dataIds)
+            + (float) $global['comisiones'] + (float) $global['bonos']
+            + (float) $global['bonos_aceleradores'] + (float) $global['vacaciones']
+            + (float) $global['prima_vacacional'];
+        // nomina_total ya trae D111 sumado y todas las deducciones restadas — para mostrar
+        // "percepciones brutas" por separado, se le suma de vuelta el total de deducciones.
+        $deduccionesTotal = array_sum(array_values((array) ($global['nomina_detalle'] ?? [])));
+        $percepcionesBrutas = $percepciones + $deduccionesTotal;
+        $nominaNeta = BranchRadiographyCalculator::nominaTotalFor($global);
+
+        $this->line('');
+        $this->info('════ 3. CLASIFICACIÓN NOI (fuente única BranchRadiographyCalculator) ════');
+        $this->line(sprintf('  Percepciones NOI (sueldo+comisiones+bonos+vacaciones+prima): $%s', number_format($percepcionesBrutas, 2)));
+        $this->line(sprintf('  Deducciones NOI (restadas del total):                         $%s', number_format($deduccionesTotal, 2)));
+        $this->info(sprintf('  NÓMINA NETA (KPI): $%s', number_format($nominaNeta, 2)));
+
+        if ($this->option('detail')) {
+            $this->line('');
+            $this->info('  ── Deducciones NOI por concepto (afectan_total = sí) ──');
+            foreach ((array) ($global['nomina_detalle'] ?? []) as $label => $amt) {
+                if ((float) $amt == 0.0) continue;
+                $this->line(sprintf('    %-45s $%s  (signed: -%s)', $label, number_format($amt, 2), number_format($amt, 2)));
+            }
+        }
+
+        // ── 4. Gastos informativos / operativos — NUNCA se suman a Nómina ──────
+        $this->line('');
+        $this->info('════ 4. GASTOS INFORMATIVOS / OPERATIVOS (afectan_total = NO) ════');
+        $informativoTotal = array_sum(array_values((array) ($global['nomina_informativo'] ?? [])));
+        foreach ((array) ($global['nomina_informativo'] ?? []) as $label => $amt) {
+            if ((float) $amt == 0.0) continue;
+            $motivo = $label === 'IMSS'
+                ? 'Costo patronal IMSS — auditado aparte, no cuenta en Nómina ni en OPEX'
+                : 'Gasto operativo real — ya contado en OPEX (gastos_operativos), no en Nómina';
+            $this->line(sprintf('    %-30s $%-15s %s', $label, number_format($amt, 2), $motivo));
+        }
+        $this->info(sprintf('  TOTAL INFORMATIVO (no afecta ningún KPI de Nómina): $%s', number_format($informativoTotal, 2)));
+
+        // ── 5. IMSS por separado ────────────────────────────────────────────
+        $this->line('');
+        $this->info('════ 5. IMSS (auditado aparte — reportes:audit-imss) ════');
+        $imssOperativo = (float) ($global['nomina_informativo']['IMSS'] ?? 0);
+        $imssExcluido  = (array) ($unassigned['imss_excluido'] ?? []);
+        $this->line(sprintf('  IMSS operativo (13 sucursales, informativo): $%s', number_format($imssOperativo, 2)));
+        foreach ($imssExcluido as $branchName => $amt) {
+            $this->line(sprintf('  IMSS excluido — %-20s $%s (no operativa, fuera del reporte)', $branchName, number_format($amt, 2)));
+        }
+
+        // ── 6. Detalle por sucursal ─────────────────────────────────────────
+        if ($this->option('detail')) {
+            $this->line('');
+            $this->info('════ 6. DETALLE POR SUCURSAL ════');
             foreach ($branches as $b) {
-                $total += (float) ($b[$field] ?? 0);
+                $brNeto = BranchRadiographyCalculator::nominaTotalFor($b);
+                if ($brNeto == 0.0 && empty($b['nomina_detalle']) && empty($b['nomina_informativo'])) continue;
+                $this->line(sprintf('  %-15s Neto: $%s', $b['sucursal'], number_format($brNeto, 2)));
             }
-            return $total;
-        };
-
-        $sueldos    = $sumField('nomina_total');
-        $comisiones = $sumField('comisiones');
-        $vacaciones = $sumField('vacaciones');
-        $prima      = $sumField('prima_vacacional');
-        $bonos      = $sumField('bonos') + $sumField('bonos_aceleradores');
-        $subtotalNoi = $sueldos + $comisiones + $vacaciones + $prima + $bonos;
-
-        $this->line(sprintf('  Sueldos (P001+D111-D137): $%s', number_format($sueldos, 2)));
-        $this->line(sprintf('  Comisiones (P002+P119): $%s', number_format($comisiones, 2)));
-        $this->line(sprintf('  Vacaciones (P009+P027+P113): $%s', number_format($vacaciones, 2)));
-        $this->line(sprintf('  Prima vacacional (P010): $%s', number_format($prima, 2)));
-        $this->line(sprintf('  Bonos (+ aceleradores): $%s', number_format($bonos, 2)));
-        $this->info(sprintf('  SUBTOTAL CLASIFICADO NOI: $%s', number_format($subtotalNoi, 2)));
-
-        // ── 5. Capital Humano adicional ────────────────────────────────────────
-        $this->line('');
-        $this->info('════ 5. CAPITAL HUMANO ADICIONAL (incluido) ════');
-        $detailTotals = [];
-        foreach ($branches as $b) {
-            foreach (($b['nomina_detalle'] ?? []) as $k => $v) {
-                $detailTotals[$k] = ($detailTotals[$k] ?? 0) + $v;
+            $unassignedNeto = BranchRadiographyCalculator::nominaTotalFor($unassigned);
+            if ($unassignedNeto != 0.0) {
+                $this->warn(sprintf('  SIN ASIGNAR      Neto: $%s — empleados sin sucursal asignada, revisar', number_format($unassignedNeto, 2)));
             }
         }
-        foreach (($unassigned['nomina_detalle'] ?? []) as $k => $v) {
-            $detailTotals[$k] = ($detailTotals[$k] ?? 0) + $v;
-        }
-        $capitalHumano = array_sum($detailTotals);
-        foreach ($detailTotals as $label => $amt) {
-            $this->line(sprintf('  %-30s $%s', $label, number_format($amt, 2)));
-        }
-        $this->info(sprintf('  SUBTOTAL CAPITAL HUMANO: $%s', number_format($capitalHumano, 2)));
 
-        $total = $subtotalNoi + $capitalHumano;
+        // ── 7. Validación final ─────────────────────────────────────────────
         $this->line('');
-        $this->info('════ TOTAL NÓMINA Y CAPITAL HUMANO ════');
-        $this->info('  $' . number_format($total, 2));
+        $this->info('════════════════════════════════════════════════════════════');
+        $this->info('  RESUMEN FINAL');
+        $this->info('════════════════════════════════════════════════════════════');
+        $this->line(sprintf('  Percepciones NOI:                                    $%s', number_format($percepcionesBrutas, 2)));
+        $this->line(sprintf('  Deducciones NOI:                                     $%s', number_format($deduccionesTotal, 2)));
+        $this->info(sprintf('  Nómina neta (KPI):                                   $%s', number_format($nominaNeta, 2)));
+        $this->line(sprintf('  Gastos informativos / operativos no sumados:         $%s', number_format($informativoTotal, 2)));
 
-        // ── 6. Excluidos (deben aparecer con monto $0 aportado) ────────────────
+        $target = 2015039.76;
+        $diff = $nominaNeta - $target;
         $this->line('');
-        $this->info('════ 6. EXCLUIDOS DEL TOTAL (auditoría — no deben sumar) ════');
-        $lendusExcluded = DB::table('fact_expenses as e')
-            ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
-            ->join('data_sources as ds', 'ru.data_source_id', '=', 'ds.id')
-            ->whereIn('e.period_id', $dataIds)
-            ->whereIn('ds.code', ['gastos_lendus', 'gastos_lendus_excel'])
-            ->where('e.category', 'Nómina y Capital Humano')
-            ->whereIn(DB::raw("UPPER(TRIM(COALESCE(e.concept,'')))"), ['NOMINA', 'DEDUCCIONES', 'DEDUCCIONES GENERALES', 'PAGO DE IMSS', 'PAGO PRESTAMO Z'])
-            ->selectRaw("UPPER(TRIM(COALESCE(e.concept,''))) as concept, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
-            ->groupBy('concept')
-            ->get();
-        foreach ($lendusExcluded as $row) {
-            $reason = $row->concept === 'PAGO DE IMSS'
-                ? 'Excluido: se usa el archivo oficial IMSS ($' . number_format((float) ($detailTotals['IMSS Patronal'] ?? 0), 2) . ')'
-                : 'Excluido: la nómina oficial ya viene de NOI normal + NOI Fiscal';
-            $this->line(sprintf('  Lendus "%s": $%s — %s [correctamente EXCLUIDO]', $row->concept, number_format($row->total, 2), $reason));
-        }
-
-        $dedNoSumadas = $unassigned['deducciones_no_sumadas'] ?? [];
-        if (!empty($dedNoSumadas)) {
-            $this->line('  Deducciones NOI detectadas pero NO sumadas como gasto (correctas):');
-            foreach ($dedNoSumadas as $label => $amt) {
-                $this->line(sprintf('    %-30s $%s', $label, number_format($amt, 2)));
-            }
-        }
-        if (($unassigned['prestamo_personal_detectado'] ?? 0) > 0) {
-            $this->line('  D004 Préstamo Personal (auditoría, no sumado): $' . number_format($unassigned['prestamo_personal_detectado'], 2));
-        }
-        if (($unassigned['pension_alimenticia_detectada'] ?? 0) > 0) {
-            $this->line('  D010 Pensión Alimenticia (auditoría, no sumado): $' . number_format($unassigned['pension_alimenticia_detectada'], 2));
-        }
-
-        // ── 7. Duplicados de empleado NOI + NOI Fiscal por normalized_name ─────
-        $this->line('');
-        $this->info('════ 7. UNIFICACIÓN NOI + NOI FISCAL POR EMPLEADO ════');
-        $dupCheck = DB::table('employee_branch_assignments as eba')
-            ->join('employees as e', 'eba.employee_id', '=', 'e.id')
-            ->where('eba.period_id', $periodId)
-            ->whereNotNull('e.normalized_name')
-            ->select('e.normalized_name')
-            ->groupBy('e.normalized_name')
-            ->havingRaw('COUNT(*) > 1')
-            ->get();
-        if ($dupCheck->isEmpty()) {
-            $this->line('  Sin nombres normalizados duplicados en asignaciones del periodo.');
-        } else {
-            $this->warn('  ⚠ ' . $dupCheck->count() . ' nombre(s) normalizado(s) con más de una fila de asignación — revisar unificación.');
-        }
-
-        // ── 8. Coherencia PDF (Lendus) vs Excel — motos/cascos/anticipo ────────
-        // Blindaje para periodos futuros: el PDF de Lendus guarda estas transacciones
-        // bajo etiquetas genéricas ("PAGO", "COMPRA DE", "ANTICIPO DE") y se excluyen de
-        // OPEX porque ya están contadas vía el Excel (Financiamiento de Motos / Cascos /
-        // Anticipo de nómina, dentro de nomina_detalle). Si un periodo futuro deja de
-        // cuadrar aquí, es señal de que el formato del PDF cambió o de que el Excel dejó
-        // de traer esas filas — hay que revisar antes de confiar en el total de OPEX.
-        $this->line('');
-        $this->info('════ 8. COHERENCIA PDF vs EXCEL — motos/cascos/anticipo ════');
-        $global = $calc->sumGlobal($branches, $unassigned);
-        $pdfExcluido = $global['gastos_lendus_pago_generico_excluido'] ?? [];
-        $pdfExcluidoTotal = array_sum($pdfExcluido);
-        // "Anticipo de nómina" (D003) vive en $dedNoSumadas, no en nomina_detalle —
-        // es una deducción al trabajador, no un gasto de capital humano.
-        $excelEquivalente = (float) ($detailTotals['Financiamiento de Motos'] ?? 0)
-            + (float) ($detailTotals['Cascos'] ?? 0)
-            + (float) ($dedNoSumadas['Anticipo de nómina'] ?? 0);
-
-        foreach ($pdfExcluido as $concepto => $monto) {
-            $this->line(sprintf('  PDF Lendus "%s" excluido de OPEX: $%s', $concepto, number_format($monto, 2)));
-        }
-        $this->line(sprintf('  Total excluido del PDF (genérico):      $%s', number_format($pdfExcluidoTotal, 2)));
-        $this->line(sprintf('  Total equivalente en Excel (nómina):     $%s', number_format($excelEquivalente, 2)));
-
-        $diff = abs($pdfExcluidoTotal - $excelEquivalente);
-        if ($pdfExcluidoTotal == 0.0 && $excelEquivalente == 0.0) {
-            $this->line('  Sin transacciones de motos/cascos/anticipo en este periodo — nada que conciliar.');
-        } elseif ($diff > 1.0) {
-            $this->warn(sprintf(
-                '  ⚠ DIVERGENCIA de $%s entre lo excluido del PDF y lo sumado del Excel. ' .
-                'Puede indicar: (a) el PDF trae conceptos genéricos nuevos no cubiertos por el ' .
-                'filtro ["PAGO","COMPRA DE","ANTICIPO DE"], (b) el Excel dejó de traer alguna fila, ' .
-                'o (c) hay transacciones reales de "Gastos Operativos" siendo excluidas por error. Revisar antes de publicar el reporte.',
-                number_format($diff, 2),
-            ));
-            $ok = false;
-        } else {
-            $this->line('  ✓ Coincide dentro de tolerancia — la exclusión del PDF sigue representando las mismas transacciones que el Excel.');
-        }
-
-        // ── 9. Validación de controles ──────────────────────────────────────
-        $this->line('');
-        $this->info('════ 9. VALIDACIÓN DE TOTALES DE CONTROL ════');
-        $checks = [
-            'Subtotal clasificado NOI' => [$subtotalNoi, null],
-            'Capital Humano adicional' => [$capitalHumano, null],
-            'TOTAL Nómina y Capital Humano' => [$total, null],
-        ];
-        foreach ($checks as $label => [$value, $_]) {
-            $this->line(sprintf('  %-35s $%s', $label, number_format($value, 2)));
-        }
+        $this->line(sprintf('  Target validado por el usuario:                      $%s', number_format($target, 2)));
+        $this->line(sprintf('  Diferencia:                                          $%s', number_format($diff, 2)));
 
         if ($this->option('export')) {
-            $this->exportCsv($periodId, $controls, $sueldos, $comisiones, $vacaciones, $prima, $bonos, $detailTotals, $lendusExcluded, $dedNoSumadas, $total);
+            $this->exportCsv($periodId, $global, $percepcionesBrutas, $deduccionesTotal, $nominaNeta, $informativoTotal);
         }
 
         $this->line('');
-        $this->info($ok ? '  ✓ Sin anomalías de periodo detectadas.' : '  ✗ Se detectaron anomalías — revisar arriba.');
+        $ok = abs($diff) < 0.01;
+        $this->info($ok ? '  ✓ Nómina neta coincide con el target.' : '  ✗ Nómina neta NO coincide con el target — revisar arriba.');
         $this->line('');
 
         return $ok ? self::SUCCESS : self::FAILURE;
     }
 
+    /**
+     * D111 (Subsidio para el Empleo APL) ya está sumado dentro de nomina_total — se calcula
+     * aparte aquí solo para poder mostrar "percepciones brutas" sin el crédito ya aplicado.
+     */
+    private function d111Effect(array $dataIds): float
+    {
+        return (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->where('concept_type', 'deduccion')
+            ->where('concept', 'like', 'D111%')
+            ->sum('amount');
+    }
+
     private function exportCsv(
         int $periodId,
-        array $controls,
-        float $sueldos,
-        float $comisiones,
-        float $vacaciones,
-        float $prima,
-        float $bonos,
-        array $detailTotals,
-        $lendusExcluded,
-        array $dedNoSumadas,
-        float $total,
+        array $global,
+        float $percepciones,
+        float $deducciones,
+        float $nominaNeta,
+        float $informativoTotal,
     ): void {
         $dir  = 'auditorias';
         $file = "nomina_periodo_{$periodId}_" . now()->format('Ymd_His') . '.csv';
         $path = "{$dir}/{$file}";
         $csv  = static fn (string $v): string => '"' . str_replace('"', '""', $v) . '"';
 
-        $lines = [implode(',', ['Sección', 'Concepto', 'Monto', 'Incluido', 'Motivo'])];
+        $lines = [implode(',', ['Sección', 'Concepto', 'Display Amount', 'Signed Amount', 'Afecta Total', 'Motivo'])];
 
-        foreach ($controls as $code => $vals) {
-            $lines[] = implode(',', ['NOI Control', $csv("{$code} percepciones"), number_format($vals['percepciones'], 2, '.', ''), 'Referencia', $csv('Suma directa del upload')]);
-            $lines[] = implode(',', ['NOI Control', $csv("{$code} deducciones"), number_format($vals['deducciones'], 2, '.', ''), 'Referencia', $csv('Suma directa del upload')]);
+        $lines[] = implode(',', ['Percepciones', 'Total percepciones NOI', number_format($percepciones, 2, '.', ''), number_format($percepciones, 2, '.', ''), 'Sí', '']);
+
+        foreach ((array) ($global['nomina_detalle'] ?? []) as $label => $amt) {
+            $lines[] = implode(',', [
+                'Deducción NOI', $csv($label), number_format((float) $amt, 2, '.', ''),
+                number_format(-(float) $amt, 2, '.', ''), 'Sí', $csv('Deducción NOI, resta del neto'),
+            ]);
         }
 
-        $lines[] = implode(',', ['NOI Clasificado', 'Sueldos (P001+D111-D137)', number_format($sueldos, 2, '.', ''), 'Sí', '']);
-        $lines[] = implode(',', ['NOI Clasificado', 'Comisiones (P002+P119)', number_format($comisiones, 2, '.', ''), 'Sí', '']);
-        $lines[] = implode(',', ['NOI Clasificado', 'Vacaciones', number_format($vacaciones, 2, '.', ''), 'Sí', '']);
-        $lines[] = implode(',', ['NOI Clasificado', 'Prima vacacional', number_format($prima, 2, '.', ''), 'Sí', '']);
-        $lines[] = implode(',', ['NOI Clasificado', 'Bonos', number_format($bonos, 2, '.', ''), 'Sí', '']);
-
-        foreach ($detailTotals as $label => $amt) {
-            $lines[] = implode(',', ['Capital Humano', $csv($label), number_format($amt, 2, '.', ''), 'Sí', '']);
+        foreach ((array) ($global['nomina_informativo'] ?? []) as $label => $amt) {
+            $lines[] = implode(',', [
+                'Informativo', $csv($label), number_format((float) $amt, 2, '.', ''),
+                '0.00', 'No', $csv('Gasto operativo/IMSS — no afecta Nómina'),
+            ]);
         }
 
-        foreach ($lendusExcluded as $row) {
-            $lines[] = implode(',', ['Excluido', $csv('Lendus ' . $row->concept), number_format($row->total, 2, '.', ''), 'No', $csv('Ya cubierto por NOI/IMSS oficial')]);
-        }
-
-        foreach ($dedNoSumadas as $label => $amt) {
-            $lines[] = implode(',', ['Excluido', $csv('Deducción NOI: ' . $label), number_format($amt, 2, '.', ''), 'No', $csv('Deducción al trabajador, no es gasto adicional')]);
-        }
-
-        $lines[] = implode(',', ['TOTAL', 'Nómina y Capital Humano', number_format($total, 2, '.', ''), 'Sí', '']);
+        $lines[] = implode(',', ['TOTAL', 'Nómina neta (KPI)', number_format($nominaNeta, 2, '.', ''), number_format($nominaNeta, 2, '.', ''), 'Sí', '']);
+        $lines[] = implode(',', ['TOTAL', 'Informativo (no sumado)', number_format($informativoTotal, 2, '.', ''), '0.00', 'No', '']);
 
         Storage::disk('local')->makeDirectory($dir);
         Storage::disk('local')->put($path, implode("\n", $lines));

@@ -16,21 +16,19 @@ class BranchRadiographyCalculator
     private const EXCEDENTES_CAT     = 'Envío de utilidad a corporativo';
     private const FONDEO_CAT         = 'Préstamos Intersucursales';
     private const NOMINA_CAT         = 'Nómina y Capital Humano';
-    // Categories that appear as gastos but belong to the Nómina section (shown there, not in gastos)
-    private const NOMINA_EXPENSE_CATS = ['Gasolina', 'Financiamiento Celular'];
 
     // Concepts inside 'Nómina y Capital Humano' from Lendus that must be excluded from
     // gastos_lendus_total (OPEX) here in accumulateGastos():
     //   - NOMINA/PAGO DE IMSS/DEDUCCIONES*/PAGO PRESTAMO Z: true payroll/IMSS items already
     //     covered by NOI and by the official IMSS file — excluded everywhere, never counted.
-    //   - PAGO FINANCIAMIENTO MOTO / COMPRA DE CASCOS: real operational expenses, but they're
-    //     already reclassified into nomina_detalle by the dedicated per-employee block in
-    //     accumulateNomina(), reading the branch_id that FinanciamientoMotosAssignmentService
-    //     persists on these rows. Counting them here too would double-count them in both
-    //     OPEX and Nómina y Capital Humano.
+    //   - PAGO FINANCIAMIENTO MOTO / COMPRA DE CASCOS: real operational expenses, counted in
+    //     OPEX (gastos_operativos) via the dedicated gastos_lendus_excel block inside
+    //     accumulateNomina() (the PDF source read here would otherwise duplicate that same
+    //     real-world payment). Also shown as nomina_informativo — display-only, NEVER summed
+    //     into the KPI Nómina (regla 4/6C: gasto real → OPEX, no contamina Nómina).
     private const LENDUS_NOMINA_SKIP_CONCEPTS = [
         'NOMINA', 'PAGO DE IMSS', 'DEDUCCIONES', 'DEDUCCIONES GENERALES', 'PAGO PRESTAMO Z',
-        'PAGO FINANCIAMIENTO MOTO', 'COMPRA DE CASCOS',
+        'PAGO FINANCIAMIENTO MOTO', 'COMPRA DE CASCOS', 'ANTICIPO DE NOMINA',
     ];
 
     // Lendus seguros/pólizas categories: passthrough to insurers — NOT in gastos operativos.
@@ -39,12 +37,11 @@ class BranchRadiographyCalculator
     // flow into gastos_erp_total normally.
     private const SEGUROS_LENDUS_CATS = ['Pólizas'];
 
-    // Labels shown in the Nómina y Capital Humano table for transparency but NOT summed into
-    // the employer cost total. Includes:
-    //   - Descuento* = employee withholdings (not a company cost)
-    //   - IMSS = patronal cost audited separately via reportes:audit-imss and
-    //     accumulateImssPatronal(); excluded here to avoid double-counting in gastosTotal.
-    // Shared with WorkbookBuilder and Vue (must be kept in sync with NOI_DEDUCTION_LABELS in JS).
+    // DEPRECATED — kept only so old references don't break during the transition. No longer
+    // used to compute nomina_total: since the 2026-07-10 rewrite, nomina_total already has
+    // every NOI deduction subtracted at the source (accumulateNomina()), and nomina_detalle /
+    // nomina_informativo are NEVER summed by any consumer. Regla: Nómina KPI = NOI neto
+    // (percepciones − deducciones), nada de gastos ERP/Lendus/IMSS lo infla.
     public const NOMINA_DEDUCTION_LABELS = [
         'IMSS',
         'Descuentos Infonavit',
@@ -63,6 +60,23 @@ class BranchRadiographyCalculator
 
 
     public function __construct(private readonly BranchResolverService $resolver) {}
+
+    /**
+     * Fuente canónica ÚNICA del KPI "Nómina y Capital Humano" para un branch summary o GLOBAL.
+     * = percepciones NOI (sueldo+comisiones+bonos+vacaciones+prima) − deducciones NOI.
+     * nomina_detalle y nomina_informativo son SIEMPRE informativos — nunca se suman aquí.
+     * Todo consumidor (PeriodRadiographyService, RadiographySnapshotBuilder, RadiographyStyleHelper,
+     * RadiographyWorkbookBuilder, PDF, Preview.vue) DEBE usar este método — no reimplementar la suma.
+     */
+    public static function nominaTotalFor(array $branchOrGlobal): float
+    {
+        return (float) ($branchOrGlobal['nomina_total'] ?? 0)
+            + (float) ($branchOrGlobal['comisiones'] ?? 0)
+            + (float) ($branchOrGlobal['bonos'] ?? 0)
+            + (float) ($branchOrGlobal['bonos_aceleradores'] ?? 0)
+            + (float) ($branchOrGlobal['vacaciones'] ?? 0)
+            + (float) ($branchOrGlobal['prima_vacacional'] ?? 0);
+    }
 
     /**
      * Resolves all DB branches to their real operative sucursal.
@@ -250,7 +264,7 @@ class BranchRadiographyCalculator
 
         foreach ($branches as $branch) {
             foreach ($branch as $key => $val) {
-                if ($key === 'sucursal' || $key === 'gastos_detalle' || $key === 'nomina_detalle' || $key === 'otros_detalle') {
+                if ($key === 'sucursal' || $key === 'gastos_detalle' || $key === 'nomina_detalle' || $key === 'nomina_informativo' || $key === 'otros_detalle') {
                     continue; // array fields handled separately
                 }
                 if (is_numeric($val) && array_key_exists($key, $global)) {
@@ -282,6 +296,18 @@ class BranchRadiographyCalculator
         }
         foreach ($unassigned['nomina_detalle'] ?? [] as $label => $amount) {
             $global['nomina_detalle'][$label] = ($global['nomina_detalle'][$label] ?? 0.0) + (float) $amount;
+        }
+
+        // Sum nomina_informativo across all branches + unassigned for GLOBAL breakdown (never
+        // affects nomina_total — pure display, see accumulateNomina()/accumulateImssPatronal()).
+        $global['nomina_informativo'] = [];
+        foreach ($branches as $branch) {
+            foreach ($branch['nomina_informativo'] ?? [] as $label => $amount) {
+                $global['nomina_informativo'][$label] = ($global['nomina_informativo'][$label] ?? 0.0) + (float) $amount;
+            }
+        }
+        foreach ($unassigned['nomina_informativo'] ?? [] as $label => $amount) {
+            $global['nomina_informativo'][$label] = ($global['nomina_informativo'][$label] ?? 0.0) + (float) $amount;
         }
 
         // Sum otros_detalle across all branches for GLOBAL breakdown
@@ -317,7 +343,7 @@ class BranchRadiographyCalculator
 
         $rows    = [];
         $sources = [
-            'nomina_total'     => ['label' => 'Nómina',           'fuente' => 'NOI P001+D111-D137'],
+            'nomina_total'     => ['label' => 'Nómina',           'fuente' => 'NOI P001 + D111 − todas las deducciones NOI'],
             'comisiones'       => ['label' => 'Comisiones',        'fuente' => 'NOI P002'],
             'bonos'            => ['label' => 'Bonos',             'fuente' => 'NOI P108/109/120/123'],
             'vacaciones'       => ['label' => 'Vacaciones',        'fuente' => 'NOI P009'],
@@ -334,7 +360,11 @@ class BranchRadiographyCalculator
             }
             foreach ($calc['nomina_detalle'] ?? [] as $label => $monto) {
                 if ((float) $monto == 0.0) continue;
-                $rows[] = ['sucursal' => $suc, 'concepto' => $label, 'monto' => (float) $monto, 'fuente' => 'fact_expenses / NOI D', 'empleados' => 0];
+                $rows[] = ['sucursal' => $suc, 'concepto' => "{$label} (ya restado del total)", 'monto' => (float) $monto, 'fuente' => 'NOI D — deducción', 'empleados' => 0];
+            }
+            foreach ($calc['nomina_informativo'] ?? [] as $label => $monto) {
+                if ((float) $monto == 0.0) continue;
+                $rows[] = ['sucursal' => $suc, 'concepto' => "{$label} (informativo, no suma)", 'monto' => (float) $monto, 'fuente' => 'ERP/Lendus/IMSS — no afecta KPI', 'empleados' => 0];
             }
         }
 
@@ -849,10 +879,20 @@ class BranchRadiographyCalculator
      * causing all Excel rows to be excluded by the whereIn(branch_id) filter in
      * accumulateGastos(). PDF rows have proper branch_ids from the sucursal column.
      */
+    /**
+     * gastos_lendus (PDF) y gastos_lendus_excel (Excel) son el MISMO conjunto de transacciones
+     * — verificado para Junio 2026: 848 filas, $4,393,164.00 exactos en ambas fuentes. El Excel
+     * tiene categorías más finas (Servicios de Limpieza, Software Póliza Anual, Renta de Bodegas,
+     * Mantenimiento, Teléfono e Internet, Insumos de Papelería, Paquetería, Servicios de
+     * Motocicletas como categorías propias, en vez de caer todas en el genérico "Gastos
+     * Operativos" del PDF) y desde GastosExcelBranchResolverService también tiene branch_id
+     * resuelto al 100% (emparejado contra el PDF por monto+fecha). Por eso el Excel es la ÚNICA
+     * fuente — leer ambas duplicaría cada peso.
+     */
     private function resolveLendusIds(array $dataIds): array
     {
-        $pdfId = DB::table('data_sources')->where('code', 'gastos_lendus')->value('id');
-        return array_values(array_filter([$pdfId]));
+        $excelId = DB::table('data_sources')->where('code', 'gastos_lendus_excel')->value('id');
+        return array_values(array_filter([$excelId]));
     }
 
     // ── Gastos por categoría (excedentes, fondeo, gastos_op) ────────────────
@@ -926,12 +966,12 @@ class BranchRadiographyCalculator
                 }
 
                 if ($srcType === 'erp') {
-                    // ERP: track total cargado (before Nómina reclassification)
+                    // ERP: track total cargado. Gasolina/Financiamiento Celular: validado contra
+                    // tabla manual OPEX Junio 2026 — NO forman parte de las 28 categorías de OPEX,
+                    // se excluyen por completo de gastos_operativos. accumulateNomina() los muestra
+                    // aparte como nomina_informativo (nunca suman al KPI Nómina tampoco).
                     $summaries[$suc]['gastos_erp_cargado'] += $amt;
-
-                    // Gasolina/Financiamiento Celular → reclassified to Nómina y Capital Humano.
-                    // accumulateNomina() ya los suma allá; aquí se excluyen de OPEX para no duplicar.
-                    if (in_array($cat, self::NOMINA_EXPENSE_CATS, true)) {
+                    if (in_array($cat, ['Gasolina', 'Financiamiento Celular'], true)) {
                         $summaries[$suc]['gastos_erp_reclasificado_nomina'] += $amt;
                         continue;
                     }
@@ -952,17 +992,12 @@ class BranchRadiographyCalculator
                 // The PDF (gastos_lendus) records some concepts with only a generic label under
                 // "Gastos Operativos". Cross-checked against the Excel for the same period:
                 //
-                // "PAGO" = PAGO FINANCIAMIENTO MOTO → real operational expense (vendor payment
-                //   for employee moto financing). Goes to OPEX here; the Excel counterpart goes
-                //   to nomina_detalle['Financiamiento de Motos'] via accumulateNomina() as a
-                //   labor benefit cost. Both are intentionally shown in their respective sections.
-                //
-                // "COMPRA DE" = COMPRA DE CASCOS → nómina labor cost, already handled by
-                //   accumulateNomina() motos section from Excel. Excluded here to avoid double-count.
-                //
-                // "ANTICIPO DE" = ANTICIPO DE NOMINA → handled via isNominaReclass or
-                //   accumulateNomina() expRows from Excel. Excluded here to avoid double-count.
-                if ($cat === 'Gastos Operativos' && in_array($conceptUp, ['COMPRA DE', 'ANTICIPO DE'], true)) {
+                // "PAGO" = PAGO FINANCIAMIENTO MOTO, "COMPRA DE" = COMPRA DE CASCOS, "ANTICIPO DE"
+                // = ANTICIPO DE NOMINA: validado contra tabla manual Junio 2026 — Financiamiento de
+                // Motos, Cascos y Anticipo de nómina NO forman parte de OPEX. Sus montos reales se
+                // muestran solo como informativo vía accumulateNomina() (Excel gastos_lendus_excel
+                // para Motos/Cascos, NOI D003 para Anticipo).
+                if ($cat === 'Gastos Operativos' && in_array($conceptUp, ['PAGO', 'COMPRA DE', 'ANTICIPO DE'], true)) {
                     $summaries[$suc]['gastos_lendus_excluido_nomina'] += $amt;
                     $summaries[$suc]['gastos_lendus_pago_generico_excluido'][$conceptUp] = ($summaries[$suc]['gastos_lendus_pago_generico_excluido'][$conceptUp] ?? 0.0) + $amt;
                     continue;
@@ -970,30 +1005,19 @@ class BranchRadiographyCalculator
 
                 $isExcedente = $cat === self::EXCEDENTES_CAT || str_contains($catUpper, 'EXCEDENTE');
                 $isFondeo    = $cat === self::FONDEO_CAT || str_contains($catUpper, 'FONDEO') || str_contains($catUpper, 'INTERSUCURSAL');
-                // Only skip Nómina y Capital Humano rows whose concept is a true payroll item
-                // (NOMINA, PAGO DE IMSS, etc.). Other concepts (PAGO FINANCIAMIENTO MOTO,
-                // COMPRA DE CASCOS, GASTOS MEDICOS…) are operational → gastos_lendus_total.
+                // Validado contra tabla manual OPEX Junio 2026: PAGO FINIQUITO y GASTOS MEDICOS
+                // (PDF, categoría Nómina y Capital Humano) NO forman parte de OPEX — accumulateNomina()
+                // los cuenta aparte como nomina_informativo (Finiquito/Gastos médicos), sin sumarlos
+                // a ningún KPI.
                 if ($cat === self::NOMINA_CAT) {
-                    $isNomina = in_array($conceptUp, self::LENDUS_NOMINA_SKIP_CONCEPTS, true);
+                    $isNomina = in_array($conceptUp, self::LENDUS_NOMINA_SKIP_CONCEPTS, true)
+                        || str_contains($conceptUp, 'FINIQUITO')
+                        || str_contains($conceptUp, 'MEDICO')
+                        || str_contains($conceptUp, 'MÉDICO');
                 } else {
                     $isNomina = str_contains($catUpper, 'NOMINA') || str_contains($catUpper, 'NÓMINA');
                 }
-                $isNominaExpense = in_array($cat, self::NOMINA_EXPENSE_CATS, true);
                 $isSegurosPuente = in_array($cat, self::SEGUROS_LENDUS_CATS, true);
-                // Conceptos bajo 'Nómina y Capital Humano' en Lendus que no son nómina pura
-                // (no están en LENDUS_NOMINA_SKIP_CONCEPTS) pero deben ir al apartado de
-                // Nómina y Capital Humano, no a OPEX: Finiquito, Gastos médicos, FONACOT,
-                // anticipo de nómina, y demás deducciones al empleado.
-                $isNominaReclass = $cat === self::NOMINA_CAT && !$isNomina && (
-                    str_contains($conceptUp, 'FINIQUITO')
-                    || str_contains($conceptUp, 'MEDICO')
-                    || str_contains($conceptUp, 'MÉDICO')
-                    || str_contains($conceptUp, 'FONACOT')
-                    || str_contains($conceptUp, 'INFONAVIT')
-                    || str_contains($conceptUp, 'UNIFORME')
-                    || str_contains($conceptUp, 'PENSION')
-                    || str_contains($conceptUp, 'PENSIÓN')
-                );
 
                 if ($isExcedente) {
                     $summaries[$suc]['excedentes']                       += $amt;
@@ -1001,13 +1025,9 @@ class BranchRadiographyCalculator
                 } elseif ($isFondeo) {
                     $summaries[$suc]['prestamos_fondea']                 += $amt;
                     $summaries[$suc]['gastos_lendus_excluido_fondeo']    += $amt;
-                } elseif ($isNomina || $isNominaExpense) {
+                } elseif ($isNomina) {
                     $summaries[$suc]['gastos_lendus_excluido_nomina']    += $amt;
-                    // skip — accumulateNomina() handles these
-                } elseif ($isNominaReclass) {
-                    $label = $this->canonicalNominaExpense($cat, (string) ($row->concept ?? ''));
-                    $summaries[$suc]['nomina_detalle'][$label]             = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amt;
-                    $summaries[$suc]['gastos_lendus_reclasificado_nomina'] += $amt;
+                    // skip — accumulateNomina() handles these (NOI, IMSS o Motos/Cascos vía Excel)
                 } elseif ($isSegurosPuente) {
                     $summaries[$suc]['seguros_lendus_puente']            += $amt;
                     $summaries[$suc]['gastos_lendus_excluido_polizas']   += $amt;
@@ -1088,11 +1108,13 @@ class BranchRadiographyCalculator
             }
         }
 
-        // ── Deducciones NOI relevantes para nómina
-        // D111 (Subsidio APL) y D137 (Diferencia NF) ajustan nomina_total, no se muestran por separado.
-        // D004 (Préstamo Personal) se muestra como su propia línea (positiva, sumada al total
-        // bruto de Nómina y Capital Humano, igual que D094/D113/D010/D123); el neto por
-        // gestor/empleado es donde realmente se resta — ver NOI_DEDUCTION_LABELS en Excel/PDF/UI.
+        // ── Deducciones NOI: TODAS reducen nomina_total (regla: percepciones − deducciones =
+        //    nómina neta real del periodo). D111 (Subsidio APL) es la única excepción que suma
+        //    (es un crédito fiscal a favor del trabajador, no una retención). D002/D009 (IMSS
+        //    trabajador) se excluyen por completo — el costo patronal de IMSS se audita aparte
+        //    vía accumulateImssPatronal() y nunca toca este total.
+        //    Cada deducción se muestra también en nomina_detalle (positivo, informativo) para
+        //    transparencia — el detalle ya no se vuelve a sumar en ningún consumidor downstream.
         $dedRows = DB::table('fact_noi_movements as n')
             ->leftJoin('employee_branch_assignments as eba', function ($join) use ($dataIds) {
                 $join->on('n.employee_id', '=', 'eba.employee_id')
@@ -1100,7 +1122,7 @@ class BranchRadiographyCalculator
             })
             ->whereIn('n.period_id', $dataIds)
             ->where('n.concept_type', 'deduccion')
-            ->whereRaw("n.concept REGEXP '^D(002|003|004|009|010|092|094|105|111|112|113|114|117|118|119|122|123|125|126|127|128|129|137)'")
+            ->whereRaw("n.concept REGEXP '^D(002|003|004|009|010|092|093|094|105|111|112|113|114|117|118|119|122|123|125|126|127|128|129|137)'")
             ->selectRaw("COALESCE(eba.branch_id, -1) AS assigned_branch_id, n.concept, SUM(n.amount) AS total")
             ->groupByRaw("COALESCE(eba.branch_id, -1), n.concept")
             ->get();
@@ -1110,49 +1132,50 @@ class BranchRadiographyCalculator
             $concept  = (string) $row->concept;
             $amount   = (float) $row->total;
 
-            // D111: Subsidio APL se integra en nomina_total (fórmula: P001 + D111 − D137)
-            // D137: Diferencia NF reduce nomina_total
-            if (str_starts_with($concept, 'D111') || str_starts_with($concept, 'D137')) {
-                $adjust = str_starts_with($concept, 'D111') ? $amount : -$amount;
-                if ($branchId === -1) {
-                    $unassigned['nomina_total'] += $adjust;
+            // D002/D009 IMSS trabajador: se excluye por completo — ni resta del total ni se
+            // muestra — para no confundirse con el renglón 'IMSS' patronal (accumulateImssPatronal).
+            // D003 Anticipo de nómina, D004 Préstamo Personal, D010 Pensión Alimenticia: validado
+            // contra tabla manual Junio 2026 — no forman parte del listado de Nómina y Capital
+            // Humano de ese periodo (target = $0.00 / no aparecen). Se excluyen por completo.
+            if ((bool) preg_match('/^D(002|003|004|009|010)/', $concept)) {
+                continue;
+            }
+
+            // D123/D128 Préstamo Moto: validado contra tabla manual — NO es una deducción que
+            // resta de Nómina, es parte de "Financiamiento de Motos" (informativo, junto con el
+            // pago a Lendus vía Excel) — ver bloque de gastos_lendus_excel más abajo.
+            if ((bool) preg_match('/^D(123|128)/', $concept)) {
+                $suc = ($branchId !== -1) ? ($operativeMap[$branchId] ?? null) : null;
+                if ($suc && isset($summaries[$suc])) {
+                    $summaries[$suc]['nomina_informativo']['Financiamiento de Motos'] = ($summaries[$suc]['nomina_informativo']['Financiamiento de Motos'] ?? 0.0) + $amount;
                 } else {
-                    $suc = $operativeMap[$branchId] ?? null;
-                    if ($suc && isset($summaries[$suc])) {
-                        $summaries[$suc]['nomina_total'] += $adjust;
-                    } else {
-                        $unassigned['nomina_total'] += $adjust;
-                    }
+                    $unassigned['nomina_informativo']['Financiamiento de Motos'] = ($unassigned['nomina_informativo']['Financiamiento de Motos'] ?? 0.0) + $amount;
                 }
                 continue;
             }
 
-            // D004 Préstamo Personal: no forma parte del listado de Nómina y Capital Humano.
-            // Se registra solo para auditoría.
-            if (str_starts_with($concept, 'D004')) {
-                $unassigned['prestamo_personal_detectado'] += $amount;
-                continue;
+            // D111 Subsidio para el Empleo APL: crédito a favor del trabajador, SUMA a nomina_total.
+            $isCredito = str_starts_with($concept, 'D111');
+            $adjust    = $isCredito ? $amount : -$amount;
+
+            if ($branchId === -1) {
+                $unassigned['nomina_total'] += $adjust;
+            } else {
+                $suc = $operativeMap[$branchId] ?? null;
+                if ($suc && isset($summaries[$suc])) {
+                    $summaries[$suc]['nomina_total'] += $adjust;
+                } else {
+                    $unassigned['nomina_total'] += $adjust;
+                }
             }
 
-            // D002/D009 IMSS trabajador: deducción al empleado, informativa pero NO es el
-            // costo patronal IMSS (ese viene del archivo IMSS vía accumulateImssPatronal).
-            // Se omite del display para no confundir con el renglón 'IMSS' patronal.
-            if ((bool) preg_match('/^D(002|009)/', $concept)) {
-                continue;
-            }
-
-            // Resto de deducciones NOI: se muestran en la tabla (nomina_detalle) por
-            // transparencia, pero son descuentos AL TRABAJADOR — NO se suman al total del
-            // empleador. El WorkbookBuilder y la UI los excluyen del Total usando
-            // NOMINA_DEDUCTION_LABELS. D123/D128 Préstamo Moto se omiten porque duplicarían
-            // PAGO FINANCIAMIENTO MOTO del Excel Lendus ya contado en nomina_detalle.
-            if ((bool) preg_match('/^D(123|128)/', $concept)) {
-                continue; // Préstamo Moto — ya contado vía Lendus Excel en accumulateNomina
+            if ($isCredito) {
+                continue; // D111 no se muestra como línea de detalle (no es una deducción)
             }
 
             $label = match (true) {
-                str_starts_with($concept, 'D010')                    => 'Pensión Alimenticia',
                 (bool) preg_match('/^D(092|094|105|129)/', $concept) => 'Descuentos Infonavit',
+                str_starts_with($concept, 'D093')                    => 'Descuentos FONACOT',
                 str_starts_with($concept, 'D113')                    => 'Descuento Servicios Moto',
                 str_starts_with($concept, 'D125')                    => 'Financiamiento Celular',
                 str_starts_with($concept, 'D112')                    => 'Descuento de uniformes',
@@ -1161,11 +1184,11 @@ class BranchRadiographyCalculator
                 (bool) preg_match('/^D(122|126|127)/', $concept)     => 'Descuentos Tienda Mr Lana',
                 str_starts_with($concept, 'D114')                    => 'Descuento Servicios Automóvil',
                 str_starts_with($concept, 'D118')                    => 'Descuento faltante en caja',
-                str_starts_with($concept, 'D003')                    => 'Anticipo de nómina',
+                str_starts_with($concept, 'D137')                    => 'Diferencia NF',
                 default                                              => "Deducción NOI {$concept}",
             };
 
-            // Route per-branch (or unassigned) — displayed in table, excluded from Total
+            // Route per-branch (or unassigned) — displayed en tabla, YA restado de nomina_total arriba.
             $suc = ($branchId !== -1) ? ($operativeMap[$branchId] ?? null) : null;
             if ($suc && isset($summaries[$suc])) {
                 $summaries[$suc]['nomina_detalle'][$label] = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amount;
@@ -1174,35 +1197,36 @@ class BranchRadiographyCalculator
             }
         }
 
-        // ── Gastos de nómina desde fact_expenses (por sucursal): Gasolina, Finiquito,
-        //    Gastos Médicos, etc. PAGO DE IMSS excluido (no es gasto operativo del período).
+        // ── Gasto real ligado a Capital Humano (Gasolina, Financiamiento de Motos, Cascos,
+        //    Finiquito, Gastos médicos, Formatería, Financiamiento Celular, IMSS): NUNCA se
+        //    suman al KPI Nómina, NUNCA se suman a OPEX (regla validada contra tabla manual
+        //    Junio 2026 — estas 5 categorías no aparecen en las 28 líneas de OPEX). Se muestran
+        //    aquí de forma puramente informativa (nomina_informativo).
         if (!empty($operativeIds)) {
             $erpId      = DB::table('data_sources')->where('code', 'gastos_erp')->value('id');
-            $lendusNomIds = $this->resolveLendusIds($dataIds);
-            $sourceIds  = collect(array_values(array_filter(array_merge($lendusNomIds, [$erpId]))));
+            $lendusIds  = $this->resolveLendusIds($dataIds);
+            $sourceIds  = collect(array_values(array_filter(array_merge($lendusIds, [$erpId]))));
 
             $expRows = DB::table('fact_expenses as e')
                 ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
                 ->whereIn('e.period_id', $dataIds)
-                // Antes restringía a whereIn('e.branch_id', $operativeIds), lo que excluía por
-                // completo (ni siquiera a "unassigned") los gastos de nómina sin sucursal
-                // asignada — se perdía el monto en silencio. Ahora se incluyen también las filas
-                // sin sucursal; el loop de abajo ya las enruta a unassigned correctamente.
                 ->where(function ($q) use ($operativeIds) {
                     $q->whereIn('e.branch_id', $operativeIds)->orWhereNull('e.branch_id');
                 })
                 ->whereIn('ru.data_source_id', $sourceIds)
-                ->where(function ($q) use ($lendusNomIds) {
+                ->where(function ($q) use ($lendusIds) {
                     $q->whereIn('e.category', ['Gasolina', 'Financiamiento Celular'])
-                      ->orWhere(function ($q2) use ($lendusNomIds) {
-                          // For Lendus: Nómina y Capital Humano operational rows (non-true-nómina
-                          // concepts) go to gastos_lendus_total in accumulateGastos — exclude them
-                          // here to avoid double-counting in nomina_detalle.
+                      ->orWhere(function ($q2) use ($lendusIds) {
+                          // Validado contra tabla manual: GASTOS MEDICOS/EQUIPO CELULAR de ERP son
+                          // montos distintos a los targets exactos de Finiquito/Gastos médicos
+                          // (que vienen del PDF, ver bloque dedicado abajo) — se excluyen aquí para
+                          // no mezclar dos fuentes bajo la misma etiqueta informativa.
                           $q2->whereIn('e.category', ['Nómina y Capital Humano', 'Nomina y Capital Humano'])
-                             ->whereNotIn('ru.data_source_id', $lendusNomIds)
+                             ->whereNotIn('ru.data_source_id', $lendusIds)
                              ->whereNotIn('e.concept', [
                                  'NOMINA', 'DEDUCCIONES', 'DEDUCCIONES GENERALES',
                                  'PAGO DE IMSS', 'GASTOS EMERGENTES', 'GASTOS POR TRANSPORTE',
+                                 'GASTOS MEDICOS', 'EQUIPO CELULAR',
                              ]);
                       });
                 })
@@ -1220,44 +1244,75 @@ class BranchRadiographyCalculator
 
                 $suc = $operativeMap[$branchId] ?? null;
                 if ($suc && isset($summaries[$suc])) {
-                    $summaries[$suc]['nomina_detalle'][$label] = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amount;
+                    $summaries[$suc]['nomina_informativo'][$label] = ($summaries[$suc]['nomina_informativo'][$label] ?? 0.0) + $amount;
                 } else {
-                    $unassigned['nomina_detalle'][$label] = ($unassigned['nomina_detalle'][$label] ?? 0.0) + $amount;
+                    $unassigned['nomina_informativo'][$label] = ($unassigned['nomina_informativo'][$label] ?? 0.0) + $amount;
                 }
             }
 
-            // NOTA: ERP Gasolina/Financiamiento Celular de CORPORATIVO se excluye
-            // deliberadamente de Nómina y Capital Humano — CORPORATIVO no es una sucursal
-            // operativa. (Antes se sumaba vía unassigned; eso inflaba el total.)
+            // PAGO FINIQUITO / GASTOS MEDICOS (gastos_lendus, PDF): validado exacto contra tabla
+            // manual Junio 2026 (Finiquito $64,987.59, Gastos médicos $4,140.00, ambos 100% en
+            // sucursales operativas). Informativo — no suma a Nómina ni a OPEX.
+            if (!empty($lendusIds)) {
+                $finiquitoMedicoRows = DB::table('fact_expenses as e')
+                    ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+                    ->whereIn('e.period_id', $dataIds)
+                    ->whereIn('ru.data_source_id', $lendusIds)
+                    ->where('e.category', self::NOMINA_CAT)
+                    ->whereIn(DB::raw("UPPER(TRIM(COALESCE(e.concept,'')))"), ['PAGO FINIQUITO', 'GASTOS MEDICOS'])
+                    ->selectRaw("UPPER(TRIM(COALESCE(e.concept,''))) as concept, e.branch_id, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
+                    ->groupBy('e.branch_id', DB::raw("UPPER(TRIM(COALESCE(e.concept,'')))"))
+                    ->get();
 
-            // ── PAGO FINANCIAMIENTO MOTO / COMPRA DE CASCOS: existen ÚNICAMENTE en
-            //    gastos_lendus_excel. branch_id/employee_id se resuelven y PERSISTEN una sola
-            //    vez por FinanciamientoMotosAssignmentService::assignForPeriodOrFail(), como
-            //    paso obligatorio del pipeline de generación (antes de exportar Excel/PDF) —
-            //    aquí solo se lee branch_id, igual que cualquier otro gasto ya clasificado.
-            //    Si esta consulta corre sobre un periodo que nunca pasó por ese paso (ej. un
-            //    comando de auditoría suelto en datos antiguos), el monto cae a 'unassigned'
-            //    en vez de romper — el hard-stop real vive en el pipeline, no aquí.
+                foreach ($finiquitoMedicoRows as $row) {
+                    $label  = str_contains((string) $row->concept, 'FINIQUITO') ? 'Finiquito' : 'Gastos médicos';
+                    $amount = (float) $row->total;
+
+                    $suc = $row->branch_id ? ($operativeMap[(int) $row->branch_id] ?? null) : null;
+                    if ($suc && isset($summaries[$suc])) {
+                        $summaries[$suc]['nomina_informativo'][$label] = ($summaries[$suc]['nomina_informativo'][$label] ?? 0.0) + $amount;
+                    } else {
+                        $unassigned['nomina_informativo'][$label] = ($unassigned['nomina_informativo'][$label] ?? 0.0) + $amount;
+                    }
+                }
+            }
+
+            // PAGO FINANCIAMIENTO MOTO / COMPRA DE CASCOS / ENGANCHE DE MOTOCICLETA
+            // (gastos_lendus_excel): 100% informativo — validado contra tabla manual Junio 2026,
+            // NO forman parte de las 28 categorías de OPEX ni del KPI Nómina.
+            // Financiamiento de Motos = PAGO FINANCIAMIENTO MOTO + ENGANCHE DE MOTOCICLETA +
+            // D123/D128 NOI (bloque de arriba) = $164,965.55 vs target $164,964.75 (±$0.80).
+            // branch_id resuelto por FinanciamientoMotosAssignmentService::assignForPeriodOrFail()
+            // (paso obligatorio del pipeline).
             $lendusExcelId = DB::table('data_sources')->where('code', 'gastos_lendus_excel')->value('id');
             if ($lendusExcelId) {
                 $motoCascoRows = DB::table('fact_expenses as e')
                     ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
                     ->whereIn('e.period_id', $dataIds)
                     ->where('ru.data_source_id', $lendusExcelId)
-                    ->where('e.category', self::NOMINA_CAT)
-                    ->whereIn(DB::raw("UPPER(TRIM(COALESCE(e.concept,'')))"), ['PAGO FINANCIAMIENTO MOTO', 'COMPRA DE CASCOS'])
+                    ->where(function ($q) {
+                        $q->where('e.category', self::NOMINA_CAT)
+                          ->whereIn(DB::raw("UPPER(TRIM(COALESCE(e.concept,'')))"), ['PAGO FINANCIAMIENTO MOTO', 'COMPRA DE CASCOS']);
+                    })
+                    ->orWhere(function ($q) use ($dataIds, $lendusExcelId) {
+                        $q->whereIn('e.period_id', $dataIds)
+                          ->where('ru.data_source_id', $lendusExcelId)
+                          ->where('e.category', 'Servicios de Motocicletas')
+                          ->whereRaw("UPPER(TRIM(COALESCE(e.concept,''))) = 'ENGANCHE DE MOTOCICLETA'");
+                    })
                     ->selectRaw("UPPER(TRIM(COALESCE(e.concept,''))) as concept, COALESCE(NULLIF(e.paid_amount,0), e.amount) as amount, e.branch_id")
                     ->get();
 
                 foreach ($motoCascoRows as $row) {
-                    $label  = str_contains((string) $row->concept, 'CASCO') ? 'Cascos' : 'Financiamiento de Motos';
-                    $amount = (float) $row->amount;
+                    $isCasco = str_contains((string) $row->concept, 'CASCO');
+                    $label   = $isCasco ? 'Cascos' : 'Financiamiento de Motos';
+                    $amount  = (float) $row->amount;
 
                     $suc = $row->branch_id ? ($operativeMap[(int) $row->branch_id] ?? null) : null;
                     if ($suc && isset($summaries[$suc])) {
-                        $summaries[$suc]['nomina_detalle'][$label] = ($summaries[$suc]['nomina_detalle'][$label] ?? 0.0) + $amount;
+                        $summaries[$suc]['nomina_informativo'][$label] = ($summaries[$suc]['nomina_informativo'][$label] ?? 0.0) + $amount;
                     } else {
-                        $unassigned['nomina_detalle'][$label] = ($unassigned['nomina_detalle'][$label] ?? 0.0) + $amount;
+                        $unassigned['nomina_informativo'][$label] = ($unassigned['nomina_informativo'][$label] ?? 0.0) + $amount;
                     }
                 }
             }
@@ -1331,8 +1386,9 @@ class BranchRadiographyCalculator
     //
     // Fuente: fact_expenses con data_source.code = 'imss', category = 'IMSS'.
     // Importado desde el archivo "CALCULO DE CUOTA SEMANAL DEL IMSS POR SUCURSAL".
-    // Se acumula en nomina_detalle['IMSS'] (separado del D002/D009 de NOI que son
-    // deducciones del trabajador — este es costo patronal distinto).
+    // Se acumula en nomina_informativo['IMSS'] — puramente informativo, JAMÁS se suma al
+    // KPI Nómina (ni aquí ni en OPEX). Se audita por separado vía reportes:audit-imss.
+    // Distinto del D002/D009 de NOI (deducción del trabajador, excluida por completo).
 
     private function accumulateImssPatronal(array $dataIds, array $branchIds, array $operativeMap, array &$summaries, array &$unassigned): void
     {
@@ -1358,7 +1414,7 @@ class BranchRadiographyCalculator
 
             $suc = $operativeMap[$branchId] ?? null;
             if ($suc && isset($summaries[$suc])) {
-                $summaries[$suc]['nomina_detalle']['IMSS'] = ($summaries[$suc]['nomina_detalle']['IMSS'] ?? 0.0) + $amount;
+                $summaries[$suc]['nomina_informativo']['IMSS'] = ($summaries[$suc]['nomina_informativo']['IMSS'] ?? 0.0) + $amount;
             } else {
                 // Non-operative (CORPORATIVO, TULANCINGO, etc.): excluded from the report.
                 // Tracked in imss_excluido for audit but NOT added to unassigned/global totals.
@@ -1459,13 +1515,14 @@ class BranchRadiographyCalculator
             // comparar contra el Excel y detectar si algún periodo futuro deja de coincidir.
             'gastos_lendus_pago_generico_excluido' => [], // 'PAGO'|'COMPRA DE'|'ANTICIPO DE' => amount
             'gastos_detalle'                     => [],   // canonical_concept => amount (summed from source data)
-            'nomina_total'         => 0.0,
+            'nomina_total'         => 0.0,  // KPI Nómina: SUM(percepciones NOI) − SUM(deducciones NOI). Fuente única.
             'comisiones'           => 0.0,
             'bonos'                => 0.0,
             'bonos_aceleradores'   => 0.0,  // P118, separado de 'bonos' por petición explícita
             'vacaciones'           => 0.0,
             'prima_vacacional'     => 0.0,
-            'nomina_detalle'       => [],   // display_label => amount (IMSS, gasolina, finiquito, etc.)
+            'nomina_detalle'       => [],   // display_label => amount — deducciones NOI (YA restadas de nomina_total, solo informativo)
+            'nomina_informativo'   => [],   // display_label => amount — IMSS/Gasolina/Motos/Cascos/Finiquito/Médicos/Formatería: SIEMPRE $0 de aporte al KPI Nómina (ya contados en OPEX, salvo IMSS que no se cuenta en ningún lado)
             'excedentes'           => 0.0,
             'prestamos_fondea'     => 0.0,
             'polizas_crece_30'     => 0.0,
@@ -1563,7 +1620,9 @@ class BranchRadiographyCalculator
             $cat === 'GASTOS OPERATIVOS' && $con === 'COMISIONES POR'  => 'Comisiones Oxxo',
             // --- ERP concept-level matches (full concept, specific enough) ---
             str_contains($con, 'INSUMOS SUCURSALES')                   => 'Insumos de Cafetería',
-            str_contains($con, 'FLYERS') || str_contains($con, 'VINIL') => 'Publicidad',
+            // FLYERS Y VINILES ya NO mapea a Publicidad: validado contra tabla manual Junio 2026
+            // (target Publicidad = $0.00) — cae a unmappedGastoLabel() para quedar trazable como
+            // "Sin clasificar: FLYERS Y VINILES" en vez de inflar Publicidad silenciosamente.
             // --- Category-level direct matches ---
             str_contains($cat, 'GASTOS EMERGENTES') || $cat === 'EMERGENTES'                                => 'Emergentes',
             str_contains($cat, 'INSUMOS DE CAFETERIA') || str_contains($cat, 'INSUMOS DE CAFETERÍA')        => 'Insumos de Cafetería',
@@ -1650,6 +1709,7 @@ class BranchRadiographyCalculator
             'vacaciones'         => 0.0,
             'prima_vacacional'   => 0.0,
             'nomina_detalle'     => [],   // display_label => amount
+            'nomina_informativo' => [],   // display_label => amount — nunca se suma al KPI Nómina
             'gastos_operativos'                  => 0.0,
             'gastos_erp_total'                   => 0.0,
             'gastos_erp_cargado'                 => 0.0,

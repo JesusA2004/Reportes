@@ -160,13 +160,9 @@ class RadiographySnapshotBuilder
         // empresa). Las deducciones se muestran para explicar el neto — nunca se vuelven a
         // sumar como gasto adicional.
         $noiPercepDeducc = $this->branchCalculator->computeNoiPercepcionesDeducciones($this->dataIds);
-        $nominaDetalleSuma      = array_sum(array_values((array) ($branchCalcGlobal['nomina_detalle'] ?? [])));
-        $nominaParaEbitda       = (float) ($branchCalcGlobal['nomina_total'] ?? 0)
-                                + (float) ($branchCalcGlobal['comisiones'] ?? 0)
-                                + (float) ($branchCalcGlobal['bonos'] ?? 0)
-                                + (float) ($branchCalcGlobal['vacaciones'] ?? 0)
-                                + (float) ($branchCalcGlobal['prima_vacacional'] ?? 0)
-                                + $nominaDetalleSuma;
+        // Fuente única: BranchRadiographyCalculator::nominaTotalFor() — NOI neto (percepciones
+        // − deducciones). nomina_detalle/nomina_informativo son informativos, NUNCA se suman.
+        $nominaParaEbitda       = BranchRadiographyCalculator::nominaTotalFor($branchCalcGlobal);
         $opexParaEbitda         = (float) ($branchCalcGlobal['gastos_operativos'] ?? 0);
         // EBITDA = Recuperación − Colocación − OPEX − Nómina y Capital Humano.
         // Colocación es una salida de capital (dinero prestado a clientes), no un ingreso —

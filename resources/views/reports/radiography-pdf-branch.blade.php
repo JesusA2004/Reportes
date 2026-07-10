@@ -59,9 +59,7 @@ $rec     = (float)($branchRow['recuperacion_total'] ?? 0);
 $col     = (float)($branchRow['colocacion'] ?? 0);
 $cartera = (float)($branchRow['valor_cartera'] ?? 0);
 $gastos  = (float)($branchRow['gastos_operativos'] ?? 0);
-$nomina  = (float)($branchRow['nomina_total'] ?? 0) + (float)($branchRow['comisiones'] ?? 0) + (float)($branchRow['bonos'] ?? 0)
-    + (float)($branchRow['vacaciones'] ?? 0) + (float)($branchRow['prima_vacacional'] ?? 0)
-    + array_sum((array)($branchRow['nomina_detalle'] ?? []));
+$nomina  = \App\Services\Radiography\BranchRadiographyCalculator::nominaTotalFor($branchRow);
 $ebitda  = \App\Services\Radiography\RadiographyStyleHelper::branchEbitdaEstimate($branchRow);
 $categoria = \App\Services\Radiography\RadiographyStyleHelper::ebitdaCategory($ebitda);
 

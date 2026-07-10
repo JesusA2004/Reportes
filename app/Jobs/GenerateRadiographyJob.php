@@ -11,6 +11,7 @@ use App\Models\PeriodSummary;
 use App\Models\User;
 use App\Services\EmployeeBranchAutoMatchService;
 use App\Services\FinanciamientoMotosAssignmentService;
+use App\Services\GastosExcelBranchResolverService;
 use App\Services\PeriodConsolidationService;
 use App\Services\PeriodDerivedDataCleaner;
 use App\Services\PeriodRadiographyService;
@@ -50,6 +51,7 @@ class GenerateRadiographyJob implements ShouldQueue
         PeriodDerivedDataCleaner $cleaner,
         EmployeeBranchAutoMatchService $branchAutoMatch,
         FinanciamientoMotosAssignmentService $motosAssignment,
+        GastosExcelBranchResolverService $gastosExcelResolver,
         RadiographySnapshotBuilder $snapshotBuilder,
     ): void {
         @ini_set('memory_limit', '1024M');
@@ -108,8 +110,11 @@ class GenerateRadiographyJob implements ShouldQueue
             // Persisted directly on fact_expenses, never left in a "sin asignar" bucket.
             // Throws (stopping generation) if any record can't be tied to a real employee
             // and operative branch — see FinanciamientoMotosAssignmentService.
-            $this->updateProgress($run, 67, 'Resolviendo Financiamiento de Motos', 'Vinculando cada movimiento de Financiamiento de Motos/Cascos con su empleado y sucursal.');
+            $this->updateProgress($run, 66, 'Resolviendo sucursal de gastos Excel', 'Emparejando cada gasto del Excel de Lendus contra su fila equivalente en el PDF (monto + fecha) para asignar sucursal.');
             $dataIds = $snapshotBuilder->resolveDataIdsPublic($period);
+            $gastosExcelResolver->resolveForPeriodOrFail($period, $dataIds);
+
+            $this->updateProgress($run, 67, 'Resolviendo Financiamiento de Motos', 'Vinculando cada movimiento de Financiamiento de Motos/Cascos con su empleado y sucursal.');
             $motosAssignment->assignForPeriodOrFail($period, $dataIds);
 
             // ── 4. Consolidate employee summaries (populates fact_period_employee_summary) ──

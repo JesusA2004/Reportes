@@ -473,12 +473,7 @@ final class RadiographyStyleHelper
      */
     public static function branchEbitdaEstimate(array $branch): float
     {
-        $nomina = (float)($branch['nomina_total'] ?? 0)
-            + (float)($branch['comisiones'] ?? 0)
-            + (float)($branch['bonos'] ?? 0)
-            + (float)($branch['vacaciones'] ?? 0)
-            + (float)($branch['prima_vacacional'] ?? 0)
-            + array_sum((array)($branch['nomina_detalle'] ?? []));
+        $nomina = BranchRadiographyCalculator::nominaTotalFor($branch);
 
         return (float)($branch['recuperacion_total'] ?? 0)
             - (float)($branch['colocacion'] ?? 0)
