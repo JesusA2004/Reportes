@@ -92,21 +92,28 @@ class AuditNominaPeriodoCommand extends Command
         $unassigned   = $branchResult['unassigned'];
         $global       = $calc->sumGlobal($branches, $unassigned);
 
-        $percepciones = (float) $global['nomina_total'] - $this->d111Effect($dataIds)
+        // nomina_total + comisiones + bonos + ... + otros_percepciones ya trae TODAS las
+        // deducciones NOI restadas (regla vigente 2026-07: ninguna excepción, ver
+        // accumulateNomina()) — para mostrar "percepciones brutas" por separado, se suma de
+        // vuelta el total de deducciones (nomina_detalle).
+        $percepciones = (float) $global['nomina_total']
             + (float) $global['comisiones'] + (float) $global['bonos']
             + (float) $global['bonos_aceleradores'] + (float) $global['vacaciones']
-            + (float) $global['prima_vacacional'];
-        // nomina_total ya trae D111 sumado y todas las deducciones restadas — para mostrar
-        // "percepciones brutas" por separado, se le suma de vuelta el total de deducciones.
+            + (float) $global['prima_vacacional'] + (float) ($global['otros_percepciones'] ?? 0);
         $deduccionesTotal = array_sum(array_values((array) ($global['nomina_detalle'] ?? [])));
         $percepcionesBrutas = $percepciones + $deduccionesTotal;
+        $imssPatronal = (float) ($global['imss_patronal'] ?? 0);
+        $gastosEmpleados = (float) ($global['gastos_empleados_nomina'] ?? 0);
         $nominaNeta = BranchRadiographyCalculator::nominaTotalFor($global);
 
         $this->line('');
         $this->info('════ 3. CLASIFICACIÓN NOI (fuente única BranchRadiographyCalculator) ════');
-        $this->line(sprintf('  Percepciones NOI (sueldo+comisiones+bonos+vacaciones+prima): $%s', number_format($percepcionesBrutas, 2)));
-        $this->line(sprintf('  Deducciones NOI (restadas del total):                         $%s', number_format($deduccionesTotal, 2)));
-        $this->info(sprintf('  NÓMINA NETA (KPI): $%s', number_format($nominaNeta, 2)));
+        $this->line(sprintf('  Percepciones NOI (sueldo+comisiones+bonos+vacaciones+prima+otras): $%s', number_format($percepcionesBrutas, 2)));
+        $this->line(sprintf('  Deducciones NOI (restadas del total, todas, sin excepción):        $%s', number_format($deduccionesTotal, 2)));
+        $this->line(sprintf('  NOI neto (percepciones − deducciones):                             $%s', number_format($percepcionesBrutas - $deduccionesTotal, 2)));
+        $this->line(sprintf('  (+) IMSS patronal operativo (excl. Corporativo/Tulancingo):        $%s', number_format($imssPatronal, 2)));
+        $this->line(sprintf('  (+) Gastos empleados Lendus (Motos/Enganche/Cascos/Finiquito/Médicos): $%s', number_format($gastosEmpleados, 2)));
+        $this->info(sprintf('  NÓMINA Y CAPITAL HUMANO (KPI): $%s', number_format($nominaNeta, 2)));
 
         if ($this->option('detail')) {
             $this->line('');
@@ -117,25 +124,24 @@ class AuditNominaPeriodoCommand extends Command
             }
         }
 
-        // ── 4. Gastos informativos / operativos — NUNCA se suman a Nómina ──────
+        // ── 4. Desglose de IMSS patronal + gastos empleados — SÍ se suman a Nómina ─────
         $this->line('');
-        $this->info('════ 4. GASTOS INFORMATIVOS / OPERATIVOS (afectan_total = NO) ════');
-        $informativoTotal = array_sum(array_values((array) ($global['nomina_informativo'] ?? [])));
+        $this->info('════ 4. DESGLOSE IMSS + GASTOS EMPLEADOS (afectan_total = SÍ) ════');
+        $this->line('  (regla vigente 2026-07: IMSS patronal operativo y los 5 gastos de empleados');
+        $this->line('   Lendus [Financiamiento de Motos, Enganche, Cascos, Finiquito, Gastos médicos]');
+        $this->line('   YA están incluidos en el KPI Nómina — este desglose es el detalle, no algo aparte)');
         foreach ((array) ($global['nomina_informativo'] ?? []) as $label => $amt) {
             if ((float) $amt == 0.0) continue;
-            $motivo = $label === 'IMSS'
-                ? 'Costo patronal IMSS — auditado aparte, no cuenta en Nómina ni en OPEX'
-                : 'Gasto operativo real — ya contado en OPEX (gastos_operativos), no en Nómina';
-            $this->line(sprintf('    %-30s $%-15s %s', $label, number_format($amt, 2), $motivo));
+            $this->line(sprintf('    %-45s $%s', $label, number_format($amt, 2)));
         }
-        $this->info(sprintf('  TOTAL INFORMATIVO (no afecta ningún KPI de Nómina): $%s', number_format($informativoTotal, 2)));
+        $this->info(sprintf('  IMSS patronal:              $%s', number_format($imssPatronal, 2)));
+        $this->info(sprintf('  Gastos empleados Lendus:    $%s', number_format($gastosEmpleados, 2)));
 
         // ── 5. IMSS por separado ────────────────────────────────────────────
         $this->line('');
         $this->info('════ 5. IMSS (auditado aparte — reportes:audit-imss) ════');
-        $imssOperativo = (float) ($global['nomina_informativo']['IMSS'] ?? 0);
         $imssExcluido  = (array) ($unassigned['imss_excluido'] ?? []);
-        $this->line(sprintf('  IMSS operativo (13 sucursales, informativo): $%s', number_format($imssOperativo, 2)));
+        $this->line(sprintf('  IMSS operativo (13 sucursales, SÍ se suma a Nómina): $%s', number_format($imssPatronal, 2)));
         foreach ($imssExcluido as $branchName => $amt) {
             $this->line(sprintf('  IMSS excluido — %-20s $%s (no operativa, fuera del reporte)', $branchName, number_format($amt, 2)));
         }
@@ -162,38 +168,30 @@ class AuditNominaPeriodoCommand extends Command
         $this->info('════════════════════════════════════════════════════════════');
         $this->line(sprintf('  Percepciones NOI:                                    $%s', number_format($percepcionesBrutas, 2)));
         $this->line(sprintf('  Deducciones NOI:                                     $%s', number_format($deduccionesTotal, 2)));
-        $this->info(sprintf('  Nómina neta (KPI):                                   $%s', number_format($nominaNeta, 2)));
-        $this->line(sprintf('  Gastos informativos / operativos no sumados:         $%s', number_format($informativoTotal, 2)));
+        $this->line(sprintf('  (+) IMSS patronal operativo:                         $%s', number_format($imssPatronal, 2)));
+        $this->line(sprintf('  (+) Gastos empleados Lendus:                         $%s', number_format($gastosEmpleados, 2)));
+        $this->info(sprintf('  NÓMINA Y CAPITAL HUMANO (KPI):                       $%s', number_format($nominaNeta, 2)));
 
-        $target = 2015039.76;
+        // Target validado por el usuario contra los archivos reales de Junio 2026 (period 21) —
+        // NOI neto ($2,007,149.81) + IMSS operativo ($237,000.00) + gastos empleados Lendus
+        // ($238,328.74). Sirve de referencia de regresión para ese periodo específico; en
+        // periodos distintos la diferencia contra este número no implica error.
+        $target = 2482478.55;
         $diff = $nominaNeta - $target;
         $this->line('');
-        $this->line(sprintf('  Target validado por el usuario:                      $%s', number_format($target, 2)));
+        $this->line(sprintf('  Target validado (Junio 2026 / period 21):            $%s', number_format($target, 2)));
         $this->line(sprintf('  Diferencia:                                          $%s', number_format($diff, 2)));
 
         if ($this->option('export')) {
-            $this->exportCsv($periodId, $global, $percepcionesBrutas, $deduccionesTotal, $nominaNeta, $informativoTotal);
+            $this->exportCsv($periodId, $global, $percepcionesBrutas, $deduccionesTotal, $nominaNeta, $imssPatronal + $gastosEmpleados);
         }
 
         $this->line('');
         $ok = abs($diff) < 0.01;
-        $this->info($ok ? '  ✓ Nómina neta coincide con el target.' : '  ✗ Nómina neta NO coincide con el target — revisar arriba.');
+        $this->info($ok ? '  ✓ Nómina neta coincide con el target.' : '  ✗ Nómina neta NO coincide con el target — revisar arriba (normal si el periodo no es Junio 2026).');
         $this->line('');
 
         return $ok ? self::SUCCESS : self::FAILURE;
-    }
-
-    /**
-     * D111 (Subsidio para el Empleo APL) ya está sumado dentro de nomina_total — se calcula
-     * aparte aquí solo para poder mostrar "percepciones brutas" sin el crédito ya aplicado.
-     */
-    private function d111Effect(array $dataIds): float
-    {
-        return (float) DB::table('fact_noi_movements')
-            ->whereIn('period_id', $dataIds)
-            ->where('concept_type', 'deduccion')
-            ->where('concept', 'like', 'D111%')
-            ->sum('amount');
     }
 
     private function exportCsv(
@@ -202,7 +200,7 @@ class AuditNominaPeriodoCommand extends Command
         float $percepciones,
         float $deducciones,
         float $nominaNeta,
-        float $informativoTotal,
+        float $imssMasGastosEmpleados,
     ): void {
         $dir  = 'auditorias';
         $file = "nomina_periodo_{$periodId}_" . now()->format('Ymd_His') . '.csv';
@@ -222,13 +220,13 @@ class AuditNominaPeriodoCommand extends Command
 
         foreach ((array) ($global['nomina_informativo'] ?? []) as $label => $amt) {
             $lines[] = implode(',', [
-                'Informativo', $csv($label), number_format((float) $amt, 2, '.', ''),
-                '0.00', 'No', $csv('Gasto operativo/IMSS — no afecta Nómina'),
+                'IMSS / Gastos empleados', $csv($label), number_format((float) $amt, 2, '.', ''),
+                number_format((float) $amt, 2, '.', ''), 'Sí', $csv('IMSS patronal o gasto de empleado Lendus — SÍ suma a Nómina'),
             ]);
         }
 
         $lines[] = implode(',', ['TOTAL', 'Nómina neta (KPI)', number_format($nominaNeta, 2, '.', ''), number_format($nominaNeta, 2, '.', ''), 'Sí', '']);
-        $lines[] = implode(',', ['TOTAL', 'Informativo (no sumado)', number_format($informativoTotal, 2, '.', ''), '0.00', 'No', '']);
+        $lines[] = implode(',', ['TOTAL', 'IMSS + Gastos empleados (incluido arriba)', number_format($imssMasGastosEmpleados, 2, '.', ''), number_format($imssMasGastosEmpleados, 2, '.', ''), 'Sí', '']);
 
         Storage::disk('local')->makeDirectory($dir);
         Storage::disk('local')->put($path, implode("\n", $lines));

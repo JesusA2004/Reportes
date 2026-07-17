@@ -256,6 +256,9 @@ const nomVac      = computed(() => Number(brGlobal.value?.vacaciones)      || 0)
 const nomPrimaVac = computed(() => Number(brGlobal.value?.prima_vacacional)|| 0)
 const nomBonos    = computed(() => Number(brGlobal.value?.bonos)           || 0)
 const nomBonosAcel= computed(() => Number(brGlobal.value?.bonos_aceleradores) || 0)
+const nomOtrosPercep = computed(() => Number(brGlobal.value?.otros_percepciones) || 0)
+const nomImssPatronal = computed(() => Number(brGlobal.value?.imss_patronal) || 0)
+const nomGastosEmpleados = computed(() => Number(brGlobal.value?.gastos_empleados_nomina) || 0)
 
 // Deducciones NOI (ya restadas de nomina_total en backend) — SOLO informativo, filas rojas.
 // Debe reflejar exactamente BranchRadiographyCalculator::accumulateNomina()'s deduction labels.
@@ -273,13 +276,17 @@ const NOI_DEDUCTION_LABELS = new Set([
     'Descuento faltante en caja',
     'Anticipo de nómina',
     'Préstamo Personal',
-    'Financiamiento de Motos (NOI)',
+    'Descuento nómina — Financiamiento Moto (NOI)',
     'Diferencia NF',
+    'IMSS trabajador (retención)',
+    'Subsidio para el Empleo APL',
 ])
 
-// nomina_detalle: deducciones NOI, ya restadas de nomina_total — informativo.
-// nomina_informativo: IMSS/Gasolina/Motos/Cascos/Finiquito/Médicos/Formatería — informativo,
-// JAMÁS se suma al KPI Nómina (ya contado en OPEX, salvo IMSS que no se cuenta en ningún lado).
+// nomina_detalle: deducciones NOI, ya restadas de nomina_total — informativo (transparencia,
+// no se vuelve a sumar aquí, YA está restado en nomina_total).
+// nomina_informativo: IMSS/Motos/Enganche/Cascos/Finiquito/Médicos — regla vigente 2026-07:
+// SÍ forman parte del KPI Nómina (vía imss_patronal + gastos_empleados_nomina, sumados en
+// nomTotal abajo). Este desglose es solo el detalle, no algo aparte.
 const nomDetalle = computed<{ label: string; value: number }[]>(() => {
     const det = (brGlobal.value?.nomina_detalle ?? {}) as Record<string, number>
     const info = (brGlobal.value?.nomina_informativo ?? {}) as Record<string, number>
@@ -288,11 +295,11 @@ const nomDetalle = computed<{ label: string; value: number }[]>(() => {
     for (const [k, v] of Object.entries(info)) merged[k] = (merged[k] ?? 0) + (Number(v) || 0)
     return Object.entries(merged).filter(([, v]) => Number(v) > 0).map(([label, v]) => ({ label, value: Number(v) }))
 })
-// Total = fuente única (percepciones NOI − deducciones NOI, ya neteado en backend). Las filas
-// de nomDetalle son SIEMPRE transparencia — nunca se vuelven a sumar aquí.
+// Total = fuente única, replica BranchRadiographyCalculator::nominaTotalFor() exactamente.
 const nomDescuentosNOI = computed(() => nomDetalle.value.filter(r => NOI_DEDUCTION_LABELS.has(r.label)).reduce((s, r) => s + r.value, 0))
 const nomTotal = computed(() =>
     nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value + nomBonosAcel.value
+    + nomOtrosPercep.value + nomImssPatronal.value + nomGastosEmpleados.value
 )
 const nomNeto = computed(() => nomTotal.value)
 
@@ -483,8 +490,9 @@ function saveSaldoInicial() {
 
 // ── Sucursales — fuente canónica única (branch_radiography.branches) ─────────
 // nominaFull replica exactamente BranchRadiographyCalculator::nominaTotalFor(): NOI neto
-// (percepciones − deducciones). nomina_detalle/nomina_informativo son SIEMPRE informativos,
-// nunca se suman aquí. Así el EBITDA/categoría por sucursal coincide siempre con Excel y PDF.
+// (percepciones − deducciones) + IMSS patronal operativo + gastos de empleados Lendus
+// (Financiamiento de Motos, Enganche, Cascos, Finiquito, Gastos médicos). Regla vigente
+// 2026-07 — coincide siempre con Excel y PDF, que usan la misma fuente canónica.
 const branchesFull = computed(() => {
     return brRaw.value.map((b: any) => {
         const moraSum = (Number(b.mora_0_30) || 0) + (Number(b.mora_31_60) || 0) + (Number(b.mora_61_90) || 0) + (Number(b.mora_91_120) || 0) + (Number(b.mora_120_plus) || 0)
@@ -493,6 +501,8 @@ const branchesFull = computed(() => {
         const nominaFull = (Number(b.nomina_total) || 0) + (Number(b.comisiones) || 0) + bonos
             + (Number(b.bonos_aceleradores) || 0)
             + (Number(b.vacaciones) || 0) + (Number(b.prima_vacacional) || 0)
+            + (Number(b.otros_percepciones) || 0)
+            + (Number(b.imss_patronal) || 0) + (Number(b.gastos_empleados_nomina) || 0)
         const recuperacion    = Number(b.recuperacion_total) || 0
         const colocacion      = Number(b.colocacion ?? b.colocacion_total ?? b.otorgamientos ?? 0) || 0
         const capitalRec      = Number(b.capital_recuperado) || 0

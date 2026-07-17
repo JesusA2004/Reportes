@@ -16,20 +16,29 @@ class AuditGastosPeriodoCommand extends Command
 
     protected $description = 'Auditoría de OPEX (gastos_operativos) — fuente única BranchRadiographyCalculator, concepto por concepto.';
 
-    /** Orden y target manual Junio 2026 (period 21) — usado solo como referencia de columna Target. */
+    /**
+     * Target validado por el usuario contra los archivos reales de Junio 2026 (period 21),
+     * regla vigente 2026-07: ERP completo a OPEX (excl. Corporativo y Pólizas/seguros) +
+     * Lendus OPEX vía PDF (excl. Nómina/IMSS/Deducciones/Fondeo/Excedentes/Pólizas/gastos de
+     * empleados, que se mueven a Nómina y Capital Humano). Pólizas queda en $0.00 a propósito
+     * (seguros excluidos de OPEX en ambas fuentes). Sirve de referencia de regresión para ese
+     * periodo específico — en periodos distintos una diferencia contra esta tabla no implica
+     * error, solo hay que revisar por qué cambió.
+     */
     private const TARGETS_JUNIO_2026 = [
-        'Renta Oficina' => 197308.60, 'Luz' => 24404.00, 'Agua' => 1362.00,
-        'Teléfono e Internet' => 12405.00, 'Insumos de Cafetería' => 11401.58,
-        'Insumos de Limpieza' => 7159.00, 'Insumos de Papelería' => 6262.95,
-        'Mobiliario y Equipo' => 6000.00, 'Mantenimiento' => 10567.84,
-        'Renta de Bodegas' => 6000.00, 'Señora Limpieza' => 42400.00, 'Eventos' => 0.00,
-        'Paquetería' => 9474.41, 'Trámites Gubernamentales' => 0.00, 'Publicidad' => 0.00,
-        'Mecánicos' => 0.00, 'Servicios de Motocicletas' => 15420.53,
-        'Software Póliza Anual' => 0.00, 'Pólizas' => 175759.00,
-        'Recargas Telefónicas' => 20200.00, 'Emergentes' => 287302.31,
+        'Renta Oficina' => 226055.12, 'Luz' => 24754.00, 'Agua' => 1012.00,
+        'Teléfono e Internet' => 12405.00, 'Insumos de Cafetería' => 25436.30,
+        'Insumos de Papelería' => 842.07,
+        'Mobiliario y Equipo' => 6000.00, 'Mantenimiento' => 3166.80,
+        'Señora Limpieza' => 42400.00, 'Eventos' => 0.00,
+        'Trámites Gubernamentales' => 0.00, 'Publicidad' => 0.00,
+        'Mecánicos' => 0.00, 'Servicios de Motocicletas' => 12253.73,
+        'Software Póliza Anual' => 0.00, 'Pólizas' => 0.00,
+        'Recargas Telefónicas' => 20200.00, 'Emergentes' => 296419.65,
         'Comisiones Oxxo' => 699.00, 'Multas e Infracciones' => 300.00,
-        'Transportes' => 3591.47, 'Pegotes' => 25522.67, 'Permisos Vehiculares' => 0.00,
-        'Viáticos' => 20592.00, 'Fletes' => 0.00, 'Formatería' => 20504.92,
+        'Transportes' => 4432.47, 'Pegotes' => 3360.00, 'Permisos Vehiculares' => 0.00,
+        'Viáticos' => 20500.00, 'Fletes' => 0.00, 'Formatería' => 18715.92,
+        'Gasolina' => 165400.00, 'Sin clasificar: FLYERS Y VINILES' => 15585.27,
     ];
 
     public function handle(BranchRadiographyCalculator $calc): int
@@ -53,7 +62,7 @@ class AuditGastosPeriodoCommand extends Command
         $this->line('');
         $this->info('════════════════════════════════════════════════════════════');
         $this->info("  AUDITORÍA OPEX — {$period->label} (ID {$periodId})");
-        $this->info('  Fuente única: gastos_lendus_excel (branch_id resuelto vía GastosExcelBranchResolverService) + gastos_erp.');
+        $this->info('  Fuente única: gastos_lendus (PDF, branch_id 100% resuelto) + gastos_erp completo (excl. Corporativo/Pólizas).');
         $this->info('════════════════════════════════════════════════════════════');
 
         $current = (array) $global['gastos_detalle'];
