@@ -108,6 +108,25 @@ class Period extends Model {
         )->pluck('id')->map(fn ($id) => (int) $id)->values()->all();
     }
 
+    // ── Periodo mensual anterior ───────────────────────────────────────
+    // Único punto de verdad para "el mes anterior" — usado por rotación/IMSS
+    // derivados. Filtra explícitamente type='monthly' (a diferencia de los
+    // patrones ad-hoc previos que comparaban ID/fecha sobre TODOS los tipos).
+
+    public function previousMonthly(?Collection $allPeriods = null): ?self {
+        if (!$this->isMonthly()) return null;
+
+        $candidates = $allPeriods
+            ? $allPeriods->where('type', 'monthly')
+            : self::query()->where('type', 'monthly')->get();
+
+        return $candidates
+            ->filter(fn ($p) => $p->id !== $this->id
+                && ($p->year < $this->year || ($p->year == $this->year && $p->month < $this->month)))
+            ->sortByDesc(fn ($p) => sprintf('%04d%02d', $p->year, $p->month))
+            ->first();
+    }
+
     // ── Relaciones ─────────────────────────────────────────────────────
 
     public function reportUploads(): HasMany {

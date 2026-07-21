@@ -1826,6 +1826,8 @@ class RadiographyWorkbookBuilder
 
         RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:B1', 'NÓMINA — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'C1', '← GLOBAL', 'GLOBAL');
+        $sheet->setCellValue('D1', 'IMSS calculado desde NOI Fiscal ($3,500 por colaborador)');
+        $sheet->getStyle('D1')->getFont()->setItalic(true)->setSize(8.5)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
 
         $sheet->getColumnDimension('A')->setWidth(42);
         $sheet->getColumnDimension('B')->setWidth(20);
@@ -4056,31 +4058,33 @@ class RadiographyWorkbookBuilder
         $rotation = $snap['sections']['rotation'] ?? [];
         $label    = strtoupper($period->label);
 
-        $this->sheetTitle($sheet, 'A1:E1', 'ÍNDICE DE ROTACIÓN DE PERSONAL — ' . $label);
+        $this->sheetTitle($sheet, 'A1:F1', 'ÍNDICE DE ROTACIÓN DE PERSONAL — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
+        $sheet->setCellValue('C2', 'Fuente: calculado automáticamente desde NOI Nómina + NOI Nómina Fiscal');
+        $sheet->getStyle('C2')->getFont()->setItalic(true)->setSize(8.5)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
 
-        $fuente   = strtoupper($rotation['fuente'] ?? 'NOI');
         $mes      = $rotation['mes'] ?? '';
+        $altas    = (int)($rotation['altas']    ?? 0);
         $bajas    = (int)($rotation['bajas']    ?? 0);
         $promedio = (float)($rotation['promedio'] ?? 0);
         $indice   = (float)($rotation['indice']   ?? 0);
 
         $r = 4;
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:E{$r}", 'RESUMEN GLOBAL');
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:F{$r}", 'RESUMEN GLOBAL');
         $r++;
 
         $summaryRows = [
-            ['Mes de referencia',              $mes,      'text',    ''],
-            ['N° de bajas en el periodo',      $bajas,    'integer', ''],
-            ['Promedio de personal activo',    $promedio, 'integer', ''],
-            ['Índice de rotación (%)',         $indice,   'percent', ''],
+            ['Mes de referencia',              $mes,      'text'],
+            ['N° de altas en el periodo',      $altas,    'integer'],
+            ['N° de bajas en el periodo',      $bajas,    'integer'],
+            ['Plantilla actual',               $promedio, 'integer'],
+            ['Índice de rotación (%)',         $indice,   'percent'],
         ];
 
-        foreach ($summaryRows as $i => [$label2, $value, $fmt, $note]) {
+        foreach ($summaryRows as $i => [$label2, $value, $fmt]) {
             $sheet->setCellValue("A{$r}", $label2);
             $sheet->setCellValue("B{$r}", $value);
-            if ($note !== '') $sheet->setCellValue("C{$r}", $note);
-            $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
+            $this->dataRow($sheet, "A{$r}:F{$r}", $i % 2 === 0);
             if ($fmt === 'percent') {
                 RadiographyStyleHelper::applyPercentFormat($sheet, "B{$r}", $value);
             } elseif ($fmt === 'integer') {
@@ -4092,36 +4096,42 @@ class RadiographyWorkbookBuilder
 
         $porSucursal = $rotation['por_sucursal'] ?? [];
         if (!empty($porSucursal)) {
-            RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:E{$r}", 'DETALLE POR SUCURSAL');
+            RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:F{$r}", 'DETALLE POR SUCURSAL');
             $r++;
             $this->colHeaders($sheet, $r, [
                 'A' => 'SUCURSAL',
-                'B' => 'BAJAS',
-                'C' => 'PROMEDIO PERSONAL',
-                'D' => 'ÍNDICE ROTACIÓN (%)',
-                'E' => 'MES',
+                'B' => 'ALTAS',
+                'C' => 'BAJAS',
+                'D' => 'PLANTILLA',
+                'E' => 'ÍNDICE ROTACIÓN (%)',
+                'F' => 'MES',
             ]);
             $r++;
 
+            $totalAltas    = 0;
             $totalBajas    = 0;
             $totalPromedio = 0.0;
             foreach ($porSucursal as $i => $row) {
-                $sucBajas    = (int)($row['bajas']             ?? 0);
+                $sucAltas    = (int)($row['altas']              ?? 0);
+                $sucBajas    = (int)($row['bajas']              ?? 0);
                 $sucPromedio = (float)($row['promedio_personal'] ?? 0);
                 $sucIndice   = (float)($row['indice_rotacion']  ?? 0);
                 $sucMes      = $row['mes'] ?? $mes;
 
                 $sheet->setCellValue("A{$r}", $row['sucursal'] ?? '');
-                $sheet->setCellValue("B{$r}", $sucBajas);
-                $sheet->setCellValue("C{$r}", $sucPromedio);
-                $sheet->setCellValue("D{$r}", $sucIndice);
-                $sheet->setCellValue("E{$r}", $sucMes);
+                $sheet->setCellValue("B{$r}", $sucAltas);
+                $sheet->setCellValue("C{$r}", $sucBajas);
+                $sheet->setCellValue("D{$r}", $sucPromedio);
+                $sheet->setCellValue("E{$r}", $sucIndice);
+                $sheet->setCellValue("F{$r}", $sucMes);
 
-                $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
+                $this->dataRow($sheet, "A{$r}:F{$r}", $i % 2 === 0);
                 RadiographyStyleHelper::applyIntegerFormat($sheet, "B{$r}");
                 RadiographyStyleHelper::applyIntegerFormat($sheet, "C{$r}");
-                RadiographyStyleHelper::applyPercentFormat($sheet, "D{$r}", $sucIndice);
+                RadiographyStyleHelper::applyIntegerFormat($sheet, "D{$r}");
+                RadiographyStyleHelper::applyPercentFormat($sheet, "E{$r}", $sucIndice);
 
+                $totalAltas    += $sucAltas;
                 $totalBajas    += $sucBajas;
                 $totalPromedio += $sucPromedio;
                 $r++;
@@ -4129,24 +4139,26 @@ class RadiographyWorkbookBuilder
 
             // Totals row
             $totalIndice = $totalPromedio > 0 ? round($totalBajas / $totalPromedio * 100, 2) : 0.0;
-            $sheet->setCellValue("A{$r}", 'TOTAL / PROMEDIO');
-            $sheet->setCellValue("B{$r}", $totalBajas);
-            $sheet->setCellValue("C{$r}", $totalPromedio);
-            $sheet->setCellValue("D{$r}", $totalIndice);
-            $sheet->setCellValue("E{$r}", '');
-            $this->totalsRow($sheet, "A{$r}:E{$r}");
+            $sheet->setCellValue("A{$r}", 'TOTAL / PLANTILLA');
+            $sheet->setCellValue("B{$r}", $totalAltas);
+            $sheet->setCellValue("C{$r}", $totalBajas);
+            $sheet->setCellValue("D{$r}", $totalPromedio);
+            $sheet->setCellValue("E{$r}", $totalIndice);
+            $sheet->setCellValue("F{$r}", '');
+            $this->totalsRow($sheet, "A{$r}:F{$r}");
             RadiographyStyleHelper::applyIntegerFormat($sheet, "B{$r}");
             RadiographyStyleHelper::applyIntegerFormat($sheet, "C{$r}");
-            RadiographyStyleHelper::applyPercentFormat($sheet, "D{$r}", $totalIndice);
+            RadiographyStyleHelper::applyIntegerFormat($sheet, "D{$r}");
+            RadiographyStyleHelper::applyPercentFormat($sheet, "E{$r}", $totalIndice);
             $r++;
         } else {
-            $sheet->setCellValue("A{$r}", 'Sin archivo de rotación cargado para este periodo.');
-            RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:E{$r}");
+            $sheet->setCellValue("A{$r}", 'Sin datos de NOI suficientes para calcular rotación en este periodo.');
+            RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:F{$r}");
             $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(9);
             $r++;
         }
 
-        $this->setColWidths($sheet, ['A' => 30, 'B' => 12, 'C' => 20, 'D' => 20, 'E' => 14]);
+        $this->setColWidths($sheet, ['A' => 30, 'B' => 10, 'C' => 10, 'D' => 14, 'E' => 20, 'F' => 14]);
         $sheet->freezePane('A5');
     }
 

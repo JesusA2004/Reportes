@@ -6,11 +6,13 @@ use App\Models\Period;
 use App\Models\PeriodRadiographyExport;
 use App\Services\EmployeeBranchAutoMatchService;
 use App\Services\FinanciamientoMotosAssignmentService;
+use App\Services\ImssFromNoiFiscalService;
 use App\Services\PeriodConsolidationService;
 use App\Services\PeriodDerivedDataCleaner;
 use App\Services\PeriodRadiographyService;
 use App\Services\Radiography\RadiographySnapshotBuilder;
 use App\Services\RadiografiaExportService;
+use App\Services\RotacionDerivedFromNoiService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
@@ -29,6 +31,8 @@ class GenerarRadiografiaCommand extends Command
         private readonly EmployeeBranchAutoMatchService $branchAutoMatch,
         private readonly FinanciamientoMotosAssignmentService $motosAssignment,
         private readonly RadiographySnapshotBuilder $snapshotBuilder,
+        private readonly RotacionDerivedFromNoiService $rotacionDerivedService,
+        private readonly ImssFromNoiFiscalService $imssDerivedService,
     ) {
         parent::__construct();
     }
@@ -75,6 +79,19 @@ class GenerarRadiografiaCommand extends Command
         $this->line('  4. Consolidando empleados...');
         $this->consolidationService->consolidate($period);
         $this->line('  <fg=green>✓ Consolidación lista.</>');
+
+        $this->line('  4b. Derivando Rotación e IMSS desde NOI (normal + fiscal)...');
+        $rotationDerived = $this->rotacionDerivedService->deriveForPeriod($period);
+        $imssDerived     = $this->imssDerivedService->deriveForPeriod($period);
+        $this->line(sprintf(
+            '  <fg=green>✓ Rotación: %d altas / %d bajas / %d plantilla (%.2f%%). IMSS: %d colaboradores ($%s).</>',
+            $rotationDerived['altas'],
+            $rotationDerived['bajas'],
+            $rotationDerived['plantilla'],
+            $rotationDerived['indice'],
+            $imssDerived['collaborators_included'],
+            number_format($imssDerived['amount_included'], 2),
+        ));
 
         $this->line('  5. Exportando Excel...');
         $path = $this->exportService->export($period);

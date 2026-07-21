@@ -1979,8 +1979,8 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                 <!-- ══════════ ROTACIÓN DE PERSONAL ══════════ -->
                 <div v-show="activeTab === 'rotacion'" class="space-y-5">
                     <template v-if="rotacionData">
-                        <div v-if="rotacionFuente !== 'xlsx'" class="rounded-xl bg-amber-50 border border-amber-100 px-4 py-2.5 text-xs text-amber-700">
-                            No se encontró el archivo de rotación para este periodo. Los datos son una estimación a partir de nómina.
+                        <div class="rounded-xl bg-indigo-50 border border-indigo-100 px-4 py-2.5 text-xs text-indigo-700">
+                            Rotación calculada automáticamente desde NOI Nómina + NOI Nómina Fiscal.
                         </div>
                         <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
                             <KpiCard label="Altas del periodo" :value="num(rotacionAltas)" :icon="TrendingUp" tone="green" />
@@ -2017,7 +2017,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                         </div>
                         <p v-else class="text-sm text-slate-500 italic text-center py-4">Sin desglose por sucursal disponible para este periodo.</p>
                     </template>
-                    <EmptyState v-else title="Sin datos de rotación" description="Carga el archivo de Rotación de Personal para ver esta sección." />
+                    <EmptyState v-else title="Sin datos de rotación" description="No hay NOI Nómina procesado para este periodo — la rotación se calcula automáticamente al actualizar la base de datos." />
                 </div>
 
                 <!-- ══════════ CATEGORÍA EBITDA ══════════ -->

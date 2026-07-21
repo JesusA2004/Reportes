@@ -1374,22 +1374,56 @@ class BranchRadiographyCalculator
 
     private function accumulateImssPatronal(array $dataIds, array $branchIds, array $operativeMap, array &$summaries, array &$unassigned): void
     {
+        // Fuente autoritativa: archivo IMSS manual (fact_expenses category=IMSS), MIENTRAS
+        // exista. ReportAnalysisService reprocesa ese archivo en cada corrida del pipeline
+        // (aunque la fuente ya no sea "requerida" en la UI), así que un periodo cerrado con
+        // archivo cargado SIEMPRE reproduce el mismo IMSS validado, nunca el derivado.
+        // El derivado (fact_imss, ImssFromNoiFiscalService) solo se usa para periodos NUEVOS
+        // sin archivo manual — ver spec 2026-07-21 sección 6: "derivado desde NOI NO significa
+        // cambiar el resultado".
         $imssSourceId = DB::table('data_sources')->where('code', 'imss')->value('id');
-        if (!$imssSourceId) {
-            return; // Fuente no configurada aún — se salta silenciosamente
+
+        $legacyRows = collect();
+        if ($imssSourceId) {
+            $legacyRows = DB::table('fact_expenses as e')
+                ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
+                ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
+                ->whereIn('e.period_id', $dataIds)
+                ->where('ru.data_source_id', $imssSourceId)
+                ->where('e.category', 'IMSS')
+                ->selectRaw("e.branch_id, b.name as branch_name, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
+                ->groupBy('e.branch_id', 'b.name')
+                ->get();
         }
 
-        $rows = DB::table('fact_expenses as e')
-            ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
-            ->leftJoin('branches as b', 'e.branch_id', '=', 'b.id')
-            ->whereIn('e.period_id', $dataIds)
-            ->where('ru.data_source_id', $imssSourceId)
-            ->where('e.category', 'IMSS')
-            ->selectRaw("e.branch_id, b.name as branch_name, SUM(COALESCE(NULLIF(e.paid_amount,0), e.amount)) as total")
-            ->groupBy('e.branch_id', 'b.name')
+        if ($legacyRows->isNotEmpty()) {
+            foreach ($legacyRows as $row) {
+                $branchId   = (int)    $row->branch_id;
+                $branchName = (string) ($row->branch_name ?? 'Sin nombre');
+                $amount     = (float)  $row->total;
+
+                $suc = $operativeMap[$branchId] ?? null;
+                if ($suc && isset($summaries[$suc])) {
+                    $summaries[$suc]['nomina_informativo']['IMSS'] = ($summaries[$suc]['nomina_informativo']['IMSS'] ?? 0.0) + $amount;
+                    $summaries[$suc]['imss_patronal'] += $amount;
+                } else {
+                    // Non-operative (CORPORATIVO, TULANCINGO, etc.): excluded from the report.
+                    // Tracked in imss_excluido for audit but NOT added to unassigned/global totals.
+                    $unassigned['imss_excluido'][$branchName] = ($unassigned['imss_excluido'][$branchName] ?? 0.0) + $amount;
+                }
+            }
+            return;
+        }
+
+        // ── Sin archivo legacy: periodo nuevo, usar el derivado de NOI fiscal ──
+        $derivedRows = DB::table('fact_imss')
+            ->whereIn('period_id', $dataIds)
+            ->where('included_in_report', true)
+            ->selectRaw('branch_id, branch_name, SUM(amount) as total')
+            ->groupBy('branch_id', 'branch_name')
             ->get();
 
-        foreach ($rows as $row) {
+        foreach ($derivedRows as $row) {
             $branchId   = (int)    $row->branch_id;
             $branchName = (string) ($row->branch_name ?? 'Sin nombre');
             $amount     = (float)  $row->total;
@@ -1399,8 +1433,6 @@ class BranchRadiographyCalculator
                 $summaries[$suc]['nomina_informativo']['IMSS'] = ($summaries[$suc]['nomina_informativo']['IMSS'] ?? 0.0) + $amount;
                 $summaries[$suc]['imss_patronal'] += $amount;
             } else {
-                // Non-operative (CORPORATIVO, TULANCINGO, etc.): excluded from the report.
-                // Tracked in imss_excluido for audit but NOT added to unassigned/global totals.
                 $unassigned['imss_excluido'][$branchName] = ($unassigned['imss_excluido'][$branchName] ?? 0.0) + $amount;
             }
         }

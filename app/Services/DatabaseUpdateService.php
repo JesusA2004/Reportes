@@ -10,10 +10,12 @@ use App\Models\PeriodIncident;
 use App\Models\PeriodSummary;
 use App\Models\ReportUpload;
 use App\Services\EmployeeBranchAutoMatchService;
+use App\Services\ImssFromNoiFiscalService;
 use App\Services\Imports\LendusEmployeeDirectoryImportService;
 use App\Services\Imports\LendusIngresosCobranzaImportService;
 use App\Services\Imports\NoiNominaImportService;
 use App\Services\ReportAnalysisService;
+use App\Services\RotacionDerivedFromNoiService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -27,6 +29,8 @@ class DatabaseUpdateService
         protected LendusEmployeeDirectoryImportService $lendusEmployeeDirectoryImportService,
         protected EmployeeBranchAutoMatchService $employeeBranchAutoMatchService,
         protected ReportAnalysisService $reportAnalysisService,
+        protected RotacionDerivedFromNoiService $rotacionDerivedService,
+        protected ImssFromNoiFiscalService $imssDerivedService,
     ) {}
 
     public function updateForPeriod(Period $period, ?PeriodDatabaseUpdateRun $run = null): void
@@ -179,6 +183,23 @@ class DatabaseUpdateService
         $this->checkCancelled($run);
         $this->employeeBranchAutoMatchService->handle($period->id);
 
+        // ── Step 7b: Derivar roster + Rotación + IMSS desde NOI (ya NO archivo manual) ──
+        // Debe correr DESPUÉS de automatch (necesita employee_branch_assignments del
+        // periodo ya resuelto). Idempotente: borra y recalcula solo este periodo.
+        $this->progress($run, 'Derivando rotación e IMSS desde NOI…', 88);
+        $this->checkCancelled($run);
+        $rotationDerived = null;
+        $imssDerived     = null;
+        try {
+            $rotationDerived = $this->rotacionDerivedService->deriveForPeriod($period);
+            $imssDerived     = $this->imssDerivedService->deriveForPeriod($period);
+        } catch (\Throwable $e) {
+            Log::warning('DatabaseUpdateService: fallo derivando rotación/IMSS desde NOI', [
+                'period_id' => $period->id,
+                'error'     => $e->getMessage(),
+            ]);
+        }
+
         // ── Step 8: Save PeriodSummary and incidents ──────────────────────────
         // Only after uploads are processed, fact_* are populated, and automatch
         // has run — so status=database_updated is actually accurate.
@@ -219,7 +240,44 @@ class DatabaseUpdateService
             'context'  => ['upload_id' => $d['upload_id'], 'source' => $d['code']],
         ], $importErrorDetails);
 
-        $allIncidents = array_merge($noiResult['incidents'] ?? [], $cobranzaResult['incidents'] ?? [], $importFailureIncidents);
+        $rotationImssIncidents = [];
+        if (!$fiscalUpload) {
+            $rotationImssIncidents[] = [
+                'type'     => 'imss_derivado.sin_noi_fiscal',
+                'severity' => 'high',
+                'message'  => 'No se puede calcular IMSS: falta NOI Nómina Fiscal para este periodo.',
+            ];
+        }
+        $sinSucursal = (int) ($rotationDerived['roster']['sin_sucursal'] ?? $imssDerived['roster']['sin_sucursal'] ?? 0);
+        if ($sinSucursal > 0) {
+            $rotationImssIncidents[] = [
+                'type'     => 'roster.empleados_sin_sucursal',
+                'severity' => 'warning',
+                'message'  => "{$sinSucursal} empleado(s) del roster NOI sin sucursal resuelta — excluidos de Rotación/IMSS por sucursal. Ver reportes:audit-roster-periodo {$period->id} --detail.",
+            ];
+        }
+
+        // Nunca bloquea ni sustituye: el legacy (archivo manual) sigue siendo la fuente
+        // autoritativa del reporte mientras exista (ver BranchRadiographyCalculator /
+        // RadiographySnapshotBuilder). Esto solo avisa cuando el derivado de NOI no
+        // reproduce el mismo número, para que se investigue antes de confiar en el
+        // derivado el día que se retire el archivo manual.
+        if ($rotationDerived && ($rotationDerived['matches_legacy'] ?? null) === false) {
+            $rotationImssIncidents[] = [
+                'type'     => 'rotacion_derivado.no_coincide_legacy',
+                'severity' => 'warning',
+                'message'  => "El índice de rotación derivado de NOI no coincide con el archivo manual validado para este periodo. El reporte sigue usando el archivo. Ver reportes:audit-rotacion-derivada {$period->id} --detail.",
+            ];
+        }
+        if ($imssDerived && ($imssDerived['matches_legacy'] ?? null) === false) {
+            $rotationImssIncidents[] = [
+                'type'     => 'imss_derivado.no_coincide_legacy',
+                'severity' => 'warning',
+                'message'  => "El IMSS derivado de NOI Fiscal no coincide con el archivo manual validado para este periodo. El reporte sigue usando el archivo. Ver reportes:audit-imss-derivado {$period->id} --detail.",
+            ];
+        }
+
+        $allIncidents = array_merge($noiResult['incidents'] ?? [], $cobranzaResult['incidents'] ?? [], $importFailureIncidents, $rotationImssIncidents);
         foreach ($allIncidents as $incident) {
             PeriodIncident::query()->create([
                 'period_summary_id' => $summary->id,

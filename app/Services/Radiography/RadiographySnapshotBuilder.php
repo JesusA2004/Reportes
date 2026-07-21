@@ -2572,10 +2572,13 @@ class RadiographySnapshotBuilder
     // Prioridad: datos del archivo XLSX importado (fact_rotacion).
     // Fallback: cálculo derivado de NOI (comparación entre periodos).
 
+    // Fuente ÚNICA vigente (2026-07-21): fact_rotacion, poblado por
+    // RotacionDerivedFromNoiService (roster NOI normal + fiscal, ya NO archivo
+    // manual). source='derived_noi' para periodos reprocesados; source='file'
+    // sobrevive para periodos históricos que no se han vuelto a generar.
     private function buildRotationData(Period $period): array
     {
-        // Try uploaded Excel data first
-        $xlsxRows = DB::table('fact_rotacion as fr')
+        $baseQuery = fn () => DB::table('fact_rotacion as fr')
             ->leftJoin('branches as b', 'fr.branch_id', '=', 'b.id')
             ->whereIn('fr.period_id', $this->dataIds)
             ->select(
@@ -2583,103 +2586,64 @@ class RadiographySnapshotBuilder
                 'fr.branch_id',
                 'fr.mes',
                 'fr.bajas',
+                'fr.altas',
                 'fr.promedio_personal',
                 'fr.indice_rotacion',
-                'fr.hoja_fuente',
-                'fr.raw_payload',
+                'fr.source',
                 'b.name as branch_name',
             )
-            ->orderBy('fr.sucursal_nombre')
-            ->get();
+            ->orderBy('fr.sucursal_nombre');
 
-        if ($xlsxRows->isNotEmpty()) {
-            $totalBajas    = $xlsxRows->sum('bajas');
-            $totalPromedio = $xlsxRows->sum('promedio_personal');
-            $mesUsado      = $xlsxRows->pluck('mes')->unique()->first() ?? '';
-            $indiceGlobal  = $totalPromedio > 0
-                ? round($totalBajas / $totalPromedio * 100, 2)
-                : round($xlsxRows->avg('indice_rotacion') ?? 0.0, 2);
+        // Fuente autoritativa: archivo legacy (source='file') mientras exista para el
+        // periodo — igual criterio que BranchRadiographyCalculator::accumulateImssPatronal().
+        // Solo se usa el derivado (source='derived_noi') cuando NO hay archivo manual.
+        $rows = $baseQuery()->where('fr.source', 'file')->get();
+        if ($rows->isEmpty()) {
+            $rows = $baseQuery()->where('fr.source', 'derived_noi')->get();
+        }
 
-            $porSucursal = $xlsxRows->map(function ($r) {
-                $payload = json_decode((string)($r->raw_payload ?? '{}'), true) ?? [];
-                return [
-                    'sucursal'          => $r->sucursal_nombre,
-                    'altas'             => (int) ($payload['altas'] ?? 0),
-                    'bajas'             => (int) $r->bajas,
-                    'promedio_personal' => (float) $r->promedio_personal,
-                    'indice_rotacion'   => (float) $r->indice_rotacion,
-                    'mes'               => $r->mes,
-                ];
-            })->values()->all();
-
-            $totalAltas = array_sum(array_column($porSucursal, 'altas'));
-
+        if ($rows->isEmpty()) {
             return [
-                'fuente'        => 'xlsx',
-                'mes'           => $mesUsado,
-                'altas'         => (int) $totalAltas,
-                'bajas'         => (int) $totalBajas,
-                'promedio'      => round((float) $totalPromedio, 2),
-                'indice'        => $indiceGlobal,
+                'fuente'        => 'sin_datos',
+                'mes'           => '',
+                'altas'         => 0,
+                'bajas'         => 0,
+                'promedio'      => 0,
+                'indice'        => 0.0,
                 'current_count' => 0,
                 'prev_count'    => 0,
-                'por_sucursal'  => $porSucursal,
+                'por_sucursal'  => [],
             ];
         }
 
-        // Fallback: derive from NOI movements (compare prev vs current period)
-        $allPeriods = Period::all();
+        $totalBajas    = (int) $rows->sum('bajas');
+        $totalAltas    = (int) $rows->sum('altas');
+        $totalPromedio = (float) $rows->sum('promedio_personal');
+        $mesUsado      = $rows->pluck('mes')->filter()->unique()->first() ?? '';
+        $fuente        = $rows->pluck('source')->filter()->unique()->first() ?? 'file';
+        $indiceGlobal  = $totalPromedio > 0
+            ? round($totalBajas / $totalPromedio * 100, 2)
+            : round($rows->avg('indice_rotacion') ?? 0.0, 2);
 
-        $currentEmps = DB::table('fact_noi_movements')
-            ->whereIn('period_id', $this->dataIds)
-            ->whereNotNull('employee_id')
-            ->distinct()
-            ->pluck('employee_id')
-            ->toArray();
-        $currentCount = count($currentEmps);
-
-        $prevPeriod = $allPeriods
-            ->filter(fn ($p) => $p->id < $period->id)
-            ->sortByDesc('id')
-            ->first();
-
-        $bajas     = 0;
-        $prevCount = 0;
-
-        if ($prevPeriod) {
-            $prevWeeklyIds = $prevPeriod->resolveBaseWeeklyIds($allPeriods);
-            $prevDataIds   = array_values(array_unique(array_merge(
-                empty($prevWeeklyIds) ? [] : $prevWeeklyIds,
-                [$prevPeriod->id]
-            )));
-
-            $prevEmps = DB::table('fact_noi_movements')
-                ->whereIn('period_id', $prevDataIds)
-                ->whereNotNull('employee_id')
-                ->distinct()
-                ->pluck('employee_id')
-                ->toArray();
-            $prevCount  = count($prevEmps);
-            $currentSet = array_flip($currentEmps);
-            foreach ($prevEmps as $emp) {
-                if (!isset($currentSet[$emp])) {
-                    $bajas++;
-                }
-            }
-        }
-
-        $promedio = $prevCount > 0 ? (int) round(($prevCount + $currentCount) / 2) : $currentCount;
-        $indice   = $promedio > 0 ? round($bajas / $promedio * 100, 2) : 0.0;
+        $porSucursal = $rows->map(fn ($r) => [
+            'sucursal'          => $r->sucursal_nombre,
+            'altas'             => (int) $r->altas,
+            'bajas'             => (int) $r->bajas,
+            'promedio_personal' => (float) $r->promedio_personal,
+            'indice_rotacion'   => (float) $r->indice_rotacion,
+            'mes'               => $r->mes,
+        ])->values()->all();
 
         return [
-            'fuente'        => 'noi',
-            'mes'           => '',
-            'bajas'         => $bajas,
-            'promedio'      => $promedio,
-            'indice'        => $indice,
-            'current_count' => $currentCount,
-            'prev_count'    => $prevCount,
-            'por_sucursal'  => [],
+            'fuente'        => $fuente,
+            'mes'           => $mesUsado,
+            'altas'         => $totalAltas,
+            'bajas'         => $totalBajas,
+            'promedio'      => round($totalPromedio, 2),
+            'indice'        => $indiceGlobal,
+            'current_count' => 0,
+            'prev_count'    => 0,
+            'por_sucursal'  => $porSucursal,
         ];
     }
 
