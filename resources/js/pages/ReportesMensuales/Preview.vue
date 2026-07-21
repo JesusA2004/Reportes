@@ -297,6 +297,18 @@ const nomDetalle = computed<{ label: string; value: number }[]>(() => {
 })
 // Total = fuente única, replica BranchRadiographyCalculator::nominaTotalFor() exactamente.
 const nomDescuentosNOI = computed(() => nomDetalle.value.filter(r => NOI_DEDUCTION_LABELS.has(r.label)).reduce((s, r) => s + r.value, 0))
+
+// Clasificación Tipo/Afecta total por renglón (regla final 2026-07, sección 7):
+// Deducción informativa → NO afecta. IMSS y Gasto empleado → SÍ afectan (ya incluidos en
+// imss_patronal / gastos_empleados_nomina, sumados dentro de nomTotal).
+function nomRowTipo(label: string): 'Deducción informativa' | 'IMSS' | 'Gasto empleado' {
+    if (label === 'IMSS') return 'IMSS'
+    if (NOI_DEDUCTION_LABELS.has(label)) return 'Deducción informativa'
+    return 'Gasto empleado'
+}
+const nomDeduccionesInformativas = computed(() => nomDetalle.value.filter(r => nomRowTipo(r.label) === 'Deducción informativa'))
+const nomImssRow      = computed(() => nomDetalle.value.filter(r => nomRowTipo(r.label) === 'IMSS'))
+const nomGastoEmpleado = computed(() => nomDetalle.value.filter(r => nomRowTipo(r.label) === 'Gasto empleado'))
 const nomTotal = computed(() =>
     nomNomina.value + nomComis.value + nomVac.value + nomPrimaVac.value + nomBonos.value + nomBonosAcel.value
     + nomOtrosPercep.value + nomImssPatronal.value + nomGastosEmpleados.value
@@ -453,15 +465,22 @@ const gastosByConcept  = computed(() => gastosDetail.value?.byConcept ?? [])
 const gastosByEmployee = computed(() => gastosDetail.value?.byEmployee ?? [])
 const gastosBySource   = computed(() => gastosDetail.value?.bySource ?? [])
 
-// ── EBITDA global ──────────────────────────────────────────────────────────────
-// EBITDA = Saldo inicial en caja + Ingresos totales (Recuperación/Cobranza) − Colocación
-// − Gastos totales (operativos + Nómina y Capital Humano). Misma fórmula que Excel/PDF
-// (RadiographyWorkbookBuilder::buildGlobalSheet / radiography-pdf.blade.php).
+// ── EBITDA global — CRITERIO FINAL (2026-07) ────────────────────────────────────
+// EBITDA NO usa Recuperación total (incluye capital recuperado, que no es ingreso real)
+// ni Colocación ni saldo inicial de caja. Ingreso base EBITDA = SOLO los componentes de
+// Recuperación que son ingreso real: Intereses + Impuestos + Moratorios/Multas + Comisión
+// por apertura + Cargos adicionales + Excedentes recuperados + Seguro CRECE reconocido (30%).
+// Misma fórmula exacta que el backend (BranchRadiographyCalculator::ingresoEbitdaBaseFor() /
+// ::ebitdaFinalFor() / ::margenEbitdaFor()) y que Excel/PDF — nunca debe divergir.
 const saldoInicialCaja  = computed(() => Number(snap.value?.saldo_inicial_caja) || 0)
 const saldoFinalCaja    = computed(() => snap.value?.saldo_final_caja !== null && snap.value?.saldo_final_caja !== undefined ? Number(snap.value.saldo_final_caja) : null)
 const gastosEbitdaTotal = computed(() => brGlobalGastosTotal.value + nomTotal.value)
-const utilidadGlobal    = computed(() => saldoInicialCaja.value + recGlobal.value - colGlobal.value - gastosEbitdaTotal.value)
-const ventaGlobal       = computed(() => Math.max(0, recGlobal.value - ingrCapital.value - ingrImpuesto.value))
+const ingresoEbitdaBaseGlobal = computed(() =>
+    ingrInteres.value + ingrImpuesto.value + ingrMultas.value
+    + ingrComAper.value + ingrCargosAdic.value + ingrExcedente.value + ingrCrece30.value
+)
+const utilidadGlobal    = computed(() => ingresoEbitdaBaseGlobal.value - gastosEbitdaTotal.value)
+const ventaGlobal       = computed(() => ingresoEbitdaBaseGlobal.value)
 const margenEbitdaPct   = computed(() => ventaGlobal.value > 0 ? (utilidadGlobal.value / ventaGlobal.value) * 100 : 0)
 // Diferencia = EBITDA − Envío de utilidad a corporativo. Puede ser negativa — no se fuerza a 0;
 // ese es justamente el saldo a llevar como saldo inicial del siguiente periodo.
@@ -505,11 +524,15 @@ const branchesFull = computed(() => {
             + (Number(b.imss_patronal) || 0) + (Number(b.gastos_empleados_nomina) || 0)
         const recuperacion    = Number(b.recuperacion_total) || 0
         const colocacion      = Number(b.colocacion ?? b.colocacion_total ?? b.otorgamientos ?? 0) || 0
-        const capitalRec      = Number(b.capital_recuperado) || 0
-        const impuestoRec     = Number(b.impuesto_recuperado) || 0
         const gastos          = Number(b.gastos_operativos) || 0
-        const ebitda          = recuperacion - colocacion - gastos - nominaFull
-        const ventaBranch     = Math.max(0, recuperacion - capitalRec - impuestoRec)
+        // Ingreso base EBITDA por sucursal — misma fórmula que el global (ver
+        // ingresoEbitdaBaseGlobal arriba / BranchRadiographyCalculator::ingresoEbitdaBaseFor()).
+        const ventaBranch     = (Number(b.interes_recuperado) || 0) + (Number(b.impuesto_recuperado) || 0)
+            + (Number(b.charges) || 0) + (Number(b.comision_apertura) || 0)
+            + (Number(b.cargos_adicionales) || 0) + (Number(b.excedente_recuperado) || 0)
+            + (Number(b.seguro_crece_reconocido) || 0)
+        const gastosTotalBranch = gastos + nominaFull
+        const ebitda          = ventaBranch - gastosTotalBranch
         const margenEbitda    = ventaBranch > 0 ? (ebitda / ventaBranch) * 100 : 0
         return {
             nombre: b.sucursal,
@@ -719,7 +742,8 @@ const gastosTree = computed(() => {
 const expandedGastosBranch = ref<string | null>(null)
 
 // ── Nómina: tabla jerárquica (sucursal padre + conceptos hijos) ──────────────
-// b.nomina (de branchesFull) YA es el neto (nominaTotalFor) — nunca se vuelve a restar aquí.
+// b.nomina (de branchesFull) = percepciones brutas + IMSS + gastos de empleados (regla final
+// 2026-07) — las deducciones NOI YA NO se restan, son puramente informativas (descuentos).
 const nominaTree = computed(() => {
     return branchesFull.value.map(b => {
         const raw = brRaw.value.find((r: any) => r.sucursal === b.nombre)
@@ -735,7 +759,7 @@ const nominaTree = computed(() => {
             ...Object.entries(det).filter(([, v]) => Number(v) > 0).map(([concepto, total]) => ({ concepto, total: Number(total) })),
         ].filter(c => c.total > 0)
         const descuentos = base.filter(c => NOI_DEDUCTION_LABELS.has(c.concepto)).reduce((s, c) => s + c.total, 0)
-        return { sucursal: b.nombre, total: b.nomina + descuentos, neto: b.nomina, descuentos, conceptos: base }
+        return { sucursal: b.nombre, total: b.nomina, neto: b.nomina - descuentos, descuentos, conceptos: base }
     }).filter(n => n.total > 0)
 })
 const expandedNominaBranch = ref<string | null>(null)
@@ -800,6 +824,30 @@ const moraBucketSeries = computed(() => moraBucketsGlobal.value.map(b => b.value
 const moraBucketOptions = computed(() => donutOptions(
     moraBucketsGlobal.value.map(b => b.label),
     ['#e11d48', '#f97316', '#eab308', '#3b82f6', '#8b5cf6'],
+))
+
+// ── Gráficas EBITDA / Gastos / Nómina / Recuperación (criterio final 2026-07) ────
+const ebitdaCompSeries = computed(() => [{ name: 'Monto', data: [ingresoEbitdaBaseGlobal.value, gastosEbitdaTotal.value, utilidadGlobal.value] }])
+const ebitdaCompOptions = computed(() => columnOptions(['Ingreso base EBITDA', 'Gastos Totales', 'EBITDA'], [chartColors.teal]))
+
+const gastosCompSeries = computed(() => [{ name: 'Monto', data: [brGlobalGastosTotal.value, nomTotal.value, gastosEbitdaTotal.value] }])
+const gastosCompOptions = computed(() => columnOptions(['OPEX', 'Nómina y Capital Humano', 'Gastos Totales'], [chartColors.amber]))
+
+const nomCompSeries = computed(() => [
+    Math.max(0, nomTotal.value - nomImssPatronal.value - nomGastosEmpleados.value),
+    nomImssPatronal.value,
+    nomGastosEmpleados.value,
+    nomDeduccionesInformativas.value.reduce((s, r) => s + r.value, 0),
+])
+const nomCompOptions = computed(() => donutOptions(
+    ['Percepciones', 'IMSS', 'Gastos empleados', 'Deducciones informativas'],
+    [chartColors.teal, chartColors.blue, chartColors.amber, chartColors.gray],
+))
+
+const recCompSeries = computed(() => [ingrCapital.value, ingrInteres.value, ingrImpuesto.value, ingrMultas.value, ingrCargosAdic.value, ingrCrece30.value])
+const recCompOptions = computed(() => donutOptions(
+    ['Capital recuperado', 'Intereses', 'Impuestos', 'Moratorios / Multas', 'Cargos adicionales', 'Seguro CRECE reconocido (30%)'],
+    [chartColors.gray, chartColors.teal, chartColors.blue, chartColors.red, chartColors.amber, chartColors.tealLight],
 ))
 
 // Sucursales: ranking por recuperación / cartera / EBITDA
@@ -1248,19 +1296,19 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">Prima vacacional</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomPrimaVac) }}</td></tr>
                                     <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Bonos</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomBonos) }}</td></tr>
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">Bonos aceleradores</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomBonosAcel) }}</td></tr>
-                                    <tr class="border-b bg-red-50/50"><td class="px-5 py-1.5 pl-5 text-red-700 text-[11px] font-semibold uppercase tracking-wide" colspan="2">Deducciones NOI (ya restadas del total)</td></tr>
-                                    <template v-for="(item, i) in nomDetalle.filter(r => NOI_DEDUCTION_LABELS.has(r.label))" :key="'ded-'+item.label">
+                                    <tr class="border-b bg-slate-50"><td class="px-5 py-1.5 pl-5 text-slate-600 text-[11px] font-semibold uppercase tracking-wide" colspan="2">IMSS y gastos reales de empleados (sí afectan el total)</td></tr>
+                                    <template v-for="(item, i) in [...nomImssRow, ...nomGastoEmpleado]" :key="'afecta-'+item.label">
                                         <tr :class="i % 2 === 0 ? '' : 'bg-slate-50/60'" class="border-b">
-                                            <td class="px-5 py-1.5 pl-8 text-red-600 text-xs">{{ item.label }}</td>
-                                            <td class="px-5 py-1.5 text-right text-xs font-semibold text-red-600">− {{ money(item.value) }}</td>
+                                            <td class="px-5 py-1.5 pl-8 text-slate-600 text-xs">{{ item.label }}</td>
+                                            <td class="px-5 py-1.5 text-right text-xs font-semibold text-slate-700">{{ money(item.value) }}</td>
                                         </tr>
                                     </template>
                                     <tr class="border-t-2 border-blue-200 bg-blue-50"><td class="px-5 py-2.5 font-black text-blue-900">Total Nómina y Capital Humano</td><td class="px-5 py-2.5 text-right font-black text-blue-900">{{ money(nomTotal) }}</td></tr>
-                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-1.5 pl-5 text-slate-500 text-[11px] font-semibold uppercase tracking-wide" colspan="2">Gastos informativos / operativos (NO suman al total — ya contados en OPEX)</td></tr>
-                                    <template v-for="(item, i) in nomDetalle.filter(r => !NOI_DEDUCTION_LABELS.has(r.label))" :key="'info-'+item.label">
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-1.5 pl-5 text-slate-500 text-[11px] font-semibold uppercase tracking-wide" colspan="2">Deducciones NOI — solo informativas, NO afectan el total</td></tr>
+                                    <template v-for="(item, i) in nomDeduccionesInformativas" :key="'ded-'+item.label">
                                         <tr :class="i % 2 === 0 ? '' : 'bg-slate-50/60'" class="border-b">
                                             <td class="px-5 py-1.5 pl-8 text-slate-500 text-xs">{{ item.label }}</td>
-                                            <td class="px-5 py-1.5 text-right text-xs font-semibold text-slate-700">{{ money(item.value) }}</td>
+                                            <td class="px-5 py-1.5 text-right text-xs font-semibold text-slate-500">{{ money(item.value) }}</td>
                                         </tr>
                                     </template>
                                 </tbody>
@@ -1271,16 +1319,27 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                             <div class="border-b bg-indigo-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-indigo-700">EBITDA — desglose</h3></div>
                             <table class="w-full text-sm">
                                 <tbody>
-                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">+ Recuperación final</td><td class="px-5 py-2 text-right font-black text-emerald-700">{{ money(recGlobal) }}</td></tr>
-                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">− Colocación del periodo</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(colGlobal) }}</td></tr>
-                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">− OPEX</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(brGlobalGastosTotal) }}</td></tr>
-                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">− Nómina y Capital Humano</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomTotal) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Ingreso base EBITDA</td><td class="px-5 py-2 text-right font-black text-emerald-700">{{ money(ingresoEbitdaBaseGlobal) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">− Gastos Totales</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(gastosEbitdaTotal) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">OPEX</td><td class="px-5 py-2 text-right text-xs text-slate-700">{{ money(brGlobalGastosTotal) }}</td></tr>
+                                    <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">Nómina y Capital Humano</td><td class="px-5 py-2 text-right text-xs text-slate-700">{{ money(nomTotal) }}</td></tr>
                                     <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">EBITDA</td><td class="px-5 py-2.5 text-right font-black text-lg" :class="utilidadGlobal < 0 ? 'text-red-700' : 'text-indigo-900'">{{ money(utilidadGlobal) }}</td></tr>
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-500 font-medium">Margen EBITDA</td><td class="px-5 py-2 text-right font-black" :class="margenEbitdaPct < 0 ? 'text-red-700' : 'text-slate-950'">{{ pct(margenEbitdaPct) }}</td></tr>
                                     <tr><td class="px-5 py-2 text-slate-600 font-medium">Excedente enviado a corporativo (informativo)</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(excGlobal) }}</td></tr>
+                                    <tr class="text-[11px] text-slate-400 italic"><td colspan="2" class="px-5 py-1.5">Recuperación total {{ money(recGlobal) }} y Colocación {{ money(colGlobal) }} son informativos — NO forman parte del cálculo de EBITDA (capital recuperado no es ingreso real).</td></tr>
                                 </tbody>
                             </table>
                         </div>
+                    </div>
+
+                    <!-- ── GRÁFICAS EBITDA / GASTOS / NÓMINA / RECUPERACIÓN ─────────── -->
+                    <div class="grid gap-4 lg:grid-cols-2">
+                        <ChartCard title="EBITDA — Ingreso base vs Gastos Totales" :series="ebitdaCompSeries" :options="ebitdaCompOptions" type="bar" :height="260" />
+                        <ChartCard title="Gastos — OPEX vs Nómina vs Total" :series="gastosCompSeries" :options="gastosCompOptions" type="bar" :height="260" />
+                    </div>
+                    <div class="grid gap-4 lg:grid-cols-2">
+                        <ChartCard title="Nómina — Composición" :series="nomCompSeries" :options="nomCompOptions" type="donut" :height="260" />
+                        <ChartCard title="Recuperación / Ingreso — Componentes" :series="recCompSeries" :options="recCompOptions" type="donut" :height="260" />
                     </div>
 
                     <!-- ── GRÁFICAS DE DISTRIBUCIÓN ─────────────────────────────── -->
@@ -1662,9 +1721,12 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                 <table v-if="expandedNominaBranch === n.sucursal" class="w-full text-xs">
                                     <tbody>
                                         <tr v-for="c in n.conceptos" :key="c.concepto" class="border-t bg-slate-50/60">
-                                            <td class="px-8 py-1.5 text-slate-600">{{ c.concepto }}</td>
-                                            <td class="px-5 py-1.5 text-right font-semibold" :class="NOI_DEDUCTION_LABELS.has(c.concepto) ? 'text-red-600' : 'text-slate-700'">
-                                                {{ NOI_DEDUCTION_LABELS.has(c.concepto) ? '-' + money(c.total) : money(c.total) }}
+                                            <td class="px-8 py-1.5 text-slate-600">
+                                                {{ c.concepto }}
+                                                <span v-if="NOI_DEDUCTION_LABELS.has(c.concepto)" class="ml-1.5 text-[10px] uppercase tracking-wide text-slate-400">(informativo, no afecta)</span>
+                                            </td>
+                                            <td class="px-5 py-1.5 text-right font-semibold" :class="NOI_DEDUCTION_LABELS.has(c.concepto) ? 'text-slate-500' : 'text-slate-700'">
+                                                {{ money(c.total) }}
                                             </td>
                                         </tr>
                                     </tbody>
@@ -1990,7 +2052,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                 </tbody>
                             </table>
                         </div>
-                        <p class="text-xs italic text-slate-400">EBITDA = Recuperación − Colocación − OPEX − Nómina completa estimada por sucursal.</p>
+                        <p class="text-xs italic text-slate-400">EBITDA = Ingreso base EBITDA (intereses + impuestos + moratorios + comisión por apertura + cargos adicionales + excedentes + 30% Seguro CRECE) − Gastos Totales (OPEX + Nómina y Capital Humano). No incluye capital recuperado.</p>
                     </template>
                     <EmptyState v-else title="Sin datos para calcular categoría EBITDA" />
                 </div>

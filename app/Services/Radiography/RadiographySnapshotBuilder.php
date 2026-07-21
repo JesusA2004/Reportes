@@ -154,36 +154,35 @@ class RadiographySnapshotBuilder
             $gm['fondeo_total']       = (float) ($branchCalcGlobal['prestamos_fondea'] ?? 0);
         }
 
-        // ── EBITDA, Venta y Margen EBITDA ────────────────────────────────────
+        // ── EBITDA, Ingreso base EBITDA y Margen EBITDA — CRITERIO FINAL (2026-07) ──────
         // Percepciones/Deducciones/Neto pagado: cifra informativa de "lo que el trabajador
         // recibió", distinta de Nómina y Capital Humano (que es un concepto de gasto de la
         // empresa). Las deducciones se muestran para explicar el neto — nunca se vuelven a
-        // sumar como gasto adicional.
+        // sumar/restar como gasto.
         $noiPercepDeducc = $this->branchCalculator->computeNoiPercepcionesDeducciones($this->dataIds);
-        // Fuente única: BranchRadiographyCalculator::nominaTotalFor() — NOI neto (percepciones
-        // − deducciones). nomina_detalle/nomina_informativo son informativos, NUNCA se suman.
+        // Fuentes únicas — ver BranchRadiographyCalculator::nominaTotalFor()/ingresoEbitdaBaseFor()/
+        // gastosTotalesFor()/ebitdaFinalFor()/margenEbitdaFor(). EBITDA NUNCA usa Recuperación
+        // total (incluye capital recuperado, que no es ingreso real) ni Colocación ni saldo de
+        // caja — únicamente Ingreso base EBITDA (intereses+impuestos+moratorios+comisión de
+        // apertura+cargos adicionales+excedentes+30% Seguro CRECE) menos Gastos Totales (OPEX +
+        // Nómina y Capital Humano).
         $nominaParaEbitda       = BranchRadiographyCalculator::nominaTotalFor($branchCalcGlobal);
         $opexParaEbitda         = (float) ($branchCalcGlobal['gastos_operativos'] ?? 0);
-        // EBITDA = Recuperación − Colocación − OPEX − Nómina y Capital Humano.
-        // Colocación es una salida de capital (dinero prestado a clientes), no un ingreso —
-        // se resta, igual que OPEX y Nómina. saldo_inicial_caja es un saldo de caja, no un
-        // componente operativo del periodo, y no participa en este cálculo.
-        $totalGastosEbitda      = $opexParaEbitda + $nominaParaEbitda;
-        $ebitdaGlobal           = $calcRecuperacion - $calcColocacion - $totalGastosEbitda;
+        $totalGastosEbitda      = BranchRadiographyCalculator::gastosTotalesFor($branchCalcGlobal);
+        $ingresoEbitdaBase      = BranchRadiographyCalculator::ingresoEbitdaBaseFor($branchCalcGlobal);
+        $ebitdaGlobal           = BranchRadiographyCalculator::ebitdaFinalFor($branchCalcGlobal);
         $capitalRecuperado      = (float) ($branchCalcGlobal['capital_recuperado'] ?? 0);
         $impuestoRecuperado     = (float) ($branchCalcGlobal['impuesto_recuperado'] ?? 0);
-        // Venta (para Margen EBITDA) = componentes sin capital ni impuestos: interés +
-        // cargos de inicio/comisión + cargos calendario + cargos vencimiento/moratorios +
-        // excedente de recuperación + seguro CRECE reconocido (30%).
         $interesRecuperado      = (float) ($branchCalcGlobal['interes_recuperado'] ?? 0);
         $cargosInicioComision   = (float) ($branchCalcGlobal['comision_apertura'] ?? 0);
         $cargosCalendario       = (float) ($branchCalcGlobal['cargos_adicionales'] ?? 0);
         $cargosVencimiento      = (float) ($branchCalcGlobal['charges'] ?? 0);
         $excedenteRecuperado    = (float) ($branchCalcGlobal['excedente_recuperado'] ?? 0);
         $seguroCreceReconocido  = (float) ($branchCalcGlobal['seguro_crece_reconocido'] ?? 0);
-        $ventaGlobal            = $interesRecuperado + $cargosInicioComision + $cargosCalendario
-                                + $cargosVencimiento + $excedenteRecuperado + $seguroCreceReconocido;
-        $margenEbitda           = $ventaGlobal > 0 ? round($ebitdaGlobal / $ventaGlobal * 100, 2) : 0.0;
+        // "Venta"/"ingreso base EBITDA" — mismo valor, dos nombres (venta_global se conserva
+        // para no romper consumidores existentes; ingreso_ebitda_base es el nombre canónico).
+        $ventaGlobal            = $ingresoEbitdaBase;
+        $margenEbitda           = BranchRadiographyCalculator::margenEbitdaFor($branchCalcGlobal);
 
         $snapshot = [
             'period' => [
@@ -239,6 +238,12 @@ class RadiographySnapshotBuilder
                 'venta_global'                 => $ventaGlobal,
                 'margen_ebitda'                => $margenEbitda,
                 'ebitda_categoria'             => $this->ebitdaCategory($ebitdaGlobal),
+                // Nombres canónicos del criterio final (2026-07) — mismos valores que arriba,
+                // expuestos con el nombre que UI/Excel/PDF deben mostrar literalmente:
+                // "Ingreso base EBITDA" / "Gastos Totales" / "EBITDA" / "Margen EBITDA".
+                'ingreso_ebitda_base'          => $ingresoEbitdaBase,
+                'gastos_totales'               => $totalGastosEbitda,
+                'ebitda_final'                 => $ebitdaGlobal,
                 'unificacion_excluida'         => (float)($branchCalcGlobal['unificacion_excluida'] ?? 0),
                 'condonacion_excluida'         => (float)($branchCalcGlobal['condonacion_excluida'] ?? 0),
             ],

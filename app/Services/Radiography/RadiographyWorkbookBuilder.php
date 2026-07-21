@@ -212,10 +212,19 @@ class RadiographyWorkbookBuilder
             'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
             'Gastos legales',
         ];
-        $gastosOpTotal = 0.0;
+        // OPEX TOTAL: SIEMPRE la fuente canónica gastos_operativos (ERP completo sin
+        // Corporativo/Pólizas + Lendus sin nómina/IMSS/deducciones/fondeo/excedentes/pólizas/
+        // gasto-empleados/anticipo) — NUNCA la suma de la lista curada de abajo, que existe
+        // solo para el desglose por concepto y puede no cubrir TODOS los conceptos reales
+        // (ej. Gasolina o un concepto "Sin clasificar" nuevo). Si la lista curada no cuadra
+        // exactamente contra el total canónico, el remanente se muestra como "Otros conceptos
+        // operativos" para que el desglose siempre sume exacto al total — nunca se pierde un peso.
+        $gastosOpTotal = $brCalcGlobal ? (float)($brCalcGlobal['gastos_operativos'] ?? 0) : 0.0;
+        $gastosOpCurada = 0.0;
         foreach ($gastosOp as $gasto) {
-            $gastosOpTotal += $getGDet($gasto);
+            $gastosOpCurada += $getGDet($gasto);
         }
+        $gastosOpOtros = round($gastosOpTotal - $gastosOpCurada, 2);
 
         // ── Nómina y Capital Humano (totales primero, render después) ───────
         $globalNomina    = $brCalcGlobal ? (float)$brCalcGlobal['nomina_total']     : (float)$pay['pagos'];
@@ -299,10 +308,14 @@ class RadiographyWorkbookBuilder
         $brGlobalFondea = $brCalcGlobal ? (float)$brCalcGlobal['prestamos_fondea'] : (float)($loans['operative_fondeos']['fondea_total'] ?? 0);
         $brGlobalRecibe = $brGlobalFondea;
 
-        // ── Tendencias / EBITDA (depende de gastosOpTotal y nomTotal ya conocidos) ──
-        $excGlobal      = $brCalcGlobal ? (float)$brCalcGlobal['excedentes'] : $excedentes;
-        $gastosTotal    = $gastosOpTotal + $nomTotal;
-        $utilidad       = $recTotal - $colTotal - $gastosTotal;
+        // ── EBITDA — CRITERIO FINAL (2026-07): Ingreso base EBITDA − Gastos Totales.
+        // NUNCA Recuperación − Colocación (capital recuperado no es ingreso real). Fuente
+        // única: BranchRadiographyCalculator::ingresoEbitdaBaseFor()/ebitdaFinalFor().
+        $excGlobal        = $brCalcGlobal ? (float)$brCalcGlobal['excedentes'] : $excedentes;
+        $gastosTotal      = $gastosOpTotal + $nomTotal;
+        $ingresoEbitdaBase = $brCalcGlobal ? BranchRadiographyCalculator::ingresoEbitdaBaseFor($brCalcGlobal) : 0.0;
+        $utilidad         = $ingresoEbitdaBase - $gastosTotal;
+        $margenEbitdaCalc = $ingresoEbitdaBase > 0 ? round($utilidad / $ingresoEbitdaBase * 100, 2) : 0.0;
 
         // ════════════════════════════════════════════════════════════════════
         // Layout: título(1) · subtítulo(2) · meta(3) · KPI band(4-7) · blank(8)
@@ -328,17 +341,17 @@ class RadiographyWorkbookBuilder
 
         // ── KPI band (8 indicadores clave del periodo) ───────────────────────
         $kpiPairs = [
-            ['Valor cartera global', $carteraTotal, 'currency', 'Recuperación total',          $recTotal,   'currency'],
+            ['Valor cartera global', $carteraTotal, 'currency', 'Recuperación total (informativo)', $recTotal,   'currency'],
             ['Otorgamientos',        $colTotal,     'currency', 'Mora total',                  $moraTotal,  'currency'],
-            ['Mora %',               $moraPct,      'percent',  'Gastos totales',               $gastosTotal,'currency'],
+            ['Ingreso base EBITDA',  $ingresoEbitdaBase, 'currency', 'Gastos Totales',          $gastosTotal,'currency'],
             ['Nómina y Capital Humano', $nomTotal,  'currency', 'EBITDA', $utilidad,   'currency'],
             [
                 'Percepciones', (float) ($snap['summary']['noi_percepciones'] ?? 0), 'currency',
-                'Deducciones', (float) ($snap['summary']['noi_deducciones'] ?? 0), 'currency',
+                'Deducciones (informativo)', (float) ($snap['summary']['noi_deducciones'] ?? 0), 'currency',
             ],
             [
                 'Neto pagado a trabajadores', (float) ($snap['summary']['noi_neto_pagado'] ?? 0), 'currency',
-                'Margen EBITDA', (float) ($snap['summary']['margen_ebitda'] ?? 0), 'percent',
+                'Margen EBITDA', $margenEbitdaCalc, 'percent',
             ],
         ];
         $kpiRow = 4;
@@ -443,6 +456,99 @@ class RadiographyWorkbookBuilder
         }
         $moraBucketLabelEnd = $dashRow - 1;
 
+        // Sección 5: EBITDA — Ingreso base EBITDA / Gastos Totales / EBITDA
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'EBITDA');
+        $dashRow++;
+        $ebitdaLabelStart = $dashRow;
+        foreach ([
+            ['Ingreso base EBITDA', $ingresoEbitdaBase],
+            ['Gastos Totales',      $gastosTotal],
+            ['EBITDA',              $utilidad],
+        ] as [$eLabel, $eVal]) {
+            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $eLabel);
+            $sheet->setCellValue("G{$dashRow}", $eVal);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+            $dashRow++;
+        }
+        $ebitdaLabelEnd = $dashRow - 1;
+        $dashRow++;
+
+        // Sección 6: Gastos — OPEX vs Nómina y Capital Humano vs Gastos Totales
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'GASTOS');
+        $dashRow++;
+        $gastosCompLabelStart = $dashRow;
+        foreach ([
+            ['OPEX',                       $gastosOpTotal],
+            ['Nómina y Capital Humano',    $nomTotal],
+            ['Gastos Totales',             $gastosTotal],
+        ] as [$gcLabel, $gcVal]) {
+            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $gcLabel);
+            $sheet->setCellValue("G{$dashRow}", $gcVal);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+            $dashRow++;
+        }
+        $gastosCompLabelEnd = $dashRow - 1;
+        $dashRow++;
+
+        // Sección 7: Nómina — Percepciones / IMSS / Gastos empleados / Deducciones informativas
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'NÓMINA — COMPOSICIÓN');
+        $dashRow++;
+        $nomImssGlobal   = (float)($brCalcGlobal['imss_patronal'] ?? 0);
+        $nomGastoEmpGlobal = (float)($brCalcGlobal['gastos_empleados_nomina'] ?? 0);
+        $nomPercepGlobal = max(0.0, $nomTotal - $nomImssGlobal - $nomGastoEmpGlobal);
+        $nomDeduccInformGlobal = array_sum(array_values((array)($brCalcGlobal['nomina_detalle'] ?? [])));
+        $nomCompLabelStart = $dashRow;
+        foreach ([
+            ['Percepciones',               $nomPercepGlobal],
+            ['IMSS',                       $nomImssGlobal],
+            ['Gastos empleados',           $nomGastoEmpGlobal],
+            ['Deducciones informativas',   $nomDeduccInformGlobal],
+        ] as [$ncLabel, $ncVal]) {
+            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $ncLabel);
+            $sheet->setCellValue("G{$dashRow}", $ncVal);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+            $dashRow++;
+        }
+        $nomCompLabelEnd = $dashRow - 1;
+        $dashRow++;
+
+        // Sección 8: Recuperación / Ingreso — desglose de componentes
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'RECUPERACIÓN / INGRESO');
+        $dashRow++;
+        $recCompLabelStart = $dashRow;
+        foreach ([
+            ['Capital recuperado',              $ingrCapital],
+            ['Intereses',                       $ingrInteres],
+            ['Impuestos',                       $ingrImpuesto],
+            ['Moratorios / Multas',             $ingrCharges],
+            ['Cargos adicionales',              $ingrCargosAdic],
+            ['Seguro CRECE reconocido (30%)',   $ingrCrece30],
+        ] as [$rcLabel, $rcVal]) {
+            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $rcLabel);
+            $sheet->setCellValue("G{$dashRow}", $rcVal);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+            $dashRow++;
+        }
+        $recCompLabelEnd = $dashRow - 1;
+        $dashRow++;
+
+        // Sección 9: OPEX por concepto — top conceptos de gasto operativo
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'OPEX POR CONCEPTO (TOP)');
+        $dashRow++;
+        $opexTopConceptos = $globalGastosDetalle;
+        arsort($opexTopConceptos);
+        $opexTopConceptos = array_slice($opexTopConceptos, 0, 8, true);
+        $opexTopLabelStart = $dashRow;
+        foreach ($opexTopConceptos as $ocLabel => $ocVal) {
+            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $ocLabel);
+            $sheet->setCellValue("G{$dashRow}", (float)$ocVal);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+            $dashRow++;
+        }
+        $opexTopLabelEnd   = $dashRow - 1;
+        $opexTopCount      = count($opexTopConceptos);
+        $dashRow++;
+
         // ── Gráficas dona/pastel (columnas H:T) sin DataBars ─────────────────
         $chartColors = ['106A59', '5B9BD5', '1DC1A2', 'D97706', '94A3B8', '0EA5E9', '7C3AED', 'DC2626'];
         $tealBlue    = ['106A59', '5B9BD5'];
@@ -475,6 +581,44 @@ class RadiographyWorkbookBuilder
             5, 'O17', 'U33',
             ['e11d48', 'f97316', 'eab308', '3b82f6', '8b5cf6']
         );
+
+        // ── Gráficas EBITDA / Gastos / Nómina / Recuperación / OPEX (criterio final 2026-07) ──
+        RadiographyStyleHelper::addBarChart(
+            $sheet, 'EBITDA — Ingreso base vs Gastos Totales',
+            "F{$ebitdaLabelStart}:F{$ebitdaLabelEnd}",
+            "G{$ebitdaLabelStart}:G{$ebitdaLabelEnd}",
+            $ebitdaLabelEnd - $ebitdaLabelStart + 1, 'H34', 'N50',
+            ['106A59', 'DC2626', '5B9BD5']
+        );
+        RadiographyStyleHelper::addBarChart(
+            $sheet, 'Gastos — OPEX vs Nómina vs Total',
+            "F{$gastosCompLabelStart}:F{$gastosCompLabelEnd}",
+            "G{$gastosCompLabelStart}:G{$gastosCompLabelEnd}",
+            $gastosCompLabelEnd - $gastosCompLabelStart + 1, 'O34', 'U50',
+            ['D97706', '5B9BD5', '1F2937']
+        );
+        RadiographyStyleHelper::addDonutChart(
+            $sheet, 'Nómina — Composición',
+            "F{$nomCompLabelStart}:F{$nomCompLabelEnd}",
+            "G{$nomCompLabelStart}:G{$nomCompLabelEnd}",
+            $nomCompLabelEnd - $nomCompLabelStart + 1, 'H51', 'N67',
+            ['106A59', '5B9BD5', 'D97706', '94A3B8']
+        );
+        RadiographyStyleHelper::addDonutChart(
+            $sheet, 'Recuperación / Ingreso — Componentes',
+            "F{$recCompLabelStart}:F{$recCompLabelEnd}",
+            "G{$recCompLabelStart}:G{$recCompLabelEnd}",
+            $recCompLabelEnd - $recCompLabelStart + 1, 'O51', 'U67',
+            ['94A3B8', '106A59', '5B9BD5', 'DC2626', 'D97706', '1DC1A2']
+        );
+        if ($opexTopCount > 0) {
+            RadiographyStyleHelper::addPieChart(
+                $sheet, 'OPEX por Concepto (Top)',
+                "F{$opexTopLabelStart}:F{$opexTopLabelEnd}",
+                "G{$opexTopLabelStart}:G{$opexTopLabelEnd}",
+                $opexTopCount, 'H68', 'N88', array_slice($chartColors, 0, $opexTopCount)
+            );
+        }
 
         // ── Navegación: acceso directo a cada hoja del workbook ──────────────
         $r = $kpiRow + 1;
@@ -714,6 +858,14 @@ class RadiographyWorkbookBuilder
             $gastosOpIdx++;
             $r++;
         }
+        if (abs($gastosOpOtros) >= 0.01) {
+            RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'Otros conceptos operativos');
+            $sheet->setCellValue("B{$r}", $gastosOpOtros);
+            $sheet->setCellValue("C{$r}", '');
+            $this->dataRow($sheet, "A{$r}:D{$r}", $gastosOpIdx % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", 'currency', $gastosOpOtros);
+            $r++;
+        }
         RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'Total Gastos Operativos');
         $sheet->setCellValue("B{$r}", $gastosOpTotal);
         $this->totalsRow($sheet, "A{$r}:D{$r}");
@@ -784,17 +936,28 @@ class RadiographyWorkbookBuilder
         $r++;
 
         // ── 7. EBITDA ─────────────────────────────────────────────────────────
-        // EBITDA = Recuperación total − Colocación − Gastos Totales
+        // EBITDA = Ingreso base EBITDA − Gastos Totales. Ingreso base EBITDA = Intereses +
+        // Impuestos + Moratorios/Multas + Comisión por apertura + Cargos adicionales +
+        // Excedentes recuperados + Seguro CRECE reconocido (30%) — NUNCA capital recuperado,
+        // NUNCA Recuperación/Colocación completas.
         RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '7. EBITDA');
         $r++;
         $r = $writeRows($r, [
-            ['Recuperación total / Cobranza',              $recTotal,      'currency', ''],
-            ['Menos: Colocación del periodo',              $colTotal,      'currency', ''],
+            ['Ingreso base EBITDA',                        $ingresoEbitdaBase, 'currency', ''],
+            ['  Intereses',                                $ingrInteres,   'currency', ''],
+            ['  Impuestos',                                $ingrImpuesto,  'currency', ''],
+            ['  Moratorios / Multas',                      $ingrCharges,   'currency', ''],
+            ['  Comisión por apertura',                    $ingrComAper,   'currency', ''],
+            ['  Cargos adicionales',                       $ingrCargosAdic,'currency', ''],
+            ['  Excedentes recuperados',                   $ingrExcedRec,  'currency', ''],
+            ['  Seguro CRECE reconocido (30%)',             $ingrCrece30,   'currency', ''],
             ['Menos: Gastos Totales',                      $gastosTotal,   'currency', ''],
-            ['  Gastos operativos',                        $gastosOpTotal, 'currency', ''],
+            ['  Gastos operativos (OPEX)',                 $gastosOpTotal, 'currency', ''],
             ['  Nómina y Capital Humano',                  $nomTotal,      'currency', ''],
             ['EBITDA',                                     $utilidad,      'currency', ''],
+            ['Margen EBITDA (%)',                          $margenEbitdaCalc, 'percent', ''],
             ['Excedente enviado a corporativo (informativo)', $excGlobal,  'currency', ''],
+            ['Recuperación total / Colocación (informativo, no forma parte del EBITDA)', $recTotal - $colTotal, 'currency', ''],
         ]);
         $r++;
 
@@ -1682,46 +1845,42 @@ class RadiographyWorkbookBuilder
         $branches   = $brCalc['branches']   ?? [];
         $label      = strtoupper($period->label);
 
-        RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:C1', 'NÓMINA — ' . $label);
-        RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'D1', '← GLOBAL', 'GLOBAL');
+        RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:E1', 'NÓMINA — ' . $label);
+        RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'F1', '← GLOBAL', 'GLOBAL');
         RadiographyStyleHelper::setCellValueSafe(
             $sheet,
             'A2',
-            'Descuentos mostrados en rojo solo a modo informativo — el total de cada sucursal es el monto registrado (incluye todos los conceptos antes de descuentos).'
+            'Tipo Percepción/IMSS/Gasto empleado = SÍ afecta el total. Deducción informativa = NO afecta el total (solo se muestra para validación manual).'
         );
-        RadiographyStyleHelper::mergeCellsSafe($sheet, 'A2:C2');
-        RadiographyStyleHelper::applyMetaStyle($sheet, 'A2:C2');
+        RadiographyStyleHelper::mergeCellsSafe($sheet, 'A2:E2');
+        RadiographyStyleHelper::applyMetaStyle($sheet, 'A2:E2');
 
         $sheet->getColumnDimension('A')->setWidth(40);
         $sheet->getColumnDimension('B')->setWidth(20);
-        $sheet->getColumnDimension('C')->setWidth(28);
-        $sheet->setAutoFilter('A3:C3');
+        $sheet->getColumnDimension('C')->setWidth(18);
+        $sheet->getColumnDimension('D')->setWidth(14);
+        $sheet->getColumnDimension('E')->setWidth(30);
+        $sheet->setAutoFilter('A3:E3');
         $sheet->freezePane('A4');
 
         RadiographyStyleHelper::applyTableHeaderStyle($sheet, 3, [
-            'A' => 'ETIQUETAS DE FILA', 'B' => 'SUMA DE ACUMULADO', 'C' => 'NOTA',
+            'A' => 'CONCEPTO', 'B' => 'TIPO', 'C' => 'MONTO', 'D' => 'AFECTA TOTAL', 'E' => 'FUENTE',
         ], accent: true);
 
         // Codes confirmed against BranchRadiographyCalculator::accumulateNomina()'s
         // own NOI concept grouping — real codes, not invented ones.
-        $codeLabels = [
-            'Nómina'           => 'P001 SUELDO',
-            'Comisiones'       => 'P002 COMISIONES',
-            'Vacaciones'       => 'P009 VACACIONES',
-            'Prima vacacional' => 'P010 PRIMA VACACIONAL',
-            'Bonos'            => 'P1XX BONOS (CATEGORÍA / PRODUCTIVIDAD)',
-        ];
         $scalarFields = [
-            'Nómina' => 'nomina_total', 'Comisiones' => 'comisiones', 'Vacaciones' => 'vacaciones',
-            'Prima vacacional' => 'prima_vacacional', 'Bonos' => 'bonos',
+            'Nómina / Sueldos' => ['nomina_total',     'NOI P001 SUELDO'],
+            'Comisiones'       => ['comisiones',       'NOI P002 COMISIONES'],
+            'Vacaciones'       => ['vacaciones',        'NOI P009 VACACIONES'],
+            'Prima vacacional' => ['prima_vacacional', 'NOI P010 PRIMA VACACIONAL'],
+            'Bonos'            => ['bonos',             'NOI P1XX BONOS'],
+            'Bonos Aceleradores' => ['bonos_aceleradores', 'NOI P118'],
+            'Otras percepciones' => ['otros_percepciones', 'NOI (código no catalogado)'],
         ];
-        $detOrder = [
-            'IMSS', 'Descuentos Infonavit', 'Finiquito', 'Gastos médicos',
-            'Gasolina', 'Financiamiento de Motos', 'Cascos',
-            'Descuento Servicios Moto', 'Financiamiento Celular',
-            'Descuento de uniformes', 'Anticipo de nómina', 'Pensión Alimenticia', 'Préstamo Personal',
-        ];
-        $isDeduction = fn (string $label) => (bool) preg_match('/Descuento|Pensión Alimenticia|Anticipo/i', $label);
+        // Gastos reales de empleados — Tipo "Gasto empleado", SÍ afectan el total (ya incluidos
+        // en gastos_empleados_nomina). Fuente: Lendus (PDF), salvo IMSS (archivo IMSS oficial).
+        $gastoEmpleadoLabels = ['Financiamiento de Motos', 'Financiamiento De Motos', 'Cascos', 'Enganche de Motocicleta', 'Finiquito', 'Gastos médicos'];
         $branchTotal = fn (array $b) => BranchRadiographyCalculator::nominaTotalFor($b);
 
         usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
@@ -1734,12 +1893,13 @@ class RadiographyWorkbookBuilder
             $grandTotal += $total;
 
             RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", strtoupper($g['sucursal']));
-            $sheet->setCellValue("B{$r}", $total);
-            $sheet->getStyle("A{$r}:C{$r}")->applyFromArray([
+            $sheet->setCellValue("C{$r}", $total);
+            RadiographyStyleHelper::setCellValueSafe($sheet, "D{$r}", 'TOTAL');
+            $sheet->getStyle("A{$r}:E{$r}")->applyFromArray([
                 'font' => ['bold' => true, 'size' => 10, 'color' => ['argb' => RadiographyStyleHelper::FG_WHITE]],
                 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => RadiographyStyleHelper::BG_PRIMARY_DARK]],
             ]);
-            RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$r}");
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "C{$r}");
             $sheet->getRowDimension($r)->setRowHeight(19);
             $r++;
 
@@ -1750,47 +1910,46 @@ class RadiographyWorkbookBuilder
             foreach ((array)($g['nomina_informativo'] ?? []) as $k => $v) {
                 $det[$k] = ($det[$k] ?? 0.0) + (float) $v;
             }
-            $detKeys = array_unique(array_merge($detOrder, array_keys($det)));
             $i = 0;
-            foreach ($scalarFields as $concept => $field) {
-                $val = (float)($g[$field] ?? 0);
-                if ($val == 0.0) continue;
-                $displayVal = $isDeduction($concept) ? -$val : $val;
-                RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", '    ' . ($codeLabels[$concept] ?? $concept));
-                $sheet->setCellValue("B{$r}", $displayVal);
-                $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
-                RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$r}");
-                if ($displayVal < 0) {
-                    $sheet->getStyle("B{$r}")->getFont()->getColor()->setARGB(RadiographyStyleHelper::FG_RED);
+            $writeRow = function (string $concepto, string $tipo, float $monto, bool $afecta, string $fuente) use ($sheet, &$r, &$i): void {
+                if ($monto == 0.0) return;
+                RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", '    ' . $concepto);
+                RadiographyStyleHelper::setCellValueSafe($sheet, "B{$r}", $tipo);
+                $sheet->setCellValue("C{$r}", $monto);
+                RadiographyStyleHelper::setCellValueSafe($sheet, "D{$r}", $afecta ? 'Sí' : 'No');
+                RadiographyStyleHelper::setCellValueSafe($sheet, "E{$r}", $fuente);
+                $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
+                RadiographyStyleHelper::applyCurrencyFormat($sheet, "C{$r}");
+                if (!$afecta) {
+                    $sheet->getStyle("A{$r}:E{$r}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF64748B'));
                 }
                 $i++;
                 $r++;
+            };
+
+            foreach ($scalarFields as $concept => [$field, $fuente]) {
+                $writeRow($concept, 'Percepción', (float)($g[$field] ?? 0), true, $fuente);
             }
-            foreach ($detKeys as $key) {
-                $val = (float)($det[$key] ?? 0);
-                if ($val == 0.0) continue;
-                $displayVal = $isDeduction($key) ? -$val : $val;
-                RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", '    ' . $key);
-                $sheet->setCellValue("B{$r}", $displayVal);
-                $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
-                RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$r}");
-                if ($displayVal < 0) {
-                    $sheet->getStyle("B{$r}")->getFont()->getColor()->setARGB(RadiographyStyleHelper::FG_RED);
-                }
-                $i++;
-                $r++;
+            $writeRow('IMSS', 'IMSS', (float)($g['imss_patronal'] ?? 0), true, 'Archivo IMSS oficial');
+            foreach ($gastoEmpleadoLabels as $key) {
+                if (!isset($det[$key])) continue;
+                $writeRow($key, 'Gasto empleado', (float)$det[$key], true, 'Lendus (PDF)');
+            }
+            foreach ($det as $key => $val) {
+                if (in_array($key, $gastoEmpleadoLabels, true) || $key === 'IMSS') continue;
+                $writeRow($key, 'Deducción informativa', (float)$val, false, 'NOI (deducción)');
             }
         }
 
         RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'TOTAL GENERAL');
-        $sheet->setCellValue("B{$r}", $grandTotal);
+        $sheet->setCellValue("C{$r}", $grandTotal);
         RadiographyStyleHelper::setCellValueSafe(
             $sheet,
-            "C{$r}",
-            'Descuentos en rojo solo a modo informativo; el total refleja el monto total registrado.'
+            "E{$r}",
+            'Deducciones informativas NO están incluidas en este total.'
         );
-        $this->totalsRow($sheet, "A{$r}:C{$r}");
-        RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$r}");
+        $this->totalsRow($sheet, "A{$r}:E{$r}");
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "C{$r}");
 
         // ── Resumen + gráfica: nómina por sucursal ───────────────────────────
         $r += 2;
@@ -2133,11 +2292,16 @@ class RadiographyWorkbookBuilder
                 'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
                 'Gastos legales','IMSS','Financiamiento de Motos',
             ];
-            $gopTotal = 0.0;
+            // Total OPEX SIEMPRE viene de la fuente canónica gastos_operativos (regla final
+            // 2026-07) — la lista curada de abajo es solo para el desglose por concepto; si
+            // no cubre algún concepto real (ej. Gasolina), el remanente se muestra como
+            // "Otros conceptos operativos" para que el desglose siempre sume exacto al total.
+            $gopTotal = $calc ? (float)($calc['gastos_operativos'] ?? 0) : 0.0;
+            $gopCurada = 0.0;
             $gopIdx = 0;
             foreach ($gastosOpList as $gastoName) {
                 $val = $getBGDet($gastoName);
-                $gopTotal += $val;
+                $gopCurada += $val;
                 if ($val == 0.0) continue; // skip zero rows
                 $sheet->setCellValue("A{$r}", $gastoName);
                 $sheet->setCellValue("B{$r}", $val);
@@ -2146,7 +2310,14 @@ class RadiographyWorkbookBuilder
                 $gopIdx++;
                 $r++;
             }
-            // Total must equal the sum of visible rows — no fallback to external total
+            $gopOtros = round($gopTotal - $gopCurada, 2);
+            if (abs($gopOtros) >= 0.01) {
+                $sheet->setCellValue("A{$r}", 'Otros conceptos operativos');
+                $sheet->setCellValue("B{$r}", $gopOtros);
+                $this->dataRow($sheet, "A{$r}:C{$r}", $gopIdx % 2 === 0);
+                $this->applyFmt($sheet, "B{$r}", 'currency', $gopOtros);
+                $r++;
+            }
             $sheet->setCellValue("A{$r}", 'Total Gastos Operativos');
             $sheet->setCellValue("B{$r}", $gopTotal);
             $this->totalsRow($sheet, "A{$r}:C{$r}");
@@ -2265,21 +2436,25 @@ class RadiographyWorkbookBuilder
             }
             $r++;
 
-            $brGastosTotal    = $gopTotal + $brNomTotal;
-            $brUtilidad       = $recB - $colB - $brGastosTotal;
+            $brGastosTotal     = $gopTotal + $brNomTotal;
+            $brIngresoEbitdaBase = $calc ? BranchRadiographyCalculator::ingresoEbitdaBaseFor($calc) : 0.0;
+            $brUtilidad        = $brIngresoEbitdaBase - $brGastosTotal;
+            $brMargenEbitda    = $brIngresoEbitdaBase > 0 ? round($brUtilidad / $brIngresoEbitdaBase * 100, 2) : 0.0;
             $brExcedCalc      = $calc ? (float)$calc['excedentes']       : $excedCalc;
 
-            // 7. EBITDA = Ingresos − Otorgamientos − Gastos Totales
+            // 7. EBITDA = Ingreso base EBITDA − Gastos Totales (criterio final 2026-07;
+            // NUNCA Recuperación − Colocación, ver BranchRadiographyCalculator::ebitdaFinalFor()).
             $this->sectionHeader($sheet, "A{$r}:C{$r}", '7. EBITDA');
             $r++;
             foreach ([
-                ['Ingresos Totales',                          $recB,          'currency'],
-                ['Menos: Colocación del periodo',             $colB,          'currency'],
+                ['Ingreso base EBITDA',                       $brIngresoEbitdaBase, 'currency'],
                 ['Menos: Gastos Totales',                     $brGastosTotal, 'currency'],
-                ['  Gastos operativos',                       $gopTotal,      'currency'],
+                ['  Gastos operativos (OPEX)',                $gopTotal,      'currency'],
                 ['  Nómina y Capital Humano',                  $brNomTotal,    'currency'],
                 ['EBITDA',                                    $brUtilidad,    'currency'],
+                ['Margen EBITDA (%)',                         $brMargenEbitda, 'percent'],
                 ['Excedente enviado a corporativo (inform.)', $brExcedCalc,   'currency'],
+                ['Recuperación total / Colocación (informativo)', $recB - $colB, 'currency'],
             ] as $i => [$label, $val, $fmt]) {
                 $sheet->setCellValue("A{$r}", $label);
                 $sheet->setCellValue("B{$r}", $val);
@@ -4031,6 +4206,11 @@ class RadiographyWorkbookBuilder
         $branchName = $branchRow['nombre'];
         $brUp       = strtoupper(trim($branchName));
 
+        // BranchRadiographyCalculator record for this branch — fuente canónica de
+        // gastos_operativos y de los componentes de Ingreso base EBITDA (ver más abajo).
+        $brCalc = collect($snap['branch_radiography']['branches'] ?? [])
+            ->first(fn ($b) => strtoupper(trim($b['sucursal'] ?? '')) === $brUp);
+
         $spreadsheet = new Spreadsheet();
         $spreadsheet->getProperties()
             ->setTitle("Radiografía {$branchName} — {$period->label}")
@@ -4099,10 +4279,10 @@ class RadiographyWorkbookBuilder
             if (strtoupper($lRow['branch']) === $brUp) { $loanRecibe += (float)$lRow['total']; }
         }
 
-        // EBITDA = Ingresos − Otorgamientos − (GastosOp + NóminaNet)
-        // $nomTotal from payBC already excludes DESCUENTO/DEDUCCION keywords
-        $gopTotalBW = $gopTotal > 0 ? $gopTotal : $gastosB;
-        $utilidad   = $recB - $colB - ($gopTotalBW + $nomTotal);
+        // EBITDA = Ingreso base EBITDA − Gastos Totales (criterio final 2026-07 — NUNCA
+        // Recuperación − Colocación). Ver BranchRadiographyCalculator::ebitdaFinalFor().
+        $ingresoEbitdaBaseBW = $brCalc ? BranchRadiographyCalculator::ingresoEbitdaBaseFor($brCalc) : 0.0;
+        $nomTotalBW = $brCalc ? BranchRadiographyCalculator::nominaTotalFor($brCalc) : $nomTotal;
 
         // ── Sheet 1: RESUMEN ─────────────────────────────────────────────────
         $sheet = $spreadsheet->getActiveSheet()->setTitle('RESUMEN');
@@ -4173,8 +4353,11 @@ class RadiographyWorkbookBuilder
             $this->applyFmt($sheet, "B{$r}", 'currency', $val);
             $r++;
         }
+        // Total OPEX: fuente canónica gastos_operativos (regla final 2026-07), no la suma de
+        // la lista curada de arriba (que es solo desglose y puede no cubrir todos los conceptos).
+        $gopTotalCanonico = $brCalc ? (float)($brCalc['gastos_operativos'] ?? 0) : ($gopTotal > 0 ? $gopTotal : $gastosB);
         $sheet->setCellValue("A{$r}", 'Total Gastos Operativos');
-        $sheet->setCellValue("B{$r}", $gopTotal > 0 ? $gopTotal : $gastosB);
+        $sheet->setCellValue("B{$r}", $gopTotalCanonico);
         $this->totalsRow($sheet, "A{$r}:D{$r}");
         $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
@@ -4199,8 +4382,8 @@ class RadiographyWorkbookBuilder
             $ii++;
             $r++;
         }
-        $sheet->setCellValue("A{$r}", 'Total Nómina');
-        $sheet->setCellValue("B{$r}", $nomTotal > 0 ? $nomTotal : $nomTotal2);
+        $sheet->setCellValue("A{$r}", 'Total Nómina y Capital Humano');
+        $sheet->setCellValue("B{$r}", $nomTotalBW);
         $this->totalsRow($sheet, "A{$r}:D{$r}");
         $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
@@ -4230,16 +4413,20 @@ class RadiographyWorkbookBuilder
         }
         $r++;
 
-        $bwGastosTotal = $gopTotalBW + $nomTotal;
+        $bwGastosTotal = $gopTotalCanonico + $nomTotalBW;
+        $utilidad      = $ingresoEbitdaBaseBW - $bwGastosTotal;
+        $bwMargen      = $ingresoEbitdaBaseBW > 0 ? round($utilidad / $ingresoEbitdaBaseBW * 100, 2) : 0.0;
 
+        // EBITDA = Ingreso base EBITDA − Gastos Totales (criterio final 2026-07).
         $this->sectionHeader($sheet, "A{$r}:D{$r}", '7. EBITDA'); $r++;
         foreach ([
-            ['Ingresos Totales',             $recB,          'currency'],
-            ['Menos: Otorgamientos',         $colB,          'currency'],
+            ['Ingreso base EBITDA',          $ingresoEbitdaBaseBW, 'currency'],
             ['Menos: Gastos Totales',        $bwGastosTotal, 'currency'],
-            ['  Gastos operativos',          $gopTotalBW,    'currency'],
-            ['  Nómina neta',                $nomTotal,      'currency'],
+            ['  Gastos operativos (OPEX)',   $gopTotalCanonico, 'currency'],
+            ['  Nómina y Capital Humano',    $nomTotalBW,    'currency'],
             ['= EBITDA del periodo',         $utilidad,      'currency'],
+            ['Margen EBITDA (%)',            $bwMargen,      'percent'],
+            ['Recuperación total / Otorgamientos (informativo)', $recB - $colB, 'currency'],
         ] as $i => [$label, $val, $fmt]) {
             $sheet->setCellValue("A{$r}", $label);
             $sheet->setCellValue("B{$r}", $val);
@@ -4708,6 +4895,31 @@ class RadiographyWorkbookBuilder
             return 0.0;
         };
 
+        // Ingreso base EBITDA / Gastos Totales — criterio final 2026-07, fuente canónica
+        // BranchRadiographyCalculator::ingresoEbitdaBaseFor()/gastosTotalesFor(). General
+        // scope lee del summary (ya calculado ahí); branch scope busca el registro de
+        // branch_radiography.branches (no sections.branches, que no trae los componentes
+        // de recuperación). Employee scope no tiene desglose de recuperación por gestor —
+        // se mantiene fuera del alcance de este comparativo.
+        $ingBase = function (array $snap) use ($scope, $branchId, $branchName): float {
+            if ($scope === 'branch' && $branchId) {
+                $brUp = strtoupper(trim($branchName ?? ''));
+                $row  = collect($snap['branch_radiography']['branches'] ?? [])
+                    ->first(fn ($b) => strtoupper(trim($b['sucursal'] ?? '')) === $brUp);
+                return $row ? BranchRadiographyCalculator::ingresoEbitdaBaseFor($row) : 0.0;
+            }
+            return (float)($snap['summary']['ingreso_ebitda_base'] ?? 0);
+        };
+        $gastosTot = function (array $snap) use ($scope, $branchId, $branchName): float {
+            if ($scope === 'branch' && $branchId) {
+                $brUp = strtoupper(trim($branchName ?? ''));
+                $row  = collect($snap['branch_radiography']['branches'] ?? [])
+                    ->first(fn ($b) => strtoupper(trim($b['sucursal'] ?? '')) === $brUp);
+                return $row ? BranchRadiographyCalculator::gastosTotalesFor($row) : 0.0;
+            }
+            return (float)($snap['summary']['gastos_totales'] ?? 0);
+        };
+
         // Get metric values from both snapshots
         $get = function (array $snap, string $path) use ($scope, $branchVal, $empVal, $branchId, $empId): float {
             if ($scope === 'branch' && $branchId) {
@@ -4875,19 +5087,21 @@ class RadiographyWorkbookBuilder
         $this->dataRow($sheet, "A{$r}:G{$r}", true);
         $r += 2;
 
-        // ── Section 7: EBITDA (periodo anterior vs actual) ───────────────────
+        // ── Section 7: EBITDA (periodo anterior vs actual) — criterio final 2026-07:
+        // Ingreso base EBITDA − Gastos Totales. NUNCA Recuperación − Colocación.
         $this->sectionHeader($sheet, "A{$r}:G{$r}", '7. EBITDA'); $r++;
-        foreach ([
-            ['Recuperación',   'recuperacion'],
-            ['Otorgamientos',  'colocacion'],
-            ['Gastos Totales', 'gastos'],
-        ] as $i => [$label, $key]) {
-            $writeComp($r, $label, $get($compareSnap,$key), $get($currentSnap,$key), 'currency', $i % 2 === 0);
-        }
-        // EBITDA = Ingresos − Otorgamientos − (GastosOp + NóminaNet)
-        $utilPrev = $get($compareSnap,'recuperacion') - $get($compareSnap,'colocacion') - ($get($compareSnap,'gastos') + $get($compareSnap,'pagos') + $get($compareSnap,'bonos') - $get($compareSnap,'descuentos'));
-        $utilCurr = $get($currentSnap,'recuperacion') - $get($currentSnap,'colocacion') - ($get($currentSnap,'gastos') + $get($currentSnap,'pagos') + $get($currentSnap,'bonos') - $get($currentSnap,'descuentos'));
-        $writeComp($r, 'EBITDA estimado', $utilPrev, $utilCurr, 'currency', true);
+        $ingBasePrev = $ingBase($compareSnap);
+        $ingBaseCurr = $ingBase($currentSnap);
+        $gastosTotPrev = $gastosTot($compareSnap);
+        $gastosTotCurr = $gastosTot($currentSnap);
+        $writeComp($r, 'Ingreso base EBITDA', $ingBasePrev, $ingBaseCurr, 'currency', true);
+        $writeComp($r, 'Gastos Totales',      $gastosTotPrev, $gastosTotCurr, 'currency', false);
+        $utilPrev = $ingBasePrev - $gastosTotPrev;
+        $utilCurr = $ingBaseCurr - $gastosTotCurr;
+        $writeComp($r, 'EBITDA', $utilPrev, $utilCurr, 'currency', true);
+        $margenPrev = $ingBasePrev > 0 ? round($utilPrev / $ingBasePrev * 100, 2) : 0.0;
+        $margenCurr = $ingBaseCurr > 0 ? round($utilCurr / $ingBaseCurr * 100, 2) : 0.0;
+        $writeComp($r, 'Margen EBITDA', $margenPrev, $margenCurr, 'percent', false);
         $r++;
 
         // ── Section 8: N/A ───────────────────────────────────────────────

@@ -64,14 +64,16 @@ class BranchRadiographyCalculator
 
     /**
      * Fuente canónica ÚNICA del KPI "Nómina y Capital Humano" para un branch summary o GLOBAL.
-     * Regla vigente (2026-07):
-     *   = percepciones NOI (sueldo+comisiones+bonos+vacaciones+prima) − deducciones NOI
+     * Regla vigente (2026-07, criterio final):
+     *   = percepciones NOI normal + percepciones NOI fiscal (sueldo+comisiones+bonos+
+     *     vacaciones+prima+otros — TODAS las percepciones, brutas, SIN restar deducciones)
      *   + IMSS patronal operativo (imss_patronal, excluye Corporativo/Tulancingo)
-     *   + gastos de empleados Lendus: Financiamiento de Motos, Enganche de Motocicleta,
+     *   + gastos reales de empleados: Financiamiento de Motos, Enganche de Motocicleta,
      *     Cascos, Finiquito, Gastos médicos (gastos_empleados_nomina).
-     * nomina_detalle son deducciones NOI ya restadas arriba (solo informativo, no se re-suman).
-     * nomina_informativo es desglose de detalle (IMSS/Motos/Cascos/Finiquito/Médicos) — sus
-     * montos YA están incluidos en imss_patronal/gastos_empleados_nomina, no se vuelven a sumar.
+     * Las deducciones NOI (nomina_detalle) YA NO se restan de nomina_total — son puramente
+     * informativas para que el usuario las valide manualmente (ver accumulateNomina()).
+     * nomina_informativo es desglose de IMSS/Motos/Cascos/Finiquito/Médicos — sus montos YA
+     * están incluidos en imss_patronal/gastos_empleados_nomina, no se vuelven a sumar.
      * Todo consumidor (PeriodRadiographyService, RadiographySnapshotBuilder, RadiographyStyleHelper,
      * RadiographyWorkbookBuilder, PDF, Preview.vue) DEBE usar este método — no reimplementar la suma.
      */
@@ -86,6 +88,54 @@ class BranchRadiographyCalculator
             + (float) ($branchOrGlobal['otros_percepciones'] ?? 0)
             + (float) ($branchOrGlobal['imss_patronal'] ?? 0)
             + (float) ($branchOrGlobal['gastos_empleados_nomina'] ?? 0);
+    }
+
+    /**
+     * Fuente canónica ÚNICA del "Ingreso base EBITDA" para un branch summary o GLOBAL.
+     * Regla vigente (2026-07, criterio final): EBITDA NO usa Recuperación total (que incluye
+     * capital recuperado — no es ingreso real) ni Colocación. El ingreso base EBITDA es
+     * únicamente la suma de los componentes de Recuperación que SÍ son ingreso real:
+     *   Intereses + Impuestos + Moratorios/Multas (charges) + Comisión por apertura
+     *   + Cargos adicionales + Excedentes recuperados + Seguro CRECE reconocido (30%).
+     * NUNCA incluye capital_recuperado. Todo consumidor de EBITDA (RadiographySnapshotBuilder,
+     * RadiographyStyleHelper::branchEbitdaEstimate(), RadiographyWorkbookBuilder, PDF,
+     * Preview.vue) DEBE usar este método — no reimplementar la suma.
+     */
+    public static function ingresoEbitdaBaseFor(array $branchOrGlobal): float
+    {
+        return (float) ($branchOrGlobal['interes_recuperado'] ?? 0)
+            + (float) ($branchOrGlobal['impuesto_recuperado'] ?? 0)
+            + (float) ($branchOrGlobal['charges'] ?? 0)
+            + (float) ($branchOrGlobal['comision_apertura'] ?? 0)
+            + (float) ($branchOrGlobal['cargos_adicionales'] ?? 0)
+            + (float) ($branchOrGlobal['excedente_recuperado'] ?? 0)
+            + (float) ($branchOrGlobal['seguro_crece_reconocido'] ?? 0);
+    }
+
+    /**
+     * Gastos Totales = OPEX (gastos_operativos) + Nómina y Capital Humano (nominaTotalFor()).
+     * Fuente canónica única — ver ingresoEbitdaBaseFor()/nominaTotalFor().
+     */
+    public static function gastosTotalesFor(array $branchOrGlobal): float
+    {
+        return (float) ($branchOrGlobal['gastos_operativos'] ?? 0) + self::nominaTotalFor($branchOrGlobal);
+    }
+
+    /**
+     * EBITDA final = Ingreso base EBITDA − Gastos Totales. Fuente canónica única.
+     */
+    public static function ebitdaFinalFor(array $branchOrGlobal): float
+    {
+        return self::ingresoEbitdaBaseFor($branchOrGlobal) - self::gastosTotalesFor($branchOrGlobal);
+    }
+
+    /**
+     * Margen EBITDA = EBITDA final / Ingreso base EBITDA * 100. Fuente canónica única.
+     */
+    public static function margenEbitdaFor(array $branchOrGlobal): float
+    {
+        $base = self::ingresoEbitdaBaseFor($branchOrGlobal);
+        return $base > 0 ? round(self::ebitdaFinalFor($branchOrGlobal) / $base * 100, 2) : 0.0;
     }
 
     /**
@@ -1123,14 +1173,12 @@ class BranchRadiographyCalculator
             }
         }
 
-        // ── Deducciones NOI: TODAS reducen nomina_total, sin excepción (regla vigente 2026-07:
-        //    "percepciones NOI menos todas las deducciones" — sin listas de exclusión ni casos
-        //    especiales). Incluye D002/D009 (IMSS trabajador), D003/D004/D010 (anticipos/
-        //    préstamos/pensión) y D111 (Subsidio APL, ahora tratado como cualquier otra
-        //    deducción, ya no como crédito) — todas restan por igual. Cada deducción también se
-        //    muestra en nomina_detalle (positivo, informativo) para transparencia — el detalle no
-        //    se vuelve a sumar en ningún consumidor downstream, solo documenta de dónde sale la
-        //    resta ya aplicada aquí.
+        // ── Deducciones NOI: regla final (2026-07) — YA NO reducen nomina_total ni ningún otro
+        //    KPI. Son puramente informativas para que el usuario las valide manualmente (ver
+        //    nomina_detalle abajo). "Nómina y Capital Humano" = percepciones brutas + IMSS +
+        //    gastos reales de empleados, SIN restar deducciones. Cada deducción se muestra en
+        //    nomina_detalle (positivo, informativo) para transparencia — nunca se resta ni se
+        //    suma como gasto en ningún consumidor downstream.
         $dedRows = DB::table('fact_noi_movements as n')
             ->leftJoin('employee_branch_assignments as eba', function ($join) use ($dataIds) {
                 $join->on('n.employee_id', '=', 'eba.employee_id')
@@ -1146,17 +1194,6 @@ class BranchRadiographyCalculator
             $branchId = (int) $row->assigned_branch_id;
             $concept  = (string) $row->concept;
             $amount   = (float) $row->total;
-
-            if ($branchId === -1) {
-                $unassigned['nomina_total'] -= $amount;
-            } else {
-                $suc = $operativeMap[$branchId] ?? null;
-                if ($suc && isset($summaries[$suc])) {
-                    $summaries[$suc]['nomina_total'] -= $amount;
-                } else {
-                    $unassigned['nomina_total'] -= $amount;
-                }
-            }
 
             $label = match (true) {
                 (bool) preg_match('/^D(092|094|105|129)/', $concept) => 'Descuentos Infonavit',

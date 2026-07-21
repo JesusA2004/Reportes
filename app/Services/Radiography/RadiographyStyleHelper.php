@@ -462,23 +462,27 @@ final class RadiographyStyleHelper
     }
 
     /**
-     * EBITDA estimado por sucursal — ÚNICA fórmula, compartida por PDF y Excel.
-     * Recuperación − Gastos operativos − Nómina completa estimada (nómina +
-     * comisiones + bonos + vacaciones + prima vacacional + detalle NOI), igual
-     * que BranchRadiographyCalculator reporta cada concepto. No es la utilidad
-     * canónica del negocio (esa resta también colocación, ver GLOBAL sección 8):
-     * es una estimación rápida por sucursal usada únicamente para categorizar.
+     * EBITDA por sucursal — ÚNICA fórmula, compartida por UI/Excel/PDF. Regla final
+     * (2026-07): Ingreso base EBITDA (intereses+impuestos+moratorios+comisión apertura+
+     * cargos adicionales+excedentes+30% Seguro CRECE — NUNCA capital recuperado ni
+     * recuperación/colocación completas) − Gastos Totales (OPEX + Nómina y Capital
+     * Humano). Ver BranchRadiographyCalculator::ebitdaFinalFor() — este método es un
+     * alias delgado que delega ahí para que exista una única fuente de verdad.
      *
      * @param array<string,mixed> $branch fila de branch_radiography.branches
      */
     public static function branchEbitdaEstimate(array $branch): float
     {
-        $nomina = BranchRadiographyCalculator::nominaTotalFor($branch);
+        return BranchRadiographyCalculator::ebitdaFinalFor($branch);
+    }
 
-        return (float)($branch['recuperacion_total'] ?? 0)
-            - (float)($branch['colocacion'] ?? 0)
-            - (float)($branch['gastos_operativos'] ?? 0)
-            - $nomina;
+    /**
+     * Margen EBITDA por sucursal — ÚNICA fórmula, alias delgado de
+     * BranchRadiographyCalculator::margenEbitdaFor().
+     */
+    public static function branchMargenEbitda(array $branch): float
+    {
+        return BranchRadiographyCalculator::margenEbitdaFor($branch);
     }
 
     /**

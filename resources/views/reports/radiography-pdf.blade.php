@@ -184,30 +184,36 @@ $moraBuckets = [
 ];
 $moraBucketMax = max(array_column($moraBuckets, 'valor')) ?: 1.0;
 
-// ── EBITDA global ─────────────────────────────────────────────────────────────
-// $nomTotal ya es el neto canónico (percepciones − deducciones NOI). $nomDescuentosNOI es
-// solo informativo (para explicar el neto), nunca se vuelve a restar aquí.
+// ── EBITDA global — CRITERIO FINAL (2026-07) ──────────────────────────────────
+// $nomTotal = percepciones brutas + IMSS operativo + gastos reales de empleados (las
+// deducciones NOI ya NO se restan, son solo informativas — ver $nomDetalle abajo).
 $nomDescuentosNOI = array_sum(array_values($nomDetalle));
 $nomNeto          = $nomTotal;
-$gastosTotal      = $gastosOpTotal + $nomNeto;
-// EBITDA = Recuperación/Cobranza − Colocación − Gastos totales.
-// Misma fórmula que Excel (RadiographyWorkbookBuilder::buildGlobalSheet).
-$utilidad       = $recTotal - $colocacion - $gastosTotal;
+$gastosTotal      = \App\Services\Radiography\BranchRadiographyCalculator::gastosTotalesFor($brGlobal ?? []);
+// Ingreso base EBITDA = Intereses + Impuestos + Moratorios/Multas + Comisión por apertura +
+// Cargos adicionales + Excedentes recuperados + Seguro CRECE reconocido (30%) — NUNCA
+// capital recuperado, NUNCA Recuperación/Colocación completas.
+$ingresoEbitdaBase = \App\Services\Radiography\BranchRadiographyCalculator::ingresoEbitdaBaseFor($brGlobal ?? []);
+$utilidad          = \App\Services\Radiography\BranchRadiographyCalculator::ebitdaFinalFor($brGlobal ?? []);
+$margenEbitda      = \App\Services\Radiography\BranchRadiographyCalculator::margenEbitdaFor($brGlobal ?? []);
 
-// ── Categoría por EBITDA — fórmula centralizada (idéntica al Excel) ───────────
-// EBITDA = Recuperación − Colocación − OPEX − Nómina
+// ── Categoría por EBITDA — fórmula centralizada (idéntica al Excel/UI) ────────
+// EBITDA = Ingreso base EBITDA − Gastos Totales (ver BranchRadiographyCalculator::ebitdaFinalFor()).
 $categorias = [];
 foreach ($brBranches as $b) {
     $bRec  = (float)($b['recuperacion_total'] ?? 0);
     $bCol  = (float)($b['colocacion'] ?? 0);
     $bGas  = (float)($b['gastos_operativos'] ?? 0);
+    $bNom  = \App\Services\Radiography\BranchRadiographyCalculator::nominaTotalFor($b);
+    $bIngBase = \App\Services\Radiography\BranchRadiographyCalculator::ingresoEbitdaBaseFor($b);
     $bUtil = \App\Services\Radiography\RadiographyStyleHelper::branchEbitdaEstimate($b);
     $categorias[] = [
         'nombre'       => $b['sucursal'],
         'recuperacion' => $bRec,
         'colocacion'   => $bCol,
         'gastos'       => $bGas,
-        'nomina'       => $bRec - $bCol - $bGas - $bUtil,
+        'ingreso_base' => $bIngBase,
+        'nomina'       => $bNom,
         'ebitda'       => $bUtil,
         'categoria'    => \App\Services\Radiography\RadiographyStyleHelper::ebitdaCategory($bUtil),
     ];
@@ -251,24 +257,26 @@ $gastosPorSucursal = array_filter(array_map(fn($r) => ['sucursal' => $r['sucursa
 usort($gastosPorSucursal, fn($x, $y) => $y['monto'] <=> $x['monto']);
 $gastosPorSucursalMax = !empty($gastosPorSucursal) ? max(array_column($gastosPorSucursal, 'monto')) : 1.0;
 
-// ── Nómina por sucursal — resumen ejecutivo (página 6) ────────────────────────
-// 'neto' es el KPI real (nominaTotalFor). 'total'/'descuentos' son solo para explicar el
-// neto (percepciones brutas y deducciones NOI ya restadas) — nunca se re-suman a nada.
+// ── Nómina por sucursal — resumen ejecutivo (página 6) — CRITERIO FINAL 2026-07 ──
+// 'nomina_capital_humano' es el KPI real (nominaTotalFor: percepciones + IMSS + gastos de
+// empleados). 'descuentos' es puramente informativo — NO se resta de ningún total.
 $nomPorSucursal = [];
 foreach ($brBranches as $b) {
     $bDetalle    = (array)($b['nomina_detalle'] ?? []);
     $bDescuentos = array_sum(array_values($bDetalle));
-    $bSueldos    = (float)($b['nomina_total'] ?? 0) + $bDescuentos; // bruto antes de deducciones
+    $bSueldos    = (float)($b['nomina_total'] ?? 0); // ya bruto (percepciones, sin restar deducciones)
     $bComisiones = (float)($b['comisiones'] ?? 0);
     $bBonos      = (float)($b['bonos'] ?? 0);
     $bOtros      = (float)($b['vacaciones'] ?? 0) + (float)($b['prima_vacacional'] ?? 0);
-    $bNeto       = \App\Services\Radiography\BranchRadiographyCalculator::nominaTotalFor($b);
+    $bImssGastosEmp = (float)($b['imss_patronal'] ?? 0) + (float)($b['gastos_empleados_nomina'] ?? 0);
+    $bNomCapHumano  = \App\Services\Radiography\BranchRadiographyCalculator::nominaTotalFor($b);
     $bTotalBruto = $bSueldos + $bComisiones + $bBonos + $bOtros;
-    if ($bTotalBruto <= 0) continue;
+    if ($bNomCapHumano <= 0) continue;
     $nomPorSucursal[] = [
         'sucursal' => $b['sucursal'], 'sueldos' => $bSueldos, 'comisiones' => $bComisiones,
         'bonos' => $bBonos, 'otros' => $bOtros, 'descuentos' => $bDescuentos,
-        'total' => $bTotalBruto, 'neto' => $bNeto,
+        'imss_gastos_empleados' => $bImssGastosEmp,
+        'total' => $bTotalBruto, 'neto' => $bNomCapHumano,
     ];
 }
 usort($nomPorSucursal, fn($x, $y) => strcmp($x['sucursal'], $y['sucursal']));
@@ -306,21 +314,21 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
 
 <table class="kpi-grid avoid">
     <tr>
-        <td class="kpi"><div class="kpi-label">Recuperación / Cobranza</div><div class="kpi-value">{{ $fmt0($recTotal) }}</div></td>
-        <td class="kpi"><div class="kpi-label">Colocación</div><div class="kpi-value">{{ $fmt0($colocacion) }}</div></td>
-        <td class="kpi"><div class="kpi-label">Cartera</div><div class="kpi-value">{{ $fmt0($cartera) }}</div></td>
-        <td class="kpi"><div class="kpi-label">Cartera vencida</div><div class="kpi-value @if($moraPct > 25) neg @endif">{{ $fmt0($moraTotal) }}</div></td>
+        <td class="kpi"><div class="kpi-label">Ingreso base EBITDA</div><div class="kpi-value">{{ $fmt0($ingresoEbitdaBase) }}</div></td>
+        <td class="kpi"><div class="kpi-label">Gastos Totales</div><div class="kpi-value">{{ $fmt0($gastosTotal) }}</div></td>
+        <td class="kpi"><div class="kpi-label">EBITDA</div><div class="kpi-value @if($utilidad < 0) neg @endif">{{ $fmt0($utilidad) }}</div></td>
+        <td class="kpi"><div class="kpi-label">Margen EBITDA</div><div class="kpi-value @if($margenEbitda < 0) neg @endif">{{ $fmtp($margenEbitda) }}</div></td>
     </tr>
     <tr>
-        <td class="kpi"><div class="kpi-label">Gastos</div><div class="kpi-value">{{ $fmt0($gastosOpTotal) }}</div></td>
+        <td class="kpi"><div class="kpi-label">OPEX</div><div class="kpi-value">{{ $fmt0($gastosOpTotal) }}</div></td>
         <td class="kpi"><div class="kpi-label">Nómina y Capital Humano</div><div class="kpi-value">{{ $fmt0($nomTotal) }}</div></td>
-        <td class="kpi"><div class="kpi-label">EBITDA</div><div class="kpi-value @if($utilidad < 0) neg @endif">{{ $fmt0($utilidad) }}</div></td>
+        <td class="kpi"><div class="kpi-label">Cartera</div><div class="kpi-value">{{ $fmt0($cartera) }}</div></td>
         <td class="kpi"><div class="kpi-label">Mora %</div><div class="kpi-value @if($moraPct > 25) neg @endif">{{ $fmtp($moraPct) }}</div></td>
     </tr>
     <tr>
         <td class="kpi"><div class="kpi-label">Percepciones</div><div class="kpi-value">{{ $fmt0((float)($snap['summary']['noi_percepciones'] ?? 0)) }}</div></td>
-        <td class="kpi"><div class="kpi-label">Deducciones</div><div class="kpi-value">{{ $fmt0((float)($snap['summary']['noi_deducciones'] ?? 0)) }}</div></td>
-        <td class="kpi" colspan="2"><div class="kpi-label">Neto pagado a trabajadores</div><div class="kpi-value">{{ $fmt0((float)($snap['summary']['noi_neto_pagado'] ?? 0)) }}</div></td>
+        <td class="kpi"><div class="kpi-label">Deducciones (informativo)</div><div class="kpi-value">{{ $fmt0((float)($snap['summary']['noi_deducciones'] ?? 0)) }}</div></td>
+        <td class="kpi" colspan="2"><div class="kpi-label">Recuperación / Colocación (informativo, no forma parte del EBITDA)</div><div class="kpi-value">{{ $fmt0($recTotal) }} / {{ $fmt0($colocacion) }}</div></td>
     </tr>
 </table>
 
@@ -331,11 +339,15 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <div style="font-size:7.8pt; line-height:1.55; color:#334155;">
                 La cartera total del periodo es de <b>{{ $fmt0($cartera) }}</b>, con una cartera vencida de
                 <b>{{ $fmt0($moraTotal) }}</b> ({{ $fmtp($moraPct) }} de la cartera).
-                La recuperación/cobranza alcanzó <b>{{ $fmt0($recTotal) }}</b> contra una colocación de
-                <b>{{ $fmt0($colocacion) }}</b> en el periodo.
-                Considerando gastos operativos (<b>{{ $fmt0($gastosOpTotal) }}</b>) y nómina
-                (<b>{{ $fmt0($nomTotal) }}</b>), el EBITDA del periodo es de
-                <b>{{ $fmt0($utilidad) }}</b>.
+                El ingreso base EBITDA (intereses, impuestos, moratorios, comisión por apertura,
+                cargos adicionales, excedentes y 30% de Seguro CRECE — sin capital recuperado) fue de
+                <b>{{ $fmt0($ingresoEbitdaBase) }}</b>.
+                Considerando gastos operativos / OPEX (<b>{{ $fmt0($gastosOpTotal) }}</b>) y Nómina y
+                Capital Humano (<b>{{ $fmt0($nomTotal) }}</b>), Gastos Totales suman
+                <b>{{ $fmt0($gastosTotal) }}</b>, para un EBITDA del periodo de
+                <b>{{ $fmt0($utilidad) }}</b> (margen {{ $fmtp($margenEbitda) }}).
+                Como referencia informativa, la recuperación/cobranza total (incluye capital recuperado)
+                alcanzó <b>{{ $fmt0($recTotal) }}</b> contra una colocación de <b>{{ $fmt0($colocacion) }}</b>.
             </div>
         </td>
         <td class="colR">
@@ -355,11 +367,10 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
     <thead>
         <tr>
             <th>Sucursal</th>
-            <th class="r">Recuperación</th>
-            <th class="r">Colocación</th>
+            <th class="r">Ingreso base EBITDA</th>
             <th class="r">OPEX</th>
             <th class="r">Nómina</th>
-            <th class="r">EBITDA estimado</th>
+            <th class="r">EBITDA</th>
             <th class="c">Categoría</th>
         </tr>
     </thead>
@@ -367,8 +378,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         @foreach($categorias as $c)
         <tr>
             <td class="b">{{ $c['nombre'] }}</td>
-            <td class="r">{{ $fmt($c['recuperacion']) }}</td>
-            <td class="r">{{ $fmt($c['colocacion']) }}</td>
+            <td class="r">{{ $fmt($c['ingreso_base']) }}</td>
             <td class="r">{{ $fmt($c['gastos']) }}</td>
             <td class="r">{{ $fmt($c['nomina']) }}</td>
             <td class="r b" @if($c['ebitda'] < 0) style="color:#b91c1c;" @endif>{{ $fmt($c['ebitda']) }}</td>
@@ -377,7 +387,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         @endforeach
     </tbody>
 </table>
-<div class="note">EBITDA = Recuperación − Colocación − OPEX − Nómina completa estimada por sucursal. Categorías: Diamante ≥$1M / Máster ≥$600K / Sénior ≥$300K / Júnior ≥$100K / Mantenido &lt;$100K.</div>
+<div class="note">EBITDA = Ingreso base EBITDA (intereses + impuestos + moratorios + comisión por apertura + cargos adicionales + excedentes + 30% Seguro CRECE) − Gastos Totales (OPEX + Nómina y Capital Humano) por sucursal. No incluye capital recuperado. Categorías: Diamante ≥$1M / Máster ≥$600K / Sénior ≥$300K / Júnior ≥$100K / Mantenido &lt;$100K.</div>
 @endif
 
 <!-- ═══════════════════════════════════════════════════════════════════════
@@ -726,9 +736,9 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <th class="r">Comisiones</th>
             <th class="r">Bonos</th>
             <th class="r">Vac./Prima/Otras</th>
-            <th class="r">Descuentos</th>
-            <th class="r">Total nómina</th>
-            <th class="r">Neto</th>
+            <th class="r">Descuentos (informativo)</th>
+            <th class="r">IMSS + Gasto empleado</th>
+            <th class="r">Total Nómina y Capital Humano</th>
         </tr>
     </thead>
     <tbody>
@@ -739,9 +749,9 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <td class="r">{{ $fmt($n['comisiones']) }}</td>
             <td class="r">{{ $fmt($n['bonos']) }}</td>
             <td class="r">{{ $fmt($n['otros']) }}</td>
-            <td class="r" @if($n['descuentos'] > 0) style="color:#b91c1c;" @endif>{{ $n['descuentos'] > 0 ? '-' . $fmt($n['descuentos']) : '—' }}</td>
-            <td class="r b">{{ $fmt($n['total']) }}</td>
-            <td class="r">{{ $fmt($n['neto']) }}</td>
+            <td class="r" style="color:#64748b;">{{ $fmt($n['descuentos']) }}</td>
+            <td class="r">{{ $fmt($n['imss_gastos_empleados']) }}</td>
+            <td class="r b">{{ $fmt($n['neto']) }}</td>
         </tr>
         @endforeach
     </tbody>
@@ -751,14 +761,14 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <td class="r">{{ $fmt($nomNomina) }}</td>
             <td class="r">{{ $fmt($nomComis) }}</td>
             <td class="r">{{ $fmt($nomBonos) }}</td>
-            <td class="r">{{ $fmt($nomTotal - $nomNomina - $nomComis - $nomBonos) }}</td>
+            <td class="r">{{ $fmt($nomTotal - $nomNomina - $nomComis - $nomBonos - (float)($brGlobal['imss_patronal'] ?? 0) - (float)($brGlobal['gastos_empleados_nomina'] ?? 0)) }}</td>
             <td class="r">{{ $fmt($nomDescuentosNOI) }}</td>
+            <td class="r">{{ $fmt((float)($brGlobal['imss_patronal'] ?? 0) + (float)($brGlobal['gastos_empleados_nomina'] ?? 0)) }}</td>
             <td class="r">{{ $fmt($nomTotal) }}</td>
-            <td class="r">{{ $fmt($nomNeto) }}</td>
         </tr>
     </tfoot>
 </table>
-<div class="note">Detalle completo por concepto disponible en el Excel (hoja NÓMINA). Este resumen es ejecutivo, por sucursal.</div>
+<div class="note">Descuentos NOI son solo informativos — NO se restan del Total Nómina y Capital Humano. IMSS y gastos reales de empleados (financiamiento de motos, cascos, enganche, finiquito, gastos médicos) sí forman parte del total. Detalle completo por concepto disponible en el Excel (hoja NÓMINA).</div>
 @else
 <div class="note">Sin datos de nómina por sucursal para este periodo.</div>
 @endif
