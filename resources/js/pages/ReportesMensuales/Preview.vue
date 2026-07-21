@@ -844,10 +844,13 @@ const nomCompOptions = computed(() => donutOptions(
     [chartColors.teal, chartColors.blue, chartColors.amber, chartColors.gray],
 ))
 
-const recCompSeries = computed(() => [ingrCapital.value, ingrInteres.value, ingrImpuesto.value, ingrMultas.value, ingrCargosAdic.value, ingrCrece30.value])
-const recCompOptions = computed(() => donutOptions(
-    ['Capital recuperado', 'Intereses', 'Impuestos', 'Moratorios / Multas', 'Cargos adicionales', 'Seguro CRECE reconocido (30%)'],
-    [chartColors.gray, chartColors.teal, chartColors.blue, chartColors.red, chartColors.amber, chartColors.tealLight],
+// OPEX por concepto (Top 6) — mismos conceptos reales que el Excel, sustituye la
+// gráfica de Recuperación/Ingreso — Componentes (esa información ya vive en la
+// tabla "Ingresos / Recuperación" de este mismo tab, no se duplica en gráfica).
+const opexTopSeries = computed(() => brGlobalGastos.value.slice(0, 6).map(g => g.total))
+const opexTopOptions = computed(() => donutOptions(
+    brGlobalGastos.value.slice(0, 6).map(g => g.concepto),
+    categoryPalette,
 ))
 
 // Sucursales: ranking por recuperación / cartera / EBITDA
@@ -1325,8 +1328,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">Nómina y Capital Humano</td><td class="px-5 py-2 text-right text-xs text-slate-700">{{ money(nomTotal) }}</td></tr>
                                     <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">EBITDA</td><td class="px-5 py-2.5 text-right font-black text-lg" :class="utilidadGlobal < 0 ? 'text-red-700' : 'text-indigo-900'">{{ money(utilidadGlobal) }}</td></tr>
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-500 font-medium">Margen EBITDA</td><td class="px-5 py-2 text-right font-black" :class="margenEbitdaPct < 0 ? 'text-red-700' : 'text-slate-950'">{{ pct(margenEbitdaPct) }}</td></tr>
-                                    <tr><td class="px-5 py-2 text-slate-600 font-medium">Excedente enviado a corporativo (informativo)</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(excGlobal) }}</td></tr>
-                                    <tr class="text-[11px] text-slate-400 italic"><td colspan="2" class="px-5 py-1.5">Recuperación total {{ money(recGlobal) }} y Colocación {{ money(colGlobal) }} son informativos — NO forman parte del cálculo de EBITDA (capital recuperado no es ingreso real).</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Excedente enviado a corporativo <span class="text-[10px] uppercase tracking-wide text-slate-400">(informativo)</span></td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(excGlobal) }}</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -1339,7 +1341,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                     </div>
                     <div class="grid gap-4 lg:grid-cols-2">
                         <ChartCard title="Nómina — Composición" :series="nomCompSeries" :options="nomCompOptions" type="donut" :height="260" />
-                        <ChartCard title="Recuperación / Ingreso — Componentes" :series="recCompSeries" :options="recCompOptions" type="donut" :height="260" />
+                        <ChartCard title="OPEX por Concepto (Top 6)" :series="opexTopSeries" :options="opexTopOptions" type="donut" :height="260" />
                     </div>
 
                     <!-- ── GRÁFICAS DE DISTRIBUCIÓN ─────────────────────────────── -->

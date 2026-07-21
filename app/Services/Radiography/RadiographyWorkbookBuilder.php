@@ -382,56 +382,58 @@ class RadiographyWorkbookBuilder
             $kpiRow++;
         }
 
-        // ── Dashboard visual (columnas F:G) — tabla + gráficas dona/pastel.
-        // Las columnas H:N contienen 4 gráficas: Rec/Col, Cartera/Mora,
-        // Top Sucursales Cartera, Mora por Bucket.
-        $sheet->getColumnDimension('F')->setWidth(26);
-        $sheet->getColumnDimension('G')->setWidth(20);
-        foreach (['H','I','J','K','L','M','N','O','P','Q','R','S','T'] as $col) {
+        // ── Dashboard visual (columnas N:O) — tabla fuente + gráficas dona/pastel
+        // en columnas P:AC. Arranca en N (no en F) para dejar una columna de
+        // margen (M) después de la tabla más ancha de la hoja ("B) Desglose por
+        // sucursal", que ocupa hasta la columna L) — así ninguna gráfica flotante
+        // queda encima de una tabla de datos.
+        $sheet->getColumnDimension('N')->setWidth(26);
+        $sheet->getColumnDimension('O')->setWidth(20);
+        foreach (['P','Q','R','S','T','U','V','W','X','Y','Z','AA','AB','AC'] as $col) {
             $sheet->getColumnDimension($col)->setWidth(10);
         }
 
         $dashRow = 4;
 
         // Sección 1: Recuperación vs Colocación
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'RECUPERACIÓN VS COLOCACIÓN');
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:O{$dashRow}", 'RECUPERACIÓN VS COLOCACIÓN');
         $dashRow++;
         $recColLabelStart = $dashRow;
-        RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", 'Recuperación');
-        $sheet->setCellValue("G{$dashRow}", $recTotal);
-        RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+        RadiographyStyleHelper::setCellValueSafe($sheet, "N{$dashRow}", 'Recuperación');
+        $sheet->setCellValue("O{$dashRow}", $recTotal);
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "O{$dashRow}");
         $dashRow++;
-        RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", 'Colocación');
-        $sheet->setCellValue("G{$dashRow}", $colTotal);
-        RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+        RadiographyStyleHelper::setCellValueSafe($sheet, "N{$dashRow}", 'Colocación');
+        $sheet->setCellValue("O{$dashRow}", $colTotal);
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "O{$dashRow}");
         $recColLabelEnd = $dashRow;
         $dashRow += 2;
 
         // Sección 2: Cartera vs Cartera Vencida
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'CARTERA VS CARTERA VENCIDA');
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:O{$dashRow}", 'CARTERA VS CARTERA VENCIDA');
         $dashRow++;
         $carteraMoraLabelStart = $dashRow;
-        RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", 'Cartera sana');
-        $sheet->setCellValue("G{$dashRow}", max(0.0, $carteraTotal - $moraTotal));
-        RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+        RadiographyStyleHelper::setCellValueSafe($sheet, "N{$dashRow}", 'Cartera sana');
+        $sheet->setCellValue("O{$dashRow}", max(0.0, $carteraTotal - $moraTotal));
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "O{$dashRow}");
         $dashRow++;
-        RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", 'Cartera vencida');
-        $sheet->setCellValue("G{$dashRow}", $moraTotal);
-        RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+        RadiographyStyleHelper::setCellValueSafe($sheet, "N{$dashRow}", 'Cartera vencida');
+        $sheet->setCellValue("O{$dashRow}", $moraTotal);
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "O{$dashRow}");
         $carteraMoraLabelEnd = $dashRow;
         $dashRow += 2;
 
         // Sección 3: Top sucursales por cartera (solo Sucursal + Valor, sin categoría EBITDA)
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'TOP SUCURSALES POR CARTERA');
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:O{$dashRow}", 'TOP SUCURSALES POR CARTERA');
         $dashRow++;
         $rankBranches = $branchesList;
         usort($rankBranches, fn ($a, $b) => (float)($b['valor_cartera'] ?? 0) <=> (float)($a['valor_cartera'] ?? 0));
         $rankBranches    = array_slice($rankBranches, 0, 8);
         $topSucLabelStart = $dashRow;
         foreach ($rankBranches as $rb) {
-            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $rb['sucursal']);
-            $sheet->setCellValue("G{$dashRow}", (float)($rb['valor_cartera'] ?? 0));
-            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+            RadiographyStyleHelper::setCellValueSafe($sheet, "N{$dashRow}", $rb['sucursal']);
+            $sheet->setCellValue("O{$dashRow}", (float)($rb['valor_cartera'] ?? 0));
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "O{$dashRow}");
             $dashRow++;
         }
         $topSucLabelEnd = $dashRow - 1;
@@ -439,7 +441,7 @@ class RadiographyWorkbookBuilder
         $dashRow++;
 
         // Sección 4: Mora por bucket
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'MORA POR BUCKET');
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:O{$dashRow}", 'MORA POR BUCKET');
         $dashRow++;
         $moraBucketLabelStart = $dashRow;
         foreach ([
@@ -449,15 +451,15 @@ class RadiographyWorkbookBuilder
             ['Mora 91-120', $mora91_120],
             ['Mora 120+',   $mora120p],
         ] as [$bLabel, $bVal]) {
-            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $bLabel);
-            $sheet->setCellValue("G{$dashRow}", $bVal);
-            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+            RadiographyStyleHelper::setCellValueSafe($sheet, "N{$dashRow}", $bLabel);
+            $sheet->setCellValue("O{$dashRow}", $bVal);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "O{$dashRow}");
             $dashRow++;
         }
         $moraBucketLabelEnd = $dashRow - 1;
 
         // Sección 5: EBITDA — Ingreso base EBITDA / Gastos Totales / EBITDA
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'EBITDA');
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:O{$dashRow}", 'EBITDA');
         $dashRow++;
         $ebitdaLabelStart = $dashRow;
         foreach ([
@@ -465,16 +467,16 @@ class RadiographyWorkbookBuilder
             ['Gastos Totales',      $gastosTotal],
             ['EBITDA',              $utilidad],
         ] as [$eLabel, $eVal]) {
-            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $eLabel);
-            $sheet->setCellValue("G{$dashRow}", $eVal);
-            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+            RadiographyStyleHelper::setCellValueSafe($sheet, "N{$dashRow}", $eLabel);
+            $sheet->setCellValue("O{$dashRow}", $eVal);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "O{$dashRow}");
             $dashRow++;
         }
         $ebitdaLabelEnd = $dashRow - 1;
         $dashRow++;
 
         // Sección 6: Gastos — OPEX vs Nómina y Capital Humano vs Gastos Totales
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'GASTOS');
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:O{$dashRow}", 'GASTOS');
         $dashRow++;
         $gastosCompLabelStart = $dashRow;
         foreach ([
@@ -482,16 +484,16 @@ class RadiographyWorkbookBuilder
             ['Nómina y Capital Humano',    $nomTotal],
             ['Gastos Totales',             $gastosTotal],
         ] as [$gcLabel, $gcVal]) {
-            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $gcLabel);
-            $sheet->setCellValue("G{$dashRow}", $gcVal);
-            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+            RadiographyStyleHelper::setCellValueSafe($sheet, "N{$dashRow}", $gcLabel);
+            $sheet->setCellValue("O{$dashRow}", $gcVal);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "O{$dashRow}");
             $dashRow++;
         }
         $gastosCompLabelEnd = $dashRow - 1;
         $dashRow++;
 
         // Sección 7: Nómina — Percepciones / IMSS / Gastos empleados / Deducciones informativas
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'NÓMINA — COMPOSICIÓN');
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:O{$dashRow}", 'NÓMINA — COMPOSICIÓN');
         $dashRow++;
         $nomImssGlobal   = (float)($brCalcGlobal['imss_patronal'] ?? 0);
         $nomGastoEmpGlobal = (float)($brCalcGlobal['gastos_empleados_nomina'] ?? 0);
@@ -504,119 +506,96 @@ class RadiographyWorkbookBuilder
             ['Gastos empleados',           $nomGastoEmpGlobal],
             ['Deducciones informativas',   $nomDeduccInformGlobal],
         ] as [$ncLabel, $ncVal]) {
-            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $ncLabel);
-            $sheet->setCellValue("G{$dashRow}", $ncVal);
-            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+            RadiographyStyleHelper::setCellValueSafe($sheet, "N{$dashRow}", $ncLabel);
+            $sheet->setCellValue("O{$dashRow}", $ncVal);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "O{$dashRow}");
             $dashRow++;
         }
         $nomCompLabelEnd = $dashRow - 1;
         $dashRow++;
 
-        // Sección 8: Recuperación / Ingreso — desglose de componentes
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'RECUPERACIÓN / INGRESO');
-        $dashRow++;
-        $recCompLabelStart = $dashRow;
-        foreach ([
-            ['Capital recuperado',              $ingrCapital],
-            ['Intereses',                       $ingrInteres],
-            ['Impuestos',                       $ingrImpuesto],
-            ['Moratorios / Multas',             $ingrCharges],
-            ['Cargos adicionales',              $ingrCargosAdic],
-            ['Seguro CRECE reconocido (30%)',   $ingrCrece30],
-        ] as [$rcLabel, $rcVal]) {
-            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $rcLabel);
-            $sheet->setCellValue("G{$dashRow}", $rcVal);
-            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
-            $dashRow++;
-        }
-        $recCompLabelEnd = $dashRow - 1;
-        $dashRow++;
-
-        // Sección 9: OPEX por concepto — top conceptos de gasto operativo
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "F{$dashRow}:G{$dashRow}", 'OPEX POR CONCEPTO (TOP)');
+        // Sección 8: OPEX por concepto — top 6 conceptos reales de gasto operativo.
+        // Esta tabla/gráfica reemplaza la antigua "Recuperación / Ingreso — Componentes"
+        // (esa información ya vive en la tabla "2. INGRESOS / RECUPERACIÓN" de la izquierda,
+        // no se duplica en gráfica).
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:O{$dashRow}", 'OPEX POR CONCEPTO (TOP 6)');
         $dashRow++;
         $opexTopConceptos = $globalGastosDetalle;
         arsort($opexTopConceptos);
-        $opexTopConceptos = array_slice($opexTopConceptos, 0, 8, true);
+        $opexTopConceptos = array_slice($opexTopConceptos, 0, 6, true);
         $opexTopLabelStart = $dashRow;
         foreach ($opexTopConceptos as $ocLabel => $ocVal) {
-            RadiographyStyleHelper::setCellValueSafe($sheet, "F{$dashRow}", $ocLabel);
-            $sheet->setCellValue("G{$dashRow}", (float)$ocVal);
-            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$dashRow}");
+            RadiographyStyleHelper::setCellValueSafe($sheet, "N{$dashRow}", $ocLabel);
+            $sheet->setCellValue("O{$dashRow}", (float)$ocVal);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "O{$dashRow}");
             $dashRow++;
         }
         $opexTopLabelEnd   = $dashRow - 1;
         $opexTopCount      = count($opexTopConceptos);
         $dashRow++;
 
-        // ── Gráficas dona/pastel (columnas H:T) sin DataBars ─────────────────
+        // ── Gráficas dona/pastel (columnas P:AC) sin DataBars — grid 4 filas x 2
+        // columnas, siempre a la derecha de la tabla más ancha (L) con margen (M/N/O). ──
         $chartColors = ['106A59', '5B9BD5', '1DC1A2', 'D97706', '94A3B8', '0EA5E9', '7C3AED', 'DC2626'];
         $tealBlue    = ['106A59', '5B9BD5'];
         $greenRed    = ['10B981', 'DC2626'];
 
         RadiographyStyleHelper::addDonutChart(
             $sheet, 'Recuperación vs Colocación',
-            "F{$recColLabelStart}:F{$recColLabelEnd}",
-            "G{$recColLabelStart}:G{$recColLabelEnd}",
-            2, 'H4', 'N16', $tealBlue
+            "N{$recColLabelStart}:N{$recColLabelEnd}",
+            "O{$recColLabelStart}:O{$recColLabelEnd}",
+            2, 'P4', 'V16', $tealBlue
         );
         RadiographyStyleHelper::addDonutChart(
             $sheet, 'Cartera vs Cartera Vencida',
-            "F{$carteraMoraLabelStart}:F{$carteraMoraLabelEnd}",
-            "G{$carteraMoraLabelStart}:G{$carteraMoraLabelEnd}",
-            2, 'O4', 'U16', $greenRed
+            "N{$carteraMoraLabelStart}:N{$carteraMoraLabelEnd}",
+            "O{$carteraMoraLabelStart}:O{$carteraMoraLabelEnd}",
+            2, 'W4', 'AC16', $greenRed
         );
         if ($topSucCount > 0) {
             RadiographyStyleHelper::addPieChart(
                 $sheet, 'Top Sucursales por Cartera',
-                "F{$topSucLabelStart}:F{$topSucLabelEnd}",
-                "G{$topSucLabelStart}:G{$topSucLabelEnd}",
-                $topSucCount, 'H17', 'N33', array_slice($chartColors, 0, $topSucCount)
+                "N{$topSucLabelStart}:N{$topSucLabelEnd}",
+                "O{$topSucLabelStart}:O{$topSucLabelEnd}",
+                $topSucCount, 'P17', 'V33', array_slice($chartColors, 0, $topSucCount)
             );
         }
         RadiographyStyleHelper::addDonutChart(
             $sheet, 'Mora por Bucket',
-            "F{$moraBucketLabelStart}:F{$moraBucketLabelEnd}",
-            "G{$moraBucketLabelStart}:G{$moraBucketLabelEnd}",
-            5, 'O17', 'U33',
+            "N{$moraBucketLabelStart}:N{$moraBucketLabelEnd}",
+            "O{$moraBucketLabelStart}:O{$moraBucketLabelEnd}",
+            5, 'W17', 'AC33',
             ['e11d48', 'f97316', 'eab308', '3b82f6', '8b5cf6']
         );
 
-        // ── Gráficas EBITDA / Gastos / Nómina / Recuperación / OPEX (criterio final 2026-07) ──
+        // ── Gráficas EBITDA / Gastos / Nómina / OPEX (criterio final 2026-07) ──
         RadiographyStyleHelper::addBarChart(
             $sheet, 'EBITDA — Ingreso base vs Gastos Totales',
-            "F{$ebitdaLabelStart}:F{$ebitdaLabelEnd}",
-            "G{$ebitdaLabelStart}:G{$ebitdaLabelEnd}",
-            $ebitdaLabelEnd - $ebitdaLabelStart + 1, 'H34', 'N50',
+            "N{$ebitdaLabelStart}:N{$ebitdaLabelEnd}",
+            "O{$ebitdaLabelStart}:O{$ebitdaLabelEnd}",
+            $ebitdaLabelEnd - $ebitdaLabelStart + 1, 'P34', 'V50',
             ['106A59', 'DC2626', '5B9BD5']
         );
         RadiographyStyleHelper::addBarChart(
             $sheet, 'Gastos — OPEX vs Nómina vs Total',
-            "F{$gastosCompLabelStart}:F{$gastosCompLabelEnd}",
-            "G{$gastosCompLabelStart}:G{$gastosCompLabelEnd}",
-            $gastosCompLabelEnd - $gastosCompLabelStart + 1, 'O34', 'U50',
+            "N{$gastosCompLabelStart}:N{$gastosCompLabelEnd}",
+            "O{$gastosCompLabelStart}:O{$gastosCompLabelEnd}",
+            $gastosCompLabelEnd - $gastosCompLabelStart + 1, 'W34', 'AC50',
             ['D97706', '5B9BD5', '1F2937']
         );
         RadiographyStyleHelper::addDonutChart(
             $sheet, 'Nómina — Composición',
-            "F{$nomCompLabelStart}:F{$nomCompLabelEnd}",
-            "G{$nomCompLabelStart}:G{$nomCompLabelEnd}",
-            $nomCompLabelEnd - $nomCompLabelStart + 1, 'H51', 'N67',
+            "N{$nomCompLabelStart}:N{$nomCompLabelEnd}",
+            "O{$nomCompLabelStart}:O{$nomCompLabelEnd}",
+            $nomCompLabelEnd - $nomCompLabelStart + 1, 'P51', 'V67',
             ['106A59', '5B9BD5', 'D97706', '94A3B8']
-        );
-        RadiographyStyleHelper::addDonutChart(
-            $sheet, 'Recuperación / Ingreso — Componentes',
-            "F{$recCompLabelStart}:F{$recCompLabelEnd}",
-            "G{$recCompLabelStart}:G{$recCompLabelEnd}",
-            $recCompLabelEnd - $recCompLabelStart + 1, 'O51', 'U67',
-            ['94A3B8', '106A59', '5B9BD5', 'DC2626', 'D97706', '1DC1A2']
         );
         if ($opexTopCount > 0) {
             RadiographyStyleHelper::addPieChart(
-                $sheet, 'OPEX por Concepto (Top)',
-                "F{$opexTopLabelStart}:F{$opexTopLabelEnd}",
-                "G{$opexTopLabelStart}:G{$opexTopLabelEnd}",
-                $opexTopCount, 'H68', 'N88', array_slice($chartColors, 0, $opexTopCount)
+                $sheet, 'OPEX por Concepto (Top 6)',
+                "N{$opexTopLabelStart}:N{$opexTopLabelEnd}",
+                "O{$opexTopLabelStart}:O{$opexTopLabelEnd}",
+                $opexTopCount, 'W51', 'AC67', array_slice($chartColors, 0, $opexTopCount)
             );
         }
 
@@ -957,7 +936,7 @@ class RadiographyWorkbookBuilder
             ['EBITDA',                                     $utilidad,      'currency', ''],
             ['Margen EBITDA (%)',                          $margenEbitdaCalc, 'percent', ''],
             ['Excedente enviado a corporativo (informativo)', $excGlobal,  'currency', ''],
-            ['Recuperación total / Colocación (informativo, no forma parte del EBITDA)', $recTotal - $colTotal, 'currency', ''],
+            ['Recuperación / Colocación (informativo)', $recTotal - $colTotal, 'currency', ''],
         ]);
         $r++;
 
@@ -1845,26 +1824,16 @@ class RadiographyWorkbookBuilder
         $branches   = $brCalc['branches']   ?? [];
         $label      = strtoupper($period->label);
 
-        RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:E1', 'NÓMINA — ' . $label);
-        RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'F1', '← GLOBAL', 'GLOBAL');
-        RadiographyStyleHelper::setCellValueSafe(
-            $sheet,
-            'A2',
-            'Tipo Percepción/IMSS/Gasto empleado = SÍ afecta el total. Deducción informativa = NO afecta el total (solo se muestra para validación manual).'
-        );
-        RadiographyStyleHelper::mergeCellsSafe($sheet, 'A2:E2');
-        RadiographyStyleHelper::applyMetaStyle($sheet, 'A2:E2');
+        RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:B1', 'NÓMINA — ' . $label);
+        RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'C1', '← GLOBAL', 'GLOBAL');
 
-        $sheet->getColumnDimension('A')->setWidth(40);
+        $sheet->getColumnDimension('A')->setWidth(42);
         $sheet->getColumnDimension('B')->setWidth(20);
-        $sheet->getColumnDimension('C')->setWidth(18);
-        $sheet->getColumnDimension('D')->setWidth(14);
-        $sheet->getColumnDimension('E')->setWidth(30);
-        $sheet->setAutoFilter('A3:E3');
+        $sheet->setAutoFilter('A3:B3');
         $sheet->freezePane('A4');
 
         RadiographyStyleHelper::applyTableHeaderStyle($sheet, 3, [
-            'A' => 'CONCEPTO', 'B' => 'TIPO', 'C' => 'MONTO', 'D' => 'AFECTA TOTAL', 'E' => 'FUENTE',
+            'A' => 'CONCEPTO', 'B' => 'MONTO',
         ], accent: true);
 
         // Codes confirmed against BranchRadiographyCalculator::accumulateNomina()'s
@@ -1893,13 +1862,12 @@ class RadiographyWorkbookBuilder
             $grandTotal += $total;
 
             RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", strtoupper($g['sucursal']));
-            $sheet->setCellValue("C{$r}", $total);
-            RadiographyStyleHelper::setCellValueSafe($sheet, "D{$r}", 'TOTAL');
-            $sheet->getStyle("A{$r}:E{$r}")->applyFromArray([
+            $sheet->setCellValue("B{$r}", $total);
+            $sheet->getStyle("A{$r}:B{$r}")->applyFromArray([
                 'font' => ['bold' => true, 'size' => 10, 'color' => ['argb' => RadiographyStyleHelper::FG_WHITE]],
                 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => RadiographyStyleHelper::BG_PRIMARY_DARK]],
             ]);
-            RadiographyStyleHelper::applyCurrencyFormat($sheet, "C{$r}");
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$r}");
             $sheet->getRowDimension($r)->setRowHeight(19);
             $r++;
 
@@ -1911,45 +1879,47 @@ class RadiographyWorkbookBuilder
                 $det[$k] = ($det[$k] ?? 0.0) + (float) $v;
             }
             $i = 0;
-            $writeRow = function (string $concepto, string $tipo, float $monto, bool $afecta, string $fuente) use ($sheet, &$r, &$i): void {
+            $writeRow = function (string $concepto, float $monto, bool $afecta) use ($sheet, &$r, &$i): void {
                 if ($monto == 0.0) return;
                 RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", '    ' . $concepto);
-                RadiographyStyleHelper::setCellValueSafe($sheet, "B{$r}", $tipo);
-                $sheet->setCellValue("C{$r}", $monto);
-                RadiographyStyleHelper::setCellValueSafe($sheet, "D{$r}", $afecta ? 'Sí' : 'No');
-                RadiographyStyleHelper::setCellValueSafe($sheet, "E{$r}", $fuente);
-                $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
-                RadiographyStyleHelper::applyCurrencyFormat($sheet, "C{$r}");
+                $sheet->setCellValue("B{$r}", $monto);
+                $this->dataRow($sheet, "A{$r}:B{$r}", $i % 2 === 0);
+                RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$r}");
                 if (!$afecta) {
-                    $sheet->getStyle("A{$r}:E{$r}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF64748B'));
+                    $sheet->getStyle("A{$r}:B{$r}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF64748B'));
                 }
                 $i++;
                 $r++;
             };
 
             foreach ($scalarFields as $concept => [$field, $fuente]) {
-                $writeRow($concept, 'Percepción', (float)($g[$field] ?? 0), true, $fuente);
+                $writeRow($concept, (float)($g[$field] ?? 0), true);
             }
-            $writeRow('IMSS', 'IMSS', (float)($g['imss_patronal'] ?? 0), true, 'Archivo IMSS oficial');
+            $writeRow('IMSS', (float)($g['imss_patronal'] ?? 0), true);
             foreach ($gastoEmpleadoLabels as $key) {
                 if (!isset($det[$key])) continue;
-                $writeRow($key, 'Gasto empleado', (float)$det[$key], true, 'Lendus (PDF)');
+                $writeRow($key, (float)$det[$key], true);
             }
-            foreach ($det as $key => $val) {
-                if (in_array($key, $gastoEmpleadoLabels, true) || $key === 'IMSS') continue;
-                $writeRow($key, 'Deducción informativa', (float)$val, false, 'NOI (deducción)');
+            $deducciones = array_filter(
+                $det,
+                fn ($val, $key) => !in_array($key, $gastoEmpleadoLabels, true) && $key !== 'IMSS' && (float)$val != 0.0,
+                ARRAY_FILTER_USE_BOTH
+            );
+            if (!empty($deducciones)) {
+                RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", '    Deducciones (no afectan el total)');
+                $sheet->getStyle("A{$r}:B{$r}")->getFont()->setItalic(true)->setBold(true)->setSize(8.5)
+                    ->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF94A3B8'));
+                $r++;
+                foreach ($deducciones as $key => $val) {
+                    $writeRow($key, (float)$val, false);
+                }
             }
         }
 
         RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'TOTAL GENERAL');
-        $sheet->setCellValue("C{$r}", $grandTotal);
-        RadiographyStyleHelper::setCellValueSafe(
-            $sheet,
-            "E{$r}",
-            'Deducciones informativas NO están incluidas en este total.'
-        );
-        $this->totalsRow($sheet, "A{$r}:E{$r}");
-        RadiographyStyleHelper::applyCurrencyFormat($sheet, "C{$r}");
+        $sheet->setCellValue("B{$r}", $grandTotal);
+        $this->totalsRow($sheet, "A{$r}:B{$r}");
+        RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$r}");
 
         // ── Resumen + gráfica: nómina por sucursal ───────────────────────────
         $r += 2;

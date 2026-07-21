@@ -138,7 +138,12 @@
       "Bash(python3 -)",
       "Bash(git *)",
       "Bash(npx vue-tsc *)",
-      "Bash(echo \"EXIT:$?\")"
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(echo \"started with pid $!\")",
+      "Bash(nohup php artisan reportes:generar-radiografia 21 --no-interaction)",
+      "Bash(echo \"started pid $!\")",
+      "Bash(kill -9 1977)",
+      "Skill(claude-in-chrome)"
     ]
   }
 }

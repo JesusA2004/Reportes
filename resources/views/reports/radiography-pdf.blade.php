@@ -328,7 +328,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
     <tr>
         <td class="kpi"><div class="kpi-label">Percepciones</div><div class="kpi-value">{{ $fmt0((float)($snap['summary']['noi_percepciones'] ?? 0)) }}</div></td>
         <td class="kpi"><div class="kpi-label">Deducciones (informativo)</div><div class="kpi-value">{{ $fmt0((float)($snap['summary']['noi_deducciones'] ?? 0)) }}</div></td>
-        <td class="kpi" colspan="2"><div class="kpi-label">Recuperación / Colocación (informativo, no forma parte del EBITDA)</div><div class="kpi-value">{{ $fmt0($recTotal) }} / {{ $fmt0($colocacion) }}</div></td>
+        <td class="kpi" colspan="2"><div class="kpi-label">Recuperación / Colocación (informativo)</div><div class="kpi-value">{{ $fmt0($recTotal) }} / {{ $fmt0($colocacion) }}</div></td>
     </tr>
 </table>
 
@@ -346,8 +346,8 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
                 Capital Humano (<b>{{ $fmt0($nomTotal) }}</b>), Gastos Totales suman
                 <b>{{ $fmt0($gastosTotal) }}</b>, para un EBITDA del periodo de
                 <b>{{ $fmt0($utilidad) }}</b> (margen {{ $fmtp($margenEbitda) }}).
-                Como referencia informativa, la recuperación/cobranza total (incluye capital recuperado)
-                alcanzó <b>{{ $fmt0($recTotal) }}</b> contra una colocación de <b>{{ $fmt0($colocacion) }}</b>.
+                Como referencia informativa, la recuperación/cobranza total alcanzó
+                <b>{{ $fmt0($recTotal) }}</b> contra una colocación de <b>{{ $fmt0($colocacion) }}</b>.
             </div>
         </td>
         <td class="colR">
@@ -768,7 +768,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         </tr>
     </tfoot>
 </table>
-<div class="note">Descuentos NOI son solo informativos — NO se restan del Total Nómina y Capital Humano. IMSS y gastos reales de empleados (financiamiento de motos, cascos, enganche, finiquito, gastos médicos) sí forman parte del total. Detalle completo por concepto disponible en el Excel (hoja NÓMINA).</div>
+<div class="note">Descuentos NOI: informativos, no se restan del total. IMSS y gastos de empleados sí están incluidos.</div>
 @else
 <div class="note">Sin datos de nómina por sucursal para este periodo.</div>
 @endif

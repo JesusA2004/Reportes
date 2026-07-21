@@ -2936,15 +2936,12 @@ class RadiographySnapshotBuilder
         return $result;
     }
 
+    // Alias delgado — delega en RadiographyStyleHelper::ebitdaCategory() para que
+    // exista una única fuente de umbrales (Excel GLOBAL, hoja CATEGORÍA EBITDA, PDF
+    // y este resumen JAMÁS se desalineen).
     private function ebitdaCategory(float $ebitda): string
     {
-        return match (true) {
-            $ebitda >= 1_000_000 => 'DIAMANTE',
-            $ebitda >= 600_000   => 'MASTER',
-            $ebitda >= 300_000   => 'SENIOR',
-            $ebitda >= 100_000   => 'JUNIOR',
-            default              => 'MANTENIDO',
-        };
+        return RadiographyStyleHelper::ebitdaCategory($ebitda);
     }
 
     // ── Efectividad de Cobranza ───────────────────────────────────────────────
