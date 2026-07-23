@@ -92,6 +92,21 @@ class RadiographySnapshotBuilder
         $payrollByBranchResult = $this->buildPayrollByBranchConceptResolved($period);
         $mergedIncidents       = array_merge($mergedIncidents, $payrollByBranchResult['incidents'] ?? []);
 
+        // Empleados NOI activos sin sucursal resuelta afectan directamente IMSS y Rotación
+        // derivados — nunca se ocultan en "sin asignar" silenciosamente (regla 2026-07-23).
+        $rosterSinSucursal = DB::table('period_employee_rosters')
+            ->where('period_id', $period->id)
+            ->where('is_active_for_period', true)
+            ->whereNull('branch_id')
+            ->count();
+        if ($rosterSinSucursal > 0) {
+            $mergedIncidents[] = [
+                'type'     => 'roster_sin_sucursal',
+                'severity' => 'critical',
+                'message'  => "{$rosterSinSucursal} colaborador(es) activo(s) en NOI sin sucursal resuelta (ni periodo actual ni histórico) — excluidos de IMSS y Rotación derivados. Ver hoja IMSS / pestaña ROTACIÓN, sección auditoría.",
+            ];
+        }
+
         // Reconcile payroll total: if buildPayroll returned 0 but employees_gestores has pagos, derive from it
         if (($payroll['pagos'] + $payroll['bonos']) == 0.0) {
             $egPagos = collect($empGestores)->sum('pagos');
@@ -271,6 +286,9 @@ class RadiographySnapshotBuilder
                 'fondeo_detalle'             => $this->buildFondeoDetalle(),
                 'placement_by_branch_product'=> $this->buildPlacementByBranchProduct($period),
                 'rotation'                   => $this->buildRotationData($period),
+                'rotation_detail'            => $this->buildRotationDetail($period),
+                'imss_meta'                  => $this->buildImssMeta($period),
+                'imss'                       => $this->buildImssDetail($period),
                 'active_loans'               => $this->buildActiveLoans($period),
                 'efectividad_cobranza'       => $this->buildEfectividadCobranza($period),
             ],
@@ -2569,18 +2587,17 @@ class RadiographySnapshotBuilder
 
     // ── ROTACIÓN DE PERSONAL ─────────────────────────────────────────────────
     //
-    // Prioridad: datos del archivo XLSX importado (fact_rotacion).
-    // Fallback: cálculo derivado de NOI (comparación entre periodos).
-
-    // Fuente ÚNICA vigente (2026-07-21): fact_rotacion, poblado por
-    // RotacionDerivedFromNoiService (roster NOI normal + fiscal, ya NO archivo
-    // manual). source='derived_noi' para periodos reprocesados; source='file'
-    // sobrevive para periodos históricos que no se han vuelto a generar.
+    // Fuente ÚNICA y definitiva (cierre 2026-07-23): fact_rotacion con
+    // source='derived_noi', poblado por RotacionDerivedFromNoiService (roster NOI
+    // normal + fiscal). El archivo manual de rotación ya NO existe como fuente del
+    // sistema — no hay fallback a source='file' en ningún caso; un periodo sin
+    // derivado simplemente reporta "sin_datos" (nunca se resucita el archivo manual).
     private function buildRotationData(Period $period): array
     {
-        $baseQuery = fn () => DB::table('fact_rotacion as fr')
+        $rows = DB::table('fact_rotacion as fr')
             ->leftJoin('branches as b', 'fr.branch_id', '=', 'b.id')
             ->whereIn('fr.period_id', $this->dataIds)
+            ->where('fr.source', 'derived_noi')
             ->select(
                 'fr.sucursal_nombre',
                 'fr.branch_id',
@@ -2592,15 +2609,8 @@ class RadiographySnapshotBuilder
                 'fr.source',
                 'b.name as branch_name',
             )
-            ->orderBy('fr.sucursal_nombre');
-
-        // Fuente autoritativa: archivo legacy (source='file') mientras exista para el
-        // periodo — igual criterio que BranchRadiographyCalculator::accumulateImssPatronal().
-        // Solo se usa el derivado (source='derived_noi') cuando NO hay archivo manual.
-        $rows = $baseQuery()->where('fr.source', 'file')->get();
-        if ($rows->isEmpty()) {
-            $rows = $baseQuery()->where('fr.source', 'derived_noi')->get();
-        }
+            ->orderBy('fr.sucursal_nombre')
+            ->get();
 
         if ($rows->isEmpty()) {
             return [
@@ -2620,7 +2630,7 @@ class RadiographySnapshotBuilder
         $totalAltas    = (int) $rows->sum('altas');
         $totalPromedio = (float) $rows->sum('promedio_personal');
         $mesUsado      = $rows->pluck('mes')->filter()->unique()->first() ?? '';
-        $fuente        = $rows->pluck('source')->filter()->unique()->first() ?? 'file';
+        $fuente        = 'derived_noi';
         $indiceGlobal  = $totalPromedio > 0
             ? round($totalBajas / $totalPromedio * 100, 2)
             : round($rows->avg('indice_rotacion') ?? 0.0, 2);
@@ -2644,6 +2654,167 @@ class RadiographySnapshotBuilder
             'current_count' => 0,
             'prev_count'    => 0,
             'por_sucursal'  => $porSucursal,
+        ];
+    }
+
+    /**
+     * Fuente ÚNICA (cierre 2026-07-23): derivado de NOI fiscal (fact_imss). El archivo
+     * manual legado ya no se consulta aquí en ningún caso. Expuesto para que Excel/PDF/UI
+     * muestren la fuente real sin duplicar la consulta en cada consumidor.
+     */
+    private function buildImssMeta(Period $period): array
+    {
+        $derivedExists = DB::table('fact_imss')->whereIn('period_id', $this->dataIds)->exists();
+
+        return ['fuente' => $derivedExists ? 'derived_noi_fiscal' : 'sin_datos'];
+    }
+
+    // ── ROTACIÓN — DETALLE PARA PESTAÑA EXCEL / AUDITORÍA ───────────────────
+    //
+    // Listas empleado por empleado (altas, bajas, activos, sin sucursal) para la
+    // pestaña Excel ROTACIÓN y para reportes:audit-rotacion-derivada --detail.
+    // Fuente ÚNICA: period_employee_rosters (roster NOI normal + fiscal), nunca
+    // Lendus ni archivo manual.
+    private function buildRotationDetail(Period $period): array
+    {
+        $activeRows = DB::table('period_employee_rosters as per')
+            ->leftJoin('employees as e', 'per.employee_id', '=', 'e.id')
+            ->where('per.period_id', $period->id)
+            ->where('per.is_active_for_period', true)
+            ->orderBy('per.branch_name')
+            ->orderBy('per.nombre_original')
+            ->get(['per.branch_id', 'per.branch_name', 'per.nombre_original', 'per.source', 'per.movement_type', 'e.employee_code']);
+
+        $bajaRows = DB::table('period_employee_rosters as per')
+            ->leftJoin('employees as e', 'per.employee_id', '=', 'e.id')
+            ->where('per.period_id', $period->id)
+            ->where('per.is_active_for_period', false)
+            ->where('per.movement_type', 'baja')
+            ->orderBy('per.branch_name')
+            ->orderBy('per.nombre_original')
+            ->get(['per.branch_id', 'per.branch_name', 'per.nombre_original', 'per.source', 'e.employee_code']);
+
+        $sourceLabel = fn (string $s) => match ($s) {
+            'ambos'              => 'NOI Nómina + NOI Nómina Fiscal',
+            'noi_nomina_fiscal'  => 'NOI Nómina Fiscal',
+            default              => 'NOI Nómina',
+        };
+
+        $altas = $activeRows->where('movement_type', 'alta')->map(fn ($r) => [
+            'sucursal' => $r->branch_name ?: 'SIN SUCURSAL',
+            'clave'    => $r->employee_code ?: '—',
+            'nombre'   => $r->nombre_original,
+            'motivo'   => 'Aparece en el periodo actual y no en el periodo anterior',
+        ])->values()->all();
+
+        $bajas = $bajaRows->map(fn ($r) => [
+            'sucursal' => $r->branch_name ?: 'SIN SUCURSAL',
+            'clave'    => $r->employee_code ?: '—',
+            'nombre'   => $r->nombre_original,
+            'motivo'   => 'Aparecía en el periodo anterior y no aparece en el periodo actual',
+        ])->values()->all();
+
+        $activos = $activeRows->map(fn ($r) => [
+            'sucursal' => $r->branch_name ?: 'SIN SUCURSAL',
+            'clave'    => $r->employee_code ?: '—',
+            'nombre'   => $r->nombre_original,
+            'fuente'   => $sourceLabel($r->source),
+        ])->values()->all();
+
+        $sinSucursal = $activeRows->whereNull('branch_id')->map(fn ($r) => [
+            'clave'  => $r->employee_code ?: '—',
+            'nombre' => $r->nombre_original,
+            'fuente' => $sourceLabel($r->source),
+            'motivo' => 'Sin sucursal resuelta en employee_branch_assignments (ni periodo actual ni histórico)',
+        ])->values()->all();
+
+        return [
+            'altas'         => $altas,
+            'bajas'         => $bajas,
+            'activos'       => $activos,
+            'sin_sucursal'  => $sinSucursal,
+        ];
+    }
+
+    // ── IMSS — DETALLE PARA PESTAÑA EXCEL / AUDITORÍA ───────────────────────
+    //
+    // Expone el desglose completo del cálculo derivado (roster NOI fiscal × $3,500):
+    // resumen por sucursal, lista de colaboradores incluidos/excluidos y totales
+    // globales. Usado por la hoja Excel "IMSS" (RadiographyWorkbookBuilder) y
+    // disponible para UI/PDF si se requiere mostrar el detalle completo.
+    private function buildImssDetail(Period $period): array
+    {
+        $fee = \App\Services\ImssFromNoiFiscalService::MONTHLY_FEE;
+
+        $rows = DB::table('period_employee_rosters as per')
+            ->leftJoin('employees as e', 'per.employee_id', '=', 'e.id')
+            ->where('per.period_id', $period->id)
+            ->where('per.is_active_for_period', true)
+            ->where('per.appears_in_nomina_fiscal', true)
+            ->orderBy('per.branch_name')
+            ->orderBy('per.nombre_original')
+            ->get(['per.branch_id', 'per.branch_name', 'per.is_branch_operativa', 'per.nombre_original', 'e.employee_code']);
+
+        $porSucursal   = [];
+        $colaboradores = [];
+        $totalIncluidos = 0;
+        $totalExcluidos = 0;
+        $montoIncluido  = 0.0;
+        $montoExcluido  = 0.0;
+
+        foreach ($rows as $r) {
+            $branchName = $r->branch_name ?: 'SIN SUCURSAL';
+            $incluido   = (bool) $r->branch_id && (bool) $r->is_branch_operativa;
+            $motivo     = $incluido
+                ? 'Sucursal operativa — incluida en el reporte'
+                : (!$r->branch_id
+                    ? 'Empleado sin sucursal resuelta (ver period_employee_rosters)'
+                    : 'No operativa (Corporativo/Tulancingo/otra unidad fuera de las 13 sucursales oficiales)');
+            $importe = $incluido ? $fee : 0.0;
+
+            $key = (int) ($r->branch_id ?? 0);
+            $porSucursal[$key] ??= [
+                'sucursal'      => $branchName,
+                'colaboradores' => 0,
+                'cuota'         => $fee,
+                'imss'          => 0.0,
+                'incluido'      => $incluido,
+                'motivo'        => $motivo,
+            ];
+            $porSucursal[$key]['colaboradores']++;
+            $porSucursal[$key]['imss'] += $importe;
+
+            $colaboradores[] = [
+                'sucursal' => $branchName,
+                'clave'    => $r->employee_code ?: '—',
+                'nombre'   => $r->nombre_original,
+                'fuente'   => 'NOI Nómina Fiscal',
+                'incluido' => $incluido,
+                'motivo'   => $motivo,
+                'importe'  => $importe,
+            ];
+
+            if ($incluido) {
+                $totalIncluidos++;
+                $montoIncluido += $importe;
+            } else {
+                $totalExcluidos++;
+                $montoExcluido += $fee;
+            }
+        }
+
+        return [
+            'fuente'                => 'derived_noi_fiscal',
+            'cuota_por_colaborador' => $fee,
+            'por_sucursal'          => array_values($porSucursal),
+            'colaboradores'         => $colaboradores,
+            'resumen'               => [
+                'total_incluidos'         => $totalIncluidos,
+                'monto_incluido'          => $montoIncluido,
+                'total_excluidos'         => $totalExcluidos,
+                'monto_excluido'          => $montoExcluido,
+                'total_detectados_fiscal' => $totalIncluidos + $totalExcluidos,
+            ],
         ];
     }
 

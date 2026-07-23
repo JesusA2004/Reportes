@@ -78,6 +78,7 @@ class RadiographyWorkbookBuilder
             ['buildNominaGestorSheet',     'NÓMINA POR GESTOR'],
             ['buildCategoriaEbitdaSheet',  'CATEGORÍA EBITDA'],
             ['buildRotacionSheet',         'ROTACIÓN'],
+            ['buildImssSheet',             'IMSS'],
         ];
         // Deliberately NOT wired in (business decision, avoid duplicate/confusing tabs):
         // - FOND CORP / SIN ASIGNAR / INCIDENCIAS / METADATA: out of scope for Excel/PDF/UI.
@@ -1826,7 +1827,11 @@ class RadiographyWorkbookBuilder
 
         RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:B1', 'NÓMINA — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'C1', '← GLOBAL', 'GLOBAL');
-        $sheet->setCellValue('D1', 'IMSS calculado desde NOI Fiscal ($3,500 por colaborador)');
+        $imssFuente = $snap['sections']['imss_meta']['fuente'] ?? 'derived_noi_fiscal';
+        $imssNota   = $imssFuente === 'derived_noi_fiscal'
+            ? 'IMSS calculado automáticamente desde NOI fiscal: colaboradores únicos × $3,500 (ver hoja IMSS)'
+            : 'IMSS calculado desde NOI fiscal: sin colaboradores detectados en NOI Nómina Fiscal para este periodo';
+        $sheet->setCellValue('D1', $imssNota);
         $sheet->getStyle('D1')->getFont()->setItalic(true)->setSize(8.5)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
 
         $sheet->getColumnDimension('A')->setWidth(42);
@@ -4060,7 +4065,8 @@ class RadiographyWorkbookBuilder
 
         $this->sheetTitle($sheet, 'A1:F1', 'ÍNDICE DE ROTACIÓN DE PERSONAL — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
-        $sheet->setCellValue('C2', 'Fuente: calculado automáticamente desde NOI Nómina + NOI Nómina Fiscal');
+        $fuenteRotacion = 'Rotación calculada automáticamente desde NOI Nómina + NOI Nómina Fiscal.';
+        $sheet->setCellValue('C2', $fuenteRotacion);
         $sheet->getStyle('C2')->getFont()->setItalic(true)->setSize(8.5)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
 
         $mes      = $rotation['mes'] ?? '';
@@ -4157,8 +4163,191 @@ class RadiographyWorkbookBuilder
             $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(9);
             $r++;
         }
+        $r++;
 
-        $this->setColWidths($sheet, ['A' => 30, 'B' => 10, 'C' => 10, 'D' => 14, 'E' => 20, 'F' => 14]);
+        $detail = $snap['sections']['rotation_detail'] ?? [];
+
+        // ── B) Altas detectadas ──
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:F{$r}", 'ALTAS DETECTADAS');
+        $r++;
+        $this->colHeaders($sheet, $r, ['A' => 'SUCURSAL', 'B' => 'CLAVE', 'C' => 'NOMBRE', 'D' => 'MOTIVO']);
+        $r++;
+        $altasList = $detail['altas'] ?? [];
+        foreach ($altasList as $i => $a) {
+            $sheet->setCellValue("A{$r}", $a['sucursal'] ?? '');
+            $sheet->setCellValue("B{$r}", $a['clave'] ?? '—');
+            $sheet->setCellValue("C{$r}", $a['nombre'] ?? '');
+            $sheet->setCellValue("D{$r}", $a['motivo'] ?? '');
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $r++;
+        }
+        if (empty($altasList)) {
+            $sheet->setCellValue("A{$r}", 'Sin altas detectadas en este periodo.');
+            $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(9);
+            $r++;
+        }
+        $r++;
+
+        // ── C) Bajas detectadas ──
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:F{$r}", 'BAJAS DETECTADAS');
+        $r++;
+        $this->colHeaders($sheet, $r, ['A' => 'SUCURSAL', 'B' => 'CLAVE', 'C' => 'NOMBRE', 'D' => 'MOTIVO']);
+        $r++;
+        $bajasList = $detail['bajas'] ?? [];
+        foreach ($bajasList as $i => $b) {
+            $sheet->setCellValue("A{$r}", $b['sucursal'] ?? '');
+            $sheet->setCellValue("B{$r}", $b['clave'] ?? '—');
+            $sheet->setCellValue("C{$r}", $b['nombre'] ?? '');
+            $sheet->setCellValue("D{$r}", $b['motivo'] ?? '');
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $r++;
+        }
+        if (empty($bajasList)) {
+            $sheet->setCellValue("A{$r}", 'Sin bajas detectadas en este periodo.');
+            $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(9);
+            $r++;
+        }
+        $r++;
+
+        // ── D) Auditoría de empleados sin sucursal ──
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:F{$r}", 'AUDITORÍA — EMPLEADOS SIN SUCURSAL');
+        $r++;
+        $this->colHeaders($sheet, $r, ['A' => 'CLAVE', 'B' => 'NOMBRE', 'C' => 'FUENTE', 'D' => 'MOTIVO']);
+        $r++;
+        $sinSucList = $detail['sin_sucursal'] ?? [];
+        foreach ($sinSucList as $i => $s) {
+            $sheet->setCellValue("A{$r}", $s['clave'] ?? '—');
+            $sheet->setCellValue("B{$r}", $s['nombre'] ?? '');
+            $sheet->setCellValue("C{$r}", $s['fuente'] ?? '');
+            $sheet->setCellValue("D{$r}", $s['motivo'] ?? '');
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $r++;
+        }
+        if (empty($sinSucList)) {
+            $sheet->setCellValue("A{$r}", 'Sin empleados sin sucursal — todos los colaboradores NOI activos tienen sucursal resuelta.');
+            $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(9);
+            $r++;
+        }
+
+        $this->setColWidths($sheet, ['A' => 30, 'B' => 14, 'C' => 32, 'D' => 48, 'E' => 20, 'F' => 14]);
+        $sheet->freezePane('A5');
+    }
+
+    /**
+     * Pestaña "IMSS" — detalle completo del cálculo automático desde NOI fiscal:
+     * colaboradores únicos por sucursal × $3,500. Fuente única vigente desde
+     * 2026-07-23 — el archivo manual queda solo como referencia histórica.
+     */
+    private function buildImssSheet(Spreadsheet $ss, Period $period, array $snap): void
+    {
+        $sheet = $ss->createSheet()->setTitle('IMSS');
+        $imss  = $snap['sections']['imss'] ?? [];
+        $label = strtoupper($period->label);
+        $fee   = (float) ($imss['cuota_por_colaborador'] ?? 3500.0);
+
+        $this->sheetTitle($sheet, 'A1:G1', 'IMSS — CUOTA PATRONAL POR SUCURSAL — ' . $label);
+        RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
+        $sheet->setCellValue('C2', 'IMSS calculado automáticamente desde NOI fiscal: colaboradores únicos × $' . number_format($fee, 2));
+        $sheet->getStyle('C2')->getFont()->setItalic(true)->setSize(8.5)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
+
+        $r = 4;
+
+        // ── A) Resumen por sucursal ──
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:G{$r}", 'RESUMEN POR SUCURSAL');
+        $r++;
+        $this->colHeaders($sheet, $r, [
+            'A' => 'SUCURSAL',
+            'B' => 'COLABORADORES NOI FISCAL',
+            'C' => 'CUOTA POR COLABORADOR',
+            'D' => 'IMSS CALCULADO',
+            'E' => 'INCLUIDO EN REPORTE',
+            'F' => 'MOTIVO',
+        ]);
+        $r++;
+
+        $porSucursal = $imss['por_sucursal'] ?? [];
+        foreach ($porSucursal as $i => $row) {
+            $sheet->setCellValue("A{$r}", $row['sucursal'] ?? '');
+            $sheet->setCellValue("B{$r}", (int) ($row['colaboradores'] ?? 0));
+            $sheet->setCellValue("C{$r}", (float) ($row['cuota'] ?? $fee));
+            $sheet->setCellValue("D{$r}", (float) ($row['imss'] ?? 0));
+            $sheet->setCellValue("E{$r}", !empty($row['incluido']) ? 'SÍ' : 'NO');
+            $sheet->setCellValue("F{$r}", $row['motivo'] ?? '');
+
+            $this->dataRow($sheet, "A{$r}:F{$r}", $i % 2 === 0);
+            RadiographyStyleHelper::applyIntegerFormat($sheet, "B{$r}");
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "C{$r}");
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "D{$r}");
+            $r++;
+        }
+        if (empty($porSucursal)) {
+            $sheet->setCellValue("A{$r}", 'Sin colaboradores en NOI Nómina Fiscal para este periodo.');
+            RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:F{$r}");
+            $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(9);
+            $r++;
+        }
+        $r++;
+
+        // ── B) Lista de colaboradores ──
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:G{$r}", 'LISTA DE COLABORADORES');
+        $r++;
+        $this->colHeaders($sheet, $r, [
+            'A' => 'SUCURSAL',
+            'B' => 'CLAVE TRABAJADOR',
+            'C' => 'NOMBRE TRABAJADOR',
+            'D' => 'FUENTE',
+            'E' => 'INCLUIDO',
+            'F' => 'MOTIVO',
+            'G' => 'IMPORTE IMSS ASIGNADO',
+        ]);
+        $r++;
+
+        $colaboradores = $imss['colaboradores'] ?? [];
+        foreach ($colaboradores as $i => $c) {
+            $sheet->setCellValue("A{$r}", $c['sucursal'] ?? '');
+            $sheet->setCellValue("B{$r}", $c['clave'] ?? '—');
+            $sheet->setCellValue("C{$r}", $c['nombre'] ?? '');
+            $sheet->setCellValue("D{$r}", $c['fuente'] ?? 'NOI Nómina Fiscal');
+            $sheet->setCellValue("E{$r}", !empty($c['incluido']) ? 'SÍ' : 'NO');
+            $sheet->setCellValue("F{$r}", $c['motivo'] ?? '');
+            $sheet->setCellValue("G{$r}", (float) ($c['importe'] ?? 0));
+
+            $this->dataRow($sheet, "A{$r}:G{$r}", $i % 2 === 0);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$r}");
+            $r++;
+        }
+        if (empty($colaboradores)) {
+            $sheet->setCellValue("A{$r}", 'Sin colaboradores que reportar.');
+            RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:G{$r}");
+            $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(9);
+            $r++;
+        }
+        $r++;
+
+        // ── C) Resumen global ──
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:G{$r}", 'RESUMEN GLOBAL');
+        $r++;
+        $resumen = $imss['resumen'] ?? [];
+        $summaryRows = [
+            ['Total colaboradores NOI fiscal detectados', (int) ($resumen['total_detectados_fiscal'] ?? 0), 'integer'],
+            ['Total colaboradores incluidos',              (int) ($resumen['total_incluidos'] ?? 0), 'integer'],
+            ['Total IMSS incluido',                         (float) ($resumen['monto_incluido'] ?? 0), 'currency'],
+            ['Total colaboradores excluidos',               (int) ($resumen['total_excluidos'] ?? 0), 'integer'],
+            ['Total IMSS excluido',                          (float) ($resumen['monto_excluido'] ?? 0), 'currency'],
+        ];
+        foreach ($summaryRows as $i => [$rowLabel, $value, $fmt]) {
+            $sheet->setCellValue("A{$r}", $rowLabel);
+            $sheet->setCellValue("B{$r}", $value);
+            $this->dataRow($sheet, "A{$r}:G{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $value);
+            $r++;
+        }
+        $sheet->setCellValue("A{$r}", 'Motivo de exclusión');
+        $sheet->setCellValue("B{$r}", 'Sin sucursal resuelta o unidad no operativa (Corporativo/Tulancingo/otra)');
+        $this->dataRow($sheet, "A{$r}:G{$r}", true);
+        RadiographyStyleHelper::mergeCellsSafe($sheet, "B{$r}:G{$r}");
+
+        $this->setColWidths($sheet, ['A' => 22, 'B' => 20, 'C' => 32, 'D' => 20, 'E' => 12, 'F' => 44, 'G' => 20]);
         $sheet->freezePane('A5');
     }
 

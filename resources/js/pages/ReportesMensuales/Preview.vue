@@ -259,6 +259,10 @@ const nomBonosAcel= computed(() => Number(brGlobal.value?.bonos_aceleradores) ||
 const nomOtrosPercep = computed(() => Number(brGlobal.value?.otros_percepciones) || 0)
 const nomImssPatronal = computed(() => Number(brGlobal.value?.imss_patronal) || 0)
 const nomGastosEmpleados = computed(() => Number(brGlobal.value?.gastos_empleados_nomina) || 0)
+const imssFuente = computed(() => snap.value?.sections?.imss_meta?.fuente ?? 'derived_noi_fiscal')
+const imssNota = computed(() => imssFuente.value === 'derived_noi_fiscal'
+    ? 'IMSS calculado automáticamente desde NOI fiscal: colaboradores únicos × $3,500'
+    : 'IMSS calculado desde NOI fiscal: sin colaboradores detectados en NOI Nómina Fiscal para este periodo')
 
 // Deducciones NOI (ya restadas de nomina_total en backend) — SOLO informativo, filas rojas.
 // Debe reflejar exactamente BranchRadiographyCalculator::accumulateNomina()'s deduction labels.
@@ -1291,6 +1295,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                 <h3 class="text-xs font-black uppercase tracking-wider text-blue-700">Nómina y Capital Humano</h3>
                                 <span class="font-black text-blue-800">{{ money(nomTotal) }}</span>
                             </div>
+                            <p class="px-5 py-1.5 text-[11px] italic text-slate-400 border-b bg-white">{{ imssNota }}</p>
                             <table class="w-full text-sm">
                                 <tbody>
                                     <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Sueldos / Nómina</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomNomina) }}</td></tr>

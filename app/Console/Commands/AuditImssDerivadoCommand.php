@@ -15,7 +15,7 @@ class AuditImssDerivadoCommand extends Command
                                 {--detail : listar colaboradores por sucursal}
                                 {--rebuild : re-derivar antes de auditar}';
 
-    protected $description = 'Auditoría IMSS: compara legacy validado (archivo, fact_expenses) contra derivado de NOI Fiscal (fact_imss). El legacy manda mientras exista.';
+    protected $description = 'Auditoría IMSS: compara derivado de NOI Fiscal (fact_imss, fuente oficial) contra archivo legacy (fact_expenses, solo referencia histórica). El derivado manda mientras exista para el periodo.';
 
     public function handle(ImssFromNoiFiscalService $service, BranchResolverService $branchResolver): int
     {
@@ -66,10 +66,12 @@ class AuditImssDerivadoCommand extends Command
             ->orderBy('branch_name')
             ->get();
 
-        $usaLegacy = !empty($legacyBySucursal);
+        $derivedIncludedTotal = (float) $derivedRows->where('included_in_report', true)->sum('amount');
+        $usaDerivado = $derivedRows->where('included_in_report', true)->isNotEmpty();
+        $usaLegacy   = !$usaDerivado && !empty($legacyBySucursal);
 
-        if ($derivedRows->isEmpty() && !$usaLegacy) {
-            $this->warn('  Sin datos legacy ni derivados para este periodo. Ejecuta con --rebuild.');
+        if ($derivedRows->isEmpty() && empty($legacyBySucursal)) {
+            $this->warn('  Sin datos legacy ni derivados para este periodo. Ejecuta con --rebuild o reportes:rebuild-derived-noi.');
             return self::SUCCESS;
         }
 
@@ -90,7 +92,7 @@ class AuditImssDerivadoCommand extends Command
             $l = $legacyBySucursal[$suc] ?? null;
             $d = $derivedBySucursal[$suc] ?? null;
             $diff = ($d['amount'] ?? 0.0) - ($l ?? 0.0);
-            $accion = $usaLegacy ? 'Usa LEGACY (validado)' : 'Usa DERIVADO (sin archivo)';
+            $accion = $usaDerivado ? 'Usa DERIVADO (NOI fiscal, oficial)' : 'Usa LEGACY (fallback histórico, sin derivado)';
             $tableRows[] = [
                 $suc,
                 $l !== null ? '$' . number_format($l, 2) : '—',
@@ -103,26 +105,26 @@ class AuditImssDerivadoCommand extends Command
         $this->table(['Sucursal', 'IMSS validado', 'IMSS derivado', 'Diferencia', 'Acción aplicada'], $tableRows);
 
         $legacyTotal = array_sum(array_filter($legacyBySucursal, fn ($k) => !str_ends_with($k, '(excluida)'), ARRAY_FILTER_USE_KEY));
-        $derivedTotal = (float) $derivedRows->where('included_in_report', true)->sum('amount');
+        $derivedTotal = $derivedIncludedTotal;
 
-        $activo = $usaLegacy ? $legacyTotal : $derivedTotal;
+        $activo = $usaDerivado ? $derivedTotal : $legacyTotal;
 
         $this->line('');
-        $this->info('════ RESULTADO QUE VE EL REPORTE (' . ($usaLegacy ? 'LEGACY validado' : 'DERIVADO NOI') . ') ════');
+        $this->info('════ RESULTADO QUE VE EL REPORTE (' . ($usaDerivado ? 'DERIVADO NOI — oficial' : 'LEGACY — fallback histórico') . ') ════');
         $this->line('  IMSS incluido en reporte: $' . number_format($activo, 2));
 
-        if ($usaLegacy && $derivedRows->isNotEmpty()) {
+        if ($usaDerivado && !empty($legacyBySucursal)) {
             $matches = abs($legacyTotal - $derivedTotal) <= 0.01;
             $this->line('');
-            $this->line('  Comparación LEGACY vs DERIVADO (informativa, el derivado NO sustituye mientras exista el archivo):');
-            $this->line('    Legacy   -> $' . number_format($legacyTotal, 2));
-            $this->line('    Derivado -> $' . number_format($derivedTotal, 2) . ' (diferencia: $' . number_format($derivedTotal - $legacyTotal, 2) . ')');
-            $this->line($matches ? '    Estado: COINCIDE ✓' : '    Estado: NO coincide — revisar sucursales con diferencia arriba (--detail para lista de empleados)');
+            $this->line('  Comparación DERIVADO vs LEGACY (informativa — el archivo manual ya NO sustituye al derivado):');
+            $this->line('    Derivado -> $' . number_format($derivedTotal, 2) . ' (oficial)');
+            $this->line('    Legacy   -> $' . number_format($legacyTotal, 2) . ' (referencia histórica, diferencia: $' . number_format($derivedTotal - $legacyTotal, 2) . ')');
+            $this->line($matches ? '    Estado: COINCIDE ✓' : '    Estado: NO coincide — el legacy estaba mal o incluía unidades no operativas (--detail para lista de empleados)');
         }
 
-        if (!$usaLegacy) {
+        if (!$usaDerivado) {
             $this->line('');
-            $this->warn('  No hay archivo legacy para este periodo — se está usando el valor DERIVADO como fuente del reporte.');
+            $this->warn('  No hay derivado NOI para este periodo (fact_imss vacío) — se está usando el archivo LEGACY como fallback histórico. Ejecuta reportes:rebuild-derived-noi ' . $period->id . ' para derivar desde NOI.');
         }
 
         if ($this->option('detail')) {

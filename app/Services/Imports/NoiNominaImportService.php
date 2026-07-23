@@ -20,6 +20,19 @@ class NoiNominaImportService
 
     public function handle(ReportUpload $upload, ?callable $progress = null): array
     {
+        // BUG CRÍTICO (encontrado 2026-07-23): $employeeCache es una propiedad de instancia
+        // que sobrevivía entre llamadas a handle() para DISTINTOS uploads/periodos cuando el
+        // mismo objeto NoiNominaImportService procesaba varios archivos NOI en una sola
+        // ejecución (ReportAnalysisService/DatabaseUpdateService). "Clave del trabajador" en
+        // NOI NO es un identificador estable entre periodos — se reutiliza para personas
+        // distintas de un mes a otro. Con la cache viva, la clave 36 de un periodo anterior
+        // (ej. "RICARDO ROCHA MORA") quedaba pegada a la clave 36 de un periodo posterior que
+        // en realidad era otra persona (ej. "JOSE JUAN MUÑOZ VAZQUEZ" en Junio), porque el
+        // cache devolvía el Employee equivocado sin volver a consultar/actualizar la BD.
+        // Resultado: empleados fusionados o perdidos en el roster/IMSS derivado. Debe
+        // reiniciarse en cada import — el cache solo es válido DENTRO de un mismo archivo.
+        $this->employeeCache = [];
+
         if (!$upload->stored_path) {
             throw new \RuntimeException('El archivo no tiene stored_path.');
         }
@@ -76,6 +89,16 @@ class NoiNominaImportService
         $currentEmployeeName = null;
         $currentEmployeeCode = null;
 
+        // Bloques de empleado detectados en el archivo (clave => nombre) y claves que
+        // efectivamente insertaron al menos una fila. Un empleado cuyos conceptos vienen
+        // TODOS en $0 (ej. alta reciente sin percepciones fiscales aún ese periodo) nunca
+        // dispara shouldInsertRow() y por lo tanto desaparece por completo del roster/IMSS
+        // aunque su bloque "Clave del trabajador : N" exista en el archivo. Para el conteo
+        // de colaboradores únicos (regla 2026-07-23: cada clave cuenta 1, sin importar si
+        // tuvo movimientos con importe) se ancla con una fila sintética al final.
+        $blockEmployees  = [];
+        $insertedCodes   = [];
+
         foreach (array_slice($rows, $headerRowIndex + 1, null, true) as $rowIndex => $row) {
             if (!is_array($row) || $this->isEmptyRow($row)) {
                 $rowsSkipped++;
@@ -112,6 +135,10 @@ class NoiNominaImportService
                     $mapped['employee_code'] = $currentEmployeeCode;
                 }
 
+                if ($mapped['employee_code'] && $this->isValidEmployeeName($mapped['employee_name'])) {
+                    $blockEmployees[$mapped['employee_code']] = $mapped['employee_name'];
+                }
+
                 if (!$this->shouldInsertRow($mapped)) {
                     $rowsSkipped++;
                     continue;
@@ -122,6 +149,10 @@ class NoiNominaImportService
                 if (!$employee) {
                     $rowsSkipped++;
                     continue;
+                }
+
+                if ($mapped['employee_code']) {
+                    $insertedCodes[$mapped['employee_code']] = true;
                 }
 
                 $normalizedRow = json_encode($mapped['raw_payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -173,9 +204,52 @@ class NoiNominaImportService
             }
         }
 
+        // ── Anclar empleados cuyo bloque existe pero TODOS sus conceptos vinieron en $0 ──
+        // Sin esta fila sintética, esos colaboradores nunca generan un Employee/NoiMovement y
+        // desaparecen del roster/IMSS derivado aunque su "Clave del trabajador" sí esté en el
+        // archivo (regla 2026-07-23: el conteo de colaboradores no depende de tener importe).
+        $rowsAnchored = 0;
+        foreach ($blockEmployees as $code => $name) {
+            if (isset($insertedCodes[$code])) {
+                continue;
+            }
+
+            $mapped = [
+                'employee_code' => $code,
+                'employee_name' => $name,
+                'raw_payload' => [null, $name, 'SIN PERCEPCIONES CON IMPORTE EN EL PERIODO', 0],
+            ];
+
+            $employee = $this->resolveEmployee($mapped);
+            if (!$employee) {
+                continue;
+            }
+
+            $normalizedRow = json_encode($mapped['raw_payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+            NoiMovement::query()->create([
+                'period_id' => $upload->period_id,
+                'employee_id' => $employee->id,
+                'report_upload_id' => $upload->id,
+                'concept' => 'SIN PERCEPCIONES CON IMPORTE EN EL PERIODO',
+                'concept_type' => 'headcount_only',
+                'amount' => 0,
+                'quantity' => 1,
+                'payroll_type' => 'NOI',
+                'movement_date' => now()->toDateString(),
+                'raw_row_hash' => hash('sha256', $normalizedRow),
+                'source_row_key' => hash('sha256', implode('|', [$upload->id, $sheetName, 'anchor', $code, $normalizedRow])),
+                'raw_payload' => $mapped['raw_payload'],
+            ]);
+
+            $rowsInserted++;
+            $rowsAnchored++;
+        }
+
         return [
             'rows_read' => $rowsRead,
             'rows_inserted' => $rowsInserted,
+            'rows_anchored' => $rowsAnchored,
             'rows_skipped' => $rowsSkipped,
             'rows_with_errors' => $rowsWithErrors,
             'log' => sprintf(
@@ -549,6 +623,17 @@ class NoiNominaImportService
         return true;
     }
 
+    /**
+     * Identidad ÚNICA y estable del empleado: nombre_normalizado + source_system='noi'.
+     * "Clave del trabajador" (employee_code) NUNCA se usa como llave de búsqueda/upsert
+     * — confirmado 2026-07-23 que el mismo número identifica personas distintas entre
+     * archivos/periodos (clave 36: Ricardo Rocha Mora vs José Juan Muñoz Vázquez; clave 7:
+     * Diego Martínez Romero vs Ernesto López López). Usarlo como llave sobrescribía
+     * retroactivamente el nombre de un Employee ya vinculado a movimientos de un periodo
+     * anterior cada vez que un periodo posterior reutilizaba ese código para otra persona.
+     * employee_code se conserva solo como dato informativo (columna "Clave" en
+     * auditorías/Excel) del ÚLTIMO archivo que lo reportó — nunca como identidad.
+     */
     private function resolveEmployee(array $mapped): ?Employee
     {
         $employeeCode = $mapped['employee_code'] ?: null;
@@ -566,31 +651,10 @@ class NoiNominaImportService
 
         [$firstName, $paternalLastName, $maternalLastName] = $this->splitName($fullName);
 
-        $cacheKey = $employeeCode
-            ? "code:{$employeeCode}"
-            : "name:{$normalizedName}";
+        $cacheKey = "name:{$normalizedName}";
 
         if (array_key_exists($cacheKey, $this->employeeCache)) {
             return $this->employeeCache[$cacheKey];
-        }
-
-        if ($employeeCode) {
-            $employee = Employee::query()->updateOrCreate(
-                [
-                    'employee_code' => $employeeCode,
-                    'source_system' => 'noi',
-                ],
-                [
-                    'full_name' => $fullName,
-                    'normalized_name' => $normalizedName,
-                    'first_name' => $firstName,
-                    'paternal_last_name' => $paternalLastName,
-                    'maternal_last_name' => $maternalLastName,
-                    'is_active' => true,
-                ],
-            );
-
-            return $this->employeeCache[$cacheKey] = $employee;
         }
 
         $employee = Employee::query()->updateOrCreate(
@@ -599,7 +663,7 @@ class NoiNominaImportService
                 'source_system' => 'noi',
             ],
             [
-                'employee_code' => null,
+                'employee_code' => $employeeCode,
                 'full_name' => $fullName,
                 'first_name' => $firstName,
                 'paternal_last_name' => $paternalLastName,

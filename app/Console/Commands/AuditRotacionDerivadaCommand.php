@@ -14,7 +14,7 @@ class AuditRotacionDerivadaCommand extends Command
                                 {--detail : listar empleados de alta/baja por sucursal}
                                 {--rebuild : re-derivar antes de auditar}';
 
-    protected $description = 'Auditoría Rotación: compara legacy validado (archivo, source=file) contra derivado de NOI (source=derived_noi). El legacy manda mientras exista.';
+    protected $description = 'Auditoría Rotación: compara derivado de NOI (source=derived_noi, fuente oficial) contra archivo legacy (source=file, solo referencia histórica). El derivado manda mientras exista para el periodo.';
 
     public function handle(RotacionDerivedFromNoiService $service): int
     {
@@ -52,7 +52,7 @@ class AuditRotacionDerivadaCommand extends Command
             $diffAltas = ($d->altas ?? 0) - ($l->altas ?? 0);
             $diffBajas = ($d->bajas ?? 0) - ($l->bajas ?? 0);
             $diffPlant = (int) ($d->promedio_personal ?? 0) - (int) ($l->promedio_personal ?? 0);
-            $accion = $l ? 'Usa LEGACY (validado)' : 'Usa DERIVADO (sin archivo)';
+            $accion = $d ? 'Usa DERIVADO (NOI, oficial)' : 'Usa LEGACY (fallback histórico, sin derivado)';
 
             $tableRows[] = [
                 $suc,
@@ -72,26 +72,26 @@ class AuditRotacionDerivadaCommand extends Command
         $legacySum = ['altas' => (int) $legacyRows->sum('altas'), 'bajas' => (int) $legacyRows->sum('bajas'), 'plant' => (int) $legacyRows->sum('promedio_personal')];
         $derivedSum = ['altas' => (int) $derivedRows->sum('altas'), 'bajas' => (int) $derivedRows->sum('bajas'), 'plant' => (int) $derivedRows->sum('promedio_personal')];
 
-        $usaLegacy = $legacyRows->isNotEmpty();
-        $activo = $usaLegacy ? $legacySum : $derivedSum;
+        $usaDerivado = $derivedRows->isNotEmpty();
+        $activo = $usaDerivado ? $derivedSum : $legacySum;
         $indiceGlobal = $activo['plant'] > 0 ? round($activo['bajas'] / $activo['plant'] * 100, 2) : 0.0;
 
         $this->line('');
-        $this->info('════ RESULTADO QUE VE EL REPORTE (' . ($usaLegacy ? 'LEGACY validado' : 'DERIVADO NOI') . ') ════');
+        $this->info('════ RESULTADO QUE VE EL REPORTE (' . ($usaDerivado ? 'DERIVADO NOI — oficial' : 'LEGACY — fallback histórico') . ') ════');
         $this->line("  Altas: {$activo['altas']}  |  Bajas: {$activo['bajas']}  |  Plantilla: {$activo['plant']}  |  Índice: {$indiceGlobal}%");
 
-        if ($usaLegacy && $derivedRows->isNotEmpty()) {
+        if ($usaDerivado && $legacyRows->isNotEmpty()) {
             $matches = $legacySum === $derivedSum;
             $this->line('');
-            $this->line('  Comparación LEGACY vs DERIVADO (informativa, el derivado NO sustituye mientras exista el archivo):');
-            $this->line("    Legacy   -> Altas {$legacySum['altas']} · Bajas {$legacySum['bajas']} · Plantilla {$legacySum['plant']}");
-            $this->line("    Derivado -> Altas {$derivedSum['altas']} · Bajas {$derivedSum['bajas']} · Plantilla {$derivedSum['plant']}");
-            $this->line($matches ? '    Estado: COINCIDE ✓' : '    Estado: NO coincide — ver detalle con --detail (revisar sucursales listadas arriba)');
+            $this->line('  Comparación DERIVADO vs LEGACY (informativa — el archivo manual ya NO sustituye al derivado):');
+            $this->line("    Derivado -> Altas {$derivedSum['altas']} · Bajas {$derivedSum['bajas']} · Plantilla {$derivedSum['plant']} (oficial)");
+            $this->line("    Legacy   -> Altas {$legacySum['altas']} · Bajas {$legacySum['bajas']} · Plantilla {$legacySum['plant']} (referencia histórica)");
+            $this->line($matches ? '    Estado: COINCIDE ✓' : '    Estado: NO coincide — el legacy estaba mal o usaba otra fuente (--detail para lista de empleados)');
         }
 
-        if (!$usaLegacy) {
+        if (!$usaDerivado) {
             $this->line('');
-            $this->warn('  No hay archivo legacy para este periodo — se está usando el valor DERIVADO como fuente del reporte.');
+            $this->warn('  No hay derivado NOI para este periodo (fact_rotacion sin source=derived_noi) — se está usando el archivo LEGACY como fallback histórico. Ejecuta reportes:rebuild-derived-noi ' . $period->id . ' para derivar desde NOI.');
         }
 
         if ($this->option('detail')) {
