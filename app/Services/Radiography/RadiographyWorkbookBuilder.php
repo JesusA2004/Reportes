@@ -4068,22 +4068,28 @@ class RadiographyWorkbookBuilder
         $this->sheetTitle($sheet, 'A1:F1', 'ÍNDICE DE ROTACIÓN DE PERSONAL — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
 
-        $mes      = $rotation['mes'] ?? '';
-        $altas    = (int)($rotation['altas']    ?? 0);
-        $bajas    = (int)($rotation['bajas']    ?? 0);
-        $promedio = (float)($rotation['promedio'] ?? 0);
-        $indice   = (float)($rotation['indice']   ?? 0);
+        $mes         = $rotation['mes'] ?? '';
+        $altas       = (int)($rotation['altas']    ?? 0);
+        $bajas       = (int)($rotation['bajas']    ?? 0);
+        $promedio    = (float)($rotation['promedio'] ?? 0);
+        $indice      = (float)($rotation['indice']   ?? 0);
+        $prevMes     = $rotation['prev_mes'] ?? null;
+        $prevCount   = (float)($rotation['prev_count'] ?? 0);
+        $currCount   = (float)($rotation['current_count'] ?? $promedio);
+        $variacion   = (float)($rotation['variacion_neta'] ?? ($currCount - $prevCount));
 
         $r = 4;
         RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:F{$r}", 'RESUMEN GLOBAL');
         $r++;
 
         $summaryRows = [
-            ['Mes de referencia',              $mes,      'text'],
-            ['N° de altas en el periodo',      $altas,    'integer'],
-            ['N° de bajas en el periodo',      $bajas,    'integer'],
-            ['Plantilla actual',               $promedio, 'integer'],
-            ['Índice de rotación (%)',         $indice,   'percent'],
+            ['Mes de referencia',                                   $mes,       'text'],
+            ['Plantilla mes anterior' . ($prevMes ? " ({$prevMes})" : ''), $prevCount, 'integer'],
+            ['Plantilla mes actual',                                $currCount, 'integer'],
+            ['Variación neta de plantilla',                         $variacion, 'integer'],
+            ['N° de altas en el periodo',                           $altas,     'integer'],
+            ['N° de bajas en el periodo',                           $bajas,     'integer'],
+            ['Índice de rotación (%)',                              $indice,    'percent'],
         ];
 
         foreach ($summaryRows as $i => [$label2, $value, $fmt]) {
@@ -4125,61 +4131,93 @@ class RadiographyWorkbookBuilder
 
         $porSucursal = $rotation['por_sucursal'] ?? [];
         if (!empty($porSucursal)) {
-            RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:F{$r}", 'DETALLE POR SUCURSAL');
+            RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:G{$r}", 'DETALLE POR SUCURSAL');
             $r++;
             $this->colHeaders($sheet, $r, [
                 'A' => 'SUCURSAL',
-                'B' => 'ALTAS',
-                'C' => 'BAJAS',
-                'D' => 'PLANTILLA',
-                'E' => 'ÍNDICE ROTACIÓN (%)',
-                'F' => 'MES',
+                'B' => 'PLANTILLA ANTERIOR',
+                'C' => 'PLANTILLA ACTUAL',
+                'D' => 'ALTAS',
+                'E' => 'BAJAS',
+                'F' => 'VARIACIÓN',
+                'G' => 'ÍNDICE ROTACIÓN (%)',
             ]);
             $r++;
 
+            $chartStartRow = $r;
             $totalAltas    = 0;
             $totalBajas    = 0;
             $totalPromedio = 0.0;
+            $totalAnterior = 0.0;
             foreach ($porSucursal as $i => $row) {
-                $sucAltas    = (int)($row['altas']              ?? 0);
-                $sucBajas    = (int)($row['bajas']              ?? 0);
-                $sucPromedio = (float)($row['promedio_personal'] ?? 0);
-                $sucIndice   = (float)($row['indice_rotacion']  ?? 0);
-                $sucMes      = $row['mes'] ?? $mes;
+                $sucAltas     = (int)($row['altas']              ?? 0);
+                $sucBajas     = (int)($row['bajas']              ?? 0);
+                $sucPromedio  = (float)($row['promedio_personal'] ?? 0);
+                $sucAnterior  = (float)($row['plantilla_anterior'] ?? 0);
+                $sucVariacion = (float)($row['variacion_plantilla'] ?? ($sucPromedio - $sucAnterior));
+                $sucIndice    = (float)($row['indice_rotacion']  ?? 0);
 
                 $sheet->setCellValue("A{$r}", $row['sucursal'] ?? '');
-                $sheet->setCellValue("B{$r}", $sucAltas);
-                $sheet->setCellValue("C{$r}", $sucBajas);
-                $sheet->setCellValue("D{$r}", $sucPromedio);
-                $sheet->setCellValue("E{$r}", $sucIndice);
-                $sheet->setCellValue("F{$r}", $sucMes);
+                $sheet->setCellValue("B{$r}", $sucAnterior);
+                $sheet->setCellValue("C{$r}", $sucPromedio);
+                $sheet->setCellValue("D{$r}", $sucAltas);
+                $sheet->setCellValue("E{$r}", $sucBajas);
+                $sheet->setCellValue("F{$r}", $sucVariacion);
+                $sheet->setCellValue("G{$r}", $sucIndice);
 
-                $this->dataRow($sheet, "A{$r}:F{$r}", $i % 2 === 0);
+                $this->dataRow($sheet, "A{$r}:G{$r}", $i % 2 === 0);
                 RadiographyStyleHelper::applyIntegerFormat($sheet, "B{$r}");
                 RadiographyStyleHelper::applyIntegerFormat($sheet, "C{$r}");
                 RadiographyStyleHelper::applyIntegerFormat($sheet, "D{$r}");
-                RadiographyStyleHelper::applyPercentFormat($sheet, "E{$r}", $sucIndice);
+                RadiographyStyleHelper::applyIntegerFormat($sheet, "E{$r}");
+                RadiographyStyleHelper::applyIntegerFormat($sheet, "F{$r}");
+                RadiographyStyleHelper::applyPercentFormat($sheet, "G{$r}", $sucIndice);
 
                 $totalAltas    += $sucAltas;
                 $totalBajas    += $sucBajas;
                 $totalPromedio += $sucPromedio;
+                $totalAnterior += $sucAnterior;
                 $r++;
             }
+            $chartEndRow = $r - 1;
 
             // Totals row
             $totalIndice = $totalPromedio > 0 ? round($totalBajas / $totalPromedio * 100, 2) : 0.0;
             $sheet->setCellValue("A{$r}", 'TOTAL / PLANTILLA');
-            $sheet->setCellValue("B{$r}", $totalAltas);
-            $sheet->setCellValue("C{$r}", $totalBajas);
-            $sheet->setCellValue("D{$r}", $totalPromedio);
-            $sheet->setCellValue("E{$r}", $totalIndice);
-            $sheet->setCellValue("F{$r}", '');
-            $this->totalsRow($sheet, "A{$r}:F{$r}");
+            $sheet->setCellValue("B{$r}", $totalAnterior);
+            $sheet->setCellValue("C{$r}", $totalPromedio);
+            $sheet->setCellValue("D{$r}", $totalAltas);
+            $sheet->setCellValue("E{$r}", $totalBajas);
+            $sheet->setCellValue("F{$r}", round($totalPromedio - $totalAnterior, 2));
+            $sheet->setCellValue("G{$r}", $totalIndice);
+            $this->totalsRow($sheet, "A{$r}:G{$r}");
             RadiographyStyleHelper::applyIntegerFormat($sheet, "B{$r}");
             RadiographyStyleHelper::applyIntegerFormat($sheet, "C{$r}");
             RadiographyStyleHelper::applyIntegerFormat($sheet, "D{$r}");
-            RadiographyStyleHelper::applyPercentFormat($sheet, "E{$r}", $totalIndice);
+            RadiographyStyleHelper::applyIntegerFormat($sheet, "E{$r}");
+            RadiographyStyleHelper::applyIntegerFormat($sheet, "F{$r}");
+            RadiographyStyleHelper::applyPercentFormat($sheet, "G{$r}", $totalIndice);
             $r++;
+            $r++;
+
+            // Gráfica: plantilla anterior vs actual por sucursal — no encimada con la
+            // tabla, se ancla varias filas abajo del total.
+            if ($chartEndRow >= $chartStartRow) {
+                RadiographyStyleHelper::addComparativeBarChart(
+                    $sheet,
+                    'Plantilla por sucursal — anterior vs actual',
+                    "\$A\${$chartStartRow}:\$A\${$chartEndRow}",
+                    "\$B\${$chartStartRow}:\$B\${$chartEndRow}",
+                    "\$C\${$chartStartRow}:\$C\${$chartEndRow}",
+                    $prevMes ?: 'Mes anterior',
+                    $mes ?: 'Mes actual',
+                    $chartEndRow - $chartStartRow + 1,
+                    "I{$chartStartRow}",
+                    'R' . ($chartStartRow + 20),
+                    '#,##0'
+                );
+                $r = max($r, $chartStartRow + 22);
+            }
         } else {
             $sheet->setCellValue("A{$r}", 'Sin datos de NOI suficientes para calcular rotación en este periodo.');
             RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:F{$r}");
@@ -4252,7 +4290,7 @@ class RadiographyWorkbookBuilder
             $r++;
         }
 
-        $this->setColWidths($sheet, ['A' => 30, 'B' => 14, 'C' => 32, 'D' => 48, 'E' => 20, 'F' => 14]);
+        $this->setColWidths($sheet, ['A' => 30, 'B' => 18, 'C' => 32, 'D' => 48, 'E' => 20, 'F' => 14, 'G' => 20]);
         $sheet->freezePane('A5');
     }
 
@@ -5339,25 +5377,81 @@ class RadiographyWorkbookBuilder
                 $fSectionStart = $fSectionEnd = null;
             }
 
-            // ── G) Gráficas ──────────────────────────────────────────────────────
-            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'G) GRÁFICAS COMPARATIVAS'); $r++;
+            // ── H) Comparativo de rotación ───────────────────────────────────────
+            // Cada snapshot ya trae su propio headcount real (current_count, antes
+            // hardcodeado a 0) — Plantilla {labelCmp} = compareSnap.current_count,
+            // Plantilla {labelCur} = currentSnap.current_count.
+            if ($scope === 'general') {
+                $rotCmpSection = $compareSnap['sections']['rotation'] ?? [];
+                $rotCurSection = $currentSnap['sections']['rotation'] ?? [];
+                $rotPlantillaCmp = (float)($rotCmpSection['current_count'] ?? $rotCmpSection['promedio'] ?? 0);
+                $rotPlantillaCur = (float)($rotCurSection['current_count'] ?? $rotCurSection['promedio'] ?? 0);
+
+                $this->sectionHeader($sheet, "A{$r}:E{$r}", 'H) COMPARATIVO DE ROTACIÓN'); $r++;
+                $r++;
+                $writeCompHeader($r);
+                $writeComp($r, 'Plantilla', $rotPlantillaCmp, $rotPlantillaCur, 'integer', true);
+                $writeComp($r, 'Altas del periodo', (float)($rotCmpSection['altas'] ?? 0), (float)($rotCurSection['altas'] ?? 0), 'integer', false);
+                $writeComp($r, 'Bajas del periodo', (float)($rotCmpSection['bajas'] ?? 0), (float)($rotCurSection['bajas'] ?? 0), 'integer', true);
+                $writeComp($r, 'Índice de rotación', (float)($rotCmpSection['indice'] ?? 0), (float)($rotCurSection['indice'] ?? 0), 'percent', false);
+                $r++;
+
+                $rotCmpPorSucursal = collect($rotCmpSection['por_sucursal'] ?? [])->keyBy(fn ($x) => strtoupper(trim($x['sucursal'] ?? '')));
+                $rotCurPorSucursal = collect($rotCurSection['por_sucursal'] ?? []);
+                if ($rotCurPorSucursal->isNotEmpty()) {
+                    $sheet->setCellValue("A{$r}", 'SUCURSAL');
+                    $sheet->setCellValue("B{$r}", 'PLANTILLA ' . $labelCmp);
+                    $sheet->setCellValue("C{$r}", 'PLANTILLA ' . $labelCur);
+                    $sheet->setCellValue("D{$r}", 'VARIACIÓN');
+                    $sheet->setCellValue("E{$r}", 'ÍNDICE ' . $labelCur);
+                    $sheet->getStyle("A{$r}:E{$r}")->applyFromArray([
+                        'font' => ['bold' => true, 'size' => 9, 'color' => ['argb' => self::FG_HDR]],
+                        'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => self::BG_HDR]],
+                    ]);
+                    $r++;
+                    foreach ($rotCurPorSucursal as $i => $curSuc) {
+                        $key   = strtoupper(trim($curSuc['sucursal'] ?? ''));
+                        $cmpSuc = $rotCmpPorSucursal->get($key, []);
+                        $plCmp = (float)($cmpSuc['promedio_personal'] ?? 0);
+                        $plCur = (float)($curSuc['promedio_personal'] ?? 0);
+                        $sheet->setCellValue("A{$r}", $curSuc['sucursal'] ?? '');
+                        $sheet->setCellValue("B{$r}", $plCmp);
+                        $sheet->setCellValue("C{$r}", $plCur);
+                        $sheet->setCellValue("D{$r}", $plCur - $plCmp);
+                        $sheet->setCellValue("E{$r}", (float)($curSuc['indice_rotacion'] ?? 0));
+                        $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
+                        RadiographyStyleHelper::applyIntegerFormat($sheet, "B{$r}");
+                        RadiographyStyleHelper::applyIntegerFormat($sheet, "C{$r}");
+                        RadiographyStyleHelper::applyIntegerFormat($sheet, "D{$r}");
+                        RadiographyStyleHelper::applyPercentFormat($sheet, "E{$r}", (float)($curSuc['indice_rotacion'] ?? 0));
+                        $r++;
+                    }
+                }
+                $r++;
+            }
+
+            // ── I) Gráficas ──────────────────────────────────────────────────────
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'I) GRÁFICAS COMPARATIVAS'); $r++;
             $chartAnchorRow = $r;
             // Reconstruye desde $bStart..$bEnd (sección B) las filas de interés por
             // etiqueta, para graficar exactamente lo que ya se ve en la tabla ejecutiva.
-            $wantedLabels = ['Recuperación', 'OPEX', 'Nómina y Capital Humano', 'EBITDA', 'Valor cartera', 'Mora %'];
+            // Separadas por unidad (dinero vs porcentaje) para no mezclar dos escalas
+            // distintas en un mismo eje, y en anclas separadas para que no queden
+            // encimadas.
+            $moneyLabels   = ['Recuperación', 'Colocación', 'OPEX', 'Nómina y Capital Humano', 'EBITDA', 'Valor cartera'];
+            $percentLabels = ['Mora %', 'Rotación %'];
             $chartRowsFound = [];
             for ($rr = $bStart; $rr <= $bEnd; $rr++) {
                 $lbl = $sheet->getCell("A{$rr}")->getValue();
-                if (in_array($lbl, $wantedLabels, true)) {
+                if (in_array($lbl, $moneyLabels, true) || in_array($lbl, $percentLabels, true)) {
                     $chartRowsFound[$lbl] = $rr;
                 }
             }
-            if (!empty($chartRowsFound)) {
-                // Tabla auxiliar oculta (misma hoja) con solo las filas a graficar, en
-                // orden, para pasarle a los charts un rango contiguo real.
+
+            $buildAuxChart = function (array $labels, string $title, string $numberFormat, int &$r) use ($sheet, $chartRowsFound, $labelCmp, $labelCur): void {
                 $auxStart = $r;
                 $ci = 0;
-                foreach ($wantedLabels as $lbl) {
+                foreach ($labels as $lbl) {
                     if (!isset($chartRowsFound[$lbl])) continue;
                     $srcRow = $chartRowsFound[$lbl];
                     $auxRow = $auxStart + $ci;
@@ -5366,25 +5460,27 @@ class RadiographyWorkbookBuilder
                     $sheet->setCellValue("C{$auxRow}", "=C{$srcRow}");
                     $ci++;
                 }
+                if ($ci === 0) return;
                 $auxEnd = $auxStart + $ci - 1;
-                if ($ci > 0) {
-                    RadiographyStyleHelper::addComparativeBarChart(
-                        $sheet,
-                        'Comparativo de KPIs — ' . $labelCmp . ' vs ' . $labelCur,
-                        "\$A\${$auxStart}:\$A\${$auxEnd}",
-                        "\$B\${$auxStart}:\$B\${$auxEnd}",
-                        "\$C\${$auxStart}:\$C\${$auxEnd}",
-                        $labelCmp,
-                        $labelCur,
-                        $ci,
-                        "G{$chartAnchorRow}",
-                        'P' . ($chartAnchorRow + 20)
-                    );
-                }
-                // La tabla auxiliar queda oculta (fuera del área visible normal, filas grises).
+                RadiographyStyleHelper::addComparativeBarChart(
+                    $sheet,
+                    $title . ' — ' . $labelCmp . ' vs ' . $labelCur,
+                    "\$A\${$auxStart}:\$A\${$auxEnd}",
+                    "\$B\${$auxStart}:\$B\${$auxEnd}",
+                    "\$C\${$auxStart}:\$C\${$auxEnd}",
+                    $labelCmp,
+                    $labelCur,
+                    $ci,
+                    "G{$auxStart}",
+                    'P' . ($auxStart + 18),
+                    $numberFormat
+                );
                 $sheet->getStyle("A{$auxStart}:C{$auxEnd}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFCBD5E1'))->setSize(7);
-                $r = $auxEnd + 22;
-            }
+                $r = $auxEnd + 21;
+            };
+
+            $buildAuxChart($moneyLabels, 'Comparativo de KPIs financieros', '"$"#,##0', $r);
+            $buildAuxChart($percentLabels, 'Comparativo Mora % / Rotación %', '0.00"%"', $r);
         }
 
         $this->setColWidths($sheet, ['A' => 42, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);

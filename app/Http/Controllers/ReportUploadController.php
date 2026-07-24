@@ -1067,16 +1067,26 @@ class ReportUploadController extends Controller {
             $elapsedSeconds = max(0, (int) $run->started_at->diffInSeconds($run->finished_at));
         }
 
+        // Un comparativo/por-sucursal/por-gestor nunca debe apuntar a la ruta plana
+        // del reporte simple del periodo — se resuelve por el run específico.
+        $isSimpleGeneral = ($run->report_type ?: 'simple') === 'simple' && ($run->scope ?: 'general') === 'general';
+
         $excelUrl = $run->output_excel_path
-            ? route('reportes-mensuales.export-radiography', $period->id)
+            ? ($isSimpleGeneral
+                ? route('reportes-mensuales.export-radiography', $period->id)
+                : route('reportes-mensuales.run-excel', $run->id))
             : null;
         $pdfUrl = $run->output_pdf_path
-            ? route('reportes-mensuales.export-radiography-pdf', $period->id)
+            ? ($isSimpleGeneral
+                ? route('reportes-mensuales.export-radiography-pdf', $period->id)
+                : route('reportes-mensuales.run-pdf', $run->id))
             : null;
 
         return response()->json([
             'status'          => $status,
             'run_id'          => $run->id,
+            'report_type'     => $run->report_type ?: 'simple',
+            'scope'           => $run->scope ?: 'general',
             'log'             => $run->log ? mb_strimwidth($run->log, 0, 300) : null,
             'error_message'   => $run->error_message ? mb_strimwidth($run->error_message, 0, 300) : null,
             'queued_at'       => optional($run->queued_at ?? $run->created_at)->format('d/m/Y H:i'),

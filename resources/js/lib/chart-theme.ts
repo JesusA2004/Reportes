@@ -70,6 +70,35 @@ export function stackedBarOptions(categories: string[], colors: string[] = categ
     }
 }
 
+/** Vertical column comparison for plain counts (headcount, altas/bajas, etc.) — no $ formatting. */
+export function countColumnOptions(categories: string[], colors: string[] = [chartColors.teal, chartColors.blue]) {
+    return {
+        ...baseChart({ chart: { type: 'bar' } }),
+        plotOptions: { bar: { columnWidth: '55%', borderRadius: 6 } },
+        colors,
+        xaxis: { categories, labels: { style: { colors: '#64748b', fontSize: '10.5px' } } },
+        yaxis: { labels: { style: { colors: '#64748b', fontSize: '10px' }, formatter: (v: number) => Math.round(v).toString() } },
+        tooltip: { y: { formatter: (v: number) => Math.round(v).toString() } },
+    }
+}
+
+/** Donut for plain counts (altas vs bajas, etc.) — center total and labels show counts, not money. */
+export function countDonutOptions(labels: string[], colors: string[] = categoryPalette) {
+    return {
+        ...baseChart({ chart: { type: 'donut' } }),
+        labels,
+        colors,
+        legend: { position: 'bottom', fontFamily, fontSize: '11px', labels: { colors: '#475569' } },
+        dataLabels: {
+            enabled: true,
+            formatter: (v: number) => percent(v),
+            style: { fontSize: '10px', fontWeight: 700 },
+        },
+        plotOptions: { pie: { donut: { size: '68%', labels: { show: true, total: { show: true, label: 'Total', formatter: (w: any) => Math.round(w.globals.seriesTotals.reduce((a: number, b: number) => a + b, 0)).toString() } } } } },
+        tooltip: { y: { formatter: (v: number) => Math.round(v).toString() } },
+    }
+}
+
 /** Donut — cartera sana vs vencida, categoría EBITDA, etc. */
 export function donutOptions(labels: string[], colors: string[] = categoryPalette) {
     return {

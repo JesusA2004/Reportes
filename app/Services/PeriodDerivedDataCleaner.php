@@ -118,4 +118,53 @@ class PeriodDerivedDataCleaner
             'deleted_files' => $exports->count(),
         ]);
     }
+
+    /**
+     * Delete only the prior run(s)/export(s)/file(s) that share the EXACT SAME
+     * identity being (re)generated now (period_id + report_type + scope +
+     * comparison_period_id + branch_id + employee_id). A simple report and a
+     * comparativo mes vs mes for the same period must coexist — this replaces the
+     * old clearGeneratedReports() call inside GenerateRadiographyJob, which wiped
+     * every export for the period regardless of report kind.
+     */
+    public function clearGeneratedReportsForIdentity(Period $period, array $identity, ?int $excludeRunId = null): void
+    {
+        $query = \App\Models\PeriodRadiographyRun::query()
+            ->where('period_id', $period->id)
+            ->where('report_type', $identity['report_type'] ?? 'simple')
+            ->where('scope', $identity['scope'] ?? 'general')
+            ->where('comparison_period_id', $identity['comparison_period_id'] ?? null)
+            ->where('branch_id', $identity['branch_id'] ?? null)
+            ->where('employee_id', $identity['employee_id'] ?? null);
+
+        if ($excludeRunId) {
+            $query->where('id', '!=', $excludeRunId);
+        }
+
+        $priorRuns = $query->get();
+
+        if ($priorRuns->isEmpty()) {
+            return;
+        }
+
+        $exports = PeriodRadiographyExport::query()
+            ->whereIn('run_id', $priorRuns->pluck('id'))
+            ->get();
+
+        foreach ($exports as $export) {
+            if ($export->export_path && Storage::exists($export->export_path)) {
+                Storage::delete($export->export_path);
+            }
+        }
+
+        PeriodRadiographyExport::query()->whereIn('run_id', $priorRuns->pluck('id'))->delete();
+        \App\Models\PeriodRadiographyRun::query()->whereIn('id', $priorRuns->pluck('id'))->delete();
+
+        Log::info('PeriodDerivedDataCleaner: clearGeneratedReportsForIdentity done', [
+            'period_id'     => $period->id,
+            'identity'      => $identity,
+            'deleted_runs'  => $priorRuns->count(),
+            'deleted_files' => $exports->count(),
+        ]);
+    }
 }

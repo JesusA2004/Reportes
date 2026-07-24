@@ -77,29 +77,48 @@ class GenerateRadiographyJob implements ShouldQueue
             ? PeriodRadiographyRun::query()->find($this->runId)
             : null;
 
+        // ── Identidad del reporte (simple vs comparativo vs por sucursal/gestor) ──
+        // Un reporte simple y un comparativo del mismo periodo NO son el mismo
+        // reporte: deben poder coexistir. La identidad se calcula una sola vez aquí
+        // y se persiste en el run/exports para que limpieza, listado y descarga
+        // resuelvan siempre por identidad, nunca solo por period_id.
+        $reportType = $this->config['report_type'] ?? 'simple';
+        $scope      = $this->config['scope'] ?? 'general';
+        $identity   = [
+            'period_id'            => $period->id,
+            'report_type'          => $reportType,
+            'scope'                => $scope,
+            'comparison_period_id' => !empty($this->config['compare_period_id']) ? (int) $this->config['compare_period_id'] : null,
+            'branch_id'            => !empty($this->config['branch_id']) ? (int) $this->config['branch_id'] : null,
+            'employee_id'          => !empty($this->config['employee_id']) ? (int) $this->config['employee_id'] : null,
+        ];
+        $isComparativeOrScoped = $reportType !== 'simple' || $scope !== 'general';
+
         if (!$run) {
-            $run = PeriodRadiographyRun::query()->create([
-                'period_id'  => $period->id,
+            $run = PeriodRadiographyRun::query()->create(array_merge($identity, [
                 'status'     => 'queued',
                 'queued_at'  => now(),
                 'created_by' => $this->userId,
                 'log'        => 'Radiografía en cola.',
                 'metadata'   => $this->config ? ['config' => $this->config] : null,
-            ]);
+            ]));
         }
 
-        // Mark as running and record start time
-        $run->update([
+        // Mark as running and record start time — also (re)persist identity in case
+        // this run was created earlier (by the controller) without these columns.
+        $run->update(array_merge($identity, [
             'status'      => 'running',
             'started_at'  => $run->started_at ?: now(),
             'finished_at' => null,
-        ]);
+        ]));
         $this->updateProgress($run, 3, 'Iniciando generación', 'Preparando configuración del reporte.');
 
         try {
-            // ── 1. Remove previous export files ──────────────────────────────────
+            // ── 1. Remove previous export files for THIS SAME identity only ──────
+            // Nunca borra los exports de otras identidades (p. ej. el reporte simple
+            // sigue intacto al generar un comparativo del mismo periodo).
             $this->updateProgress($run, 8, 'Limpiando versión anterior', 'Eliminando reportes generados anteriormente.');
-            $cleaner->clearGeneratedReports($period);
+            $cleaner->clearGeneratedReportsForIdentity($period, $identity, excludeRunId: $run->id);
 
             // ── 2. Generate summary (metrics from Expense/Recovery/Placement/Portfolio) ──
             $this->updateProgress($run, 12, 'Calculando métricas financieras', 'Analizando cobranza, colocación, nómina y cartera del periodo. Esta etapa puede tardar varios minutos.');
@@ -135,65 +154,23 @@ class GenerateRadiographyJob implements ShouldQueue
             $consolidationService->consolidate($period);
 
             // ── 5. Export Excel (from scratch, no template) ──
+            // Comparativo/por sucursal/por gestor usan el builder con config (que SÍ
+            // arma un archivo distinto), nunca el simple — este era el bug raíz por
+            // el que un comparativo terminaba descargando el reporte simple.
             $this->updateProgress($run, 75, 'Generando Excel', 'Construyendo hojas, tablas y formato del reporte.');
-            $path = $exportService->export($period, $this->config);
+            $path = $isComparativeOrScoped
+                ? $exportService->exportWithConfig($period, $this->config)
+                : $exportService->export($period, $this->config);
 
             // ── 6. Export PDF (via Blade + dompdf) ──
             $this->updateProgress($run, 90, 'Generando PDF', 'Renderizando el reporte en formato PDF.');
-            $pdfPath = $exportService->exportPdf($period, $this->config);
-
-            // ── 7. Reload summary and register exports ──
-            $this->updateProgress($run, 97, 'Registrando exportaciones', 'Guardando rutas de descarga en base de datos.');
-
-            $summary = PeriodSummary::query()
-                ->where('period_id', $period->id)
-                ->first();
-
-            if ($summary) {
-                PeriodRadiographyExport::query()->create([
-                    'period_summary_id' => $summary->id,
-                    'export_path'       => $path,
-                    'file_type'         => 'excel',
-                    'template_version'  => config('app.version'),
-                    'metadata'          => ['period_id' => $period->id, 'period_label' => $period->label, 'config' => $this->config],
-                    'exported_at'       => now(),
-                    'exported_by'       => $this->userId,
-                ]);
-
-                PeriodRadiographyExport::query()->create([
-                    'period_summary_id' => $summary->id,
-                    'export_path'       => $pdfPath,
-                    'file_type'         => 'pdf',
-                    'template_version'  => config('app.version'),
-                    'metadata'          => ['period_id' => $period->id, 'period_label' => $period->label, 'config' => $this->config],
-                    'exported_at'       => now(),
-                    'exported_by'       => $this->userId,
-                ]);
-            }
-
-            $finalMeta = array_merge(is_array($run->metadata) ? $run->metadata : [], [
-                'progress_percent' => 100,
-                'current_step'     => 'Completado',
-            ]);
-
-            $run->update([
-                'status'            => 'success',
-                'period_summary_id' => $summary?->id,
-                'finished_at'       => now(),
-                'log'               => 'Radiografía generada. Excel y PDF listos para descargar.',
-                'metadata'          => $finalMeta,
-                'output_excel_path' => $path,
-                'output_pdf_path'   => $pdfPath,
-            ]);
-
-            $this->notifyUser(
-                subject: 'Radiografía lista',
-                message: "La Radiografía del periodo {$period->label} ya está lista. Puedes consultarla en Reportes mensuales.",
-                period: $period,
-                success: true,
-                run: $run,
-            );
+            $pdfPath = $isComparativeOrScoped
+                ? $exportService->exportPdfWithConfig($period, $this->config)
+                : $exportService->exportPdf($period, $this->config);
         } catch (\Throwable $exception) {
+            // Fallo REAL: no se generaron archivos válidos. Marca el run como
+            // fallido y notifica por correo — este es el único caso que debe
+            // producir un correo de error.
             Log::error('GenerateRadiographyJob falló.', [
                 'period_id'  => $period->id,
                 'run_id'     => $run->id,
@@ -228,6 +205,83 @@ class GenerateRadiographyJob implements ShouldQueue
 
             throw $exception;
         }
+
+        // ── 7. Registro de exportaciones y correo de éxito ──────────────────────
+        // A partir de aquí, el Excel y el PDF YA EXISTEN en disco y son válidos. Un
+        // fallo en este bloque (p. ej. un hipo de BD al guardar el registro) NO
+        // significa que el reporte no se generó — nunca debe mandar un correo de
+        // error ni marcar el run como failed; a lo más, deja constancia en el log.
+        try {
+            $this->updateProgress($run, 97, 'Registrando exportaciones', 'Guardando rutas de descarga en base de datos.');
+
+            $summary = PeriodSummary::query()
+                ->where('period_id', $period->id)
+                ->first();
+
+            if ($summary) {
+                PeriodRadiographyExport::query()->create([
+                    'period_summary_id' => $summary->id,
+                    'run_id'            => $run->id,
+                    'export_path'       => $path,
+                    'file_type'         => 'excel',
+                    'template_version'  => config('app.version'),
+                    'metadata'          => ['period_id' => $period->id, 'period_label' => $period->label, 'config' => $this->config],
+                    'exported_at'       => now(),
+                    'exported_by'       => $this->userId,
+                ]);
+
+                PeriodRadiographyExport::query()->create([
+                    'period_summary_id' => $summary->id,
+                    'run_id'            => $run->id,
+                    'export_path'       => $pdfPath,
+                    'file_type'         => 'pdf',
+                    'template_version'  => config('app.version'),
+                    'metadata'          => ['period_id' => $period->id, 'period_label' => $period->label, 'config' => $this->config],
+                    'exported_at'       => now(),
+                    'exported_by'       => $this->userId,
+                ]);
+            }
+
+            $finalMeta = array_merge(is_array($run->metadata) ? $run->metadata : [], [
+                'progress_percent' => 100,
+                'current_step'     => 'Completado',
+            ]);
+
+            $run->update([
+                'status'            => 'success',
+                'period_summary_id' => $summary?->id,
+                'finished_at'       => now(),
+                'log'               => 'Radiografía generada. Excel y PDF listos para descargar.',
+                'metadata'          => $finalMeta,
+                'output_excel_path' => $path,
+                'output_pdf_path'   => $pdfPath,
+            ]);
+        } catch (\Throwable $bookkeepingException) {
+            Log::error('GenerateRadiographyJob: el Excel/PDF se generaron correctamente pero falló el registro posterior (esto NO debe disparar un correo de error).', [
+                'period_id' => $period->id,
+                'run_id'    => $run->id,
+                'exception' => get_class($bookkeepingException),
+                'message'   => $bookkeepingException->getMessage(),
+            ]);
+
+            // Los archivos son reales — el run se marca success igual, aunque el
+            // registro de exportaciones haya fallado parcialmente.
+            $run->update([
+                'status'            => 'success',
+                'finished_at'       => now(),
+                'log'               => 'Radiografía generada. Excel y PDF listos para descargar.',
+                'output_excel_path' => $path,
+                'output_pdf_path'   => $pdfPath,
+            ]);
+        }
+
+        $this->notifyUser(
+            subject: 'Radiografía lista',
+            message: "La Radiografía del periodo {$period->label} ya está lista. Puedes consultarla en Reportes mensuales.",
+            period: $period,
+            success: true,
+            run: $run,
+        );
     }
 
     /**

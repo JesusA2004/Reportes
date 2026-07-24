@@ -99,6 +99,12 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::get('/{period}/export-filtrado.pdf', [MonthlyReportController::class, 'exportFilteredRadiographyPdf'])->name('export-filtered-radiography-pdf');
             Route::get('/{period}/filtrado-datos', [MonthlyReportController::class, 'filteredPreviewData'])->name('filtered-preview-data');
             Route::get('/{period}/consolidado.csv', [MonthlyReportController::class, 'exportSummary'])->name('export-summary');
+            // Descargas/"Ver" ligadas a un run específico (identidad real: simple vs
+            // comparativo vs por sucursal/gestor) — nunca caen al reporte simple del
+            // periodo aunque el run pedido sea un comparativo.
+            Route::get('/runs/{run}/excel', [MonthlyReportController::class, 'downloadRunExcel'])->name('run-excel');
+            Route::get('/runs/{run}/pdf', [MonthlyReportController::class, 'downloadRunPdf'])->name('run-pdf');
+            Route::get('/runs/{run}/ver', [MonthlyReportController::class, 'viewRun'])->name('run-ver');
         });
 });
 

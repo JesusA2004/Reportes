@@ -33,32 +33,206 @@ class MonthlyReportController extends Controller {
         'SAN LUIS POTOSI', 'TENANGO DEL VALLE', 'TLAXCALA', 'TULA',
     ];
 
+    /** Mismas etiquetas que ReportConfigurationStep.vue (REPORT_TYPES) — no inventar otras. */
+    private const REPORT_TYPE_LABELS = [
+        'simple'                => 'Radiografía simple',
+        'month_vs_month'        => 'Comparativo mes vs mes',
+        'bimester_vs_bimester'  => 'Comparativo bimestre vs bimestre',
+        'quarter_vs_quarter'    => 'Comparativo trimestre vs trimestre',
+    ];
+
     public function index(Request $request): Response {
-        $generatedReports = PeriodSummary::query()
+        // Fuente: PeriodRadiographyRun (un row por reporte REALMENTE generado, con su
+        // identidad propia), no PeriodSummary (un row por periodo) — así un simple y
+        // un comparativo del mismo periodo aparecen como dos filas distintas, cada
+        // una con su tipo/alcance real y sus propios enlaces de descarga.
+        // Runs de antes de esta corrección no tenían identidad ni limpieza por
+        // identidad — puede haber varios runs "success" históricos para la MISMA
+        // identidad (mismo period_id/report_type/scope/...). Para esos casos, la
+        // lista solo debe mostrar el más reciente de cada identidad, nunca todos
+        // los duplicados históricos.
+        $runs = PeriodRadiographyRun::query()
+            ->with([
+                'period:id,name,code,type,year,month,sequence,start_date,end_date',
+                'comparisonPeriod:id,name,code,type,year,month,sequence,start_date,end_date',
+                'branch:id,name',
+                'employee:id,full_name',
+            ])
+            ->where('status', 'success')
+            ->latest('finished_at')
+            ->get()
+            ->unique(fn (PeriodRadiographyRun $run) => implode('|', $run->identity()))
+            ->values();
+
+        $summaryIds = $runs->pluck('period_summary_id')->filter()->unique();
+        $summaries  = PeriodSummary::query()->whereIn('id', $summaryIds)->get()->keyBy('id');
+
+        $generatedReports = $runs->map(function (PeriodRadiographyRun $run) use ($summaries) {
+            $reportType = $run->report_type ?: 'simple';
+            $scope      = $run->scope ?: 'general';
+            $isSimpleGeneral = $reportType === 'simple' && $scope === 'general';
+
+            $summary = $run->period_summary_id ? $summaries->get($run->period_summary_id) : null;
+            $status  = (!$summary || $summary->status !== 'generated' || $summary->invalidated_at)
+                ? 'invalidated' : 'generated';
+
+            $name = self::REPORT_TYPE_LABELS[$reportType] ?? 'Radiografía';
+            if ($reportType !== 'simple' && $run->comparisonPeriod) {
+                $name = self::REPORT_TYPE_LABELS[$reportType] . ' — ' . $run->comparisonPeriod->label . ' vs ' . $run->period?->label;
+            } else {
+                $name = 'Radiografía ' . $run->period?->label;
+            }
+            if ($scope === 'branch' && $run->branch) {
+                $name .= ' — ' . $run->branch->name;
+            } elseif ($scope === 'employee' && $run->employee) {
+                $name .= ' — ' . $run->employee->full_name;
+            }
+
+            return [
+                'id' => $run->id,
+                'name' => $name,
+                'period_id' => $run->period_id,
+                'period' => $run->period?->label,
+                'period_code' => $run->period?->code,
+                'comparison_period' => $run->comparisonPeriod?->label,
+                'type' => self::REPORT_TYPE_LABELS[$reportType] ?? $reportType,
+                'scope' => $scope,
+                'scope_detail' => $scope === 'branch' ? $run->branch?->name : ($scope === 'employee' ? $run->employee?->full_name : null),
+                'generated_at' => optional($run->finished_at)->format('d/m/Y H:i'),
+                '_sort_ts' => optional($run->finished_at)->timestamp ?? 0,
+                'generated_by' => $run->created_by,
+                'status' => $status,
+                'excel_url' => $isSimpleGeneral
+                    ? route('reportes-mensuales.export-radiography', $run->period_id)
+                    : route('reportes-mensuales.run-excel', $run->id),
+                'pdf_url' => $isSimpleGeneral
+                    ? route('reportes-mensuales.export-radiography-pdf', $run->period_id)
+                    : route('reportes-mensuales.run-pdf', $run->id),
+                'preview_url' => $isSimpleGeneral
+                    ? route('reportes-mensuales.preview', $run->period_id)
+                    : route('reportes-mensuales.run-ver', $run->id),
+            ];
+        })->values();
+
+        // Periodos generados por una vía anterior a esta corrección (p. ej. el botón
+        // de descarga directa de MonthlyReportController::exportRadiography, que
+        // nunca crea un PeriodRadiographyRun) no tienen ningún run "simple/general"
+        // asociado — sin este respaldo, desaparecerían de la lista aunque el reporte
+        // exista de verdad. Se agregan como fila "simple/general" igual que antes.
+        $periodIdsWithSimpleGeneralRun = $runs
+            ->filter(fn (PeriodRadiographyRun $run) => ($run->report_type ?: 'simple') === 'simple' && ($run->scope ?: 'general') === 'general')
+            ->pluck('period_id')->all();
+
+        $legacySummaries = PeriodSummary::query()
             ->with(['period:id,name,code,type,year,month,sequence,start_date,end_date'])
             ->where('status', 'generated')
+            ->whereNotIn('period_id', $periodIdsWithSimpleGeneralRun)
             ->latest('generated_at')
             ->get()
             ->map(fn (PeriodSummary $summary) => [
-                'id' => $summary->id,
+                'id' => 'summary-' . $summary->id,
                 'name' => 'Radiografía ' . $summary->period?->label,
                 'period_id' => $summary->period_id,
                 'period' => $summary->period?->label,
                 'period_code' => $summary->period?->code,
-                'type' => 'Radiografía simple',
-                'scope' => 'General',
+                'comparison_period' => null,
+                'type' => self::REPORT_TYPE_LABELS['simple'],
+                'scope' => 'general',
+                'scope_detail' => null,
                 'generated_at' => optional($summary->generated_at)->format('d/m/Y H:i'),
+                '_sort_ts' => optional($summary->generated_at)->timestamp ?? 0,
                 'generated_by' => $summary->generated_by,
                 'status' => $summary->invalidated_at ? 'invalidated' : 'generated',
                 'excel_url' => route('reportes-mensuales.export-radiography', $summary->period_id),
                 'pdf_url' => route('reportes-mensuales.export-radiography-pdf', $summary->period_id),
                 'preview_url' => route('reportes-mensuales.preview', $summary->period_id),
-            ])->values();
+            ]);
+
+        $generatedReports = $generatedReports->concat($legacySummaries)
+            ->sortByDesc('_sort_ts')
+            ->map(fn (array $row) => \Illuminate\Support\Arr::except($row, ['_sort_ts']))
+            ->values();
 
         return Inertia::render('ReportesMensuales/Index', [
             'message' => 'Consulta, previsualiza y descarga los reportes ya generados.',
             'generatedReports' => $generatedReports,
         ]);
+    }
+
+    /**
+     * Resuelve el export de un run específico por su tipo de archivo — nunca cae al
+     * reporte simple del periodo, aunque el run pedido sea comparativo/por sucursal.
+     */
+    private function resolveRunExportPath(PeriodRadiographyRun $run, string $fileType): string
+    {
+        $export = $run->exports()->where('file_type', $fileType)->latest('id')->first();
+        $path   = $export?->export_path ?? ($fileType === 'excel' ? $run->output_excel_path : $run->output_pdf_path);
+
+        abort_unless($path && file_exists($path) && filesize($path) > 0, 404,
+            'El archivo generado para este reporte ya no está disponible. Vuelve a generarlo desde Histórico General.');
+
+        return $path;
+    }
+
+    public function downloadRunExcel(PeriodRadiographyRun $run)
+    {
+        $path = $this->resolveRunExportPath($run, 'excel');
+
+        return response()->download($path, basename($path), [
+            'Content-Type'  => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma'        => 'no-cache',
+        ]);
+    }
+
+    public function downloadRunPdf(PeriodRadiographyRun $run)
+    {
+        $path = $this->resolveRunExportPath($run, 'pdf');
+
+        return response()->download($path, basename($path), [
+            'Content-Type'  => 'application/pdf',
+            'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma'        => 'no-cache',
+        ]);
+    }
+
+    /**
+     * "Ver" de un run específico. Simple+general reutiliza la vista web completa ya
+     * existente; comparativo renderiza la misma plantilla del PDF comparativo como
+     * página web normal (sin dompdf) — reutiliza exactamente los mismos datos que el
+     * PDF, así que nunca se desincroniza de lo que se descarga.
+     */
+    public function viewRun(PeriodRadiographyRun $run, RadiografiaExportService $service)
+    {
+        $reportType = $run->report_type ?: 'simple';
+        $scope      = $run->scope ?: 'general';
+
+        if ($reportType === 'simple' && $scope === 'general') {
+            return redirect()->route('reportes-mensuales.preview', $run->period_id);
+        }
+
+        if (in_array($reportType, ['month_vs_month', 'bimester_vs_bimester', 'quarter_vs_quarter'], true)) {
+            $config = [
+                'scope'                => $scope,
+                'report_type'          => $reportType,
+                'branch_id'            => $run->branch_id,
+                'employee_id'          => $run->employee_id,
+                'compare_period_id'    => $run->comparison_period_id,
+            ];
+
+            $data = $service->comparativeViewData($run->period, $config);
+
+            return view('reports.radiography-pdf-comparative', $data);
+        }
+
+        // Por sucursal / por gestor (simple, sin comparativo): la vista web completa
+        // ya soporta filtrar por scope/branch_id/employee_id vía query string.
+        return redirect()->route('reportes-mensuales.preview', array_filter([
+            'period'     => $run->period_id,
+            'scope'      => $scope,
+            'branch_id'  => $run->branch_id,
+            'employee_id'=> $run->employee_id,
+        ]));
     }
 
     public function show(Period $period): RedirectResponse {

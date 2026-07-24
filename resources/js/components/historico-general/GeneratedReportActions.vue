@@ -9,20 +9,33 @@ const props = defineProps<{ period: any; config?: any }>()
 const canExport = computed(() => !!props.period?.can_export_radiography)
 const isRunning = computed(() => !!props.period?.radiography_running)
 
+// report_type distinto de 'simple' (comparativo mes/bimestre/trimestre vs vs) TAMBIÉN
+// cuenta como "filtrado" — antes solo se miraba scope, así que un comparativo con
+// scope=general terminaba usando la ruta plana del reporte simple.
+const isComparative = computed(() => !!props.config?.report_type && props.config.report_type !== 'simple')
 const isFiltered = computed(() =>
-    props.config?.scope === 'branch' || props.config?.scope === 'employee'
+    props.config?.scope === 'branch' || props.config?.scope === 'employee' || isComparative.value
 )
 
 const filteredParams = computed(() => {
     if (!isFiltered.value) return ''
-    const p = new URLSearchParams({ scope: props.config.scope, report_type: props.config.report_type ?? 'simple' })
+    const p = new URLSearchParams({ scope: props.config.scope ?? 'general', report_type: props.config.report_type ?? 'simple' })
     if (props.config.scope === 'branch'   && props.config.branch_id)   p.set('branch_id',   String(props.config.branch_id))
     if (props.config.scope === 'employee' && props.config.employee_id) p.set('employee_id', String(props.config.employee_id))
+    if (isComparative.value && props.config.compare_period_id) p.set('compare_period_id', String(props.config.compare_period_id))
     return '?' + p.toString()
 })
 
+// El periodo ya trae el id del último run generado (period.radiography_run_id,
+// calculado por ReportUploadController). Con él se puede resolver por identidad
+// exacta (simple vs comparativo vs por sucursal/gestor) en vez de adivinar la ruta
+// plana del reporte simple. Sin run_id todavía, se usa el endpoint de exportación
+// filtrada bajo demanda como respaldo (ya corregido para incluir compare_period_id).
+const runId = computed(() => props.period?.radiography_run_id ?? null)
+
 const excelUrl = computed(() => {
     if (!props.period) return '#'
+    if (isFiltered.value && runId.value) return `/reportes-mensuales/runs/${runId.value}/excel`
     return isFiltered.value
         ? `/reportes-mensuales/${props.period.id}/export-filtrado.xlsx${filteredParams.value}`
         : `/reportes-mensuales/${props.period.id}/radiografia.xlsx`
@@ -30,6 +43,7 @@ const excelUrl = computed(() => {
 
 const pdfUrl = computed(() => {
     if (!props.period) return '#'
+    if (isFiltered.value && runId.value) return `/reportes-mensuales/runs/${runId.value}/pdf`
     return isFiltered.value
         ? `/reportes-mensuales/${props.period.id}/export-filtrado.pdf${filteredParams.value}`
         : `/reportes-mensuales/${props.period.id}/radiografia.pdf`
@@ -37,6 +51,7 @@ const pdfUrl = computed(() => {
 
 const previewUrl = computed(() => {
     if (!props.period?.radiography_ready) return null
+    if (isFiltered.value && runId.value) return `/reportes-mensuales/runs/${runId.value}/ver`
     const base = `/reportes-mensuales/${props.period.id}/preview`
     if (props.config?.scope === 'branch'   && props.config.branch_id)   return `${base}?scope=branch&branch_id=${props.config.branch_id}`
     if (props.config?.scope === 'employee' && props.config.employee_id) return `${base}?scope=employee&employee_id=${props.config.employee_id}`
@@ -44,11 +59,13 @@ const previewUrl = computed(() => {
 })
 
 const excelSubtitle = computed(() => {
+    if (isComparative.value)                return 'Comparativo — archivo distinto al reporte simple'
     if (props.config?.scope === 'branch')   return 'Filtrado por sucursal · sin plantilla'
     if (props.config?.scope === 'employee') return 'Filtrado por gestor · sin plantilla'
     return 'Generado desde cero · sin plantilla'
 })
 const pdfSubtitle = computed(() => {
+    if (isComparative.value)                return 'Comparativo — archivo distinto al reporte simple'
     if (props.config?.scope === 'branch')   return 'Diseño filtrado por sucursal'
     if (props.config?.scope === 'employee') return 'Diseño filtrado por gestor'
     return 'Diseño con tablas y métricas'

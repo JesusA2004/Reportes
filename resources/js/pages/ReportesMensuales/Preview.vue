@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { router } from '@inertiajs/vue3'
 import {
-    ArrowLeft, AlertTriangle, FileSpreadsheet, FileText, Search, ChevronDown, ChevronUp, Download,
+    ArrowLeft, AlertTriangle, FileSpreadsheet, FileText, Search, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Download,
     HandCoins, TrendingUp, Landmark, Percent, Receipt, Wallet, Gauge, Building2, Banknote, CheckCircle2,
 } from 'lucide-vue-next'
 import AppLayout from '@/layouts/AppLayout.vue'
@@ -12,7 +12,7 @@ import EbitdaBadge from '@/components/radiography/EbitdaBadge.vue'
 import EmptyState from '@/components/radiography/EmptyState.vue'
 import FilterBar from '@/components/radiography/FilterBar.vue'
 import { money, percent as fmtPercent, num } from '@/lib/format'
-import { chartColors, categoryPalette, horizontalBarOptions, columnOptions, stackedBarOptions, donutOptions } from '@/lib/chart-theme'
+import { chartColors, categoryPalette, horizontalBarOptions, columnOptions, stackedBarOptions, donutOptions, countColumnOptions, countDonutOptions } from '@/lib/chart-theme'
 
 defineOptions({ layout: AppLayout })
 
@@ -175,6 +175,45 @@ onMounted(() => {
 // ════════════════════════════════════════════════════════════════════════════
 type TabKey = 'resumen' | 'sucursales' | 'ingresos' | 'gastos' | 'nomina' | 'mora' | 'productos' | 'fondeos' | 'rotacion' | 'categoria' | 'gestores' | 'cobranza'
 const activeTab = ref<TabKey>('resumen')
+
+// ── Tabs: scroll horizontal con flechas + auto-scroll del tab activo ─────────
+// El contenedor ya usaba overflow-x-auto (funciona en cualquier ancho), pero sin
+// scrollbar visible no había ninguna pista de que hay más pestañas fuera de
+// pantalla (p. ej. Rotación / Categoría EBITDA a la derecha en media pantalla).
+const tabsScrollEl = ref<HTMLElement | null>(null)
+const canScrollTabsLeft  = ref(false)
+const canScrollTabsRight = ref(false)
+
+function updateTabsScrollState() {
+    const el = tabsScrollEl.value
+    if (!el) return
+    canScrollTabsLeft.value  = el.scrollLeft > 4
+    canScrollTabsRight.value = el.scrollLeft + el.clientWidth < el.scrollWidth - 4
+}
+
+function scrollTabs(direction: 'left' | 'right') {
+    const el = tabsScrollEl.value
+    if (!el) return
+    el.scrollBy({ left: direction === 'left' ? -160 : 160, behavior: 'smooth' })
+}
+
+watch(activeTab, () => {
+    nextTick(() => {
+        const el = tabsScrollEl.value
+        const btn = el?.querySelector<HTMLElement>(`[data-tab-key="${activeTab.value}"]`)
+        btn?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+    })
+})
+
+onMounted(() => {
+    updateTabsScrollState()
+    tabsScrollEl.value?.addEventListener('scroll', updateTabsScrollState, { passive: true })
+    window.addEventListener('resize', updateTabsScrollState)
+})
+onUnmounted(() => {
+    tabsScrollEl.value?.removeEventListener('scroll', updateTabsScrollState)
+    window.removeEventListener('resize', updateTabsScrollState)
+})
 
 const snap   = computed(() => props.snapshot)
 const periodComposite = computed(() => snap.value?.period?.composite ?? null)
@@ -645,6 +684,23 @@ const rotacionMesAnteriorLista = computed(() => (rotacionDetalle.value?.empleado
 const rotacionMesActualLabel   = computed(() => rotacionDetalle.value?.mes_actual ?? '')
 const rotacionMesAnteriorLabel = computed(() => rotacionDetalle.value?.mes_anterior ?? 'periodo anterior')
 const rotacionAuditoriaAbierta = ref(false)
+
+// Plantilla mes anterior vs mes actual (antes hardcodeado a 0 en el backend)
+const rotacionPrevCount = computed(() => Number(rotacionData.value?.prev_count) || 0)
+const rotacionCurrCount = computed(() => Number(rotacionData.value?.current_count ?? rotacionPromedio.value) || 0)
+const rotacionVariacionNeta = computed(() => Number(rotacionData.value?.variacion_neta) || (rotacionCurrCount.value - rotacionPrevCount.value))
+
+const rotacionPlantillaOptions = computed(() => ({
+    ...countColumnOptions(rotacionPorSucursal.value.map((r: any) => r.sucursal), [chartColors.gray, chartColors.teal]),
+    legend: { show: true, position: 'bottom' as const },
+}))
+const rotacionPlantillaSeries = computed(() => [
+    { name: rotacionMesAnteriorLabel.value || 'Mes anterior', data: rotacionPorSucursal.value.map((r: any) => Number(r.plantilla_anterior) || 0) },
+    { name: rotacionMesActualLabel.value || 'Mes actual', data: rotacionPorSucursal.value.map((r: any) => Number(r.promedio_personal) || 0) },
+])
+
+const rotacionAltasBajasSeries  = computed(() => [rotacionAltas.value, rotacionBajas.value])
+const rotacionAltasBajasOptions = computed(() => countDonutOptions(['Altas', 'Bajas'], [chartColors.green, chartColors.red]))
 
 // ════════════════════════════════════════════════════════════════════════════
 // FILTROS DE VISTA EN VIVO — sucursal / producto / mora / gestor / categoría
@@ -1178,12 +1234,26 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                     </div>
                 </div>
 
-                <!-- TABS -->
-                <div class="flex overflow-x-auto border-b border-slate-200 gap-1 scrollbar-none">
-                    <button v-for="t in tabs" :key="t.key" @click="activeTab = t.key"
-                        class="relative shrink-0 px-3.5 py-2.5 text-xs font-bold transition border-b-2 whitespace-nowrap"
-                        :class="activeTab === t.key ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-800'">
-                        {{ t.label }}
+                <!-- TABS: scroll horizontal con flechas — visibles solo cuando hay contenido
+                     oculto a cada lado, para que quede claro que hay más pestañas (p. ej.
+                     Rotación de Personal / Categoría EBITDA) sin necesitar pantalla completa. -->
+                <div class="relative border-b border-slate-200">
+                    <button v-if="canScrollTabsLeft" type="button" @click="scrollTabs('left')"
+                        class="absolute left-0 top-0 z-10 flex h-full items-center bg-gradient-to-r from-white via-white/90 to-transparent pl-1 pr-4 text-slate-500 hover:text-indigo-600"
+                        aria-label="Ver pestañas anteriores">
+                        <ChevronLeft class="size-4" />
+                    </button>
+                    <div ref="tabsScrollEl" class="flex overflow-x-auto gap-1 scroll-smooth">
+                        <button v-for="t in tabs" :key="t.key" :data-tab-key="t.key" @click="activeTab = t.key"
+                            class="relative shrink-0 px-3.5 py-2.5 text-xs font-bold transition border-b-2 whitespace-nowrap"
+                            :class="activeTab === t.key ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-800'">
+                            {{ t.label }}
+                        </button>
+                    </div>
+                    <button v-if="canScrollTabsRight" type="button" @click="scrollTabs('right')"
+                        class="absolute right-0 top-0 z-10 flex h-full items-center bg-gradient-to-l from-white via-white/90 to-transparent pr-1 pl-4 text-slate-500 hover:text-indigo-600"
+                        aria-label="Ver más pestañas">
+                        <ChevronRight class="size-4" />
                     </button>
                 </div>
 
@@ -1999,12 +2069,20 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                         <div class="flex items-center justify-between">
                             <h3 class="text-lg font-bold text-slate-800">Rotación de personal</h3>
                         </div>
-                        <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                            <KpiCard :label="`Plantilla ${rotacionMesAnteriorLabel || 'anterior'}`" :value="num(rotacionPrevCount)" :icon="Building2" tone="neutral" />
+                            <KpiCard :label="`Plantilla ${rotacionMesActualLabel || 'actual'}`" :value="num(rotacionCurrCount)" :icon="Building2" tone="blue" />
+                            <KpiCard label="Variación neta" :value="(rotacionVariacionNeta >= 0 ? '+' : '') + num(rotacionVariacionNeta)" :icon="TrendingUp" :tone="rotacionVariacionNeta < 0 ? 'red' : 'green'" />
                             <KpiCard label="Altas del periodo" :value="num(rotacionAltas)" :icon="TrendingUp" tone="green" />
                             <KpiCard label="Bajas del periodo" :value="num(rotacionBajas)" :icon="AlertTriangle" tone="red" />
-                            <KpiCard label="Plantilla" :value="num(rotacionPromedio)" :icon="Building2" tone="blue" />
                             <KpiCard label="Índice de rotación" :value="fmtPercent(rotacionIndice)" :icon="Percent" :tone="rotacionIndice > 5 ? 'red' : rotacionIndice > 2 ? 'amber' : 'teal'" />
                         </div>
+
+                        <div v-if="rotacionPorSucursal.length" class="grid gap-4 md:grid-cols-2">
+                            <ChartCard title="Plantilla por sucursal — anterior vs actual" :series="rotacionPlantillaSeries" :options="rotacionPlantillaOptions" type="bar" :height="280" />
+                            <ChartCard title="Altas vs Bajas del periodo" :series="rotacionAltasBajasSeries" :options="rotacionAltasBajasOptions" type="donut" :height="280" />
+                        </div>
+
                         <div v-if="rotacionPorSucursal.length" class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
                             <div class="px-5 py-3 border-b">
                                 <span class="font-bold text-sm">Rotación de personal por sucursal</span>
@@ -2013,18 +2091,25 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                 <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
                                     <tr>
                                         <th class="px-4 py-3 text-left">Sucursal</th>
+                                        <th class="px-4 py-3 text-right">Plantilla anterior</th>
+                                        <th class="px-4 py-3 text-right">Plantilla actual</th>
                                         <th class="px-4 py-3 text-right">Altas</th>
                                         <th class="px-4 py-3 text-right">Bajas</th>
-                                        <th class="px-4 py-3 text-right">Plantilla</th>
+                                        <th class="px-4 py-3 text-right">Variación</th>
                                         <th class="px-4 py-3 text-right">Índice de rotación</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     <tr v-for="(r, i) in rotacionPorSucursal" :key="i" class="border-t hover:bg-slate-50" :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'">
                                         <td class="px-4 py-2.5 font-bold">{{ r.sucursal }}</td>
+                                        <td class="px-4 py-2.5 text-right text-slate-500">{{ Number(r.plantilla_anterior ?? 0).toFixed(0) }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ Number(r.promedio_personal).toFixed(0) }}</td>
                                         <td class="px-4 py-2.5 text-right text-emerald-700 font-medium">{{ r.altas ?? 0 }}</td>
                                         <td class="px-4 py-2.5 text-right text-red-700 font-medium">{{ r.bajas }}</td>
-                                        <td class="px-4 py-2.5 text-right">{{ Number(r.promedio_personal).toFixed(0) }}</td>
+                                        <td class="px-4 py-2.5 text-right font-semibold"
+                                            :class="(Number(r.promedio_personal) - Number(r.plantilla_anterior ?? 0)) < 0 ? 'text-red-700' : (Number(r.promedio_personal) - Number(r.plantilla_anterior ?? 0)) > 0 ? 'text-emerald-700' : 'text-slate-500'">
+                                            {{ (Number(r.variacion_plantilla ?? (r.promedio_personal - (r.plantilla_anterior ?? 0))) >= 0 ? '+' : '') + Number(r.variacion_plantilla ?? (r.promedio_personal - (r.plantilla_anterior ?? 0))).toFixed(0) }}
+                                        </td>
                                         <td class="px-4 py-2.5 text-right font-semibold" :class="Number(r.indice_rotacion) > 5 ? 'text-red-700' : Number(r.indice_rotacion) > 2 ? 'text-amber-600' : 'text-emerald-700'">
                                             {{ Number(r.indice_rotacion).toFixed(2) }}%
                                         </td>

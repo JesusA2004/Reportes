@@ -46,8 +46,10 @@ const syncFromProps = () => {
     liveElapsed.value       = null
     liveStuck.value         = false
     liveMeta.value          = props.period?.radiography_run_metadata ?? null
-    liveExcelUrl.value      = null
-    livePdfUrl.value        = null
+    // No resetear liveExcelUrl/livePdfUrl aquí: al terminar la generación, el padre
+    // recarga la página (Inertia) y este watcher se dispara de nuevo — si limpiara
+    // las URLs, el botón "Descargar" caería al fallback plano de abajo aunque el run
+    // real fuera un comparativo/por sucursal, descargando el reporte equivocado.
     liveCanProcessNow.value = !!props.period?.radiography_can_process_now
 }
 
@@ -121,7 +123,13 @@ watch(
     { immediate: true },
 )
 
-onMounted(syncFromProps)
+onMounted(() => {
+    syncFromProps()
+    // Si el reporte ya estaba generado al montar (isDone desde props), pide de una
+    // vez las URLs reales al backend — nunca confiar en un fallback plano adivinado,
+    // que podría apuntar al reporte simple aunque lo generado fuera un comparativo.
+    if (props.period?.radiography_ready) pollProgress()
+})
 onUnmounted(() => { clearTicker(); clearPoll() })
 
 // ── Computed state ────────────────────────────────────────────────────
@@ -283,22 +291,31 @@ const statusConfig = computed(() => {
                         <!-- Error detail -->
                         <div v-if="isFailed && liveError" class="mt-3 break-all rounded-xl bg-rose-100 p-3 font-mono text-xs leading-5 text-rose-800">{{ liveError }}</div>
 
-                        <!-- Descarga (éxito con archivos listos) -->
-                        <div v-if="isDone || (liveExcelUrl || livePdfUrl)" class="mt-4 flex flex-wrap gap-2">
+                        <!-- Descarga (éxito con archivos listos) — nunca se adivina la URL: si
+                             isDone pero aún no llegó la respuesta real del backend, el botón se
+                             muestra deshabilitado en vez de apuntar a un archivo posiblemente
+                             equivocado (p. ej. el simple cuando lo generado fue un comparativo). -->
+                        <div v-if="isDone || liveExcelUrl || livePdfUrl" class="mt-4 flex flex-wrap gap-2">
                             <a
-                                v-if="liveExcelUrl || isDone"
-                                :href="liveExcelUrl || `/reportes-mensuales/${period?.id}/radiografia.xlsx`"
+                                v-if="liveExcelUrl"
+                                :href="liveExcelUrl"
                                 class="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-white px-3 py-2 text-xs font-bold text-emerald-700 shadow-sm transition hover:bg-emerald-50"
                             >
                                 <FileSpreadsheet class="size-3.5" />Descargar Excel
                             </a>
+                            <span v-else-if="isDone" class="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-400">
+                                <LoaderCircle class="size-3.5 animate-spin" />Descargar Excel
+                            </span>
                             <a
-                                v-if="livePdfUrl || isDone"
-                                :href="livePdfUrl || `/reportes-mensuales/${period?.id}/radiografia.pdf`"
+                                v-if="livePdfUrl"
+                                :href="livePdfUrl"
                                 class="inline-flex items-center gap-1.5 rounded-xl border border-rose-300 bg-white px-3 py-2 text-xs font-bold text-rose-700 shadow-sm transition hover:bg-rose-50"
                             >
                                 <FileText class="size-3.5" />Descargar PDF
                             </a>
+                            <span v-else-if="isDone" class="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-400">
+                                <LoaderCircle class="size-3.5 animate-spin" />Descargar PDF
+                            </span>
                         </div>
                     </div>
 

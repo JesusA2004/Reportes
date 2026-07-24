@@ -5,13 +5,15 @@ import { FileBarChart2, Search } from 'lucide-vue-next'
 import AppLayout from '@/layouts/AppLayout.vue'
 
 type GeneratedReport = {
-    id: number
+    id: number | string
     name: string
     period_id: number
     period: string
     period_code: string
+    comparison_period?: string | null
     type: string
     scope: string
+    scope_detail?: string | null
     generated_at: string
     generated_by?: number | null
     status: string
@@ -35,20 +37,22 @@ defineOptions({
 })
 
 const STATUS_LABELS: Record<string, string> = {
-    generated:  'Generado',
-    processing: 'Procesando',
-    pending:    'Pendiente',
-    failed:     'Error',
-    cancelled:  'Cancelado',
-    expired:    'Expirado',
+    generated:   'Generado',
+    processing:  'Procesando',
+    pending:     'Pendiente',
+    failed:      'Error',
+    cancelled:   'Cancelado',
+    expired:     'Expirado',
+    invalidated: 'Desactualizado',
 }
 const STATUS_COLORS: Record<string, string> = {
-    generated:  'bg-emerald-50 text-emerald-700',
-    processing: 'bg-blue-50 text-blue-700',
-    pending:    'bg-amber-50 text-amber-700',
-    failed:     'bg-red-50 text-red-700',
-    cancelled:  'bg-slate-100 text-slate-500',
-    expired:    'bg-slate-50 text-slate-400',
+    generated:   'bg-emerald-50 text-emerald-700',
+    processing:  'bg-blue-50 text-blue-700',
+    pending:     'bg-amber-50 text-amber-700',
+    failed:      'bg-red-50 text-red-700',
+    cancelled:   'bg-slate-100 text-slate-500',
+    expired:     'bg-slate-50 text-slate-400',
+    invalidated: 'bg-amber-50 text-amber-700',
 }
 const statusLabel  = (s: string) => STATUS_LABELS[s?.toLowerCase()] ?? s
 const statusColor  = (s: string) => STATUS_COLORS[s?.toLowerCase()] ?? 'bg-slate-100 text-slate-600'
@@ -131,7 +135,7 @@ const filteredReports = computed(() => {
                         </div>
                         <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
                             <span>{{ report.period }}</span>
-                            <span>{{ report.type }} · {{ scopeLabel(report.scope) }}</span>
+                            <span>{{ report.type }} · {{ scopeLabel(report.scope) }}<template v-if="report.scope_detail"> ({{ report.scope_detail }})</template></span>
                             <span>{{ report.generated_at ?? '—' }}</span>
                         </div>
                         <div class="mt-3 flex gap-2">
@@ -164,7 +168,7 @@ const filteredReports = computed(() => {
                                 </td>
                                 <td class="px-4 py-3">
                                     <span class="font-medium">{{ report.type }}</span>
-                                    <p class="text-xs text-muted-foreground">{{ scopeLabel(report.scope) }}</p>
+                                    <p class="text-xs text-muted-foreground">{{ scopeLabel(report.scope) }}<template v-if="report.scope_detail"> — {{ report.scope_detail }}</template></p>
                                 </td>
                                 <td class="px-4 py-3 text-sm text-slate-600">{{ report.generated_at ?? '—' }}</td>
                                 <td class="px-4 py-3">

@@ -434,7 +434,8 @@ final class RadiographyStyleHelper
         string $currLabel,
         int $dataPointCount,
         string $topLeftCell,
-        string $bottomRightCell
+        string $bottomRightCell,
+        string $axisNumberFormat = '"$"#,##0'
     ): void {
         $categoriesRef = self::sheetQualifiedRange($sheet, $categoryRange);
         $prevRef       = self::sheetQualifiedRange($sheet, $prevValueRange);
@@ -465,7 +466,7 @@ final class RadiographyStyleHelper
         $chart = new Chart(uniqid('chart_', true), $title, $legend, $plotArea);
         $chart->setTopLeftPosition($topLeftCell);
         $chart->setBottomRightPosition($bottomRightCell);
-        $chart->getChartAxisY()->setAxisNumberProperties('"$"#,##0', true, false);
+        $chart->getChartAxisY()->setAxisNumberProperties($axisNumberFormat, true, false);
 
         $sheet->addChart($chart);
     }

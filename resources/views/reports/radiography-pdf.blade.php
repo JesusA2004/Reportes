@@ -824,6 +824,108 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
 <div class="note">Sin préstamos activos registrados para este periodo.</div>
 @endif
 
+<!-- ═══════════════════════════════════════════════════════════════════════
+     PÁGINA 8 — ROTACIÓN DE PERSONAL
+     ═══════════════════════════════════════════════════════════════════════ -->
+@php
+$rot       = $snap['sections']['rotation'] ?? [];
+$rotDetail = $snap['sections']['rotation_detail'] ?? [];
+$rotPrevCount = (float)($rot['prev_count'] ?? 0);
+$rotCurrCount = (float)($rot['current_count'] ?? ($rot['promedio'] ?? 0));
+$rotVariacion = (float)($rot['variacion_neta'] ?? ($rotCurrCount - $rotPrevCount));
+$rotPrevMes   = $rot['prev_mes'] ?? null;
+$rotPorSucursal = $rot['por_sucursal'] ?? [];
+@endphp
+<div class="pagebreak"></div>
+<div class="section-bar">Rotación de personal</div>
+<table class="kpi-grid">
+    <tr>
+        <td class="kpi"><div class="kpi-label">Plantilla {{ $rotPrevMes ?: 'mes anterior' }}</div><div class="kpi-value">{{ $fmtn($rotPrevCount) }}</div></td>
+        <td class="kpi"><div class="kpi-label">Plantilla {{ $rot['mes'] ?? 'mes actual' }}</div><div class="kpi-value">{{ $fmtn($rotCurrCount) }}</div></td>
+        <td class="kpi"><div class="kpi-label">Altas</div><div class="kpi-value">{{ $fmtn($rot['altas'] ?? 0) }}</div></td>
+        <td class="kpi"><div class="kpi-label">Bajas</div><div class="kpi-value">{{ $fmtn($rot['bajas'] ?? 0) }}</div></td>
+    </tr>
+    <tr>
+        <td class="kpi"><div class="kpi-label">Variación neta de plantilla</div><div class="kpi-value @if($rotVariacion < 0) neg @endif">{{ $rotVariacion >= 0 ? '+' : '' }}{{ $fmtn($rotVariacion) }}</div></td>
+        <td class="kpi" colspan="3"><div class="kpi-label">Índice de rotación</div><div class="kpi-value @if(($rot['indice'] ?? 0) > 5) neg @elseif(($rot['indice'] ?? 0) > 2) warn @endif">{{ $fmtp($rot['indice'] ?? 0) }}</div></td>
+    </tr>
+</table>
+
+<div class="section-bar alt">Detalle por sucursal</div>
+@if(!empty($rotPorSucursal))
+<table class="tbl">
+    <thead>
+        <tr>
+            <th>Sucursal</th>
+            <th class="r">Plantilla anterior</th>
+            <th class="r">Plantilla actual</th>
+            <th class="r">Altas</th>
+            <th class="r">Bajas</th>
+            <th class="r">Variación</th>
+            <th class="r">Índice</th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach($rotPorSucursal as $rs)
+        @php $rsVar = (float)($rs['variacion_plantilla'] ?? ((float)($rs['promedio_personal'] ?? 0) - (float)($rs['plantilla_anterior'] ?? 0))); @endphp
+        <tr>
+            <td class="b">{{ $rs['sucursal'] ?? '' }}</td>
+            <td class="r">{{ $fmtn($rs['plantilla_anterior'] ?? 0) }}</td>
+            <td class="r">{{ $fmtn($rs['promedio_personal'] ?? 0) }}</td>
+            <td class="r">{{ $fmtn($rs['altas'] ?? 0) }}</td>
+            <td class="r">{{ $fmtn($rs['bajas'] ?? 0) }}</td>
+            <td class="r" @if($rsVar < 0) style="color:#b91c1c;" @elseif($rsVar > 0) style="color:#106A59;" @endif>{{ $rsVar >= 0 ? '+' : '' }}{{ $fmtn($rsVar) }}</td>
+            <td class="r">{{ $fmtp($rs['indice_rotacion'] ?? 0) }}</td>
+        </tr>
+        @endforeach
+    </tbody>
+</table>
+@else
+<div class="note">Sin datos de rotación disponibles para este periodo.</div>
+@endif
+
+<div class="section-bar alt">Altas del periodo ({{ count($rotDetail['altas'] ?? []) }})</div>
+@if(!empty($rotDetail['altas']))
+<table class="tbl">
+    <thead>
+        <tr><th>Sucursal</th><th>Clave</th><th>Nombre</th><th>Motivo</th></tr>
+    </thead>
+    <tbody>
+        @foreach($rotDetail['altas'] as $a)
+        <tr>
+            <td>{{ $a['sucursal'] ?? '' }}</td>
+            <td>{{ $a['clave'] ?? '—' }}</td>
+            <td>{{ $a['nombre'] ?? '' }}</td>
+            <td>{{ $a['motivo'] ?? 'No aparece el mes anterior y aparece este mes.' }}</td>
+        </tr>
+        @endforeach
+    </tbody>
+</table>
+@else
+<div class="note">Sin altas detectadas en este periodo.</div>
+@endif
+
+<div class="section-bar alt">Bajas del periodo ({{ count($rotDetail['bajas'] ?? []) }})</div>
+@if(!empty($rotDetail['bajas']))
+<table class="tbl">
+    <thead>
+        <tr><th>Sucursal anterior</th><th>Clave</th><th>Nombre</th><th>Motivo</th></tr>
+    </thead>
+    <tbody>
+        @foreach($rotDetail['bajas'] as $b)
+        <tr>
+            <td>{{ $b['sucursal'] ?? '' }}</td>
+            <td>{{ $b['clave'] ?? '—' }}</td>
+            <td>{{ $b['nombre'] ?? '' }}</td>
+            <td>{{ $b['motivo'] ?? 'Aparece el mes anterior y no aparece este mes.' }}</td>
+        </tr>
+        @endforeach
+    </tbody>
+</table>
+@else
+<div class="note">Sin bajas detectadas en este periodo.</div>
+@endif
+
 <!-- ═══ Pie de página repetido + numeración (canvas nativo de DomPDF) ════════ -->
 <script type="text/php">
 if (isset($pdf)) {

@@ -165,25 +165,11 @@ class RadiografiaExportService
         $reportType = $config['report_type'] ?? 'simple';
 
         if (in_array($reportType, ['month_vs_month', 'bimester_vs_bimester', 'quarter_vs_quarter'], true)) {
-            $comparePeriodId = (int) ($config['compare_period_id'] ?? 0);
-            if (!$comparePeriodId) {
-                throw new RuntimeException('Se requiere compare_period_id para reportes comparativos.');
-            }
-            $comparePeriod  = Period::findOrFail($comparePeriodId);
-            $compareSummary = $this->requireSummary($comparePeriod);
-            $compareSnap    = $this->buildSnapshotCached($comparePeriod, $compareSummary);
+            $viewData      = $this->comparativeViewData($period, $config, $summary, $snapshot);
+            $comparePeriod = $viewData['comparePeriod'];
 
-            [$rows, $scopeLabel] = $this->buildComparativeRows($snapshot, $compareSnap, $config);
-
-            $pdf = Pdf::loadView('reports.radiography-pdf-comparative', [
-                'period'           => $period,
-                'comparePeriod'    => $comparePeriod,
-                'rows'             => $rows,
-                'scopeLabel'       => $scopeLabel,
-                'reportType'       => $reportType,
-                'currentComposite' => $snapshot['period']['composite'] ?? null,
-                'compareComposite' => $compareSnap['period']['composite'] ?? null,
-            ])->setPaper('letter', 'portrait')->setOption('isPhpEnabled', true);
+            $pdf = Pdf::loadView('reports.radiography-pdf-comparative', $viewData)
+                ->setPaper('letter', 'portrait')->setOption('isPhpEnabled', true);
             $suffix = 'comparativo_' . $comparePeriod->code;
         } elseif ($scope === 'branch') {
             $branchId = (int) ($config['branch_id'] ?? 0);
@@ -229,6 +215,40 @@ class RadiografiaExportService
         $pdf->save($outputPath);
 
         return $outputPath;
+    }
+
+    /**
+     * Datos de un comparativo (mes/bimestre/trimestre vs mes/bimestre/trimestre),
+     * separados de su renderizado — reutilizados tanto por exportPdfWithConfig()
+     * (PDF vía dompdf) como por el "Ver" web de un run comparativo (misma plantilla,
+     * renderizada como página normal), así ambos nunca se desincronizan.
+     */
+    public function comparativeViewData(Period $period, array $config, ?PeriodSummary $summary = null, ?array $snapshot = null): array
+    {
+        $summary  ??= $this->requireSummary($period);
+        $snapshot ??= $this->buildSnapshotCached($period, $summary);
+
+        $reportType = $config['report_type'] ?? 'month_vs_month';
+        $comparePeriodId = (int) ($config['compare_period_id'] ?? 0);
+        if (!$comparePeriodId) {
+            throw new RuntimeException('Se requiere compare_period_id para reportes comparativos.');
+        }
+
+        $comparePeriod  = Period::findOrFail($comparePeriodId);
+        $compareSummary = $this->requireSummary($comparePeriod);
+        $compareSnap    = $this->buildSnapshotCached($comparePeriod, $compareSummary);
+
+        [$rows, $scopeLabel] = $this->buildComparativeRows($snapshot, $compareSnap, $config);
+
+        return [
+            'period'           => $period,
+            'comparePeriod'    => $comparePeriod,
+            'rows'             => $rows,
+            'scopeLabel'       => $scopeLabel,
+            'reportType'       => $reportType,
+            'currentComposite' => $snapshot['period']['composite'] ?? null,
+            'compareComposite' => $compareSnap['period']['composite'] ?? null,
+        ];
     }
 
     /**
@@ -435,10 +455,19 @@ class RadiografiaExportService
                 ['Gastos Totales',               $gastosTotPrev, $gastosTotCurr, 'currency'],
                 ['EBITDA',                       $ingBasePrev - $gastosTotPrev, $ingBaseCurr - $gastosTotCurr, 'currency'],
                 ['Margen EBITDA',                BranchRadiographyCalculator::margenEbitdaFor($cmpRow), BranchRadiographyCalculator::margenEbitdaFor($curRow), 'percent'],
+                ['Préstamos activos (contratos)', (float)($cmpRow['contratos'] ?? 0), (float)($curRow['contratos'] ?? 0), 'integer'],
                 ['IMSS',                         (float)($cmpRow['imss_patronal'] ?? 0), (float)($curRow['imss_patronal'] ?? 0), 'currency'],
             ];
             if ($scope === 'general') {
-                $metricValues[] = ['Rotación %', (float)($compareSnap['sections']['rotation']['indice'] ?? 0), (float)($currentSnap['sections']['rotation']['indice'] ?? 0), 'percent'];
+                $rotCmp = $compareSnap['sections']['rotation'] ?? [];
+                $rotCur = $currentSnap['sections']['rotation'] ?? [];
+                $metricValues[] = ['Percepciones',              (float)($compareSnap['summary']['noi_percepciones'] ?? 0), (float)($currentSnap['summary']['noi_percepciones'] ?? 0), 'currency'];
+                $metricValues[] = ['Deducciones (informativo)', (float)($compareSnap['summary']['noi_deducciones']  ?? 0), (float)($currentSnap['summary']['noi_deducciones']  ?? 0), 'currency'];
+                $metricValues[] = ['Neto pagado a trabajadores', (float)($compareSnap['summary']['noi_neto_pagado'] ?? 0), (float)($currentSnap['summary']['noi_neto_pagado'] ?? 0), 'currency'];
+                $metricValues[] = ['Plantilla',                 (float)($rotCmp['current_count'] ?? $rotCmp['promedio'] ?? 0), (float)($rotCur['current_count'] ?? $rotCur['promedio'] ?? 0), 'integer'];
+                $metricValues[] = ['Altas del periodo',          (float)($rotCmp['altas'] ?? 0), (float)($rotCur['altas'] ?? 0), 'integer'];
+                $metricValues[] = ['Bajas del periodo',          (float)($rotCmp['bajas'] ?? 0), (float)($rotCur['bajas'] ?? 0), 'integer'];
+                $metricValues[] = ['Rotación %',                 (float)($rotCmp['indice'] ?? 0), (float)($rotCur['indice'] ?? 0), 'percent'];
             }
 
             foreach ($metricValues as [$label, $prev, $curr, $fmt]) {

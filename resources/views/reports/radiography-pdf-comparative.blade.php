@@ -31,8 +31,9 @@ table.tbl .b { font-weight: bold; }
 <body>
 
 @php
-$fmt  = fn($v) => number_format((float)$v, 2);
+$fmt  = fn($v) => '$' . number_format((float)$v, 2);
 $fmtp = fn($v) => number_format((float)$v, 2) . '%';
+$fmti = fn($v) => number_format((float)$v, 0);
 $typeLabel = match($reportType) {
     'bimester_vs_bimester' => 'COMPARATIVO BIMESTRE',
     'quarter_vs_quarter'   => 'COMPARATIVO TRIMESTRE',
@@ -71,13 +72,14 @@ $typeLabel = match($reportType) {
         </tr>
     </thead>
     <tbody>
+        @php $rowFmt = fn($v, $f) => $f === 'percent' ? $fmtp($v) : ($f === 'integer' ? $fmti($v) : $fmt($v)); @endphp
         @foreach($rows as $row)
         <tr>
             <td class="b">{{ $row['label'] }}</td>
-            <td class="r">{{ $row['fmt'] === 'percent' ? $fmtp($row['prev']) : $fmt($row['prev']) }}</td>
-            <td class="r">{{ $row['fmt'] === 'percent' ? $fmtp($row['curr']) : $fmt($row['curr']) }}</td>
-            <td class="r">{{ $row['fmt'] === 'percent' ? $fmtp($row['diff']) : $fmt($row['diff']) }}</td>
-            <td class="r {{ $row['var_pct'] > 0 ? 'pos' : ($row['var_pct'] < 0 ? 'negv' : '') }}">{{ number_format($row['var_pct'], 2) }}%</td>
+            <td class="r">{{ $rowFmt($row['prev'], $row['fmt']) }}</td>
+            <td class="r">{{ $rowFmt($row['curr'], $row['fmt']) }}</td>
+            <td class="r">{{ $row['fmt'] === 'percent' ? $rowFmt($row['diff'], $row['fmt']) : ($row['diff'] >= 0 ? '+' : '') . $rowFmt($row['diff'], $row['fmt']) }}</td>
+            <td class="r {{ $row['var_pct'] > 0 ? 'pos' : ($row['var_pct'] < 0 ? 'negv' : '') }}">{{ $row['var_pct'] >= 0 ? '+' : '' }}{{ number_format($row['var_pct'], 2) }}%</td>
         </tr>
         @endforeach
     </tbody>
