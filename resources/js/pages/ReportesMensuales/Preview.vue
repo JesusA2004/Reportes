@@ -177,6 +177,7 @@ type TabKey = 'resumen' | 'sucursales' | 'ingresos' | 'gastos' | 'nomina' | 'mor
 const activeTab = ref<TabKey>('resumen')
 
 const snap   = computed(() => props.snapshot)
+const periodComposite = computed(() => snap.value?.period?.composite ?? null)
 const sum    = computed(() => snap.value?.summary ?? {})
 const charts = computed(() => snap.value?.charts ?? {})
 
@@ -977,6 +978,12 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                     <div>
                         <p class="text-xs font-bold uppercase tracking-widest text-indigo-400">Radiografía Financiera</p>
                         <h1 class="mt-1 text-2xl font-black">{{ period.label }}</h1>
+                        <div v-if="periodComposite" class="mt-1.5 space-y-0.5">
+                            <p class="text-sm font-semibold text-indigo-300">{{ periodComposite.component_range }}</p>
+                            <p class="text-xs text-slate-400">
+                                Periodo: {{ periodComposite.week_range }} · Rango: {{ periodComposite.date_start }} → {{ periodComposite.date_end }}
+                            </p>
+                        </div>
                         <p class="mt-1 text-sm text-slate-400">
                             <span v-if="snap && enConciliacion" class="mr-2 inline-flex items-center gap-1.5 rounded-full bg-amber-400/20 px-2.5 py-0.5 text-xs font-black text-amber-300">
                                 EN CONCILIACIÓN

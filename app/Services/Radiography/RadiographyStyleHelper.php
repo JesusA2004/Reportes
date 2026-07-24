@@ -415,6 +415,61 @@ final class RadiographyStyleHelper
         $sheet->addChart($chart);
     }
 
+    /**
+     * Two-series clustered bar chart — un valor por categoría para "periodo comparado" y
+     * otro para "periodo actual", lado a lado. Usado por el comparativo (mes/bimestre/
+     * trimestre vs vs) para que cada métrica se vea gráficamente, no solo en tabla.
+     *
+     * @param string $categoryRange same-sheet range, e.g. "$A$6:$A$11"
+     * @param string $prevValueRange same-sheet range para el periodo comparado
+     * @param string $currValueRange same-sheet range para el periodo actual
+     */
+    public static function addComparativeBarChart(
+        Worksheet $sheet,
+        string $chartTitle,
+        string $categoryRange,
+        string $prevValueRange,
+        string $currValueRange,
+        string $prevLabel,
+        string $currLabel,
+        int $dataPointCount,
+        string $topLeftCell,
+        string $bottomRightCell
+    ): void {
+        $categoriesRef = self::sheetQualifiedRange($sheet, $categoryRange);
+        $prevRef       = self::sheetQualifiedRange($sheet, $prevValueRange);
+        $currRef       = self::sheetQualifiedRange($sheet, $currValueRange);
+
+        $categories = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, $categoriesRef, null, $dataPointCount);
+
+        $prevValues = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, $prevRef, null, $dataPointCount);
+        $prevValues->setFillColor(self::stripAlpha('FF94A3B8'));
+
+        $currValues = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, $currRef, null, $dataPointCount);
+        $currValues->setFillColor(self::stripAlpha(self::BG_ACCENT));
+
+        $series = new DataSeries(
+            DataSeries::TYPE_BARCHART,
+            DataSeries::GROUPING_CLUSTERED,
+            [0, 1],
+            [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, null, null, 1, [$prevLabel]), new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, null, null, 1, [$currLabel])],
+            [$categories, $categories],
+            [$prevValues, $currValues]
+        );
+        $series->setPlotDirection(DataSeries::DIRECTION_COL);
+
+        $plotArea = new PlotArea(null, [$series]);
+        $legend   = new \PhpOffice\PhpSpreadsheet\Chart\Legend(\PhpOffice\PhpSpreadsheet\Chart\Legend::POSITION_BOTTOM, null, false);
+        $title    = new Title($chartTitle);
+
+        $chart = new Chart(uniqid('chart_', true), $title, $legend, $plotArea);
+        $chart->setTopLeftPosition($topLeftCell);
+        $chart->setBottomRightPosition($bottomRightCell);
+        $chart->getChartAxisY()->setAxisNumberProperties('"$"#,##0', true, false);
+
+        $sheet->addChart($chart);
+    }
+
     private static function stripAlpha(string $argb): string
     {
         return mb_strlen($argb) === 8 ? mb_substr($argb, 2) : $argb;

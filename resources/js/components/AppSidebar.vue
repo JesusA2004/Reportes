@@ -6,6 +6,7 @@ import {
     FolderOpen,
     FileSpreadsheet,
     Settings,
+    BookOpen,
 } from 'lucide-vue-next';
 
 import AppLogo from '@/components/AppLogo.vue';
@@ -44,6 +45,11 @@ const mainNavItems: NavItem[] = [
         title: 'Reportes mensuales',
         href: '/reportes-mensuales',
         icon: FileSpreadsheet,
+    },
+    {
+        title: 'Guía del sistema',
+        href: '/guia-sistema',
+        icon: BookOpen,
     },
     {
         title: 'Configuración',

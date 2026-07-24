@@ -13,8 +13,8 @@ const isRunning = computed(() => props.period?.radiography_running)
 const isSuccess = computed(() => props.period?.radiography_ready)
 
 const statusKey = computed(() => {
-    if (isRunning.value) return 'running'
     if (isSuccess.value) return 'completed'
+    if (isRunning.value) return 'running'
     if (isFailed.value) return 'error'
     return 'pending'
 })
@@ -25,8 +25,8 @@ const publicLog = computed(() => props.period?.radiography_run_log ?? '')
 <template>
     <section class="rounded-[2rem] border border-white/70 bg-white p-6 shadow-xl shadow-slate-200/70">
 
-        <!-- Estado fallido -->
-        <template v-if="isFailed">
+        <!-- Estado fallido — solo si el reporte no quedó listo realmente -->
+        <template v-if="isFailed && !isSuccess">
             <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                 <div class="flex gap-4">
                     <div class="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-red-100 text-red-600">

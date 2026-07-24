@@ -6,6 +6,7 @@ use App\Models\Employee;
 use App\Models\Period;
 use App\Models\PeriodSummary;
 use App\Services\EmployeeNameCanonicalizer;
+use App\Services\Radiography\BranchRadiographyCalculator;
 use App\Services\Radiography\RadiographySnapshotBuilder;
 use App\Services\Radiography\RadiographyWorkbookBuilder;
 use Barryvdh\DomPDF\Facade\Pdf;
@@ -175,11 +176,13 @@ class RadiografiaExportService
             [$rows, $scopeLabel] = $this->buildComparativeRows($snapshot, $compareSnap, $config);
 
             $pdf = Pdf::loadView('reports.radiography-pdf-comparative', [
-                'period'        => $period,
-                'comparePeriod' => $comparePeriod,
-                'rows'          => $rows,
-                'scopeLabel'    => $scopeLabel,
-                'reportType'    => $reportType,
+                'period'           => $period,
+                'comparePeriod'    => $comparePeriod,
+                'rows'             => $rows,
+                'scopeLabel'       => $scopeLabel,
+                'reportType'       => $reportType,
+                'currentComposite' => $snapshot['period']['composite'] ?? null,
+                'compareComposite' => $compareSnap['period']['composite'] ?? null,
             ])->setPaper('letter', 'portrait')->setOption('isPhpEnabled', true);
             $suffix = 'comparativo_' . $comparePeriod->code;
         } elseif ($scope === 'branch') {
@@ -394,18 +397,67 @@ class RadiografiaExportService
             };
         };
 
-        $metrics = [
-            ['Valor cartera',      'cartera',      'currency'],
-            ['Otorgamientos',      'colocacion',   'currency'],
-            ['Recuperación total', 'recuperacion', 'currency'],
-            ['Cartera vencida',    'vencida',      'currency'],
-            ['Gastos totales',     'gastos',       'currency'],
-        ];
+        $rows = [];
+
         if ($scope === 'general' || $scope === 'branch') {
-            $metrics[] = ['Mora %', 'mora', 'percent'];
+            // Misma fuente que RadiographyWorkbookBuilder::buildComparativeFromSnapshots()
+            // sección B — GLOBAL o el registro de esa sucursal en branch_radiography.branches.
+            $rowSource = function (array $snap) use ($scope, $branchName): array {
+                if ($scope === 'branch' && $branchName) {
+                    $brUp = strtoupper(trim($branchName));
+                    return collect($snap['branch_radiography']['branches'] ?? [])
+                        ->first(fn ($b) => strtoupper(trim($b['sucursal'] ?? '')) === $brUp) ?? [];
+                }
+                return $snap['branch_radiography']['global'] ?? [];
+            };
+            $cmpRow = $rowSource($compareSnap);
+            $curRow = $rowSource($currentSnap);
+
+            $moraTotalFor = fn (array $row) => (float)($row['mora_0_30'] ?? 0) + (float)($row['mora_31_60'] ?? 0)
+                + (float)($row['mora_61_90'] ?? 0) + (float)($row['mora_91_120'] ?? 0) + (float)($row['mora_120_plus'] ?? 0);
+            $moraPctFor = fn (array $row) => (float)($row['valor_cartera'] ?? 0) > 0
+                ? round($moraTotalFor($row) / (float)$row['valor_cartera'] * 100, 2) : 0.0;
+
+            $ingBasePrev = BranchRadiographyCalculator::ingresoEbitdaBaseFor($cmpRow);
+            $ingBaseCurr = BranchRadiographyCalculator::ingresoEbitdaBaseFor($curRow);
+            $gastosTotPrev = BranchRadiographyCalculator::gastosTotalesFor($cmpRow);
+            $gastosTotCurr = BranchRadiographyCalculator::gastosTotalesFor($curRow);
+
+            $metricValues = [
+                ['Recuperación',                (float)($cmpRow['recuperacion_total'] ?? 0), (float)($curRow['recuperacion_total'] ?? 0), 'currency'],
+                ['Ingreso base EBITDA',          $ingBasePrev, $ingBaseCurr, 'currency'],
+                ['Colocación',                   (float)($cmpRow['colocacion'] ?? 0), (float)($curRow['colocacion'] ?? 0), 'currency'],
+                ['Valor cartera',                (float)($cmpRow['valor_cartera'] ?? 0), (float)($curRow['valor_cartera'] ?? 0), 'currency'],
+                ['Cartera vencida',              $moraTotalFor($cmpRow), $moraTotalFor($curRow), 'currency'],
+                ['Mora %',                       $moraPctFor($cmpRow), $moraPctFor($curRow), 'percent'],
+                ['OPEX',                         (float)($cmpRow['gastos_operativos'] ?? 0), (float)($curRow['gastos_operativos'] ?? 0), 'currency'],
+                ['Nómina y Capital Humano',      BranchRadiographyCalculator::nominaTotalFor($cmpRow), BranchRadiographyCalculator::nominaTotalFor($curRow), 'currency'],
+                ['Gastos Totales',               $gastosTotPrev, $gastosTotCurr, 'currency'],
+                ['EBITDA',                       $ingBasePrev - $gastosTotPrev, $ingBaseCurr - $gastosTotCurr, 'currency'],
+                ['Margen EBITDA',                BranchRadiographyCalculator::margenEbitdaFor($cmpRow), BranchRadiographyCalculator::margenEbitdaFor($curRow), 'percent'],
+                ['IMSS',                         (float)($cmpRow['imss_patronal'] ?? 0), (float)($curRow['imss_patronal'] ?? 0), 'currency'],
+            ];
+            if ($scope === 'general') {
+                $metricValues[] = ['Rotación %', (float)($compareSnap['sections']['rotation']['indice'] ?? 0), (float)($currentSnap['sections']['rotation']['indice'] ?? 0), 'percent'];
+            }
+
+            foreach ($metricValues as [$label, $prev, $curr, $fmt]) {
+                $diff = $curr - $prev;
+                $varPct = $prev != 0 ? round($diff / abs($prev) * 100, 2) : ($curr != 0 ? 100.0 : 0.0);
+                $rows[] = ['label' => $label, 'prev' => $prev, 'curr' => $curr, 'diff' => $diff, 'var_pct' => $varPct, 'fmt' => $fmt];
+            }
+
+            return [$rows, $scopeLabel];
         }
 
-        $rows = [];
+        // Scope employee: sin desglose de recuperación por gestor, se mantiene simple.
+        $metrics = [
+            ['Recuperación',       'recuperacion', 'currency'],
+            ['Colocación',         'colocacion',   'currency'],
+            ['Valor cartera',      'cartera',      'currency'],
+            ['Cartera vencida',    'vencida',      'currency'],
+            ['Gastos',             'gastos',       'currency'],
+        ];
         foreach ($metrics as [$label, $path, $fmt]) {
             $prev = $get($compareSnap, $path);
             $curr = $get($currentSnap, $path);

@@ -310,6 +310,15 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         &nbsp;&nbsp;·&nbsp;&nbsp;
         <b>Fecha de generación:</b> {{ $snap['generated_at'] }}
     </div>
+    @if(!empty($snap['period']['composite']))
+    <div class="brand-meta" style="margin-top:2px;">
+        <b>{{ $snap['period']['composite']['component_range'] }}</b>
+        &nbsp;&nbsp;·&nbsp;&nbsp;
+        Periodo: {{ $snap['period']['composite']['week_range'] }}
+        &nbsp;&nbsp;·&nbsp;&nbsp;
+        Rango: {{ $snap['period']['composite']['date_start'] }} → {{ $snap['period']['composite']['date_end'] }}
+    </div>
+    @endif
 </div>
 
 <table class="kpi-grid avoid">

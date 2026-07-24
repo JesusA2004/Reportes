@@ -206,8 +206,11 @@ const runError = computed(() => props.period?.radiography_run_error ?? null)
                 </p>
             </div>
 
-            <!-- Error -->
-            <div v-if="isFailed && runError" class="mb-5 rounded-2xl border border-rose-200 bg-rose-50 p-4">
+            <!-- Error — solo si el periodo NO quedó consolidado. Un run puede marcar 'failed'
+                 en un paso posterior (ej. resolver de gastos) mientras el consolidado en sí ya
+                 se generó correctamente (isConsolidated=true); en ese caso no es un error real
+                 para el usuario, el Excel/PDF de abajo ya está disponible y correcto. -->
+            <div v-if="isFailed && runError && !isConsolidated" class="mb-5 rounded-2xl border border-rose-200 bg-rose-50 p-4">
                 <div class="flex items-center gap-2.5">
                     <XCircle class="size-4 shrink-0 text-rose-600" />
                     <p class="text-sm font-bold text-rose-800">La generación falló</p>
@@ -245,10 +248,10 @@ const runError = computed(() => props.period?.radiography_run_error ?? null)
                 v-if="!isRunning"
                 type="button"
                 class="inline-flex h-12 w-full items-center justify-center gap-2 rounded-2xl px-5 text-sm font-black transition focus:outline-none focus:ring-4 disabled:cursor-not-allowed disabled:opacity-40"
-                :class="canConsolidate || isFailed || isCancelled
-                    ? 'bg-violet-600 text-white shadow-lg shadow-violet-200 hover:bg-violet-700 focus:ring-violet-100'
-                    : isConsolidated
-                        ? 'bg-slate-700 text-white shadow-lg shadow-slate-200 hover:bg-slate-800 focus:ring-slate-100'
+                :class="isConsolidated
+                    ? 'bg-slate-700 text-white shadow-lg shadow-slate-200 hover:bg-slate-800 focus:ring-slate-100'
+                    : canConsolidate || isFailed || isCancelled
+                        ? 'bg-violet-600 text-white shadow-lg shadow-violet-200 hover:bg-violet-700 focus:ring-violet-100'
                         : 'bg-slate-200 text-slate-400'"
                 :disabled="!canConsolidate && !isFailed && !isCancelled && !isConsolidated"
                 @click="emit('generate')"

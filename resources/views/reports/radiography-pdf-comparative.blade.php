@@ -50,6 +50,13 @@ $typeLabel = match($reportType) {
         &nbsp;&nbsp;·&nbsp;&nbsp;
         <b>Periodo actual:</b> {{ $period->label }}
     </div>
+    @if(!empty($compareComposite) || !empty($currentComposite))
+    <div class="brand-meta" style="margin-top:2px;">
+        @if(!empty($compareComposite)){{ $compareComposite['component_range'] }}@else{{ $comparePeriod->label }}@endif
+        &nbsp;vs&nbsp;
+        @if(!empty($currentComposite)){{ $currentComposite['component_range'] }}@else{{ $period->label }}@endif
+    </div>
+    @endif
 </div>
 
 <div class="section-bar">Comparativo de métricas</div>

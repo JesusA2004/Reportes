@@ -8,6 +8,7 @@ use App\Http\Controllers\EmployeeBranchAssignmentController;
 use App\Http\Controllers\EmployeeController;
 use App\Http\Controllers\ValidationController;
 use App\Http\Controllers\MonthlyReportController;
+use App\Http\Controllers\SystemGuideController;
 
 Route::redirect('/', '/login');
 
@@ -74,6 +75,13 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->name('validaciones.')
         ->group(function () {
             Route::get('/', [ValidationController::class, 'index'])->name('index');
+        });
+
+    Route::prefix('guia-sistema')
+        ->name('guia-sistema.')
+        ->group(function () {
+            Route::get('/', [SystemGuideController::class, 'index'])->name('index');
+            Route::get('/pdf', [SystemGuideController::class, 'pdf'])->name('pdf');
         });
 
     Route::prefix('reportes-mensuales')

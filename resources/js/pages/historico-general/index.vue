@@ -162,7 +162,11 @@ watch(() => period.value?.radiography_run_status, (newStatus, oldStatus) => {
     const wasRunning = ['queued', 'running'].includes(String(oldStatus ?? ''))
     if (!wasRunning) return
 
-    if (newStatus === 'success') {
+    if (newStatus === 'success' || (newStatus === 'failed' && period.value?.radiography_ready)) {
+        // El run más reciente puede marcar 'failed' (ej. un paso posterior a la
+        // consolidación, como el resolver de gastos) mientras el reporte en sí ya
+        // quedó generado correctamente (radiography_ready=true). En ese caso el
+        // resultado real es éxito — mostrar error aquí sería un falso negativo.
         Swal.fire({
             title: '¡Reporte generado!',
             html: `El reporte del periodo <strong>${period.value?.label ?? ''}</strong> ya está listo.<br><br>Descarga Excel y PDF desde el paso de reporte o en Reportes mensuales.`,
