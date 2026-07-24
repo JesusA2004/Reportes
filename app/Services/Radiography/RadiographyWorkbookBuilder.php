@@ -344,7 +344,7 @@ class RadiographyWorkbookBuilder
         $kpiPairs = [
             ['Valor cartera global', $carteraTotal, 'currency', 'Recuperación total (informativo)', $recTotal,   'currency'],
             ['Otorgamientos',        $colTotal,     'currency', 'Mora total',                  $moraTotal,  'currency'],
-            ['Ingreso base EBITDA',  $ingresoEbitdaBase, 'currency', 'Gastos Totales',          $gastosTotal,'currency'],
+            ['Utilidad bruta',       $ingresoEbitdaBase, 'currency', 'Gastos Totales',          $gastosTotal,'currency'],
             ['Nómina y Capital Humano', $nomTotal,  'currency', 'EBITDA', $utilidad,   'currency'],
             [
                 'Percepciones', (float) ($snap['summary']['noi_percepciones'] ?? 0), 'currency',
@@ -464,7 +464,7 @@ class RadiographyWorkbookBuilder
         $dashRow++;
         $ebitdaLabelStart = $dashRow;
         foreach ([
-            ['Ingreso base EBITDA', $ingresoEbitdaBase],
+            ['Utilidad bruta',      $ingresoEbitdaBase],
             ['Gastos Totales',      $gastosTotal],
             ['EBITDA',              $utilidad],
         ] as [$eLabel, $eVal]) {
@@ -571,7 +571,7 @@ class RadiographyWorkbookBuilder
 
         // ── Gráficas EBITDA / Gastos / Nómina / OPEX (criterio final 2026-07) ──
         RadiographyStyleHelper::addBarChart(
-            $sheet, 'EBITDA — Ingreso base vs Gastos Totales',
+            $sheet, 'EBITDA — Utilidad bruta vs Gastos Totales',
             "N{$ebitdaLabelStart}:N{$ebitdaLabelEnd}",
             "O{$ebitdaLabelStart}:O{$ebitdaLabelEnd}",
             $ebitdaLabelEnd - $ebitdaLabelStart + 1, 'P34', 'V50',
@@ -923,7 +923,7 @@ class RadiographyWorkbookBuilder
         RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '7. EBITDA');
         $r++;
         $r = $writeRows($r, [
-            ['Ingreso base EBITDA',                        $ingresoEbitdaBase, 'currency', ''],
+            ['Utilidad bruta',                              $ingresoEbitdaBase, 'currency', ''],
             ['  Intereses',                                $ingrInteres,   'currency', ''],
             ['  Impuestos',                                $ingrImpuesto,  'currency', ''],
             ['  Moratorios / Multas',                      $ingrCharges,   'currency', ''],
@@ -2424,7 +2424,7 @@ class RadiographyWorkbookBuilder
             $this->sectionHeader($sheet, "A{$r}:C{$r}", '7. EBITDA');
             $r++;
             foreach ([
-                ['Ingreso base EBITDA',                       $brIngresoEbitdaBase, 'currency'],
+                ['Utilidad bruta',                             $brIngresoEbitdaBase, 'currency'],
                 ['Menos: Gastos Totales',                     $brGastosTotal, 'currency'],
                 ['  Gastos operativos (OPEX)',                $gopTotal,      'currency'],
                 ['  Nómina y Capital Humano',                  $brNomTotal,    'currency'],
@@ -4065,7 +4065,7 @@ class RadiographyWorkbookBuilder
 
         $this->sheetTitle($sheet, 'A1:F1', 'ÍNDICE DE ROTACIÓN DE PERSONAL — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
-        $fuenteRotacion = 'Rotación calculada automáticamente desde NOI Nómina + NOI Nómina Fiscal.';
+        $fuenteRotacion = 'Fuente: NOI';
         $sheet->setCellValue('C2', $fuenteRotacion);
         $sheet->getStyle('C2')->getFont()->setItalic(true)->setSize(8.5)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
 
@@ -4591,7 +4591,7 @@ class RadiographyWorkbookBuilder
         // EBITDA = Ingreso base EBITDA − Gastos Totales (criterio final 2026-07).
         $this->sectionHeader($sheet, "A{$r}:D{$r}", '7. EBITDA'); $r++;
         foreach ([
-            ['Ingreso base EBITDA',          $ingresoEbitdaBaseBW, 'currency'],
+            ['Utilidad bruta',                $ingresoEbitdaBaseBW, 'currency'],
             ['Menos: Gastos Totales',        $bwGastosTotal, 'currency'],
             ['  Gastos operativos (OPEX)',   $gopTotalCanonico, 'currency'],
             ['  Nómina y Capital Humano',    $nomTotalBW,    'currency'],
@@ -5265,7 +5265,7 @@ class RadiographyWorkbookBuilder
         $ingBaseCurr = $ingBase($currentSnap);
         $gastosTotPrev = $gastosTot($compareSnap);
         $gastosTotCurr = $gastosTot($currentSnap);
-        $writeComp($r, 'Ingreso base EBITDA', $ingBasePrev, $ingBaseCurr, 'currency', true);
+        $writeComp($r, 'Utilidad bruta', $ingBasePrev, $ingBaseCurr, 'currency', true);
         $writeComp($r, 'Gastos Totales',      $gastosTotPrev, $gastosTotCurr, 'currency', false);
         $utilPrev = $ingBasePrev - $gastosTotPrev;
         $utilCurr = $ingBaseCurr - $gastosTotCurr;

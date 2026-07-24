@@ -639,6 +639,15 @@ const rotacionPromedio    = computed(() => Number(rotacionData.value?.promedio) 
 const rotacionIndice      = computed(() => Number(rotacionData.value?.indice) || 0)
 const rotacionPorSucursal = computed(() => (rotacionData.value?.por_sucursal ?? []) as any[])
 
+const rotacionDetalle        = computed(() => snap.value?.sections?.rotation_detail ?? null)
+const rotacionAltasLista     = computed(() => (rotacionDetalle.value?.altas ?? []) as any[])
+const rotacionBajasLista     = computed(() => (rotacionDetalle.value?.bajas ?? []) as any[])
+const rotacionMesActualLista   = computed(() => (rotacionDetalle.value?.empleados_mes_actual ?? []) as any[])
+const rotacionMesAnteriorLista = computed(() => (rotacionDetalle.value?.empleados_mes_anterior ?? []) as any[])
+const rotacionMesActualLabel   = computed(() => rotacionDetalle.value?.mes_actual ?? '')
+const rotacionMesAnteriorLabel = computed(() => rotacionDetalle.value?.mes_anterior ?? 'periodo anterior')
+const rotacionAuditoriaAbierta = ref(false)
+
 // ════════════════════════════════════════════════════════════════════════════
 // FILTROS DE VISTA EN VIVO — sucursal / producto / mora / gestor / categoría
 // ════════════════════════════════════════════════════════════════════════════
@@ -832,7 +841,7 @@ const moraBucketOptions = computed(() => donutOptions(
 
 // ── Gráficas EBITDA / Gastos / Nómina / Recuperación (criterio final 2026-07) ────
 const ebitdaCompSeries = computed(() => [{ name: 'Monto', data: [ingresoEbitdaBaseGlobal.value, gastosEbitdaTotal.value, utilidadGlobal.value] }])
-const ebitdaCompOptions = computed(() => columnOptions(['Ingreso base EBITDA', 'Gastos Totales', 'EBITDA'], [chartColors.teal]))
+const ebitdaCompOptions = computed(() => columnOptions(['Utilidad bruta', 'Gastos Totales', 'EBITDA'], [chartColors.teal]))
 
 const gastosCompSeries = computed(() => [{ name: 'Monto', data: [brGlobalGastosTotal.value, nomTotal.value, gastosEbitdaTotal.value] }])
 const gastosCompOptions = computed(() => columnOptions(['OPEX', 'Nómina y Capital Humano', 'Gastos Totales'], [chartColors.amber]))
@@ -1327,7 +1336,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                             <div class="border-b bg-indigo-50 px-5 py-3"><h3 class="text-xs font-black uppercase tracking-wider text-indigo-700">EBITDA — desglose</h3></div>
                             <table class="w-full text-sm">
                                 <tbody>
-                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Ingreso base EBITDA</td><td class="px-5 py-2 text-right font-black text-emerald-700">{{ money(ingresoEbitdaBaseGlobal) }}</td></tr>
+                                    <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Utilidad bruta</td><td class="px-5 py-2 text-right font-black text-emerald-700">{{ money(ingresoEbitdaBaseGlobal) }}</td></tr>
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 text-slate-600 font-medium">− Gastos Totales</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(gastosEbitdaTotal) }}</td></tr>
                                     <tr class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">OPEX</td><td class="px-5 py-2 text-right text-xs text-slate-700">{{ money(brGlobalGastosTotal) }}</td></tr>
                                     <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">Nómina y Capital Humano</td><td class="px-5 py-2 text-right text-xs text-slate-700">{{ money(nomTotal) }}</td></tr>
@@ -1341,7 +1350,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
 
                     <!-- ── GRÁFICAS EBITDA / GASTOS / NÓMINA / RECUPERACIÓN ─────────── -->
                     <div class="grid gap-4 lg:grid-cols-2">
-                        <ChartCard title="EBITDA — Ingreso base vs Gastos Totales" :series="ebitdaCompSeries" :options="ebitdaCompOptions" type="bar" :height="260" />
+                        <ChartCard title="EBITDA — Utilidad bruta vs Gastos Totales" :series="ebitdaCompSeries" :options="ebitdaCompOptions" type="bar" :height="260" />
                         <ChartCard title="Gastos — OPEX vs Nómina vs Total" :series="gastosCompSeries" :options="gastosCompOptions" type="bar" :height="260" />
                     </div>
                     <div class="grid gap-4 lg:grid-cols-2">
@@ -1984,8 +1993,9 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                 <!-- ══════════ ROTACIÓN DE PERSONAL ══════════ -->
                 <div v-show="activeTab === 'rotacion'" class="space-y-5">
                     <template v-if="rotacionData">
-                        <div class="rounded-xl bg-indigo-50 border border-indigo-100 px-4 py-2.5 text-xs text-indigo-700">
-                            Rotación calculada automáticamente desde NOI Nómina + NOI Nómina Fiscal.
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-lg font-bold text-slate-800">Rotación de personal</h3>
+                            <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500" title="Calculado desde NOI Nómina y NOI Nómina Fiscal">Fuente: NOI</span>
                         </div>
                         <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
                             <KpiCard label="Altas del periodo" :value="num(rotacionAltas)" :icon="TrendingUp" tone="green" />
@@ -2021,8 +2031,91 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                             </table>
                         </div>
                         <p v-else class="text-sm text-slate-500 italic text-center py-4">Sin desglose por sucursal disponible para este periodo.</p>
+
+                        <div v-if="rotacionDetalle" class="rounded-2xl border bg-white shadow-sm">
+                            <button
+                                type="button"
+                                class="flex w-full items-center justify-between px-5 py-3.5"
+                                @click="rotacionAuditoriaAbierta = !rotacionAuditoriaAbierta"
+                            >
+                                <span class="font-bold text-sm text-slate-700">Auditoría de rotación</span>
+                                <ChevronDown v-if="!rotacionAuditoriaAbierta" class="size-4 text-slate-400" />
+                                <ChevronUp v-else class="size-4 text-slate-400" />
+                            </button>
+                            <div v-show="rotacionAuditoriaAbierta" class="border-t px-5 py-4 space-y-5">
+                                <div class="grid gap-4 md:grid-cols-2">
+                                    <div>
+                                        <p class="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+                                            Altas ({{ rotacionAltasLista.length }})
+                                        </p>
+                                        <div class="max-h-64 overflow-y-auto rounded-xl border">
+                                            <table class="w-full text-xs">
+                                                <tbody>
+                                                    <tr v-for="(e, i) in rotacionAltasLista" :key="'alta-'+i" class="border-t first:border-t-0" :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'">
+                                                        <td class="px-3 py-1.5 font-medium text-emerald-700">{{ e.nombre }}</td>
+                                                        <td class="px-3 py-1.5 text-right text-slate-500">{{ e.sucursal }}</td>
+                                                    </tr>
+                                                    <tr v-if="!rotacionAltasLista.length"><td class="px-3 py-3 text-center text-slate-400 italic">Sin altas en el periodo</td></tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <p class="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+                                            Bajas ({{ rotacionBajasLista.length }})
+                                        </p>
+                                        <div class="max-h-64 overflow-y-auto rounded-xl border">
+                                            <table class="w-full text-xs">
+                                                <tbody>
+                                                    <tr v-for="(e, i) in rotacionBajasLista" :key="'baja-'+i" class="border-t first:border-t-0" :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'">
+                                                        <td class="px-3 py-1.5 font-medium text-red-700">{{ e.nombre }}</td>
+                                                        <td class="px-3 py-1.5 text-right text-slate-500">{{ e.sucursal }}</td>
+                                                    </tr>
+                                                    <tr v-if="!rotacionBajasLista.length"><td class="px-3 py-3 text-center text-slate-400 italic">Sin bajas en el periodo</td></tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="grid gap-4 md:grid-cols-2">
+                                    <div>
+                                        <p class="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+                                            Plantilla {{ rotacionMesAnteriorLabel }} ({{ rotacionMesAnteriorLista.length }})
+                                        </p>
+                                        <div class="max-h-64 overflow-y-auto rounded-xl border">
+                                            <table class="w-full text-xs">
+                                                <tbody>
+                                                    <tr v-for="(e, i) in rotacionMesAnteriorLista" :key="'prev-'+i" class="border-t first:border-t-0" :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'">
+                                                        <td class="px-3 py-1.5">{{ e.nombre }}</td>
+                                                        <td class="px-3 py-1.5 text-right text-slate-500">{{ e.sucursal }}</td>
+                                                    </tr>
+                                                    <tr v-if="!rotacionMesAnteriorLista.length"><td class="px-3 py-3 text-center text-slate-400 italic">Sin datos del periodo anterior</td></tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <p class="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+                                            Plantilla {{ rotacionMesActualLabel }} ({{ rotacionMesActualLista.length }})
+                                        </p>
+                                        <div class="max-h-64 overflow-y-auto rounded-xl border">
+                                            <table class="w-full text-xs">
+                                                <tbody>
+                                                    <tr v-for="(e, i) in rotacionMesActualLista" :key="'curr-'+i" class="border-t first:border-t-0" :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'">
+                                                        <td class="px-3 py-1.5">{{ e.nombre }}</td>
+                                                        <td class="px-3 py-1.5 text-right text-slate-500">{{ e.sucursal }}</td>
+                                                    </tr>
+                                                    <tr v-if="!rotacionMesActualLista.length"><td class="px-3 py-3 text-center text-slate-400 italic">Sin datos del periodo actual</td></tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                                <p class="text-xs text-slate-400">Fuente: NOI Nómina + NOI Nómina Fiscal.</p>
+                            </div>
+                        </div>
                     </template>
-                    <EmptyState v-else title="Sin datos de rotación" description="No hay NOI Nómina procesado para este periodo — la rotación se calcula automáticamente al actualizar la base de datos." />
+                    <EmptyState v-else title="Sin datos de rotación" description="Aún no hay información de rotación para este periodo." />
                 </div>
 
                 <!-- ══════════ CATEGORÍA EBITDA ══════════ -->
@@ -2059,7 +2152,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                 </tbody>
                             </table>
                         </div>
-                        <p class="text-xs italic text-slate-400">EBITDA = Ingreso base EBITDA (intereses + impuestos + moratorios + comisión por apertura + cargos adicionales + excedentes + 30% Seguro CRECE) − Gastos Totales (OPEX + Nómina y Capital Humano). No incluye capital recuperado.</p>
+                        <p class="text-xs italic text-slate-400">EBITDA = Utilidad bruta (intereses + impuestos + moratorios + comisión por apertura + cargos adicionales + excedentes + 30% Seguro CRECE) − Gastos Totales (OPEX + Nómina y Capital Humano). No incluye capital recuperado.</p>
                     </template>
                     <EmptyState v-else title="Sin datos para calcular categoría EBITDA" />
                 </div>

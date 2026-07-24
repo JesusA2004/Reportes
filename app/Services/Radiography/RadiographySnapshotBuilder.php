@@ -2715,10 +2715,11 @@ class RadiographySnapshotBuilder
         ])->values()->all();
 
         $activos = $activeRows->map(fn ($r) => [
-            'sucursal' => $r->branch_name ?: 'SIN SUCURSAL',
-            'clave'    => $r->employee_code ?: '—',
-            'nombre'   => $r->nombre_original,
-            'fuente'   => $sourceLabel($r->source),
+            'sucursal'      => $r->branch_name ?: 'SIN SUCURSAL',
+            'clave'         => $r->employee_code ?: '—',
+            'nombre'        => $r->nombre_original,
+            'fuente'        => $sourceLabel($r->source),
+            'movement_type' => $r->movement_type,
         ])->values()->all();
 
         $sinSucursal = $activeRows->whereNull('branch_id')->map(fn ($r) => [
@@ -2728,11 +2729,31 @@ class RadiographySnapshotBuilder
             'motivo' => 'Sin sucursal resuelta en employee_branch_assignments (ni periodo actual ni histórico)',
         ])->values()->all();
 
+        // Lista del periodo anterior reconstruida a partir del roster actual: los que
+        // siguen activos (movement_type='activo') más los que causaron baja. Evita una
+        // consulta aparte — el periodo anterior ya no tiene por qué seguir en BD igual.
+        $mesAnteriorLista = array_values(array_filter($activos, fn ($r) => $r['movement_type'] === 'activo'));
+        foreach ($bajas as $b) {
+            $mesAnteriorLista[] = [
+                'sucursal' => $b['sucursal'],
+                'clave'    => $b['clave'],
+                'nombre'   => $b['nombre'],
+                'fuente'   => '—',
+            ];
+        }
+        usort($mesAnteriorLista, fn ($a, $b) => strcmp($a['nombre'], $b['nombre']));
+
+        $prevPeriod = $period->previousMonthly(Period::all());
+
         return [
-            'altas'         => $altas,
-            'bajas'         => $bajas,
-            'activos'       => $activos,
-            'sin_sucursal'  => $sinSucursal,
+            'altas'            => $altas,
+            'bajas'            => $bajas,
+            'activos'          => $activos,
+            'sin_sucursal'     => $sinSucursal,
+            'mes_actual'       => strtoupper($period->label),
+            'mes_anterior'     => $prevPeriod ? strtoupper($prevPeriod->label) : null,
+            'empleados_mes_actual'   => $activos,
+            'empleados_mes_anterior' => $mesAnteriorLista,
         ];
     }
 

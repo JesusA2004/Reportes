@@ -314,7 +314,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
 
 <table class="kpi-grid avoid">
     <tr>
-        <td class="kpi"><div class="kpi-label">Ingreso base EBITDA</div><div class="kpi-value">{{ $fmt0($ingresoEbitdaBase) }}</div></td>
+        <td class="kpi"><div class="kpi-label">Utilidad bruta</div><div class="kpi-value">{{ $fmt0($ingresoEbitdaBase) }}</div></td>
         <td class="kpi"><div class="kpi-label">Gastos Totales</div><div class="kpi-value">{{ $fmt0($gastosTotal) }}</div></td>
         <td class="kpi"><div class="kpi-label">EBITDA</div><div class="kpi-value @if($utilidad < 0) neg @endif">{{ $fmt0($utilidad) }}</div></td>
         <td class="kpi"><div class="kpi-label">Margen EBITDA</div><div class="kpi-value @if($margenEbitda < 0) neg @endif">{{ $fmtp($margenEbitda) }}</div></td>
@@ -339,7 +339,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
             <div style="font-size:7.8pt; line-height:1.55; color:#334155;">
                 La cartera total del periodo es de <b>{{ $fmt0($cartera) }}</b>, con una cartera vencida de
                 <b>{{ $fmt0($moraTotal) }}</b> ({{ $fmtp($moraPct) }} de la cartera).
-                El ingreso base EBITDA (intereses, impuestos, moratorios, comisión por apertura,
+                La utilidad bruta (intereses, impuestos, moratorios, comisión por apertura,
                 cargos adicionales, excedentes y 30% de Seguro CRECE — sin capital recuperado) fue de
                 <b>{{ $fmt0($ingresoEbitdaBase) }}</b>.
                 Considerando gastos operativos / OPEX (<b>{{ $fmt0($gastosOpTotal) }}</b>) y Nómina y
@@ -367,7 +367,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
     <thead>
         <tr>
             <th>Sucursal</th>
-            <th class="r">Ingreso base EBITDA</th>
+            <th class="r">Utilidad bruta</th>
             <th class="r">OPEX</th>
             <th class="r">Nómina</th>
             <th class="r">EBITDA</th>
@@ -387,7 +387,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         @endforeach
     </tbody>
 </table>
-<div class="note">EBITDA = Ingreso base EBITDA (intereses + impuestos + moratorios + comisión por apertura + cargos adicionales + excedentes + 30% Seguro CRECE) − Gastos Totales (OPEX + Nómina y Capital Humano) por sucursal. No incluye capital recuperado. Categorías: Diamante ≥$1M / Máster ≥$600K / Sénior ≥$300K / Júnior ≥$100K / Mantenido &lt;$100K.</div>
+<div class="note">EBITDA = Utilidad bruta (intereses + impuestos + moratorios + comisión por apertura + cargos adicionales + excedentes + 30% Seguro CRECE) − Gastos Totales (OPEX + Nómina y Capital Humano) por sucursal. No incluye capital recuperado. Categorías: Diamante ≥$1M / Máster ≥$600K / Sénior ≥$300K / Júnior ≥$100K / Mantenido &lt;$100K.</div>
 @endif
 
 <!-- ═══════════════════════════════════════════════════════════════════════
