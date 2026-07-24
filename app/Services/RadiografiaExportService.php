@@ -115,8 +115,18 @@ class RadiografiaExportService
             $comparePeriod = Period::findOrFail($comparePeriodId);
             $compareSummary = $this->requireSummary($comparePeriod);
             $compareSnap    = $this->buildSnapshotCached($comparePeriod, $compareSummary);
-            $spreadsheet    = $this->workbookBuilder->buildComparativeFromSnapshots($period, $snapshot, $comparePeriod, $compareSnap, $config);
-            $suffix         = 'comparativo_' . $comparePeriod->code . '_vs_' . ($period->code ?: $period->id);
+
+            // General: el comparativo es EL MISMO libro que el reporte simple (mismas
+            // pestañas, secciones y gráficas), con columnas de comparación en cada
+            // tabla — no una hoja ejecutiva aparte. Por sucursal/gestor sigue usando
+            // el comparativo ejecutivo (una sola hoja) mientras se extiende con el
+            // mismo criterio.
+            if ($scope === 'general') {
+                $spreadsheet = $this->workbookBuilder->buildFromSnapshot($period, $summary, $snapshot, $comparePeriod, $compareSnap);
+            } else {
+                $spreadsheet = $this->workbookBuilder->buildComparativeFromSnapshots($period, $snapshot, $comparePeriod, $compareSnap, $config);
+            }
+            $suffix = 'comparativo_' . $comparePeriod->code . '_vs_' . ($period->code ?: $period->id);
         } elseif ($scope === 'branch') {
             $branchId = (int) ($config['branch_id'] ?? 0);
             if (!$branchId) {

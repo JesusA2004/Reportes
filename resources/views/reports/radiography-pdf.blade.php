@@ -884,11 +884,11 @@ $rotPorSucursal = $rot['por_sucursal'] ?? [];
 <div class="note">Sin datos de rotación disponibles para este periodo.</div>
 @endif
 
-<div class="section-bar alt">Altas del periodo ({{ count($rotDetail['altas'] ?? []) }})</div>
+<div class="section-bar alt">Altas ({{ count($rotDetail['altas'] ?? []) }})</div>
 @if(!empty($rotDetail['altas']))
 <table class="tbl">
     <thead>
-        <tr><th>Sucursal</th><th>Clave</th><th>Nombre</th><th>Motivo</th></tr>
+        <tr><th>Sucursal</th><th>Clave</th><th>Colaborador</th></tr>
     </thead>
     <tbody>
         @foreach($rotDetail['altas'] as $a)
@@ -896,20 +896,19 @@ $rotPorSucursal = $rot['por_sucursal'] ?? [];
             <td>{{ $a['sucursal'] ?? '' }}</td>
             <td>{{ $a['clave'] ?? '—' }}</td>
             <td>{{ $a['nombre'] ?? '' }}</td>
-            <td>{{ $a['motivo'] ?? 'No aparece el mes anterior y aparece este mes.' }}</td>
         </tr>
         @endforeach
     </tbody>
 </table>
 @else
-<div class="note">Sin altas detectadas en este periodo.</div>
+<div class="note">Sin altas en este periodo.</div>
 @endif
 
-<div class="section-bar alt">Bajas del periodo ({{ count($rotDetail['bajas'] ?? []) }})</div>
+<div class="section-bar alt">Bajas ({{ count($rotDetail['bajas'] ?? []) }})</div>
 @if(!empty($rotDetail['bajas']))
 <table class="tbl">
     <thead>
-        <tr><th>Sucursal anterior</th><th>Clave</th><th>Nombre</th><th>Motivo</th></tr>
+        <tr><th>Sucursal</th><th>Clave</th><th>Colaborador</th></tr>
     </thead>
     <tbody>
         @foreach($rotDetail['bajas'] as $b)
@@ -917,13 +916,12 @@ $rotPorSucursal = $rot['por_sucursal'] ?? [];
             <td>{{ $b['sucursal'] ?? '' }}</td>
             <td>{{ $b['clave'] ?? '—' }}</td>
             <td>{{ $b['nombre'] ?? '' }}</td>
-            <td>{{ $b['motivo'] ?? 'Aparece el mes anterior y no aparece este mes.' }}</td>
         </tr>
         @endforeach
     </tbody>
 </table>
 @else
-<div class="note">Sin bajas detectadas en este periodo.</div>
+<div class="note">Sin bajas en este periodo.</div>
 @endif
 
 <!-- ═══ Pie de página repetido + numeración (canvas nativo de DomPDF) ════════ -->

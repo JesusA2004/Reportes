@@ -45,11 +45,28 @@ class RadiographyWorkbookBuilder
     // The total "Nómina y Capital Humano" = SUM of all configured concepts, not a net figure.
     private const NOI_DEDUCTION_LABELS = [];
 
-    public function buildFromSnapshot(Period $period, PeriodSummary $summary, array $snap): Spreadsheet
-    {
+    /**
+     * Construye el libro completo. Cuando $comparePeriod/$compareSnap vienen dados
+     * (comparativo mes/bimestre/trimestre vs vs), CADA hoja conserva su mismo
+     * nombre, orden, secciones y gráficas — solo cambia cada columna de valor
+     * único por 4 columnas (mes comparado | mes actual | diferencia | variación %).
+     * Nunca se genera una hoja "resumen ejecutivo" aparte: el comparativo ES el
+     * mismo libro, con comparación.
+     */
+    public function buildFromSnapshot(
+        Period $period,
+        PeriodSummary $summary,
+        array $snap,
+        ?Period $comparePeriod = null,
+        ?array $compareSnap = null
+    ): Spreadsheet {
         $spreadsheet = new Spreadsheet();
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
+        $title = $isComparative
+            ? 'Radiografía Comparativa ' . $comparePeriod->label . ' vs ' . $period->label
+            : 'Radiografía ' . $period->label;
         $spreadsheet->getProperties()
-            ->setTitle('Radiografía ' . $period->label)
+            ->setTitle($title)
             ->setCreator('Sistema de Reportes')
             ->setSubject('Radiografía Financiera')
             ->setDescription('Generado automáticamente — sin plantilla');
@@ -90,7 +107,7 @@ class RadiographyWorkbookBuilder
 
         foreach ($sheetBuilders as [$method, $label]) {
             try {
-                $this->$method($spreadsheet, $period, $snap);
+                $this->$method($spreadsheet, $period, $snap, $comparePeriod, $compareSnap);
             } catch (\Throwable $e) {
                 report($e);
                 if ($label !== null) {
@@ -135,8 +152,188 @@ class RadiographyWorkbookBuilder
 
     // ── HOJA 1: GLOBAL — índice ejecutivo principal del reporte ─────────────
 
-    private function buildGlobalSheet(Spreadsheet $ss, Period $period, array $snap): void
+    /**
+     * Recalcula el mismo bloque de métricas GLOBAL que buildGlobalSheet ya
+     * computa para $snap, pero para CUALQUIER snapshot dado (el del periodo
+     * comparado). Misma fórmula exacta, copiada literal — nunca se toca el
+     * cálculo original usado por el reporte simple, solo se reutiliza para
+     * poder comparar Mayo vs Junio con las mismas reglas.
+     */
+    private function extractGlobalCoreMetrics(array $snap): array
     {
+        $sum     = $snap['summary'];
+        $pay     = $snap['sections']['payroll'];
+        $buckets = $snap['sections']['portfolio_buckets'] ?? [];
+        $loans   = $snap['sections']['interbranch_loans'] ?? [];
+        $funding = $snap['sections']['corporate_funding'] ?? [];
+
+        $brCalcGlobal = $snap['branch_radiography']['global'] ?? null;
+        $branchesList = $snap['branch_radiography']['branches'] ?? [];
+
+        $carteraTotal = $brCalcGlobal ? (float)$brCalcGlobal['valor_cartera'] : (float)$sum['portfolio_total'];
+        $recTotal     = $brCalcGlobal ? (float)$brCalcGlobal['recuperacion_total'] : (float)$sum['recovery_total'];
+        $colTotal     = $brCalcGlobal ? (float)$brCalcGlobal['colocacion'] : (float)$sum['placement_total'];
+        $excedentes   = $brCalcGlobal ? (float)$brCalcGlobal['excedentes'] : (float)($funding['total'] ?? 0);
+
+        if ($brCalcGlobal) {
+            $mora0_30   = (float)$brCalcGlobal['mora_0_30'];
+            $mora31_60  = (float)$brCalcGlobal['mora_31_60'];
+            $mora61_90  = (float)$brCalcGlobal['mora_61_90'];
+            $mora91_120 = (float)$brCalcGlobal['mora_91_120'];
+            $mora120p   = (float)$brCalcGlobal['mora_120_plus'];
+        } else {
+            $bucket = fn (string $label) => collect($buckets)->firstWhere('label', $label);
+            $mora0_30   = (float)($bucket('Mora 1-30')['vencida']   ?? 0);
+            $mora31_60  = (float)($bucket('Mora 31-60')['vencida']  ?? 0);
+            $mora61_90  = (float)($bucket('Mora 61-90')['vencida']  ?? 0);
+            $mora91_120 = (float)($bucket('Mora 91-120')['vencida'] ?? 0);
+            $mora120p   = 0.0;
+        }
+        $moraTotal = $mora0_30 + $mora31_60 + $mora61_90 + $mora91_120 + $mora120p;
+        $moraPct   = $carteraTotal > 0 ? round($moraTotal / $carteraTotal * 100, 2) : 0.0;
+
+        $ingrSavehearts  = $brCalcGlobal ? (float)$brCalcGlobal['seguro_savehearts_bruto']  : 0.0;
+        $ingrComadres    = $brCalcGlobal ? (float)$brCalcGlobal['seguro_comadres_bruto']    : 0.0;
+        $ingrCrece       = $brCalcGlobal ? (float)$brCalcGlobal['seguro_crece_bruto']       : (float)($sum['recovery_crece_bruto']      ?? 0.0);
+        $ingrCrece30     = $brCalcGlobal ? (float)$brCalcGlobal['seguro_crece_reconocido']  : (float)($sum['recovery_crece_reconocido'] ?? 0.0);
+        $ingrCrece70     = max(0.0, $ingrCrece - $ingrCrece30);
+        $ingrCanalizadoAseguradora = $ingrSavehearts + $ingrComadres + $ingrCrece70;
+        $ingrTotal       = $recTotal;
+        $ingrCapital     = $brCalcGlobal ? (float)$brCalcGlobal['capital_recuperado']   : 0.0;
+        $ingrInteres     = $brCalcGlobal ? (float)$brCalcGlobal['interes_recuperado']   : 0.0;
+        $ingrImpuesto    = $brCalcGlobal ? (float)$brCalcGlobal['impuesto_recuperado']  : 0.0;
+        $ingrCharges     = $brCalcGlobal ? (float)$brCalcGlobal['charges']              : 0.0;
+        $ingrCargosIni   = $brCalcGlobal ? (float)$brCalcGlobal['cargos_inicio']        : 0.0;
+        $ingrComAper     = $brCalcGlobal ? (float)$brCalcGlobal['comision_apertura']    : 0.0;
+        $ingrCargosAdic  = $brCalcGlobal ? (float)$brCalcGlobal['cargos_adicionales']   : 0.0;
+        $ingrExcedRec    = $brCalcGlobal ? (float)$brCalcGlobal['excedente_recuperado'] : 0.0;
+        $ingrOtrosDet    = (array)($brCalcGlobal['otros_detalle'] ?? []);
+        $ingrItemsComp = [
+            ['Capital recuperado',     $ingrCapital,    'currency'],
+            ['Intereses',              $ingrInteres,    'currency'],
+            ['Impuestos',              $ingrImpuesto,   'currency'],
+            ['Moratorios / Multas',    $ingrCharges,    'currency'],
+            ['Cargos al inicio',       $ingrCargosIni,  'currency'],
+            ['Comisión por apertura',  $ingrComAper,    'currency'],
+            ['Cargos adicionales',     $ingrCargosAdic, 'currency'],
+            ['Excedentes recuperados', $ingrExcedRec,   'currency'],
+            ['Seguro CRECE reconocido (30%)', $ingrCrece30, 'currency'],
+        ];
+        foreach ($ingrOtrosDet as $concept => $amount) {
+            $ingrItemsComp[] = [(string)$concept, (float)$amount, 'currency'];
+        }
+
+        $globalGastosDetalle = (array)($brCalcGlobal['gastos_detalle'] ?? []);
+        $getGDet = fn (string $name) => (float)($globalGastosDetalle[$name] ?? 0.0);
+        $gastosOp = [
+            'Renta Oficina','Luz','Agua','Teléfono e Internet','Insumos de Cafetería',
+            'Insumos de Limpieza','Insumos de Papelería','Mobiliario y Equipo','Mantenimiento',
+            'Renta de Bodegas','Señora Limpieza','Eventos','Paquetería','Trámites Gubernamentales',
+            'Publicidad','Mecánicos','Servicios de Motocicletas','Financiamiento de Motos',
+            'Software Póliza Anual','Pólizas',
+            'Recargas Telefónicas','Emergentes','Comisiones Oxxo','Multas e Infracciones',
+            'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
+            'Gastos legales',
+        ];
+        $gastosOpTotal = $brCalcGlobal ? (float)($brCalcGlobal['gastos_operativos'] ?? 0) : 0.0;
+        $gastosOpCurada = 0.0;
+        foreach ($gastosOp as $gasto) {
+            $gastosOpCurada += $getGDet($gasto);
+        }
+        $gastosOpOtros = round($gastosOpTotal - $gastosOpCurada, 2);
+        $gastosOpDetalleMap = [];
+        foreach ($gastosOp as $gasto) {
+            $gastosOpDetalleMap[$gasto] = $getGDet($gasto);
+        }
+
+        $globalNomina    = $brCalcGlobal ? (float)$brCalcGlobal['nomina_total']     : (float)$pay['pagos'];
+        $globalComisions = $brCalcGlobal ? (float)$brCalcGlobal['comisiones']       : 0.0;
+        $globalBonos     = $brCalcGlobal ? (float)$brCalcGlobal['bonos']            : (float)$pay['bonos'];
+        $globalVacac     = $brCalcGlobal ? (float)$brCalcGlobal['vacaciones']       : 0.0;
+        $globalPrimaVac  = $brCalcGlobal ? (float)$brCalcGlobal['prima_vacacional'] : 0.0;
+        $globalNomDet = [];
+        foreach ((array)($brCalcGlobal['nomina_detalle'] ?? []) as $k => $v) {
+            $globalNomDet[$k] = ($globalNomDet[$k] ?? 0.0) + (float) $v;
+        }
+        foreach ((array)($brCalcGlobal['nomina_informativo'] ?? []) as $k => $v) {
+            $globalNomDet[$k] = ($globalNomDet[$k] ?? 0.0) + (float) $v;
+        }
+
+        $nomDisplayOrder = [
+            'Nómina'                                    => $globalNomina,
+            'Comisiones'                                => $globalComisions,
+            'Vacaciones'                                => $globalVacac,
+            'Prima vacacional'                          => $globalPrimaVac,
+            'Bonos'                                     => $globalBonos,
+            'Bonos Aceleradores'                        => 0.0,
+            'IMSS'                                      => 0.0,
+            'Descuentos Infonavit'                      => 0.0,
+            'Finiquito'                                 => 0.0,
+            'Gastos médicos'                            => 0.0,
+            'Gasolina'                                  => 0.0,
+            'Financiamiento De Motos'                   => 0.0,
+            'Descuento Servicios Moto'                  => 0.0,
+            'Financiamiento Celular'                    => 0.0,
+            'Cascos'                                    => 0.0,
+            'Descuento de uniformes'                    => 0.0,
+            'Descuentos FONACOT'                        => 0.0,
+            'Descuento extravío tarjeta de circulación' => 0.0,
+            'Descuentos Tienda Mr Lana'                 => 0.0,
+            'Descuento Servicios Automóvil'             => 0.0,
+            'Descuento faltante en caja'                => 0.0,
+            'Anticipo de nómina'                        => 0.0,
+            'Formatería'                                => 0.0,
+            'Pensión Alimenticia'                       => 0.0,
+        ];
+        $nomDetAlias = [
+            'Financiamiento de Motos' => 'Financiamiento De Motos',
+            'Descuento tienda Mr Lana' => 'Descuentos Tienda Mr Lana',
+        ];
+        $mandatory24 = array_keys($nomDisplayOrder);
+        $claimed = [];
+        foreach ($globalNomDet as $detKey => $detVal) {
+            $canonical = $nomDetAlias[$detKey] ?? $detKey;
+            if (array_key_exists($canonical, $nomDisplayOrder)) {
+                $nomDisplayOrder[$canonical] += (float) $detVal;
+                $claimed[$detKey] = true;
+            }
+        }
+        foreach ($globalNomDet as $detKey => $detVal) {
+            if (!isset($claimed[$detKey]) && (float) $detVal > 0) {
+                $nomDisplayOrder[$detKey] = ($nomDisplayOrder[$detKey] ?? 0.0) + (float) $detVal;
+            }
+        }
+        $nomTotal = $brCalcGlobal ? BranchRadiographyCalculator::nominaTotalFor($brCalcGlobal) : (float) $pay['pagos'];
+
+        $brGlobalFondea = $brCalcGlobal ? (float)$brCalcGlobal['prestamos_fondea'] : (float)($loans['operative_fondeos']['fondea_total'] ?? 0);
+        $brGlobalRecibe = $brGlobalFondea;
+
+        $excGlobal        = $brCalcGlobal ? (float)$brCalcGlobal['excedentes'] : $excedentes;
+        $gastosTotal      = $gastosOpTotal + $nomTotal;
+        $ingresoEbitdaBase = $brCalcGlobal ? BranchRadiographyCalculator::ingresoEbitdaBaseFor($brCalcGlobal) : 0.0;
+        $utilidad         = $ingresoEbitdaBase - $gastosTotal;
+        $margenEbitdaCalc = $ingresoEbitdaBase > 0 ? round($utilidad / $ingresoEbitdaBase * 100, 2) : 0.0;
+
+        $rotation    = $snap['sections']['rotation'] ?? [];
+        $imssPatronal = $brCalcGlobal ? (float)($brCalcGlobal['imss_patronal'] ?? 0) : 0.0;
+
+        return compact(
+            'carteraTotal', 'recTotal', 'colTotal', 'excedentes',
+            'mora0_30', 'mora31_60', 'mora61_90', 'mora91_120', 'mora120p', 'moraTotal', 'moraPct',
+            'ingrSavehearts', 'ingrComadres', 'ingrCrece', 'ingrCrece30', 'ingrCrece70', 'ingrCanalizadoAseguradora',
+            'ingrTotal', 'ingrItemsComp',
+            'gastosOpTotal', 'gastosOpOtros', 'gastosOpDetalleMap',
+            'nomDisplayOrder', 'nomTotal',
+            'brGlobalFondea', 'brGlobalRecibe', 'excGlobal', 'gastosTotal', 'ingresoEbitdaBase', 'utilidad', 'margenEbitdaCalc',
+            'branchesList', 'rotation', 'sum', 'imssPatronal'
+        );
+    }
+
+    private function buildGlobalSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
+    {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
+        $cm = $isComparative ? $this->extractGlobalCoreMetrics($compareSnap) : null;
+
         $sheet   = $ss->getActiveSheet()->setTitle('GLOBAL');
         $sum     = $snap['summary'];
         $pay     = $snap['sections']['payroll'];
@@ -324,6 +521,12 @@ class RadiographyWorkbookBuilder
         $ingresoEbitdaBase = $brCalcGlobal ? BranchRadiographyCalculator::ingresoEbitdaBaseFor($brCalcGlobal) : 0.0;
         $utilidad         = $ingresoEbitdaBase - $gastosTotal;
         $margenEbitdaCalc = $ingresoEbitdaBase > 0 ? round($utilidad / $ingresoEbitdaBase * 100, 2) : 0.0;
+        $imssPatronal     = $brCalcGlobal ? (float)($brCalcGlobal['imss_patronal'] ?? 0) : 0.0;
+        $rotation         = $snap['sections']['rotation'] ?? [];
+        $gastosOpDetalleMap = [];
+        foreach ($gastosOp as $gasto) {
+            $gastosOpDetalleMap[$gasto] = $getGDet($gasto);
+        }
 
         // ════════════════════════════════════════════════════════════════════
         // Layout: título(1) · subtítulo(2) · meta(3) · KPI band(4-7) · blank(8)
@@ -335,12 +538,18 @@ class RadiographyWorkbookBuilder
         $sheet->getColumnDimension('C')->setWidth(12);
         $sheet->getColumnDimension('D')->setWidth(18);
 
-        RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:D1', 'Radiografía Completa del Negocio — Estado Financiero');
-        RadiographyStyleHelper::applySubtitleStyle($sheet, 'A2:D2', 'MR LANA — GLOBAL · ' . strtoupper($period->label));
+        RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:D1', $isComparative
+            ? 'Radiografía Completa del Negocio — Estado Financiero Comparativo'
+            : 'Radiografía Completa del Negocio — Estado Financiero');
+        RadiographyStyleHelper::applySubtitleStyle($sheet, 'A2:D2', $isComparative
+            ? 'MR LANA — GLOBAL · ' . strtoupper($comparePeriod->label) . ' VS ' . strtoupper($period->label)
+            : 'MR LANA — GLOBAL · ' . strtoupper($period->label));
 
         $composite = $snap['period']['composite'] ?? null;
         $periodoLinea = 'Periodo: ' . ($period->code ?: $period->id) . '  |  Generado: ' . $snap['generated_at'];
-        if ($composite) {
+        if ($isComparative) {
+            $periodoLinea = 'Periodo comparado: ' . $comparePeriod->label . '  |  Periodo actual: ' . $period->label . '  |  Generado: ' . $snap['generated_at'];
+        } elseif ($composite) {
             $periodoLinea = $composite['component_range'] . '  |  Periodo: ' . $composite['week_range']
                 . '  |  Rango: ' . $composite['date_start'] . ' → ' . $composite['date_end'] . '  |  Generado: ' . $snap['generated_at'];
         }
@@ -348,7 +557,107 @@ class RadiographyWorkbookBuilder
         RadiographyStyleHelper::setCellValueSafe($sheet, 'A3', $periodoLinea);
         RadiographyStyleHelper::applyMetaStyle($sheet, 'A3:D3');
 
-        // ── KPI band (8 indicadores clave del periodo) ───────────────────────
+        // ── KPI band ──────────────────────────────────────────────────────────
+        // Comparativo: tabla MÉTRICA | mes comparado | mes actual | diferencia |
+        // variación % (misma tabla que se pide en TODAS las pestañas). Simple:
+        // cuadrícula de tarjetas 2-arriba, sin cambios respecto al original.
+        if ($isComparative) {
+            $kpiRow = 4;
+            $this->comparativeHeader($sheet, $kpiRow, $comparePeriod->label, $period->label);
+            $kpiRow++;
+            $kpiComparativeRows = [
+                ['Valor cartera global',       $cm['carteraTotal'],        $carteraTotal,       'currency'],
+                ['Otorgamientos',              $cm['colTotal'],            $colTotal,           'currency'],
+                ['Recuperación total',         $cm['recTotal'],            $recTotal,           'currency'],
+                ['Utilidad bruta',             $cm['ingresoEbitdaBase'],   $ingresoEbitdaBase,  'currency'],
+                ['Gastos Totales',             $cm['gastosTotal'],         $gastosTotal,        'currency'],
+                ['OPEX',                       $cm['gastosOpTotal'],       $gastosOpTotal,      'currency'],
+                ['Nómina y Capital Humano',    $cm['nomTotal'],            $nomTotal,           'currency'],
+                ['EBITDA',                     $cm['utilidad'],            $utilidad,           'currency'],
+                ['Margen EBITDA',              $cm['margenEbitdaCalc'],    $margenEbitdaCalc,   'percent'],
+                ['Percepciones',               (float)($cm['sum']['noi_percepciones'] ?? 0), (float)($snap['summary']['noi_percepciones'] ?? 0), 'currency'],
+                ['Deducciones (informativo)',  (float)($cm['sum']['noi_deducciones']  ?? 0), (float)($snap['summary']['noi_deducciones']  ?? 0), 'currency'],
+                ['Neto pagado a trabajadores', (float)($cm['sum']['noi_neto_pagado']  ?? 0), (float)($snap['summary']['noi_neto_pagado']  ?? 0), 'currency'],
+                ['Mora total',                 $cm['moraTotal'],           $moraTotal,          'currency'],
+                ['IMSS',                       $cm['imssPatronal'],        $imssPatronal,       'currency'],
+                ['Rotación %',                 (float)($cm['rotation']['indice'] ?? 0), (float)($rotation['indice'] ?? 0), 'percent'],
+            ];
+            foreach ($kpiComparativeRows as $i => [$lbl, $prev, $curr, $fmt]) {
+                $this->writeComparativeRow($sheet, $kpiRow, $lbl, (float)$prev, (float)$curr, $fmt, $i % 2 === 0);
+            }
+            $kpiRow++;
+
+            // ── Dashboard comparativo (columnas N:P) — mismas gráficas del reporte
+            // simple, ahora de 2 series (mes comparado vs mes actual) en vez de 1.
+            $sheet->getColumnDimension('N')->setWidth(26);
+            $sheet->getColumnDimension('O')->setWidth(18);
+            $sheet->getColumnDimension('P')->setWidth(18);
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+
+            $writeDashPair = function (int &$dr, array $rows) use ($sheet): array {
+                $start = $dr;
+                foreach ($rows as [$lbl, $prev, $curr]) {
+                    $sheet->setCellValue("N{$dr}", $lbl);
+                    $sheet->setCellValue("O{$dr}", $prev);
+                    $sheet->setCellValue("P{$dr}", $curr);
+                    RadiographyStyleHelper::applyCurrencyFormat($sheet, "O{$dr}");
+                    RadiographyStyleHelper::applyCurrencyFormat($sheet, "P{$dr}");
+                    $dr++;
+                }
+                return [$start, $dr - 1];
+            };
+
+            $dashRow = 4;
+            RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:P{$dashRow}", 'RECUPERACIÓN Y COLOCACIÓN');
+            $dashRow++;
+            [$recColStart, $recColEnd] = $writeDashPair($dashRow, [
+                ['Recuperación', $cm['recTotal'], $recTotal],
+                ['Colocación',   $cm['colTotal'], $colTotal],
+            ]);
+            $dashRow++;
+
+            RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:P{$dashRow}", 'CARTERA Y MORA');
+            $dashRow++;
+            [$carteraStart, $carteraEnd] = $writeDashPair($dashRow, [
+                ['Valor cartera', $cm['carteraTotal'], $carteraTotal],
+                ['Cartera vencida (mora)', $cm['moraTotal'], $moraTotal],
+            ]);
+            $dashRow++;
+
+            RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:P{$dashRow}", 'EBITDA');
+            $dashRow++;
+            [$ebitdaStart, $ebitdaEnd] = $writeDashPair($dashRow, [
+                ['Utilidad bruta', $cm['ingresoEbitdaBase'], $ingresoEbitdaBase],
+                ['Gastos Totales', $cm['gastosTotal'],       $gastosTotal],
+                ['EBITDA',         $cm['utilidad'],          $utilidad],
+            ]);
+            $dashRow++;
+
+            RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:P{$dashRow}", 'GASTOS');
+            $dashRow++;
+            [$gastosStart, $gastosEnd] = $writeDashPair($dashRow, [
+                ['OPEX',                    $cm['gastosOpTotal'], $gastosOpTotal],
+                ['Nómina y Capital Humano', $cm['nomTotal'],      $nomTotal],
+                ['Gastos Totales',          $cm['gastosTotal'],   $gastosTotal],
+            ]);
+            $dashRow++;
+
+            RadiographyStyleHelper::applySectionHeaderStyle($sheet, "N{$dashRow}:P{$dashRow}", 'ROTACIÓN DE PERSONAL');
+            $dashRow++;
+            [$rotStart, $rotEnd] = $writeDashPair($dashRow, [
+                ['Plantilla', (float)($cm['rotation']['current_count'] ?? $cm['rotation']['promedio'] ?? 0), (float)($rotation['current_count'] ?? $rotation['promedio'] ?? 0)],
+            ]);
+            $sheet->getStyle("O{$rotStart}:P{$rotEnd}")->getNumberFormat()->setFormatCode(self::INTEGER);
+
+            $this->addComparativeChart($sheet, 'Recuperación y Colocación', $recColStart, $recColEnd, $labelCmp, $labelCur, 'R4', 'Y18');
+            $this->addComparativeChart($sheet, 'Cartera y Mora',            $carteraStart, $carteraEnd, $labelCmp, $labelCur, 'Z4', 'AG18');
+            $this->addComparativeChart($sheet, 'EBITDA',                    $ebitdaStart, $ebitdaEnd, $labelCmp, $labelCur, 'R19', 'Y33');
+            $this->addComparativeChart($sheet, 'Gastos',                    $gastosStart, $gastosEnd, $labelCmp, $labelCur, 'Z19', 'AG33');
+            $this->addComparativeChart($sheet, 'Rotación — Plantilla',      $rotStart, $rotEnd, $labelCmp, $labelCur, 'R34', 'Y48', '#,##0');
+
+            goto globalKpiBandDone;
+        }
         $kpiPairs = [
             ['Valor cartera global', $carteraTotal, 'currency', 'Recuperación total (informativo)', $recTotal,   'currency'],
             ['Otorgamientos',        $colTotal,     'currency', 'Mora total',                  $moraTotal,  'currency'],
@@ -608,6 +917,7 @@ class RadiographyWorkbookBuilder
             );
         }
 
+        globalKpiBandDone:
         // ── Navegación: acceso directo a cada hoja del workbook ──────────────
         $r = $kpiRow + 1;
         RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '0. NAVEGACIÓN — ACCESOS DIRECTOS');
@@ -654,6 +964,196 @@ class RadiographyWorkbookBuilder
             $r++;
         }
         $r++;
+
+        if ($isComparative) {
+            // ── 1. Métricas Generales ─────────────────────────────────────────
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", '1. MÉTRICAS GENERALES'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            foreach ([
+                ['Valor cartera global',   $cm['carteraTotal'], $carteraTotal, 'currency'],
+                ['Otorgamientos',          $cm['colTotal'],     $colTotal,     'currency'],
+                ['Recuperación total',     $cm['recTotal'],     $recTotal,     'currency'],
+                ['Mora de 0 a 30 días',    $cm['mora0_30'],     $mora0_30,     'currency'],
+                ['Mora de 31 a 60 días',   $cm['mora31_60'],    $mora31_60,    'currency'],
+                ['Mora de 61 a 90 días',   $cm['mora61_90'],    $mora61_90,    'currency'],
+                ['Mora de 91 a 120 días',  $cm['mora91_120'],   $mora91_120,   'currency'],
+                ['Mora 120+ días',         $cm['mora120p'],     $mora120p,     'currency'],
+                ['Mora total',             $cm['moraTotal'],    $moraTotal,    'currency'],
+                ['Excedente enviado a corporativo', $cm['excedentes'], $excedentes, 'currency'],
+            ] as $i => [$lbl, $prev, $curr, $fmt]) {
+                $this->writeComparativeRow($sheet, $r, $lbl, (float)$prev, (float)$curr, $fmt, $i % 2 === 0);
+            }
+            $r++;
+
+            // ── 2. Ingresos / Recuperación ────────────────────────────────────
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", '2. INGRESOS / RECUPERACIÓN'); $r++;
+            RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'A) Desglose por componente');
+            $sheet->getStyle("A{$r}")->getFont()->setBold(true);
+            $sheet->getStyle("A{$r}:E{$r}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setARGB(RadiographyStyleHelper::BG_GRAY);
+            $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            $cmpComp = collect($cm['ingrItemsComp'])->keyBy(fn ($row) => $row[0]);
+            $curComp = collect($ingrItemsComp)->keyBy(fn ($row) => $row[0]);
+            $allCompLabels = $cmpComp->keys()->merge($curComp->keys())->unique()->values();
+            $ci = 0;
+            foreach ($allCompLabels as $compLabel) {
+                $prevVal = (float)($cmpComp->get($compLabel)[1] ?? 0);
+                $currVal = (float)($curComp->get($compLabel)[1] ?? 0);
+                if ($prevVal == 0.0 && $currVal == 0.0) continue;
+                $this->writeComparativeRow($sheet, $r, $compLabel, $prevVal, $currVal, 'currency', $ci % 2 === 0);
+                $ci++;
+            }
+            $this->writeComparativeTotalsRow($sheet, $r, 'Total Recuperación', (float)$cm['ingrTotal'], (float)$ingrTotal, 'currency');
+            $r++;
+
+            // B) Por sucursal — colapsado a Total (no explotar 10 columnas x 2 periodos,
+            // criterio explícito del negocio para tablas anchas en modo comparativo).
+            RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'B) Recuperación por sucursal (total)');
+            $sheet->getStyle("A{$r}")->getFont()->setBold(true);
+            $sheet->getStyle("A{$r}:E{$r}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setARGB(RadiographyStyleHelper::BG_GRAY);
+            $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'SUCURSAL'); $r++;
+            $cmpBranchesByName = collect($cm['branchesList'])->keyBy(fn ($b) => strtoupper(trim($b['sucursal'] ?? '')));
+            foreach ($branchesList as $i => $curB) {
+                $key  = strtoupper(trim($curB['sucursal'] ?? ''));
+                $prev = (float)($cmpBranchesByName->get($key)['recuperacion_total'] ?? 0);
+                $curr = (float)($curB['recuperacion_total'] ?? 0);
+                $this->writeComparativeRow($sheet, $r, $curB['sucursal'], $prev, $curr, 'currency', $i % 2 === 0);
+            }
+            $r++;
+
+            // Seguros y coberturas canalizadas
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'SEGUROS Y COBERTURAS CANALIZADAS'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            $segIdx = 0;
+            foreach ([
+                ['Cobertura Savehearts', $cm['ingrSavehearts'], $ingrSavehearts],
+                ['Cobertura Crédito Grupal / Comadres', $cm['ingrComadres'], $ingrComadres],
+                ['Seguro CRECE total', $cm['ingrCrece'], $ingrCrece],
+                ['Reconocido como ingreso MR Lana (30%)', $cm['ingrCrece30'], $ingrCrece30],
+                ['Canalizado a aseguradora (70%)', $cm['ingrCrece70'], $ingrCrece70],
+            ] as [$lbl, $prev, $curr]) {
+                if ($prev == 0.0 && $curr == 0.0) continue;
+                $this->writeComparativeRow($sheet, $r, $lbl, (float)$prev, (float)$curr, 'currency', $segIdx % 2 === 0);
+                $segIdx++;
+            }
+            $this->writeComparativeTotalsRow($sheet, $r, 'Total canalizado a aseguradora', (float)$cm['ingrCanalizadoAseguradora'], (float)$ingrCanalizadoAseguradora, 'currency');
+            $r++;
+
+            // ── 3. Gastos Operativos ──────────────────────────────────────────
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", '3. GASTOS OPERATIVOS'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            $gIdx = 0;
+            foreach ($gastosOp as $gasto) {
+                $prevVal = (float)($cm['gastosOpDetalleMap'][$gasto] ?? 0);
+                $currVal = (float)($gastosOpDetalleMap[$gasto] ?? 0);
+                if ($prevVal == 0.0 && $currVal == 0.0) continue;
+                $this->writeComparativeRow($sheet, $r, $gasto, $prevVal, $currVal, 'currency', $gIdx % 2 === 0);
+                $gIdx++;
+            }
+            if (abs($gastosOpOtros) >= 0.01 || abs($cm['gastosOpOtros']) >= 0.01) {
+                $this->writeComparativeRow($sheet, $r, 'Otros conceptos operativos', (float)$cm['gastosOpOtros'], (float)$gastosOpOtros, 'currency', $gIdx % 2 === 0);
+            }
+            $this->writeComparativeTotalsRow($sheet, $r, 'Total Gastos Operativos', (float)$cm['gastosOpTotal'], (float)$gastosOpTotal, 'currency');
+            $r++;
+
+            // ── 4. Nómina y Capital Humano ─────────────────────────────────────
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", '4. NÓMINA Y CAPITAL HUMANO'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            $nIdx = 0;
+            foreach ($nomDisplayOrder as $nomName => $currVal) {
+                $prevVal = (float)($cm['nomDisplayOrder'][$nomName] ?? 0);
+                if ($currVal == 0 && $prevVal == 0 && !in_array($nomName, $mandatory24)) continue;
+                $this->writeComparativeRow($sheet, $r, $nomName, $prevVal, (float)$currVal, 'currency', $nIdx % 2 === 0);
+                $nIdx++;
+            }
+            $this->writeComparativeTotalsRow($sheet, $r, 'Total Nómina y Capital Humano', (float)$cm['nomTotal'], (float)$nomTotal, 'currency');
+            $r++;
+
+            // ── 5. Préstamos Intersucursales ───────────────────────────────────
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", '5. PRÉSTAMOS INTERSUCURSALES (solo sucursal operativa → sucursal operativa)'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            $this->writeComparativeRow($sheet, $r, 'Activos (fondea)', (float)$cm['brGlobalFondea'], (float)$brGlobalFondea, 'currency', true);
+            $this->writeComparativeRow($sheet, $r, 'Pasivos (recibe)', (float)$cm['brGlobalRecibe'], (float)$brGlobalRecibe, 'currency', false);
+            $r++;
+
+            // ── 5B. Excedente enviado a corporativo ────────────────────────────
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", '5B. EXCEDENTE ENVIADO A CORPORATIVO'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            $this->writeComparativeTotalsRow($sheet, $r, 'Total', (float)$cm['excGlobal'], (float)$excGlobal, 'currency');
+            $excIdx = 0;
+            $cmpExcByName = collect($cm['branchesList'])->keyBy(fn ($b) => strtoupper(trim($b['sucursal'] ?? '')));
+            foreach ($branchesList as $eb) {
+                $key   = strtoupper(trim($eb['sucursal'] ?? ''));
+                $prev  = (float)($cmpExcByName->get($key)['excedentes'] ?? 0);
+                $curr  = (float)($eb['excedentes'] ?? 0);
+                if ($prev == 0.0 && $curr == 0.0) continue;
+                $this->writeComparativeRow($sheet, $r, $eb['sucursal'], $prev, $curr, 'currency', $excIdx % 2 === 0);
+                $excIdx++;
+            }
+            $r++;
+
+            // ── 6. Índice de rotación de personal ──────────────────────────────
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", '6. ÍNDICE DE ROTACIÓN DE PERSONAL'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            $cmpRotation = $cm['rotation'];
+            $this->writeComparativeRow($sheet, $r, 'N° de personas que dejaron la empresa', (float)($cmpRotation['bajas'] ?? 0), (float)($rotation['bajas'] ?? 0), 'integer', true);
+            $this->writeComparativeRow($sheet, $r, 'Plantilla', (float)($cmpRotation['current_count'] ?? $cmpRotation['promedio'] ?? 0), (float)($rotation['current_count'] ?? $rotation['promedio'] ?? 0), 'integer', false);
+            $this->writeComparativeRow($sheet, $r, 'Índice de rotación', (float)($cmpRotation['indice'] ?? 0), (float)($rotation['indice'] ?? 0), 'percent', true);
+            $r++;
+
+            // ── 7. EBITDA ───────────────────────────────────────────────────────
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", '7. EBITDA'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            foreach ([
+                ['Utilidad bruta',                     $cm['ingresoEbitdaBase'], $ingresoEbitdaBase, 'currency'],
+                ['Menos: Gastos Totales',               $cm['gastosTotal'],       $gastosTotal,       'currency'],
+                ['  Gastos operativos (OPEX)',          $cm['gastosOpTotal'],     $gastosOpTotal,     'currency'],
+                ['  Nómina y Capital Humano',            $cm['nomTotal'],          $nomTotal,          'currency'],
+                ['EBITDA',                               $cm['utilidad'],          $utilidad,          'currency'],
+                ['Margen EBITDA (%)',                    $cm['margenEbitdaCalc'],  $margenEbitdaCalc,  'percent'],
+                ['Excedente enviado a corporativo (informativo)', $cm['excGlobal'], $excGlobal, 'currency'],
+                ['Recuperación / Colocación (informativo)', $cm['recTotal'] - $cm['colTotal'], $recTotal - $colTotal, 'currency'],
+            ] as $i => [$lbl, $prev, $curr, $fmt]) {
+                $this->writeComparativeRow($sheet, $r, $lbl, (float)$prev, (float)$curr, $fmt, $i % 2 === 0);
+            }
+            $r++;
+
+            // ── Categoría por EBITDA (por sucursal) — mes comparado vs mes actual ──
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'CATEGORÍA POR EBITDA (POR SUCURSAL)'); $r++;
+            $this->colHeaders($sheet, $r, ['A' => 'SUCURSAL', 'B' => 'CATEGORÍA ' . strtoupper($labelCmp), 'C' => 'CATEGORÍA ' . strtoupper($labelCur), 'D' => '', 'E' => '']);
+            $r++;
+            $catRankedBranches = $branchesList;
+            usort($catRankedBranches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+            $catIdx = 0;
+            foreach ($catRankedBranches as $cb) {
+                $key = strtoupper(trim($cb['sucursal'] ?? ''));
+                $cmB = $cmpBranchesByName->get($key);
+                $curCat = RadiographyStyleHelper::ebitdaCategory(RadiographyStyleHelper::branchEbitdaEstimate($cb));
+                $cmpCat = $cmB ? RadiographyStyleHelper::ebitdaCategory(RadiographyStyleHelper::branchEbitdaEstimate($cmB)) : '—';
+                $sheet->setCellValue("A{$r}", $cb['sucursal']);
+                $sheet->setCellValue("B{$r}", $cmpCat);
+                $sheet->setCellValue("C{$r}", $curCat);
+                $this->dataRow($sheet, "A{$r}:E{$r}", $catIdx % 2 === 0);
+                foreach (['B' => $cmpCat, 'C' => $curCat] as $col => $cat) {
+                    if ($cat === '—') continue;
+                    $colors = RadiographyStyleHelper::categoryColors($cat);
+                    $sheet->getStyle("{$col}{$r}")->applyFromArray([
+                        'font' => ['bold' => true, 'size' => 9, 'color' => ['argb' => $colors['fg']]],
+                        'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $colors['bg']]],
+                        'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
+                    ]);
+                }
+                $catIdx++;
+                $r++;
+            }
+            $r++;
+            RadiographyStyleHelper::applyHyperlinkStyle($sheet, "A{$r}", '→ Ver detalle completo en hoja CATEGORÍA EBITDA', 'CATEGORÍA EBITDA');
+            $sheet->getStyle("A{$r}")->getFont()->setSize(9);
+            $r += 2;
+
+            goto globalSectionsDone;
+        }
 
         RadiographyStyleHelper::applyTableHeaderStyle($sheet, $r, ['A' => 'MÉTRICA', 'B' => 'VALOR', 'C' => '%', 'D' => 'NOTA']);
         $r++;
@@ -981,6 +1481,7 @@ class RadiographyWorkbookBuilder
         $sheet->getStyle("A{$r}")->getFont()->setSize(9);
         $r += 2;
 
+        globalSectionsDone:
         // ── 8. Observaciones y Notas ─────────────────────────────────────────
         RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '8. OBSERVACIONES Y NOTAS');
         $r++;
@@ -1010,15 +1511,16 @@ class RadiographyWorkbookBuilder
 
     // ── VALOR CARTERA ────────────────────────────────────────────────────────
 
-    private function buildValorCarteraSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildValorCarteraSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet    = $ss->createSheet()->setTitle('VALOR CARTERA');
         $brCalc   = $snap['branch_radiography'] ?? [];
         $global   = $brCalc['global']   ?? [];
         $branches = $brCalc['branches'] ?? [];
         $label    = strtoupper($period->label);
 
-        $this->sheetTitle($sheet, 'A1:G1', 'VALOR CARTERA — ' . $label);
+        $this->sheetTitle($sheet, 'A1:G1', 'VALOR CARTERA — ' . ($isComparative ? strtoupper($comparePeriod->label) . ' VS ' . $label : $label));
         $sheet->setCellValue('A2', '← GLOBAL');
         $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
         $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
@@ -1027,9 +1529,79 @@ class RadiographyWorkbookBuilder
         RadiographyStyleHelper::mergeCellsSafe($sheet, 'B2:G2');
 
         $carteraGlobal = (float)($global['valor_cartera'] ?? 0);
-        // cartera_vencida = SUM of 5 columns (fixed formula), same as KPI
         $vencidaGlobal = (float)($global['cartera_vencida'] ?? 0);
         $pctMora       = $carteraGlobal > 0 ? round($vencidaGlobal / $carteraGlobal * 100, 2) : 0;
+
+        $pbbp   = $snap['sections']['portfolio_by_branch_product'] ?? [];
+        $capSum = array_sum(array_column($pbbp, 'capital_atrasado'));
+        $intSum = array_sum(array_column($pbbp, 'interes_atrasado'));
+        $impSum = array_sum(array_column($pbbp, 'impuesto_atrasado'));
+        $simSum = array_sum(array_column($pbbp, 'saldo_interes_moratorio'));
+        $siiSum = array_sum(array_column($pbbp, 'saldo_impuesto_interes_moratorio'));
+
+        if ($isComparative) {
+            $cGlobal   = $compareSnap['branch_radiography']['global']    ?? [];
+            $cBranches = $compareSnap['branch_radiography']['branches']  ?? [];
+            $cCartera  = (float)($cGlobal['valor_cartera'] ?? 0);
+            $cVencida  = (float)($cGlobal['cartera_vencida'] ?? 0);
+            $cPbbp     = $compareSnap['sections']['portfolio_by_branch_product'] ?? [];
+            $cCapSum   = array_sum(array_column($cPbbp, 'capital_atrasado'));
+            $cIntSum   = array_sum(array_column($cPbbp, 'interes_atrasado'));
+            $cImpSum   = array_sum(array_column($cPbbp, 'impuesto_atrasado'));
+            $cSimSum   = array_sum(array_column($cPbbp, 'saldo_interes_moratorio'));
+            $cSiiSum   = array_sum(array_column($cPbbp, 'saldo_impuesto_interes_moratorio'));
+            $labelCmp  = $comparePeriod->label;
+            $labelCur  = $period->label;
+
+            $r = 4;
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'RESUMEN GLOBAL'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            foreach ([
+                ['Valor cartera total',      $cCartera, $carteraGlobal, 'currency'],
+                ['Cartera vencida (5 cols)', $cVencida, $vencidaGlobal, 'currency'],
+                ['% Mora sobre cartera',     $cCartera > 0 ? round($cVencida / $cCartera * 100, 2) : 0, $pctMora, 'percent'],
+                ['Colocación del periodo',   (float)($cGlobal['colocacion'] ?? 0), (float)($global['colocacion'] ?? 0), 'currency'],
+                ['Recuperación del periodo', (float)($cGlobal['recuperacion_total'] ?? 0), (float)($global['recuperacion_total'] ?? 0), 'currency'],
+            ] as $i => [$lbl, $prev, $curr, $fmt]) {
+                $this->writeComparativeRow($sheet, $r, $lbl, (float)$prev, (float)$curr, $fmt, $i % 2 === 0);
+            }
+            $r++;
+
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'DESGLOSE CARTERA VENCIDA — COMPONENTES GLOBALES'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            foreach ([
+                ['Capital atrasado',              $cCapSum, $capSum],
+                ['Interés atrasado',              $cIntSum, $intSum],
+                ['Impuesto atrasado',             $cImpSum, $impSum],
+                ['Saldo interés moratorio',       $cSimSum, $simSum],
+                ['Saldo impuesto int. moratorio', $cSiiSum, $siiSum],
+            ] as $i => [$lbl, $prev, $curr]) {
+                $this->writeComparativeRow($sheet, $r, $lbl, (float)$prev, (float)$curr, 'currency', $i % 2 === 0);
+            }
+            $this->writeComparativeTotalsRow($sheet, $r, 'Cartera vencida TOTAL', (float)$cVencida, (float)$vencidaGlobal, 'currency');
+            $r++;
+
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'CARTERA POR SUCURSAL'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'SUCURSAL'); $r++;
+            $cBranchesByName = collect($cBranches)->keyBy(fn ($b) => strtoupper(trim($b['sucursal'] ?? '')));
+            usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+            $chartStart = $r;
+            foreach ($branches as $i => $b) {
+                $key  = strtoupper(trim($b['sucursal'] ?? ''));
+                $prev = (float)($cBranchesByName->get($key)['valor_cartera'] ?? 0);
+                $curr = (float)($b['valor_cartera'] ?? 0);
+                $this->writeComparativeRow($sheet, $r, $b['sucursal'], $prev, $curr, 'currency', $i % 2 === 0);
+            }
+            $chartEnd = $r - 1;
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL', (float)$cCartera, (float)$carteraGlobal, 'currency');
+            if ($chartEnd >= $chartStart) {
+                $this->addComparativeChart($sheet, 'Cartera por sucursal', $chartStart, $chartEnd, $labelCmp, $labelCur, 'G4', 'O24');
+            }
+
+            $this->setColWidths($sheet, ['A' => 28, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+            $sheet->freezePane('A5');
+            return;
+        }
 
         // ── Resumen global ────────────────────────────────────────────────────
         $r = 4;
@@ -1053,21 +1625,6 @@ class RadiographyWorkbookBuilder
         // ── Desglose componentes vencidos (global) ────────────────────────────
         $this->sectionHeader($sheet, "A{$r}:G{$r}", 'DESGLOSE CARTERA VENCIDA — COMPONENTES GLOBALES');
         $r++;
-        // These are summed from branches (branch_radiography.global = sum of branches)
-        $compRows = [
-            ['Capital atrasado',              'mora_0_30',  0.0],  // placeholder — pulled from VAL.CART
-            ['Interés atrasado',              '',           0.0],
-            ['Impuesto atrasado',             '',           0.0],
-            ['Saldo interés moratorio',       '',           0.0],
-            ['Saldo impuesto int. moratorio', '',           0.0],
-        ];
-        // Get component sums from portfolio_by_branch_product aggregated
-        $pbbp   = $snap['sections']['portfolio_by_branch_product'] ?? [];
-        $capSum = array_sum(array_column($pbbp, 'capital_atrasado'));
-        $intSum = array_sum(array_column($pbbp, 'interes_atrasado'));
-        $impSum = array_sum(array_column($pbbp, 'impuesto_atrasado'));
-        $simSum = array_sum(array_column($pbbp, 'saldo_interes_moratorio'));
-        $siiSum = array_sum(array_column($pbbp, 'saldo_impuesto_interes_moratorio'));
         $venSum = $capSum + $intSum + $impSum + $simSum + $siiSum;
         foreach ([
             ['Capital atrasado',              $capSum],
@@ -1159,21 +1716,86 @@ class RadiographyWorkbookBuilder
 
     // ── MORAS ────────────────────────────────────────────────────────────────
 
-    private function buildMorasSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildMorasSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet   = $ss->createSheet()->setTitle('MORAS');
         $buckets = $snap['sections']['portfolio_buckets'] ?? [];
         $brCalc  = $snap['branch_radiography'] ?? [];
         $branches = $brCalc['branches'] ?? [];
         $label   = strtoupper($period->label);
 
-        $this->sheetTitle($sheet, 'A1:F1', 'MORAS — ' . $label);
+        $this->sheetTitle($sheet, 'A1:F1', 'MORAS — ' . ($isComparative ? strtoupper($comparePeriod->label) . ' VS ' . $label : $label));
         $sheet->setCellValue('A2', '← GLOBAL');
         $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
         $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
         $sheet->setCellValue('B2', 'Días vencidos — Lendus Saldos por Cliente');
         $this->metaStyle($sheet, 'B2:F2');
         RadiographyStyleHelper::mergeCellsSafe($sheet,'B2:F2');
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $cBuckets  = $compareSnap['sections']['portfolio_buckets'] ?? [];
+            $cBranches = $compareSnap['branch_radiography']['branches'] ?? [];
+            $cGlobal   = $compareSnap['branch_radiography']['global'] ?? [];
+            $global    = $brCalc['global'] ?? [];
+
+            $r = 4;
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'DISTRIBUCIÓN GLOBAL POR DÍAS VENCIDOS'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'BUCKET'); $r++;
+            $cBucketsByLabel = collect($cBuckets)->keyBy('label');
+            $chartStart = $r;
+            foreach ($buckets as $i => $b) {
+                $prev = (float)($cBucketsByLabel->get($b['label'])['vencida'] ?? 0);
+                $curr = (float)($b['vencida'] ?? 0);
+                $this->writeComparativeRow($sheet, $r, $b['label'], $prev, $curr, 'currency', $i % 2 === 0);
+            }
+            $chartEnd = $r - 1;
+            if ($chartEnd >= $chartStart) {
+                $this->addComparativeChart($sheet, 'Mora por bucket (días vencidos)', $chartStart, $chartEnd, $labelCmp, $labelCur, 'G4', 'O18');
+            }
+            $r++;
+
+            // Mora por sucursal — colapsada a cartera vencida total (5 columnas x 2
+            // periodos sería ilegible; criterio explícito para tablas anchas).
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'MORA POR SUCURSAL (cartera vencida total)'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'SUCURSAL'); $r++;
+            $cBranchesByName = collect($cBranches)->keyBy(fn ($b) => strtoupper(trim($b['sucursal'] ?? '')));
+            usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+            foreach ($branches as $i => $b) {
+                $key  = strtoupper(trim($b['sucursal'] ?? ''));
+                $prev = (float)($cBranchesByName->get($key)['cartera_vencida'] ?? 0);
+                $curr = (float)($b['cartera_vencida'] ?? 0);
+                $this->writeComparativeRow($sheet, $r, $b['sucursal'], $prev, $curr, 'currency', $i % 2 === 0);
+            }
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL', (float)($cGlobal['cartera_vencida'] ?? 0), (float)($global['cartera_vencida'] ?? 0), 'currency');
+            $r++;
+
+            // Desglose por componente — colapsado a total por bucket (Capital+Interés+
+            // Impuesto+Moratorio+Imp.Moratorio ya sumados), mismo criterio.
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'DESGLOSE POR COMPONENTE — MORA GLOBAL (total por bucket)'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'BUCKET'); $r++;
+            $bucketDefs = [
+                'mora_0_30'     => 'Mora 1-30 días',
+                'mora_31_60'    => 'Mora 31-60 días',
+                'mora_61_90'    => 'Mora 61-90 días',
+                'mora_91_120'   => 'Mora 91-120 días',
+                'mora_120_plus' => 'Mora 120+ días',
+            ];
+            $bi = 0;
+            foreach ($bucketDefs as $bKey => $bLabel) {
+                $prev = (float)($cGlobal[$bKey] ?? 0);
+                $curr = (float)($global[$bKey] ?? 0);
+                $this->writeComparativeRow($sheet, $r, $bLabel, $prev, $curr, 'currency', $bi % 2 === 0);
+                $bi++;
+            }
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL MORA', (float)($cGlobal['cartera_vencida'] ?? 0), (float)($global['cartera_vencida'] ?? 0), 'currency');
+
+            $this->setColWidths($sheet, ['A' => 26, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+            $sheet->freezePane('A5');
+            return;
+        }
 
         $r = 4;
         // Buckets globales (from portfolio_buckets section)
@@ -1368,16 +1990,55 @@ class RadiographyWorkbookBuilder
 
     // ── EFECTIVIDAD DE COBRANZA ───────────────────────────────────────────────
 
-    private function buildEfectividadCobranzaSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildEfectividadCobranzaSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet = $ss->createSheet()->setTitle('EFECT. COBRANZA');
         $label = strtoupper($period->label);
         $ec    = $snap['sections']['efectividad_cobranza'] ?? [];
 
-        $this->sheetTitle($sheet, 'A1:H1', 'EFECTIVIDAD DE COBRANZA — ' . $label);
+        $this->sheetTitle($sheet, 'A1:H1', 'EFECTIVIDAD DE COBRANZA — ' . ($isComparative ? strtoupper($comparePeriod->label) . ' VS ' . $label : $label));
         $sheet->setCellValue('B2', 'Cobros clasificados por estatus del crédito: Vigente (DPD=0) / Atrasado (1-90) / Vencido (>90). Exclusiones: Seguros, Condonaciones, Coberturas.');
         $this->metaStyle($sheet, 'B2:H2');
         RadiographyStyleHelper::mergeCellsSafe($sheet, 'B2:H2');
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $cEc = $compareSnap['sections']['efectividad_cobranza'] ?? [];
+            $statusDefs = ['vigente' => 'Vigente (DPD=0)', 'atrasado' => 'Atrasado (1-90)', 'vencido' => 'Vencido (>90)'];
+
+            $r = 4;
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'RESUMEN POR ESTATUS (TOTAL)'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'ESTATUS'); $r++;
+            $chartStart = $r;
+            foreach ($statusDefs as $key => $lbl) {
+                $prev = (float)($cEc[$key]['total'] ?? 0);
+                $curr = (float)($ec[$key]['total'] ?? 0);
+                $this->writeComparativeRow($sheet, $r, $lbl, $prev, $curr, 'currency', ($r - $chartStart) % 2 === 0);
+            }
+            $chartEnd = $r - 1;
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL', (float)($cEc['total']['total'] ?? 0), (float)($ec['total']['total'] ?? 0), 'currency');
+            if ($chartEnd >= $chartStart) {
+                $this->addComparativeChart($sheet, 'Efectividad de cobranza por estatus', $chartStart, $chartEnd, $labelCmp, $labelCur, 'G4', 'O18');
+            }
+            $r++;
+
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'INDICADORES DE EFECTIVIDAD'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            $cVigente  = (float)($cEc['vigente']['total'] ?? 0);
+            $cAtrasado = (float)($cEc['atrasado']['total'] ?? 0);
+            $cVencido  = (float)($cEc['vencido']['total'] ?? 0);
+            $vigente   = (float)($ec['vigente']['total'] ?? 0);
+            $atrasado  = (float)($ec['atrasado']['total'] ?? 0);
+            $vencido   = (float)($ec['vencido']['total'] ?? 0);
+            $this->writeComparativeRow($sheet, $r, 'Cobros en mora (Atrasado + Vencido)', $cAtrasado + $cVencido, $atrasado + $vencido, 'currency', true);
+            $this->writeComparativeRow($sheet, $r, 'Cobros al corriente (Vigente)', $cVigente, $vigente, 'currency', false);
+
+            $this->setColWidths($sheet, ['A' => 30, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+            $sheet->freezePane('A5');
+            return;
+        }
 
         $r = 4;
         $this->sectionHeader($sheet, "A{$r}:H{$r}", 'RESUMEN POR ESTATUS');
@@ -1466,19 +2127,75 @@ class RadiographyWorkbookBuilder
 
     // ── INGRESOS ─────────────────────────────────────────────────────────────
 
-    private function buildIngresosSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildIngresosSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet   = $ss->createSheet()->setTitle('INGRESOS');
         $brCalc  = $snap['branch_radiography'] ?? [];
         $global  = $brCalc['global']   ?? [];
         $branches = $brCalc['branches'] ?? [];
         $label   = strtoupper($period->label);
 
-        $this->sheetTitle($sheet, 'A1:O1', 'INGRESOS / RECUPERACIÓN — ' . $label);
+        $this->sheetTitle($sheet, 'A1:O1', 'INGRESOS / RECUPERACIÓN — ' . ($isComparative ? strtoupper($comparePeriod->label) . ' VS ' . $label : $label));
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
         $sheet->setCellValue('B2', 'Desglose de recuperación por componente y sucursal');
         $this->metaStyle($sheet, 'B2:O2');
         RadiographyStyleHelper::mergeCellsSafe($sheet,'B2:O2');
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $cGlobal  = $compareSnap['branch_radiography']['global']   ?? [];
+            $cBranches = $compareSnap['branch_radiography']['branches'] ?? [];
+
+            $componentFields = [
+                'Capital'            => 'capital_recuperado',
+                'Intereses'          => 'interes_recuperado',
+                'Impuestos'          => 'impuesto_recuperado',
+                'Moratorios'         => 'charges',
+                'Cargos adicionales' => 'cargos_adicionales',
+                'Excedentes'         => 'excedente_recuperado',
+                'Cargos al inicio'   => 'cargos_inicio',
+                'Comisión apertura'  => 'comision_apertura',
+                'Seguro CRECE 30%'   => 'seguro_crece_reconocido',
+                'Otros conceptos'    => 'otros_recuperacion',
+            ];
+
+            $r = 4;
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'A) DESGLOSE POR COMPONENTE (GLOBAL)'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            $ci = 0;
+            foreach ($componentFields as $lbl => $field) {
+                $prev = (float)($cGlobal[$field] ?? 0);
+                $curr = (float)($global[$field] ?? 0);
+                if ($prev == 0.0 && $curr == 0.0) continue;
+                $this->writeComparativeRow($sheet, $r, $lbl, $prev, $curr, 'currency', $ci % 2 === 0);
+                $ci++;
+            }
+            $this->writeComparativeTotalsRow($sheet, $r, 'Total Recuperación', (float)($cGlobal['recuperacion_total'] ?? 0), (float)($global['recuperacion_total'] ?? 0), 'currency');
+            $r++;
+
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'B) RECUPERACIÓN POR SUCURSAL (TOTAL)'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'SUCURSAL'); $r++;
+            $cBranchesByName = collect($cBranches)->keyBy(fn ($b) => strtoupper(trim($b['sucursal'] ?? '')));
+            usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+            $chartStart = $r;
+            foreach ($branches as $i => $b) {
+                $key  = strtoupper(trim($b['sucursal'] ?? ''));
+                $prev = (float)($cBranchesByName->get($key)['recuperacion_total'] ?? 0);
+                $curr = (float)($b['recuperacion_total'] ?? 0);
+                $this->writeComparativeRow($sheet, $r, $b['sucursal'], $prev, $curr, 'currency', $i % 2 === 0);
+            }
+            $chartEnd = $r - 1;
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL GLOBAL', (float)($cGlobal['recuperacion_total'] ?? 0), (float)($global['recuperacion_total'] ?? 0), 'currency');
+            if ($chartEnd >= $chartStart) {
+                $this->addComparativeChart($sheet, 'Recuperación por sucursal', $chartStart, $chartEnd, $labelCmp, $labelCur, 'G4', 'O24');
+            }
+
+            $this->setColWidths($sheet, ['A' => 26, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+            $sheet->freezePane('A5');
+            return;
+        }
 
         $r = 4;
         $this->sectionHeader($sheet, "A{$r}:L{$r}", 'INGRESOS POR SUCURSAL — Desglose por componente');
@@ -1557,8 +2274,9 @@ class RadiographyWorkbookBuilder
 
     // ── GASTOS (canonical cross-tab desde branch_radiography) ────────────────
 
-    private function buildGastosSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildGastosSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet    = $ss->createSheet()->setTitle('GASTOS');
         $brCalc   = $snap['branch_radiography'] ?? [];
         $global   = $brCalc['global']   ?? [];
@@ -1575,6 +2293,63 @@ class RadiographyWorkbookBuilder
             'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
             'Gastos legales',
         ];
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $cGlobal   = $compareSnap['branch_radiography']['global']   ?? [];
+            $cBranches = $compareSnap['branch_radiography']['branches'] ?? [];
+            $cGlobalDet = (array)($cGlobal['gastos_detalle'] ?? []);
+            $globalDet  = (array)($global['gastos_detalle'] ?? []);
+
+            RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:E1', 'GASTOS OPERATIVOS — ' . strtoupper($labelCmp) . ' VS ' . strtoupper($labelCur));
+            RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
+
+            $r = 4;
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'CONCEPTO (GLOBAL) — no se eliminan ni renombran conceptos'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'CONCEPTO'); $r++;
+            $gi = 0;
+            foreach ($conceptos as $con) {
+                $prev = (float)($cGlobalDet[$con] ?? 0);
+                $curr = (float)($globalDet[$con] ?? 0);
+                if ($prev == 0.0 && $curr == 0.0) continue;
+                $this->writeComparativeRow($sheet, $r, $con, $prev, $curr, 'currency', $gi % 2 === 0);
+                $gi++;
+            }
+            // Cualquier concepto real no cubierto por la lista curada (nunca se pierde un peso).
+            $extraLabels = collect(array_keys($cGlobalDet))->merge(array_keys($globalDet))->unique()
+                ->reject(fn ($c) => in_array($c, $conceptos, true))->values();
+            foreach ($extraLabels as $con) {
+                $prev = (float)($cGlobalDet[$con] ?? 0);
+                $curr = (float)($globalDet[$con] ?? 0);
+                if ($prev == 0.0 && $curr == 0.0) continue;
+                $this->writeComparativeRow($sheet, $r, $con, $prev, $curr, 'currency', $gi % 2 === 0);
+                $gi++;
+            }
+            $this->writeComparativeTotalsRow($sheet, $r, 'Total OPEX', (float)($cGlobal['gastos_operativos'] ?? 0), (float)($global['gastos_operativos'] ?? 0), 'currency');
+            $r++;
+
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'GASTOS OPEX POR SUCURSAL'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'SUCURSAL'); $r++;
+            $cBranchesByName = collect($cBranches)->keyBy(fn ($b) => strtoupper(trim($b['sucursal'] ?? '')));
+            usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+            $chartStart = $r;
+            foreach ($branches as $i => $b) {
+                $key  = strtoupper(trim($b['sucursal'] ?? ''));
+                $prev = (float)($cBranchesByName->get($key)['gastos_operativos'] ?? 0);
+                $curr = (float)($b['gastos_operativos'] ?? 0);
+                $this->writeComparativeRow($sheet, $r, $b['sucursal'], $prev, $curr, 'currency', $i % 2 === 0);
+            }
+            $chartEnd = $r - 1;
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL', (float)($cGlobal['gastos_operativos'] ?? 0), (float)($global['gastos_operativos'] ?? 0), 'currency');
+            if ($chartEnd >= $chartStart) {
+                $this->addComparativeChart($sheet, 'OPEX por sucursal', $chartStart, $chartEnd, $labelCmp, $labelCur, 'G4', 'O24');
+            }
+
+            $this->setColWidths($sheet, ['A' => 30, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+            $sheet->freezePane('A5');
+            return;
+        }
 
         usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
 
@@ -1825,16 +2600,64 @@ class RadiographyWorkbookBuilder
      * (nomina_total + comisiones + bonos + vacaciones + prima_vacacional +
      * sum(nomina_detalle)) — no calculation changes, presentation only.
      */
-    private function buildNominaSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildNominaSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet      = $ss->createSheet()->setTitle('NÓMINA');
         $brCalc     = $snap['branch_radiography'] ?? [];
         $global     = $brCalc['global']     ?? [];
         $branches   = $brCalc['branches']   ?? [];
         $label      = strtoupper($period->label);
 
-        RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:B1', 'NÓMINA — ' . $label);
+        RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:B1', 'NÓMINA — ' . ($isComparative ? strtoupper($comparePeriod->label) . ' VS ' . $label : $label));
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'C1', '← GLOBAL', 'GLOBAL');
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $m  = $this->extractGlobalCoreMetrics($snap);
+            $cm = $this->extractGlobalCoreMetrics($compareSnap);
+            $cBranches = $compareSnap['branch_radiography']['branches'] ?? [];
+
+            $r = 4;
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'CONCEPTO (GLOBAL) — mismos conceptos del reporte simple'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'CONCEPTO'); $r++;
+            $ni = 0;
+            $mandatory24 = ['Nómina','Comisiones','Vacaciones','Prima vacacional','Bonos','Bonos Aceleradores','IMSS','Descuentos Infonavit','Finiquito','Gastos médicos','Gasolina','Financiamiento De Motos','Descuento Servicios Moto','Financiamiento Celular','Cascos','Descuento de uniformes','Descuentos FONACOT','Descuento extravío tarjeta de circulación','Descuentos Tienda Mr Lana','Descuento Servicios Automóvil','Descuento faltante en caja','Anticipo de nómina','Formatería','Pensión Alimenticia'];
+            foreach ($m['nomDisplayOrder'] as $nomName => $currVal) {
+                $prevVal = (float)($cm['nomDisplayOrder'][$nomName] ?? 0);
+                if ($currVal == 0 && $prevVal == 0 && !in_array($nomName, $mandatory24, true)) continue;
+                $this->writeComparativeRow($sheet, $r, $nomName, $prevVal, (float)$currVal, 'currency', $ni % 2 === 0);
+                $ni++;
+            }
+            $this->writeComparativeRow($sheet, $r, 'Percepciones', (float)($cm['sum']['noi_percepciones'] ?? 0), (float)($m['sum']['noi_percepciones'] ?? 0), 'currency', $ni % 2 === 0); $ni++;
+            $this->writeComparativeRow($sheet, $r, 'Deducciones informativas', (float)($cm['sum']['noi_deducciones'] ?? 0), (float)($m['sum']['noi_deducciones'] ?? 0), 'currency', $ni % 2 === 0); $ni++;
+            $this->writeComparativeRow($sheet, $r, 'Neto pagado a trabajadores', (float)($cm['sum']['noi_neto_pagado'] ?? 0), (float)($m['sum']['noi_neto_pagado'] ?? 0), 'currency', $ni % 2 === 0); $ni++;
+            $this->writeComparativeTotalsRow($sheet, $r, 'Total Nómina y Capital Humano', (float)$cm['nomTotal'], (float)$m['nomTotal'], 'currency');
+            $r++;
+
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'NÓMINA POR SUCURSAL'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'SUCURSAL'); $r++;
+            $cBranchesByName = collect($cBranches)->keyBy(fn ($b) => strtoupper(trim($b['sucursal'] ?? '')));
+            usort($branches, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+            $chartStart = $r;
+            foreach ($branches as $i => $b) {
+                $key  = strtoupper(trim($b['sucursal'] ?? ''));
+                $cB   = $cBranchesByName->get($key);
+                $prev = $cB ? BranchRadiographyCalculator::nominaTotalFor($cB) : 0.0;
+                $curr = BranchRadiographyCalculator::nominaTotalFor($b);
+                $this->writeComparativeRow($sheet, $r, strtoupper($b['sucursal']), (float)$prev, (float)$curr, 'currency', $i % 2 === 0);
+            }
+            $chartEnd = $r - 1;
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL GENERAL', (float)$cm['nomTotal'], (float)$m['nomTotal'], 'currency');
+            if ($chartEnd >= $chartStart) {
+                $this->addComparativeChart($sheet, 'Nómina por sucursal', $chartStart, $chartEnd, $labelCmp, $labelCur, 'G4', 'O24');
+            }
+
+            $this->setColWidths($sheet, ['A' => 30, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+            $sheet->freezePane('A5');
+            return;
+        }
 
         $sheet->getColumnDimension('A')->setWidth(42);
         $sheet->getColumnDimension('B')->setWidth(20);
@@ -1966,8 +2789,15 @@ class RadiographyWorkbookBuilder
      * Creates one worksheet per real branch with the same financial structure as GLOBAL.
      * Branches are derived from the snapshot branches list (already filtered to real branches).
      */
-    private function buildBranchSheets(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildBranchSheets(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
+        $cBrCalcBranches = [];
+        if ($isComparative) {
+            foreach ($compareSnap['branch_radiography']['branches'] ?? [] as $b) {
+                $cBrCalcBranches[strtoupper(trim($b['sucursal']))] = $b;
+            }
+        }
         $branches    = $snap['sections']['branches']                    ?? [];
         $payBC       = $snap['sections']['payroll_by_branch_concept']   ?? [];
         $expMx       = $snap['sections']['expenses_matrix']             ?? [];
@@ -2065,12 +2895,16 @@ class RadiographyWorkbookBuilder
             $isSJR       = $brUp === 'SAN JUAN DEL RÍO';
             $sjrIsClosed = $isSJR && ($carteraB + $colB + $recB) == 0.0;
 
+            $calcCmp = $isComparative ? ($cBrCalcBranches[$brUp] ?? null) : null;
+
             $sheet = $ss->createSheet()->setTitle($tabName($branchName));
 
             $sheet->getColumnDimension('D')->setWidth(18);
 
             // Title row — SJR gets closed-branch note only when it has no activity
-            $titleText = strtoupper($branchName) . ' — ' . strtoupper($period->label);
+            $titleText = $isComparative
+                ? strtoupper($branchName) . ' — ' . strtoupper($comparePeriod->label) . ' VS ' . strtoupper($period->label)
+                : strtoupper($branchName) . ' — ' . strtoupper($period->label);
             if ($sjrIsClosed) {
                 $titleText .= ' — SUCURSAL CERRADA / CARTERA EN RECUPERACIÓN';
             }
@@ -2098,36 +2932,59 @@ class RadiographyWorkbookBuilder
             }
 
             // KPI card row for this branch: Cartera / Mora % / Recuperación / Colocación
-            $kpiCardBorder = ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => RadiographyStyleHelper::BG_ACCENT]];
-            $branchKpis = [
-                ['Valor cartera', $carteraB, 'currency', 'Mora %', $moraPct, 'percent'],
-                ['Recuperación',  $recB,     'currency', 'Otorgamientos', $colB, 'currency'],
-            ];
-            foreach ($branchKpis as [$lblA, $valA, $fmtA, $lblC, $valC, $fmtC]) {
-                RadiographyStyleHelper::setCellValueSafe($sheet, "A{$navRow}", $lblA);
-                $sheet->setCellValue("B{$navRow}", $valA);
-                RadiographyStyleHelper::setCellValueSafe($sheet, "C{$navRow}", $lblC);
-                $sheet->setCellValue("D{$navRow}", $valC);
-                $sheet->getStyle("A{$navRow}:B{$navRow}")->applyFromArray([
-                    'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => RadiographyStyleHelper::BG_LIGHT_BLUE]],
-                    'borders'   => ['outline' => $kpiCardBorder],
-                    'alignment' => ['vertical' => Alignment::VERTICAL_CENTER],
-                ]);
-                $sheet->getStyle("C{$navRow}:D{$navRow}")->applyFromArray([
-                    'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => RadiographyStyleHelper::BG_LIGHT_BLUE]],
-                    'borders'   => ['outline' => $kpiCardBorder],
-                    'alignment' => ['vertical' => Alignment::VERTICAL_CENTER],
-                ]);
-                $sheet->getStyle("B{$navRow}")->getFont()->setBold(true)->setSize(11)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::BG_PRIMARY_DARK));
-                $sheet->getStyle("D{$navRow}")->getFont()->setBold(true)->setSize(11)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::BG_PRIMARY_DARK));
-                $fmtA === 'percent' ? RadiographyStyleHelper::applyPercentFormat($sheet, "B{$navRow}") : RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$navRow}");
-                $fmtC === 'percent' ? RadiographyStyleHelper::applyPercentFormat($sheet, "D{$navRow}") : RadiographyStyleHelper::applyCurrencyFormat($sheet, "D{$navRow}");
-                $sheet->getRowDimension($navRow)->setRowHeight(22);
+            // Comparativo: tabla de 5 columnas en vez de tarjetas 2-arriba (mismo criterio
+            // que GLOBAL: no se puede mostrar prev+curr+diff+var% en una tarjeta angosta).
+            if ($isComparative) {
+                $cCarteraB = $calcCmp ? (float)$calcCmp['valor_cartera'] : 0.0;
+                $cRecB     = $calcCmp ? (float)$calcCmp['recuperacion_total'] : 0.0;
+                $cColB     = $calcCmp ? (float)$calcCmp['colocacion'] : 0.0;
+                $cVencidaB = $calcCmp ? ((float)$calcCmp['mora_0_30'] + (float)$calcCmp['mora_31_60'] + (float)$calcCmp['mora_61_90'] + (float)$calcCmp['mora_91_120'] + (float)$calcCmp['mora_120_plus']) : 0.0;
+                $cMoraPct  = $cCarteraB > 0 ? round($cVencidaB / $cCarteraB * 100, 2) : 0.0;
+                $this->comparativeHeader($sheet, $navRow, $comparePeriod->label, $period->label);
+                $navRow++;
+                foreach ([
+                    ['Valor cartera', $cCarteraB, $carteraB, 'currency'],
+                    ['Mora %',        $cMoraPct,  $moraPct,  'percent'],
+                    ['Recuperación',  $cRecB,     $recB,     'currency'],
+                    ['Otorgamientos', $cColB,     $colB,     'currency'],
+                ] as $i => [$lbl, $prev, $curr, $fmt]) {
+                    $this->writeComparativeRow($sheet, $navRow, $lbl, (float)$prev, (float)$curr, $fmt, $i % 2 === 0);
+                }
+                $navRow++;
+            } else {
+                $kpiCardBorder = ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => RadiographyStyleHelper::BG_ACCENT]];
+                $branchKpis = [
+                    ['Valor cartera', $carteraB, 'currency', 'Mora %', $moraPct, 'percent'],
+                    ['Recuperación',  $recB,     'currency', 'Otorgamientos', $colB, 'currency'],
+                ];
+                foreach ($branchKpis as [$lblA, $valA, $fmtA, $lblC, $valC, $fmtC]) {
+                    RadiographyStyleHelper::setCellValueSafe($sheet, "A{$navRow}", $lblA);
+                    $sheet->setCellValue("B{$navRow}", $valA);
+                    RadiographyStyleHelper::setCellValueSafe($sheet, "C{$navRow}", $lblC);
+                    $sheet->setCellValue("D{$navRow}", $valC);
+                    $sheet->getStyle("A{$navRow}:B{$navRow}")->applyFromArray([
+                        'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => RadiographyStyleHelper::BG_LIGHT_BLUE]],
+                        'borders'   => ['outline' => $kpiCardBorder],
+                        'alignment' => ['vertical' => Alignment::VERTICAL_CENTER],
+                    ]);
+                    $sheet->getStyle("C{$navRow}:D{$navRow}")->applyFromArray([
+                        'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => RadiographyStyleHelper::BG_LIGHT_BLUE]],
+                        'borders'   => ['outline' => $kpiCardBorder],
+                        'alignment' => ['vertical' => Alignment::VERTICAL_CENTER],
+                    ]);
+                    $sheet->getStyle("B{$navRow}")->getFont()->setBold(true)->setSize(11)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::BG_PRIMARY_DARK));
+                    $sheet->getStyle("D{$navRow}")->getFont()->setBold(true)->setSize(11)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::BG_PRIMARY_DARK));
+                    $fmtA === 'percent' ? RadiographyStyleHelper::applyPercentFormat($sheet, "B{$navRow}") : RadiographyStyleHelper::applyCurrencyFormat($sheet, "B{$navRow}");
+                    $fmtC === 'percent' ? RadiographyStyleHelper::applyPercentFormat($sheet, "D{$navRow}") : RadiographyStyleHelper::applyCurrencyFormat($sheet, "D{$navRow}");
+                    $sheet->getRowDimension($navRow)->setRowHeight(22);
+                    $navRow++;
+                }
                 $navRow++;
             }
-            $navRow++;
 
-            $this->colHeaders($sheet, $navRow, ['A' => 'MÉTRICA', 'B' => 'VALOR', 'C' => '%']);
+            if (!$isComparative) {
+                $this->colHeaders($sheet, $navRow, ['A' => 'MÉTRICA', 'B' => 'VALOR', 'C' => '%']);
+            }
             $headerRow = $navRow;
             $recRow    = $recIdx[$brUp] ?? [];
 
@@ -2165,6 +3022,178 @@ class RadiographyWorkbookBuilder
             // EBITDA y gastos totales se calculan más abajo tras construir el desglose de nómina.
 
             $r = $headerRow + 1;
+
+            if ($isComparative) {
+                $labelCmp = $comparePeriod->label;
+                $labelCur = $period->label;
+                $cCarteraB  = $calcCmp ? (float)$calcCmp['valor_cartera'] : 0.0;
+                $cColB      = $calcCmp ? (float)$calcCmp['colocacion'] : 0.0;
+                $cRecB      = $calcCmp ? (float)$calcCmp['recuperacion_total'] : 0.0;
+                $cGastosB   = $calcCmp ? (float)$calcCmp['gastos_operativos'] : 0.0;
+                $cMora0_30  = $calcCmp ? (float)$calcCmp['mora_0_30'] : 0.0;
+                $cMora31_60 = $calcCmp ? (float)$calcCmp['mora_31_60'] : 0.0;
+                $cMora61_90 = $calcCmp ? (float)$calcCmp['mora_61_90'] : 0.0;
+                $cMora91120 = $calcCmp ? (float)$calcCmp['mora_91_120'] : 0.0;
+                $cMora120p  = $calcCmp ? (float)$calcCmp['mora_120_plus'] : 0.0;
+                $cVencidaB  = $cMora0_30 + $cMora31_60 + $cMora61_90 + $cMora91120 + $cMora120p;
+                $cNomCalc   = $calcCmp ? (float)$calcCmp['nomina_total'] : 0.0;
+                $cExcedCalc = $calcCmp ? (float)$calcCmp['excedentes'] : 0.0;
+                $cFondeoCalc= $calcCmp ? (float)$calcCmp['prestamos_fondea'] : 0.0;
+
+                $this->sectionHeader($sheet, "A{$r}:E{$r}", '1. MÉTRICAS GENERALES'); $r++;
+                $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+                foreach ([
+                    ['Valor cartera',         $cCarteraB,  $carteraB,  'currency'],
+                    ['Otorgamientos',         $cColB,      $colB,      'currency'],
+                    ['Recuperación total',    $cRecB,      $recB,      'currency'],
+                    ['Mora de 0 a 30 días',   $cMora0_30,  $mora0_30,  'currency'],
+                    ['Mora de 31 a 60 días',  $cMora31_60, $mora31_60, 'currency'],
+                    ['Mora de 61 a 90 días',  $cMora61_90, $mora61_90, 'currency'],
+                    ['Mora de 91 a 120 días', $cMora91120, $mora91120, 'currency'],
+                    ['Mora 120+ días',        $cMora120p,  $mora120p,  'currency'],
+                    ['Mora total',            $cVencidaB,  $vencidaB,  'currency'],
+                    ['Gastos operativos',     $cGastosB,   $gastosB,   'currency'],
+                    ['Nómina (P001)',         $cNomCalc,   $nomCalc,   'currency'],
+                    ['Excedentes corp.',      $cExcedCalc, $excedCalc, 'currency'],
+                    ['Préstamos intersuc.',   $cFondeoCalc,$fondeoCalc,'currency'],
+                ] as $i => [$lbl, $prev, $curr, $fmt]) {
+                    $this->writeComparativeRow($sheet, $r, $lbl, (float)$prev, (float)$curr, $fmt, $i % 2 === 0);
+                }
+                $r++;
+
+                // 2. Ingresos / Recuperación — desglose por componente
+                $this->sectionHeader($sheet, "A{$r}:E{$r}", '2. INGRESOS / RECUPERACIÓN'); $r++;
+                $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+                $ingrFields = [
+                    'Capital'                       => 'capital_recuperado',
+                    'Intereses'                     => 'interes_recuperado',
+                    'Impuestos'                     => 'impuesto_recuperado',
+                    'Multas / Moratorios'           => 'charges',
+                    'Cargos adicionales'            => 'cargos_adicionales',
+                    'Cargos al inicio'              => 'cargos_inicio',
+                    'Comisión por apertura'         => 'comision_apertura',
+                    'Excedentes recuperados'        => 'excedente_recuperado',
+                    'Seguro CRECE reconocido (30%)' => 'seguro_crece_reconocido',
+                ];
+                $ii = 0;
+                foreach ($ingrFields as $lbl => $field) {
+                    $prev = $calcCmp ? (float)($calcCmp[$field] ?? 0) : 0.0;
+                    $curr = $calc ? (float)($calc[$field] ?? 0) : 0.0;
+                    if ($prev == 0.0 && $curr == 0.0) continue;
+                    $this->writeComparativeRow($sheet, $r, $lbl, $prev, $curr, 'currency', $ii % 2 === 0);
+                    $ii++;
+                }
+                $bIngrTotalCmp = $calcCmp ? (float)$calcCmp['recuperacion_total'] : 0.0;
+                $bIngrTotalCur = $calc ? (float)$calc['recuperacion_total'] : 0.0;
+                $this->writeComparativeTotalsRow($sheet, $r, 'Total Ingresos', $bIngrTotalCmp, $bIngrTotalCur, 'currency');
+                $r++;
+
+                // 3. Gastos Operativos — mismos conceptos, comparativo
+                $this->sectionHeader($sheet, "A{$r}:E{$r}", '3. GASTOS OPERATIVOS'); $r++;
+                $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'CONCEPTO'); $r++;
+                $gastosOpList = [
+                    'Renta Oficina','Luz','Agua','Teléfono e Internet','Insumos de Cafetería',
+                    'Insumos de Limpieza','Insumos de Papelería','Mobiliario y Equipo','Mantenimiento',
+                    'Renta de Bodegas','Señora Limpieza','Eventos','Paquetería','Trámites Gubernamentales',
+                    'Publicidad','Mecánicos','Servicios de Motocicletas','Software Póliza Anual','Pólizas',
+                    'Recargas Telefónicas','Emergentes','Comisiones Oxxo','Multas e Infracciones',
+                    'Transportes','Pegotes','Permisos Vehiculares','Viáticos','Fletes','Formatería',
+                    'Gastos legales','IMSS','Financiamiento de Motos',
+                ];
+                $cBranchGDetalle = (array)($calcCmp['gastos_detalle'] ?? []);
+                $curBranchGDetalle = (array)($calc['gastos_detalle'] ?? []);
+                $gopTotalCur = $calc ? (float)($calc['gastos_operativos'] ?? 0) : 0.0;
+                $gopTotalCmp = $calcCmp ? (float)($calcCmp['gastos_operativos'] ?? 0) : 0.0;
+                $gi = 0;
+                foreach ($gastosOpList as $gastoName) {
+                    $prev = (float)($cBranchGDetalle[$gastoName] ?? 0);
+                    $curr = (float)($curBranchGDetalle[$gastoName] ?? 0);
+                    if ($prev == 0.0 && $curr == 0.0) continue;
+                    $this->writeComparativeRow($sheet, $r, $gastoName, $prev, $curr, 'currency', $gi % 2 === 0);
+                    $gi++;
+                }
+                $this->writeComparativeTotalsRow($sheet, $r, 'Total Gastos Operativos', $gopTotalCmp, $gopTotalCur, 'currency');
+                $r++;
+
+                // 4. Nómina y Capital Humano
+                $this->sectionHeader($sheet, "A{$r}:E{$r}", '4. NÓMINA Y CAPITAL HUMANO'); $r++;
+                $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'CONCEPTO'); $r++;
+                $brNomDisplayList = [
+                    'Nómina','Comisiones','Vacaciones','Prima vacacional','Bonos','Bonos Aceleradores',
+                    'IMSS','Descuentos Infonavit','Finiquito','Gastos médicos','Gasolina',
+                    'Financiamiento De Motos','Descuento Servicios Moto','Financiamiento Celular','Cascos',
+                    'Descuento de uniformes','Descuento gastos sin comprobar','Descuento extravío tarjeta de circulación',
+                    'Descuento tienda Mr Lana','Descuento Servicios Automóvil','Descuento faltante en caja',
+                    'Anticipo de nómina','Formatería','Pensión Alimenticia',
+                ];
+                $buildBrNomMap = function (?array $c) use ($brNomDisplayList): array {
+                    if (!$c) return array_fill_keys($brNomDisplayList, 0.0);
+                    $map = [
+                        'Nómina' => (float)$c['nomina_total'], 'Comisiones' => (float)$c['comisiones'],
+                        'Vacaciones' => (float)$c['vacaciones'], 'Prima vacacional' => (float)$c['prima_vacacional'],
+                        'Bonos' => (float)$c['bonos'], 'Bonos Aceleradores' => (float)$c['bonos_aceleradores'],
+                    ];
+                    $alias = ['Financiamiento de Motos' => 'Financiamiento De Motos', 'Descuentos Tienda Mr Lana' => 'Descuento tienda Mr Lana'];
+                    foreach ((array)($c['nomina_detalle'] ?? []) as $k => $v) {
+                        $canon = $alias[$k] ?? $k;
+                        $map[$canon] = ($map[$canon] ?? 0.0) + (float)$v;
+                    }
+                    foreach ((array)($c['nomina_informativo'] ?? []) as $k => $v) {
+                        $canon = $alias[$k] ?? $k;
+                        $map[$canon] = ($map[$canon] ?? 0.0) + (float)$v;
+                    }
+                    return $map;
+                };
+                $nomMapCur = $buildBrNomMap($calc);
+                $nomMapCmp = $buildBrNomMap($calcCmp);
+                $ni = 0;
+                foreach ($brNomDisplayList as $nomName) {
+                    $prev = (float)($nomMapCmp[$nomName] ?? 0);
+                    $curr = (float)($nomMapCur[$nomName] ?? 0);
+                    if ($prev == 0.0 && $curr == 0.0 && !in_array($nomName, ['Nómina','Comisiones','Vacaciones','Prima vacacional','Bonos'], true)) continue;
+                    $this->writeComparativeRow($sheet, $r, $nomName, $prev, $curr, 'currency', $ni % 2 === 0);
+                    $ni++;
+                }
+                $brNomTotalCur = $calc ? BranchRadiographyCalculator::nominaTotalFor($calc) : 0.0;
+                $brNomTotalCmp = $calcCmp ? BranchRadiographyCalculator::nominaTotalFor($calcCmp) : 0.0;
+                $this->writeComparativeTotalsRow($sheet, $r, 'Total Nómina y Capital Humano', $brNomTotalCmp, $brNomTotalCur, 'currency');
+                $r++;
+
+                // 5. Préstamos Intersucursales
+                $this->sectionHeader($sheet, "A{$r}:E{$r}", '5. PRÉSTAMOS INTERSUCURSALES'); $r++;
+                $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+                $this->writeComparativeRow($sheet, $r, 'Fondeo otorgado', $cFondeoCalc, $fondeoCalc, 'currency', true);
+                $r++;
+
+                // 7. EBITDA (6. Rotación no aplica a nivel sucursal en este libro — ver hoja ROTACIÓN)
+                $brGastosTotalCur = $gopTotalCur + $brNomTotalCur;
+                $brGastosTotalCmp = $gopTotalCmp + $brNomTotalCmp;
+                $brIngresoEbitdaBaseCur = $calc ? BranchRadiographyCalculator::ingresoEbitdaBaseFor($calc) : 0.0;
+                $brIngresoEbitdaBaseCmp = $calcCmp ? BranchRadiographyCalculator::ingresoEbitdaBaseFor($calcCmp) : 0.0;
+                $brUtilidadCur = $brIngresoEbitdaBaseCur - $brGastosTotalCur;
+                $brUtilidadCmp = $brIngresoEbitdaBaseCmp - $brGastosTotalCmp;
+                $brMargenCur = $brIngresoEbitdaBaseCur > 0 ? round($brUtilidadCur / $brIngresoEbitdaBaseCur * 100, 2) : 0.0;
+                $brMargenCmp = $brIngresoEbitdaBaseCmp > 0 ? round($brUtilidadCmp / $brIngresoEbitdaBaseCmp * 100, 2) : 0.0;
+
+                $this->sectionHeader($sheet, "A{$r}:E{$r}", '7. EBITDA'); $r++;
+                $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+                foreach ([
+                    ['Utilidad bruta',                     $brIngresoEbitdaBaseCmp, $brIngresoEbitdaBaseCur, 'currency'],
+                    ['Menos: Gastos Totales',               $brGastosTotalCmp,       $brGastosTotalCur,       'currency'],
+                    ['  Gastos operativos (OPEX)',          $gopTotalCmp,            $gopTotalCur,            'currency'],
+                    ['  Nómina y Capital Humano',            $brNomTotalCmp,          $brNomTotalCur,          'currency'],
+                    ['EBITDA',                               $brUtilidadCmp,          $brUtilidadCur,          'currency'],
+                    ['Margen EBITDA (%)',                    $brMargenCmp,            $brMargenCur,            'percent'],
+                    ['Excedente enviado a corporativo (inform.)', $cExcedCalc,        $excedCalc,              'currency'],
+                    ['Recuperación total / Colocación (informativo)', $cRecB - $cColB, $recB - $colB,          'currency'],
+                ] as $i => [$lbl, $prev, $curr, $fmt]) {
+                    $this->writeComparativeRow($sheet, $r, $lbl, (float)$prev, (float)$curr, $fmt, $i % 2 === 0);
+                }
+                $r += 2;
+
+                $this->setColWidths($sheet, ['A' => 32, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+                goto branchSectionsDone;
+            }
 
             // 1. Métricas Generales
             $this->sectionHeader($sheet, "A{$r}:C{$r}", '1. MÉTRICAS GENERALES');
@@ -2447,6 +3476,7 @@ class RadiographyWorkbookBuilder
             }
             $r += 2;
 
+            branchSectionsDone:
             // 8. Observaciones y Notas
             $this->sectionHeader($sheet, "A{$r}:C{$r}", '8. OBSERVACIONES Y NOTAS');
             $r++;
@@ -2590,12 +3620,57 @@ class RadiographyWorkbookBuilder
 
     // ── HOJA 2: PRODUCTOS ────────────────────────────────────────────────────
 
-    private function buildProductosSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildProductosSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet    = $ss->createSheet()->setTitle('PRODUCTOS');
         $products = $snap['sections']['products'] ?? [];
 
-        $this->sheetTitle($sheet, 'A1:F1', 'PRODUCTOS POR TIPO — ' . strtoupper($period->label));
+        $this->sheetTitle($sheet, 'A1:F1', $isComparative
+            ? 'PRODUCTOS POR TIPO — ' . strtoupper($comparePeriod->label) . ' VS ' . strtoupper($period->label)
+            : 'PRODUCTOS POR TIPO — ' . strtoupper($period->label));
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $cProducts = $compareSnap['sections']['products'] ?? [];
+            $cByName = collect($cProducts)->keyBy('producto');
+            $curByName = collect($products)->keyBy('producto');
+            $allProducts = collect(array_keys($cByName->all()))->merge(array_keys($curByName->all()))->unique()->values();
+
+            $r = 3;
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'COLOCACIÓN POR PRODUCTO'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'PRODUCTO'); $r++;
+            $chartStart = $r;
+            $pi = 0;
+            foreach ($allProducts as $prod) {
+                $prev = (float)($cByName->get($prod)['colocacion'] ?? 0);
+                $curr = (float)($curByName->get($prod)['colocacion'] ?? 0);
+                if ($prev == 0.0 && $curr == 0.0) continue;
+                $this->writeComparativeRow($sheet, $r, $prod, $prev, $curr, 'currency', $pi % 2 === 0);
+                $pi++;
+            }
+            $chartEnd = $r - 1;
+            if ($chartEnd >= $chartStart) {
+                $this->addComparativeChart($sheet, 'Colocación por producto', $chartStart, $chartEnd, $labelCmp, $labelCur, 'G3', 'O20');
+            }
+            $r++;
+
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'CARTERA POR PRODUCTO'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'PRODUCTO'); $r++;
+            $ci = 0;
+            foreach ($allProducts as $prod) {
+                $prev = (float)($cByName->get($prod)['cartera'] ?? 0);
+                $curr = (float)($curByName->get($prod)['cartera'] ?? 0);
+                if ($prev == 0.0 && $curr == 0.0) continue;
+                $this->writeComparativeRow($sheet, $r, $prod, $prev, $curr, 'currency', $ci % 2 === 0);
+                $ci++;
+            }
+
+            $this->setColWidths($sheet, ['A' => 28, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+            $sheet->freezePane('A4');
+            return;
+        }
 
         if (empty($products)) {
             $sheet->setCellValue('A2', 'Sin datos de productos para este periodo.');
@@ -2747,13 +3822,55 @@ class RadiographyWorkbookBuilder
 
     // ── EMPLEADOS (fusionado, sin duplicados por alias) ──────────────────────
 
-    private function buildEmpleadosSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildEmpleadosSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet = $ss->createSheet()->setTitle('EMPLEADOS');
         $rows  = $snap['sections']['employees_gestores'] ?? [];
 
-        $this->sheetTitle($sheet, 'A1:M1', 'EMPLEADOS / GESTORES — ' . strtoupper($period->label));
+        $this->sheetTitle($sheet, 'A1:M1', $isComparative
+            ? 'EMPLEADOS / GESTORES — ' . strtoupper($comparePeriod->label) . ' VS ' . strtoupper($period->label)
+            : 'EMPLEADOS / GESTORES — ' . strtoupper($period->label));
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'O1', '← GLOBAL', 'GLOBAL');
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $canonicalizer = app(\App\Services\EmployeeNameCanonicalizer::class);
+            $cRows = $compareSnap['sections']['employees_gestores'] ?? [];
+            $cByName = collect($cRows)->keyBy(fn ($e) => $canonicalizer->normalize($e['name'] ?? ''));
+
+            $metrics = [
+                'RECUPERACIÓN POR GESTOR' => 'recuperacion',
+                'COLOCACIÓN POR GESTOR'   => 'colocacion',
+                'NETO PAGADO POR GESTOR'  => 'neto',
+            ];
+            $r = 3;
+            foreach ($metrics as $title => $field) {
+                $this->sectionHeader($sheet, "A{$r}:E{$r}", $title); $r++;
+                $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'GESTOR'); $r++;
+                $chartStart = $r;
+                $mi = 0;
+                foreach ($rows as $emp) {
+                    $key  = $canonicalizer->normalize($emp['name'] ?? '');
+                    $prev = (float)($cByName->get($key)[$field] ?? 0);
+                    $curr = (float)($emp[$field] ?? 0);
+                    if ($prev == 0.0 && $curr == 0.0) continue;
+                    $this->writeComparativeRow($sheet, $r, $emp['name'], $prev, $curr, 'currency', $mi % 2 === 0);
+                    $mi++;
+                }
+                $chartEnd = $r - 1;
+                $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL', (float)array_sum(array_column($cRows, $field)), (float)array_sum(array_column($rows, $field)), 'currency');
+                $r++;
+                if ($field === 'colocacion' && $chartEnd >= $chartStart) {
+                    $this->addComparativeChart($sheet, 'Top gestores por colocación', $chartStart, min($chartEnd, $chartStart + 9), $labelCmp, $labelCur, 'G3', 'O24');
+                }
+            }
+
+            $this->setColWidths($sheet, ['A' => 30, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+            $sheet->freezePane('A4');
+            return;
+        }
 
         if (empty($rows)) {
             $sheet->setCellValue('A2', 'Sin datos de empleados para este periodo.');
@@ -3360,20 +4477,90 @@ class RadiographyWorkbookBuilder
 
     // ── P. INTERSUC. ─────────────────────────────────────────────────────────
 
-    private function buildInterbranchLoansSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildInterbranchLoansSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet = $ss->createSheet()->setTitle('P. INTERSUC.');
         $loans = $snap['sections']['interbranch_loans'] ?? [];
 
         [$mesLabel, $anioLabel] = $this->periodMonthYear($period);
-        $this->sheetTitle($sheet, 'A1:D1',
-            'PRÉSTAMOS INTERSUCURSALES — ' . strtoupper($mesLabel) . ' ' . $anioLabel);
+        $this->sheetTitle($sheet, 'A1:D1', $isComparative
+            ? 'PRÉSTAMOS INTERSUCURSALES — ' . strtoupper($comparePeriod->label) . ' VS ' . strtoupper($period->label)
+            : 'PRÉSTAMOS INTERSUCURSALES — ' . strtoupper($mesLabel) . ' ' . $anioLabel);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'F1', '← GLOBAL', 'GLOBAL');
 
         $opFondeos   = $loans['operative_fondeos'] ?? [];
         $excedentes  = $loans['excedentes'] ?? [];
         $detail      = $loans['detail']     ?? [];
         $total       = (float)($opFondeos['fondea_total'] ?? 0) + (float)($excedentes['total'] ?? 0);
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $cLoans      = $compareSnap['sections']['interbranch_loans'] ?? [];
+            $cOpFondeos  = $cLoans['operative_fondeos'] ?? [];
+            $cExcedentes = $cLoans['excedentes'] ?? [];
+            $cFondTotal  = (float)($cOpFondeos['fondea_total'] ?? 0);
+            $fondTotal   = (float)($opFondeos['fondea_total'] ?? 0);
+            $cExcTotal   = (float)($cExcedentes['total'] ?? 0);
+            $excTotal    = (float)($excedentes['total'] ?? 0);
+
+            $r = 4;
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'FONDEOS ENTRE SUCURSALES OPERATIVAS — SUCURSAL QUE FONDEA'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'SUCURSAL'); $r++;
+            $cFondeaByBranch = collect($cOpFondeos['fondea'] ?? [])->keyBy(fn ($row) => $this->dashIfUnresolved($row['branch'] ?? null));
+            $fi = 0;
+            foreach (($opFondeos['fondea'] ?? []) as $row) {
+                $branch = $this->dashIfUnresolved($row['branch'] ?? null);
+                $prev = (float)($cFondeaByBranch->get($branch)['total'] ?? 0);
+                $this->writeComparativeRow($sheet, $r, $branch, $prev, (float)$row['total'], 'currency', $fi % 2 === 0);
+                $fi++;
+            }
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL FONDEA', $cFondTotal, $fondTotal, 'currency');
+            $r++;
+
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'FONDEOS ENTRE SUCURSALES OPERATIVAS — SUCURSAL QUE RECIBE'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'SUCURSAL'); $r++;
+            $cRecibeByBranch = collect($cOpFondeos['recibe'] ?? [])->keyBy(fn ($row) => $this->dashIfUnresolved($row['branch'] ?? null));
+            $recTotalCur = 0.0; $recTotalCmp = 0.0;
+            $ri = 0;
+            foreach (($opFondeos['recibe'] ?? []) as $row) {
+                $branch = $this->dashIfUnresolved($row['branch'] ?? null);
+                $prev = (float)($cRecibeByBranch->get($branch)['total'] ?? 0);
+                $curr = (float)$row['total'];
+                $recTotalCur += $curr;
+                $this->writeComparativeRow($sheet, $r, $branch, $prev, $curr, 'currency', $ri % 2 === 0);
+                $ri++;
+            }
+            foreach (($cOpFondeos['recibe'] ?? []) as $row) { $recTotalCmp += (float)$row['total']; }
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL RECIBE', $recTotalCmp, $recTotalCur, 'currency');
+            $r++;
+
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'EXCEDENTES / ENVÍO A CORPORATIVO — POR SUCURSAL ORIGEN'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'SUCURSAL'); $r++;
+            $cExcByBranch = collect($cExcedentes['by_branch'] ?? [])->keyBy('branch');
+            $chartStart = $r;
+            foreach (($excedentes['by_branch'] ?? []) as $row) {
+                $prev = (float)($cExcByBranch->get($row['branch'])['total'] ?? 0);
+                $this->writeComparativeRow($sheet, $r, $row['branch'], $prev, (float)$row['total'], 'currency', ($r - $chartStart) % 2 === 0);
+            }
+            $chartEnd = $r - 1;
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL EXCEDENTES', $cExcTotal, $excTotal, 'currency');
+            if ($chartEnd >= $chartStart) {
+                $this->addComparativeChart($sheet, 'Excedentes por sucursal', $chartStart, $chartEnd, $labelCmp, $labelCur, 'G4', 'O24');
+            }
+            $r++;
+
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'RESUMEN TOTAL'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            $this->writeComparativeRow($sheet, $r, 'Fondeos entre sucursales operativas', $cFondTotal, $fondTotal, 'currency', true);
+            $this->writeComparativeRow($sheet, $r, 'Excedentes a CORPORATIVO', $cExcTotal, $excTotal, 'currency', false);
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL GENERAL', $cFondTotal + $cExcTotal, $fondTotal + $excTotal, 'currency');
+
+            $this->setColWidths($sheet, ['A' => 30, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+            $sheet->freezePane('A5');
+            return;
+        }
 
         $r = 3;
 
@@ -3778,12 +4965,61 @@ class RadiographyWorkbookBuilder
 
     // ── COLOCACIÓN ───────────────────────────────────────────────────────────
 
-    private function buildPlacementSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildPlacementSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet   = $ss->createSheet()->setTitle('COLOCACIÓN');
         $rows    = $snap['sections']['placement_by_branch_product'] ?? [];
         // Authoritative KPI total — from BranchRadiographyCalculator (same as dashboard/PDF)
         $kpiTotal = (float)($snap['branch_radiography']['global']['colocacion'] ?? 0);
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $cRows = $compareSnap['sections']['placement_by_branch_product'] ?? [];
+            $cKpiTotal = (float)($compareSnap['branch_radiography']['global']['colocacion'] ?? 0);
+
+            RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:E1', 'COLOCACIÓN — ' . strtoupper($labelCmp) . ' VS ' . strtoupper($labelCur));
+            RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
+
+            $byProductCur = [];
+            foreach ($rows as $row) { $byProductCur[$row['product']] = ($byProductCur[$row['product']] ?? 0) + (float)$row['monto']; }
+            $byProductCmp = [];
+            foreach ($cRows as $row) { $byProductCmp[$row['product']] = ($byProductCmp[$row['product']] ?? 0) + (float)$row['monto']; }
+            $byBranchCur = [];
+            foreach ($rows as $row) { $byBranchCur[$row['branch']] = ($byBranchCur[$row['branch']] ?? 0) + (float)$row['monto']; }
+            $byBranchCmp = [];
+            foreach ($cRows as $row) { $byBranchCmp[$row['branch']] = ($byBranchCmp[$row['branch']] ?? 0) + (float)$row['monto']; }
+
+            $r = 4;
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'COLOCACIÓN POR PRODUCTO'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'PRODUCTO'); $r++;
+            $allProducts = collect(array_keys($byProductCmp))->merge(array_keys($byProductCur))->unique()->values();
+            $pi = 0;
+            foreach ($allProducts as $prod) {
+                $this->writeComparativeRow($sheet, $r, $prod, (float)($byProductCmp[$prod] ?? 0), (float)($byProductCur[$prod] ?? 0), 'currency', $pi % 2 === 0);
+                $pi++;
+            }
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL GENERAL', $cKpiTotal, $kpiTotal, 'currency');
+            $r++;
+
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'COLOCACIÓN POR SUCURSAL'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'SUCURSAL'); $r++;
+            $allBranches = collect(array_keys($byBranchCmp))->merge(array_keys($byBranchCur))->unique()->sort()->values();
+            $chartStart = $r;
+            foreach ($allBranches as $branch) {
+                $this->writeComparativeRow($sheet, $r, strtoupper($branch), (float)($byBranchCmp[$branch] ?? 0), (float)($byBranchCur[$branch] ?? 0), 'currency', ($r - $chartStart) % 2 === 0);
+            }
+            $chartEnd = $r - 1;
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL GENERAL', $cKpiTotal, $kpiTotal, 'currency');
+            if ($chartEnd >= $chartStart) {
+                $this->addComparativeChart($sheet, 'Colocación por sucursal', $chartStart, $chartEnd, $labelCmp, $labelCur, 'G4', 'O24');
+            }
+
+            $this->setColWidths($sheet, ['A' => 28, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+            $sheet->freezePane('A5');
+            return;
+        }
 
         [$mesLabel, $anioLabel] = $this->periodMonthYear($period);
         $this->greenTitle($sheet, 'A1:C1', $mesLabel);
@@ -3902,14 +5138,52 @@ class RadiographyWorkbookBuilder
      * RadiographyStyleHelper::branchEbitdaEstimate()/ebitdaCategory(), nunca
      * recalculada de forma distinta aquí.
      */
-    private function buildCategoriaEbitdaSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildCategoriaEbitdaSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet    = $ss->createSheet()->setTitle('CATEGORÍA EBITDA');
         $branches = $snap['branch_radiography']['branches'] ?? [];
         $label    = strtoupper($period->label);
 
-        $this->sheetTitle($sheet, 'A1:B1', 'CATEGORÍA POR EBITDA — ' . $label);
+        $this->sheetTitle($sheet, 'A1:B1', $isComparative
+            ? 'CATEGORÍA POR EBITDA — ' . strtoupper($comparePeriod->label) . ' VS ' . $label
+            : 'CATEGORÍA POR EBITDA — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $cBranches = $compareSnap['branch_radiography']['branches'] ?? [];
+            $cByName = collect($cBranches)->keyBy(fn ($b) => strtoupper(trim($b['sucursal'] ?? '')));
+
+            $this->colHeaders($sheet, 4, ['A' => 'SUCURSAL', 'B' => 'CATEGORÍA ' . strtoupper($labelCmp), 'C' => 'CATEGORÍA ' . strtoupper($labelCur)]);
+            $r = 5;
+            $sorted = $branches;
+            usort($sorted, fn ($a, $b) => strcmp($a['sucursal'], $b['sucursal']));
+            foreach ($sorted as $i => $b) {
+                $curCat = RadiographyStyleHelper::ebitdaCategory(RadiographyStyleHelper::branchEbitdaEstimate($b));
+                $cB = $cByName->get(strtoupper(trim($b['sucursal'] ?? '')));
+                $cmpCat = $cB ? RadiographyStyleHelper::ebitdaCategory(RadiographyStyleHelper::branchEbitdaEstimate($cB)) : '—';
+                $sheet->setCellValue("A{$r}", $b['sucursal']);
+                $sheet->setCellValue("B{$r}", $cmpCat);
+                $sheet->setCellValue("C{$r}", $curCat);
+                $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
+                foreach (['B' => $cmpCat, 'C' => $curCat] as $col => $cat) {
+                    if ($cat === '—') continue;
+                    $colors = RadiographyStyleHelper::categoryColors($cat);
+                    $sheet->getStyle("{$col}{$r}")->applyFromArray([
+                        'font' => ['bold' => true, 'size' => 9.5, 'color' => ['argb' => $colors['fg']]],
+                        'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $colors['bg']]],
+                        'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
+                    ]);
+                }
+                $sheet->getRowDimension($r)->setRowHeight(18);
+                $r++;
+            }
+            $this->setColWidths($sheet, ['A' => 26, 'B' => 20, 'C' => 20]);
+            $sheet->freezePane('A5');
+            return;
+        }
 
         if (empty($branches)) {
             $sheet->setCellValue('A3', 'Sin datos por sucursal para calcular categorías.');
@@ -4035,6 +5309,100 @@ class RadiographyWorkbookBuilder
         };
     }
 
+    /**
+     * Encabezado estándar de una tabla comparativa de 5 columnas (A:E):
+     * MÉTRICA | {labelCmp} | {labelCur} | DIFERENCIA | VARIACIÓN %.
+     * Usado por TODAS las hojas cuando se genera en modo comparativo — mismo
+     * criterio en cada pestaña, nunca una tabla ejecutiva distinta.
+     */
+    private function comparativeHeader(Worksheet $sheet, int $row, string $labelCmp, string $labelCur, string $metricLabel = 'MÉTRICA'): void
+    {
+        $this->colHeaders($sheet, $row, [
+            'A' => $metricLabel,
+            'B' => strtoupper($labelCmp),
+            'C' => strtoupper($labelCur),
+            'D' => 'DIFERENCIA',
+            'E' => 'VARIACIÓN %',
+        ]);
+    }
+
+    /**
+     * Escribe una fila comparativa (label | prev | curr | diferencia | variación %)
+     * en las columnas A:E y avanza $r. Misma lógica que ya se usaba en el
+     * comparativo ejecutivo — ahora reutilizada por cada hoja del libro cuando el
+     * reporte es comparativo, para que TODAS las pestañas comparen igual.
+     */
+    private function writeComparativeRow(Worksheet $sheet, int &$r, string $label, float $prev, float $curr, string $fmt, bool $alt): void
+    {
+        $diff   = $curr - $prev;
+        $varPct = $prev != 0 ? round($diff / abs($prev) * 100, 2) : ($curr != 0 ? 100.0 : 0.0);
+
+        $sheet->setCellValue("A{$r}", $label);
+        $sheet->setCellValue("B{$r}", $prev);
+        $sheet->setCellValue("C{$r}", $curr);
+        $sheet->setCellValue("D{$r}", $diff);
+        $sheet->setCellValue("E{$r}", $fmt === 'percent' ? $diff : $varPct);
+
+        $this->dataRow($sheet, "A{$r}:E{$r}", $alt);
+        $fmtCode = $fmt === 'currency' ? self::CURRENCY : ($fmt === 'percent' ? self::PERCENT : self::INTEGER);
+        foreach (['B', 'C', 'D'] as $col) {
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode($fmtCode);
+        }
+        $sheet->getStyle("E{$r}")->getNumberFormat()->setFormatCode($fmt === 'percent' ? '+0.00" pp";-0.00" pp";0.00" pp"' : '+0.00"%";-0.00"%";0.00"%"');
+        $varForColor = $fmt === 'percent' ? $diff : $varPct;
+        if ($varForColor > 0) {
+            $sheet->getStyle("E{$r}")->getFont()->getColor()->setARGB('FF15803D');
+        } elseif ($varForColor < 0) {
+            $sheet->getStyle("E{$r}")->getFont()->getColor()->setARGB(self::FG_RED);
+        }
+        $r++;
+    }
+
+    /**
+     * Fila de totales comparativa (mismo estilo que totalsRow, pero con las 4
+     * columnas prev/curr/diff/var%).
+     */
+    private function writeComparativeTotalsRow(Worksheet $sheet, int &$r, string $label, float $prev, float $curr, string $fmt): void
+    {
+        $diff   = $curr - $prev;
+        $varPct = $prev != 0 ? round($diff / abs($prev) * 100, 2) : ($curr != 0 ? 100.0 : 0.0);
+
+        $sheet->setCellValue("A{$r}", $label);
+        $sheet->setCellValue("B{$r}", $prev);
+        $sheet->setCellValue("C{$r}", $curr);
+        $sheet->setCellValue("D{$r}", $diff);
+        $sheet->setCellValue("E{$r}", $fmt === 'percent' ? $diff : $varPct);
+
+        $this->totalsRow($sheet, "A{$r}:E{$r}");
+        $fmtCode = $fmt === 'currency' ? self::CURRENCY : ($fmt === 'percent' ? self::PERCENT : self::INTEGER);
+        foreach (['B', 'C', 'D'] as $col) {
+            $sheet->getStyle("{$col}{$r}")->getNumberFormat()->setFormatCode($fmtCode);
+        }
+        $sheet->getStyle("E{$r}")->getNumberFormat()->setFormatCode($fmt === 'percent' ? '+0.00" pp";-0.00" pp";0.00" pp"' : '+0.00"%";-0.00"%";0.00"%"');
+        $r++;
+    }
+
+    /**
+     * Gráfica comparativa de 2 series (mes comparado vs mes actual) — misma
+     * apariencia (bar chart clustered) en todas las pestañas comparativas.
+     */
+    private function addComparativeChart(Worksheet $sheet, string $title, int $dataStartRow, int $dataEndRow, string $labelCmp, string $labelCur, string $topLeft, string $bottomRight, string $axisFmt = '"$"#,##0'): void
+    {
+        RadiographyStyleHelper::addComparativeBarChart(
+            $sheet,
+            $title,
+            "\$A\${$dataStartRow}:\$A\${$dataEndRow}",
+            "\$B\${$dataStartRow}:\$B\${$dataEndRow}",
+            "\$C\${$dataStartRow}:\$C\${$dataEndRow}",
+            $labelCmp,
+            $labelCur,
+            $dataEndRow - $dataStartRow + 1,
+            $topLeft,
+            $bottomRight,
+            $axisFmt
+        );
+    }
+
     private function periodMonthYear(Period $period): array
     {
         $months = ['Enero','Febrero','Marzo','Abril','Mayo','Junio',
@@ -4059,14 +5427,67 @@ class RadiographyWorkbookBuilder
         RadiographyStyleHelper::setColWidths($sheet, $widths);
     }
 
-    private function buildRotacionSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildRotacionSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet    = $ss->createSheet()->setTitle('ROTACIÓN');
         $rotation = $snap['sections']['rotation'] ?? [];
         $label    = strtoupper($period->label);
 
-        $this->sheetTitle($sheet, 'A1:F1', 'ÍNDICE DE ROTACIÓN DE PERSONAL — ' . $label);
+        $this->sheetTitle($sheet, 'A1:F1', $isComparative
+            ? 'ÍNDICE DE ROTACIÓN DE PERSONAL — ' . strtoupper($comparePeriod->label) . ' VS ' . $label
+            : 'ÍNDICE DE ROTACIÓN DE PERSONAL — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $cRotation = $compareSnap['sections']['rotation'] ?? [];
+            $curCount  = (float)($rotation['current_count'] ?? $rotation['promedio'] ?? 0);
+            $cmpCount  = (float)($cRotation['current_count'] ?? $cRotation['promedio'] ?? 0);
+
+            $r = 4;
+            $this->sectionHeader($sheet, "A{$r}:E{$r}", 'RESUMEN GLOBAL'); $r++;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur); $r++;
+            $this->writeComparativeRow($sheet, $r, 'Plantilla', $cmpCount, $curCount, 'integer', true);
+            $this->writeComparativeRow($sheet, $r, 'N° de altas en el periodo', (float)($cRotation['altas'] ?? 0), (float)($rotation['altas'] ?? 0), 'integer', false);
+            $this->writeComparativeRow($sheet, $r, 'N° de bajas en el periodo', (float)($cRotation['bajas'] ?? 0), (float)($rotation['bajas'] ?? 0), 'integer', true);
+            $this->writeComparativeRow($sheet, $r, 'Índice de rotación (%)', (float)($cRotation['indice'] ?? 0), (float)($rotation['indice'] ?? 0), 'percent', false);
+            $r++;
+
+            $porSucursalCur = $rotation['por_sucursal'] ?? [];
+            $porSucursalCmp = collect($cRotation['por_sucursal'] ?? [])->keyBy(fn ($x) => strtoupper(trim($x['sucursal'] ?? '')));
+            if (!empty($porSucursalCur)) {
+                $this->sectionHeader($sheet, "A{$r}:E{$r}", 'DETALLE POR SUCURSAL — PLANTILLA'); $r++;
+                $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'SUCURSAL'); $r++;
+                $chartStart = $r;
+                foreach ($porSucursalCur as $i => $row) {
+                    $key  = strtoupper(trim($row['sucursal'] ?? ''));
+                    $prev = (float)($porSucursalCmp->get($key)['promedio_personal'] ?? 0);
+                    $curr = (float)($row['promedio_personal'] ?? 0);
+                    $this->writeComparativeRow($sheet, $r, $row['sucursal'], $prev, $curr, 'integer', $i % 2 === 0);
+                }
+                $chartEnd = $r - 1;
+                $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL', $cmpCount, $curCount, 'integer');
+                if ($chartEnd >= $chartStart) {
+                    $this->addComparativeChart($sheet, 'Plantilla por sucursal', $chartStart, $chartEnd, $labelCmp, $labelCur, 'G4', 'O24', '#,##0');
+                }
+                $r++;
+
+                $this->sectionHeader($sheet, "A{$r}:E{$r}", 'DETALLE POR SUCURSAL — ÍNDICE DE ROTACIÓN'); $r++;
+                $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'SUCURSAL'); $r++;
+                foreach ($porSucursalCur as $i => $row) {
+                    $key  = strtoupper(trim($row['sucursal'] ?? ''));
+                    $prev = (float)($porSucursalCmp->get($key)['indice_rotacion'] ?? 0);
+                    $curr = (float)($row['indice_rotacion'] ?? 0);
+                    $this->writeComparativeRow($sheet, $r, $row['sucursal'], $prev, $curr, 'percent', $i % 2 === 0);
+                }
+            }
+
+            $this->setColWidths($sheet, ['A' => 26, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+            $sheet->freezePane('A5');
+            return;
+        }
 
         $mes         = $rotation['mes'] ?? '';
         $altas       = (int)($rotation['altas']    ?? 0);
@@ -4228,69 +5649,50 @@ class RadiographyWorkbookBuilder
 
         $detail = $snap['sections']['rotation_detail'] ?? [];
 
-        // ── B) Altas detectadas ──
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:F{$r}", 'ALTAS DETECTADAS');
+        // Reporte final limpio: solo Sucursal/Clave/Colaborador — sin Fuente/Motivo/
+        // frases de auditoría (eso queda en reportes:audit-rotacion-cierre, no en el
+        // Excel entregable).
+
+        // ── B) Altas ──
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:C{$r}", 'ALTAS');
         $r++;
-        $this->colHeaders($sheet, $r, ['A' => 'SUCURSAL', 'B' => 'CLAVE', 'C' => 'NOMBRE', 'D' => 'MOTIVO']);
+        $this->colHeaders($sheet, $r, ['A' => 'SUCURSAL', 'B' => 'CLAVE', 'C' => 'COLABORADOR']);
         $r++;
         $altasList = $detail['altas'] ?? [];
         foreach ($altasList as $i => $a) {
             $sheet->setCellValue("A{$r}", $a['sucursal'] ?? '');
             $sheet->setCellValue("B{$r}", $a['clave'] ?? '—');
             $sheet->setCellValue("C{$r}", $a['nombre'] ?? '');
-            $sheet->setCellValue("D{$r}", $a['motivo'] ?? '');
-            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
             $r++;
         }
         if (empty($altasList)) {
-            $sheet->setCellValue("A{$r}", 'Sin altas detectadas en este periodo.');
+            $sheet->setCellValue("A{$r}", 'Sin altas en este periodo.');
             $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(9);
             $r++;
         }
         $r++;
 
-        // ── C) Bajas detectadas ──
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:F{$r}", 'BAJAS DETECTADAS');
+        // ── C) Bajas ──
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:C{$r}", 'BAJAS');
         $r++;
-        $this->colHeaders($sheet, $r, ['A' => 'SUCURSAL', 'B' => 'CLAVE', 'C' => 'NOMBRE', 'D' => 'MOTIVO']);
+        $this->colHeaders($sheet, $r, ['A' => 'SUCURSAL', 'B' => 'CLAVE', 'C' => 'COLABORADOR']);
         $r++;
         $bajasList = $detail['bajas'] ?? [];
         foreach ($bajasList as $i => $b) {
             $sheet->setCellValue("A{$r}", $b['sucursal'] ?? '');
             $sheet->setCellValue("B{$r}", $b['clave'] ?? '—');
             $sheet->setCellValue("C{$r}", $b['nombre'] ?? '');
-            $sheet->setCellValue("D{$r}", $b['motivo'] ?? '');
-            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $this->dataRow($sheet, "A{$r}:C{$r}", $i % 2 === 0);
             $r++;
         }
         if (empty($bajasList)) {
-            $sheet->setCellValue("A{$r}", 'Sin bajas detectadas en este periodo.');
-            $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(9);
-            $r++;
-        }
-        $r++;
-
-        // ── D) Auditoría de empleados sin sucursal ──
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:F{$r}", 'AUDITORÍA — EMPLEADOS SIN SUCURSAL');
-        $r++;
-        $this->colHeaders($sheet, $r, ['A' => 'CLAVE', 'B' => 'NOMBRE', 'C' => 'FUENTE', 'D' => 'MOTIVO']);
-        $r++;
-        $sinSucList = $detail['sin_sucursal'] ?? [];
-        foreach ($sinSucList as $i => $s) {
-            $sheet->setCellValue("A{$r}", $s['clave'] ?? '—');
-            $sheet->setCellValue("B{$r}", $s['nombre'] ?? '');
-            $sheet->setCellValue("C{$r}", $s['fuente'] ?? '');
-            $sheet->setCellValue("D{$r}", $s['motivo'] ?? '');
-            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
-            $r++;
-        }
-        if (empty($sinSucList)) {
-            $sheet->setCellValue("A{$r}", 'Sin empleados sin sucursal — todos los colaboradores NOI activos tienen sucursal resuelta.');
+            $sheet->setCellValue("A{$r}", 'Sin bajas en este periodo.');
             $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(9);
             $r++;
         }
 
-        $this->setColWidths($sheet, ['A' => 30, 'B' => 18, 'C' => 32, 'D' => 48, 'E' => 20, 'F' => 14, 'G' => 20]);
+        $this->setColWidths($sheet, ['A' => 30, 'B' => 18, 'C' => 32, 'D' => 22, 'E' => 22, 'F' => 14, 'G' => 20]);
         $sheet->freezePane('A5');
     }
 
@@ -4299,114 +5701,161 @@ class RadiographyWorkbookBuilder
      * colaboradores únicos por sucursal × $3,500. Fuente única vigente desde
      * 2026-07-23 — el archivo manual queda solo como referencia histórica.
      */
-    private function buildImssSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildImssSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet = $ss->createSheet()->setTitle('IMSS');
         $imss  = $snap['sections']['imss'] ?? [];
         $label = strtoupper($period->label);
         $fee   = (float) ($imss['cuota_por_colaborador'] ?? 3500.0);
 
-        $this->sheetTitle($sheet, 'A1:G1', 'IMSS — CUOTA PATRONAL POR SUCURSAL — ' . $label);
+        $this->sheetTitle($sheet, 'A1:D1', $isComparative
+            ? 'IMSS — CUOTA PATRONAL POR SUCURSAL — ' . strtoupper($comparePeriod->label) . ' VS ' . $label
+            : 'IMSS — CUOTA PATRONAL POR SUCURSAL — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $cImss = $compareSnap['sections']['imss'] ?? [];
+            $porSucursalCur = collect($imss['por_sucursal'] ?? [])->filter(fn ($row) => !empty($row['incluido']))->values();
+            $porSucursalCmp = collect($cImss['por_sucursal'] ?? [])->filter(fn ($row) => !empty($row['incluido']))->keyBy(fn ($row) => strtoupper(trim($row['sucursal'] ?? '')));
+
+            $r = 4;
+            $this->sectionHeader($sheet, "A{$r}:G{$r}", 'RESUMEN POR SUCURSAL'); $r++;
+            $this->colHeaders($sheet, $r, [
+                'A' => 'SUCURSAL',
+                'B' => 'COLABORADORES ' . strtoupper($labelCmp),
+                'C' => 'COLABORADORES ' . strtoupper($labelCur),
+                'D' => 'IMSS ' . strtoupper($labelCmp),
+                'E' => 'IMSS ' . strtoupper($labelCur),
+                'F' => 'DIFERENCIA',
+                'G' => 'VARIACIÓN %',
+            ]);
+            $r++;
+            $totColCmp = 0; $totColCur = 0; $totImssCmp = 0.0; $totImssCur = 0.0;
+            foreach ($porSucursalCur as $i => $row) {
+                $key = strtoupper(trim($row['sucursal'] ?? ''));
+                $cRow = $porSucursalCmp->get($key);
+                $colCmp = (int)($cRow['colaboradores'] ?? 0);
+                $colCur = (int)($row['colaboradores'] ?? 0);
+                $imssCmp = (float)($cRow['imss'] ?? 0);
+                $imssCur = (float)($row['imss'] ?? 0);
+                $diff = $imssCur - $imssCmp;
+                $varPct = $imssCmp != 0 ? round($diff / abs($imssCmp) * 100, 2) : ($imssCur != 0 ? 100.0 : 0.0);
+                $sheet->setCellValue("A{$r}", $row['sucursal'] ?? '');
+                $sheet->setCellValue("B{$r}", $colCmp);
+                $sheet->setCellValue("C{$r}", $colCur);
+                $sheet->setCellValue("D{$r}", $imssCmp);
+                $sheet->setCellValue("E{$r}", $imssCur);
+                $sheet->setCellValue("F{$r}", $diff);
+                $sheet->setCellValue("G{$r}", $varPct);
+                $this->dataRow($sheet, "A{$r}:G{$r}", $i % 2 === 0);
+                RadiographyStyleHelper::applyIntegerFormat($sheet, "B{$r}");
+                RadiographyStyleHelper::applyIntegerFormat($sheet, "C{$r}");
+                foreach (['D', 'E', 'F'] as $col) {
+                    RadiographyStyleHelper::applyCurrencyFormat($sheet, "{$col}{$r}");
+                }
+                $sheet->getStyle("G{$r}")->getNumberFormat()->setFormatCode('+0.00"%";-0.00"%";0.00"%"');
+                $totColCmp += $colCmp; $totColCur += $colCur; $totImssCmp += $imssCmp; $totImssCur += $imssCur;
+                $r++;
+            }
+            $totDiff = $totImssCur - $totImssCmp;
+            $totVarPct = $totImssCmp != 0 ? round($totDiff / abs($totImssCmp) * 100, 2) : 0.0;
+            $sheet->setCellValue("A{$r}", 'TOTAL GENERAL');
+            $sheet->setCellValue("B{$r}", $totColCmp);
+            $sheet->setCellValue("C{$r}", $totColCur);
+            $sheet->setCellValue("D{$r}", $totImssCmp);
+            $sheet->setCellValue("E{$r}", $totImssCur);
+            $sheet->setCellValue("F{$r}", $totDiff);
+            $sheet->setCellValue("G{$r}", $totVarPct);
+            $this->totalsRow($sheet, "A{$r}:G{$r}");
+            RadiographyStyleHelper::applyIntegerFormat($sheet, "B{$r}");
+            RadiographyStyleHelper::applyIntegerFormat($sheet, "C{$r}");
+            foreach (['D', 'E', 'F'] as $col) { RadiographyStyleHelper::applyCurrencyFormat($sheet, "{$col}{$r}"); }
+
+            $this->setColWidths($sheet, ['A' => 22, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 18, 'F' => 16, 'G' => 14]);
+            $sheet->freezePane('A5');
+            return;
+        }
 
         $r = 4;
 
+        // Reporte final limpio: solo colaboradores/sucursales que SÍ cuentan en el
+        // total (sin columnas técnicas de fuente/inclusión/motivo — esa auditoría
+        // vive en `reportes:audit-imss`, no en el Excel entregable).
+        $porSucursal   = collect($imss['por_sucursal'] ?? [])->filter(fn ($row) => !empty($row['incluido']))->values();
+        $colaboradores = collect($imss['colaboradores'] ?? [])->filter(fn ($c) => !empty($c['incluido']))->values();
+
         // ── A) Resumen por sucursal ──
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:G{$r}", 'RESUMEN POR SUCURSAL');
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", 'RESUMEN POR SUCURSAL');
         $r++;
         $this->colHeaders($sheet, $r, [
             'A' => 'SUCURSAL',
-            'B' => 'COLABORADORES NOI FISCAL',
-            'C' => 'CUOTA POR COLABORADOR',
-            'D' => 'IMSS CALCULADO',
-            'E' => 'INCLUIDO EN REPORTE',
-            'F' => 'MOTIVO',
+            'B' => 'COLABORADORES',
+            'C' => 'CUOTA',
+            'D' => 'TOTAL IMSS',
         ]);
         $r++;
 
-        $porSucursal = $imss['por_sucursal'] ?? [];
         foreach ($porSucursal as $i => $row) {
             $sheet->setCellValue("A{$r}", $row['sucursal'] ?? '');
             $sheet->setCellValue("B{$r}", (int) ($row['colaboradores'] ?? 0));
             $sheet->setCellValue("C{$r}", (float) ($row['cuota'] ?? $fee));
             $sheet->setCellValue("D{$r}", (float) ($row['imss'] ?? 0));
-            $sheet->setCellValue("E{$r}", !empty($row['incluido']) ? 'SÍ' : 'NO');
-            $sheet->setCellValue("F{$r}", $row['motivo'] ?? '');
 
-            $this->dataRow($sheet, "A{$r}:F{$r}", $i % 2 === 0);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
             RadiographyStyleHelper::applyIntegerFormat($sheet, "B{$r}");
             RadiographyStyleHelper::applyCurrencyFormat($sheet, "C{$r}");
             RadiographyStyleHelper::applyCurrencyFormat($sheet, "D{$r}");
             $r++;
         }
-        if (empty($porSucursal)) {
+        if ($porSucursal->isEmpty()) {
             $sheet->setCellValue("A{$r}", 'Sin colaboradores en NOI Nómina Fiscal para este periodo.');
-            RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:F{$r}");
+            RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:D{$r}");
             $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(9);
+            $r++;
+        } else {
+            $sheet->setCellValue("A{$r}", 'TOTAL GENERAL');
+            $sheet->setCellValue("B{$r}", (int) $porSucursal->sum('colaboradores'));
+            $sheet->setCellValue("C{$r}", '');
+            $sheet->setCellValue("D{$r}", (float) $porSucursal->sum('imss'));
+            $this->totalsRow($sheet, "A{$r}:D{$r}");
+            RadiographyStyleHelper::applyIntegerFormat($sheet, "B{$r}");
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "D{$r}");
             $r++;
         }
         $r++;
 
-        // ── B) Lista de colaboradores ──
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:G{$r}", 'LISTA DE COLABORADORES');
+        // ── B) Colaboradores ──
+        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", 'COLABORADORES');
         $r++;
         $this->colHeaders($sheet, $r, [
             'A' => 'SUCURSAL',
-            'B' => 'CLAVE TRABAJADOR',
-            'C' => 'NOMBRE TRABAJADOR',
-            'D' => 'FUENTE',
-            'E' => 'INCLUIDO',
-            'F' => 'MOTIVO',
-            'G' => 'IMPORTE IMSS ASIGNADO',
+            'B' => 'CLAVE',
+            'C' => 'COLABORADOR',
+            'D' => 'IMPORTE IMSS',
         ]);
         $r++;
 
-        $colaboradores = $imss['colaboradores'] ?? [];
         foreach ($colaboradores as $i => $c) {
             $sheet->setCellValue("A{$r}", $c['sucursal'] ?? '');
             $sheet->setCellValue("B{$r}", $c['clave'] ?? '—');
             $sheet->setCellValue("C{$r}", $c['nombre'] ?? '');
-            $sheet->setCellValue("D{$r}", $c['fuente'] ?? 'NOI Nómina Fiscal');
-            $sheet->setCellValue("E{$r}", !empty($c['incluido']) ? 'SÍ' : 'NO');
-            $sheet->setCellValue("F{$r}", $c['motivo'] ?? '');
-            $sheet->setCellValue("G{$r}", (float) ($c['importe'] ?? 0));
+            $sheet->setCellValue("D{$r}", (float) ($c['importe'] ?? 0));
 
-            $this->dataRow($sheet, "A{$r}:G{$r}", $i % 2 === 0);
-            RadiographyStyleHelper::applyCurrencyFormat($sheet, "G{$r}");
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            RadiographyStyleHelper::applyCurrencyFormat($sheet, "D{$r}");
             $r++;
         }
-        if (empty($colaboradores)) {
+        if ($colaboradores->isEmpty()) {
             $sheet->setCellValue("A{$r}", 'Sin colaboradores que reportar.');
-            RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:G{$r}");
+            RadiographyStyleHelper::mergeCellsSafe($sheet, "A{$r}:D{$r}");
             $sheet->getStyle("A{$r}")->getFont()->setItalic(true)->setSize(9);
             $r++;
         }
-        $r++;
 
-        // ── C) Resumen global ──
-        RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:G{$r}", 'RESUMEN GLOBAL');
-        $r++;
-        $resumen = $imss['resumen'] ?? [];
-        $summaryRows = [
-            ['Total colaboradores NOI fiscal detectados', (int) ($resumen['total_detectados_fiscal'] ?? 0), 'integer'],
-            ['Total colaboradores incluidos',              (int) ($resumen['total_incluidos'] ?? 0), 'integer'],
-            ['Total IMSS incluido',                         (float) ($resumen['monto_incluido'] ?? 0), 'currency'],
-            ['Total colaboradores excluidos',               (int) ($resumen['total_excluidos'] ?? 0), 'integer'],
-            ['Total IMSS excluido',                          (float) ($resumen['monto_excluido'] ?? 0), 'currency'],
-        ];
-        foreach ($summaryRows as $i => [$rowLabel, $value, $fmt]) {
-            $sheet->setCellValue("A{$r}", $rowLabel);
-            $sheet->setCellValue("B{$r}", $value);
-            $this->dataRow($sheet, "A{$r}:G{$r}", $i % 2 === 0);
-            $this->applyFmt($sheet, "B{$r}", $fmt, $value);
-            $r++;
-        }
-        $sheet->setCellValue("A{$r}", 'Motivo de exclusión');
-        $sheet->setCellValue("B{$r}", 'Sin sucursal resuelta o unidad no operativa (Corporativo/Tulancingo/otra)');
-        $this->dataRow($sheet, "A{$r}:G{$r}", true);
-        RadiographyStyleHelper::mergeCellsSafe($sheet, "B{$r}:G{$r}");
-
-        $this->setColWidths($sheet, ['A' => 22, 'B' => 20, 'C' => 32, 'D' => 20, 'E' => 12, 'F' => 44, 'G' => 20]);
+        $this->setColWidths($sheet, ['A' => 22, 'B' => 14, 'C' => 34, 'D' => 18]);
         $sheet->freezePane('A5');
     }
 
@@ -5499,58 +6948,95 @@ class RadiographyWorkbookBuilder
 
     // ── NÓMINA POR GESTOR ────────────────────────────────────────────────────
 
-    private function buildNominaGestorSheet(Spreadsheet $ss, Period $period, array $snap): void
+    private function buildNominaGestorSheet(Spreadsheet $ss, Period $period, array $snap, ?Period $comparePeriod = null, ?array $compareSnap = null): void
     {
+        $isComparative = $comparePeriod !== null && $compareSnap !== null;
         $sheet = $ss->createSheet()->setTitle('NÓMINA POR GESTOR');
         $label = strtoupper($period->label);
-        $this->sheetTitle($sheet, 'A1:M1', 'NÓMINA POR GESTOR — ' . $label);
+        $this->sheetTitle($sheet, 'A1:M1', $isComparative
+            ? 'NÓMINA POR GESTOR — ' . strtoupper($comparePeriod->label) . ' VS ' . $label
+            : 'NÓMINA POR GESTOR — ' . $label);
         $sheet->setCellValue('A2', '← GLOBAL');
         $sheet->getCell('A2')->getHyperlink()->setUrl('sheet://GLOBAL!A1');
         $sheet->getStyle('A2')->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FF1D4ED8'))->setUnderline(true);
 
-        // All dataIds (weekly base periods + this period)
-        $allPeriods = \App\Models\Period::all();
-        $weeklyIds  = $period->resolveBaseWeeklyIds($allPeriods);
-        $dataIds    = array_values(array_unique(array_merge(empty($weeklyIds) ? [] : $weeklyIds, [$period->id])));
+        $fetchNominaGestorRows = function (Period $p) {
+            $allPeriods = \App\Models\Period::all();
+            $weeklyIds  = $p->resolveBaseWeeklyIds($allPeriods);
+            $dataIds    = array_values(array_unique(array_merge(empty($weeklyIds) ? [] : $weeklyIds, [$p->id])));
 
+            return \Illuminate\Support\Facades\DB::table('fact_noi_movements as n')
+                ->join('employees as e', 'n.employee_id', '=', 'e.id')
+                ->leftJoin('employee_branch_assignments as eba', function ($j) use ($p) {
+                    $j->on('eba.employee_id', '=', 'n.employee_id')->where('eba.period_id', '=', $p->id);
+                })
+                ->leftJoin('branches as b', 'eba.branch_id', '=', 'b.id')
+                ->whereIn('n.period_id', $dataIds)
+                ->whereNotNull('n.employee_id')
+                ->selectRaw("
+                    COALESCE(b.name, 'Sin sucursal') as sucursal,
+                    MAX(e.full_name) as empleado,
+                    e.normalized_name,
+                    SUM(CASE WHEN LOWER(COALESCE(n.concept_type,''))='percepcion'
+                                 AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%bono%'
+                                 AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%comisi%'
+                                 AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%vacaci%'
+                                 AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%prima%'
+                             THEN n.amount ELSE 0 END) as sueldos,
+                    SUM(CASE WHEN LOWER(COALESCE(n.concept,'')) LIKE '%comisi%' THEN n.amount ELSE 0 END) as comisiones,
+                    SUM(CASE WHEN LOWER(COALESCE(n.concept_type,''))='percepcion'
+                                  AND LOWER(COALESCE(n.concept,'')) LIKE '%bono%'
+                             THEN n.amount ELSE 0 END) as bonos,
+                    SUM(CASE WHEN LOWER(COALESCE(n.concept,'')) LIKE '%vacaci%' THEN n.amount ELSE 0 END) as vacaciones,
+                    SUM(CASE WHEN LOWER(COALESCE(n.concept,'')) LIKE '%prima%' THEN n.amount ELSE 0 END) as prima_vacacional,
+                    SUM(CASE WHEN LOWER(COALESCE(n.concept_type,'')) IN ('deduccion','descuento') THEN n.amount ELSE 0 END) as descuentos,
+                    COUNT(n.id) as registros
+                ")
+                ->groupBy('e.normalized_name', 'b.name')
+                ->orderBy('sucursal')
+                ->orderByRaw('e.normalized_name')
+                ->get();
+        };
+
+        $rows = $fetchNominaGestorRows($period);
+
+        if ($isComparative) {
+            $labelCmp = $comparePeriod->label;
+            $labelCur = $period->label;
+            $cRows = $fetchNominaGestorRows($comparePeriod);
+            $totalOf = fn ($row) => (float)$row->sueldos + (float)$row->comisiones + (float)$row->bonos
+                + (float)$row->vacaciones + (float)$row->prima_vacacional - (float)$row->descuentos;
+            $cByKey = collect($cRows)->keyBy('normalized_name');
+
+            $r = 3;
+            $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'EMPLEADO / GESTOR'); $r++;
+            $bySucursal = collect($rows)->groupBy('sucursal');
+            $grandCur = 0.0; $grandCmp = 0.0;
+            foreach ($bySucursal as $sucursal => $group) {
+                $this->sectionHeader($sheet, "A{$r}:E{$r}", strtoupper($this->dashIfUnresolved($sucursal))); $r++;
+                $subCur = 0.0; $subCmp = 0.0;
+                foreach ($group as $i => $emp) {
+                    $curr = $totalOf($emp);
+                    $cEmp = $cByKey->get($emp->normalized_name);
+                    $prev = $cEmp ? $totalOf($cEmp) : 0.0;
+                    $this->writeComparativeRow($sheet, $r, $emp->empleado, $prev, $curr, 'currency', $i % 2 === 0);
+                    $subCur += $curr; $subCmp += $prev;
+                }
+                $this->writeComparativeTotalsRow($sheet, $r, 'SUBTOTAL — ' . strtoupper($this->dashIfUnresolved($sucursal)), $subCmp, $subCur, 'currency');
+                $r++;
+                $grandCur += $subCur; $grandCmp += $subCmp;
+            }
+            $this->writeComparativeTotalsRow($sheet, $r, 'TOTAL GENERAL', $grandCmp, $grandCur, 'currency');
+
+            $this->setColWidths($sheet, ['A' => 32, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
+            $sheet->freezePane('A4');
+            return;
+        }
+
+        // All dataIds (weekly base periods + this period)
         $amtExpr = "CASE
             WHEN LOWER(COALESCE(n.concept_type,'')) LIKE '%comisi%' OR LOWER(COALESCE(n.concept,'')) LIKE '%comisi%' THEN n.amount
             ELSE 0 END";
-
-        // Consolidate by (normalized_name, branch) to prevent same employee from appearing
-        // twice when they exist in both NOI (fiscal) and Lendus (no-fiscal) source systems.
-        $rows = \Illuminate\Support\Facades\DB::table('fact_noi_movements as n')
-            ->join('employees as e', 'n.employee_id', '=', 'e.id')
-            ->leftJoin('employee_branch_assignments as eba', function ($j) use ($period) {
-                $j->on('eba.employee_id', '=', 'n.employee_id')->where('eba.period_id', '=', $period->id);
-            })
-            ->leftJoin('branches as b', 'eba.branch_id', '=', 'b.id')
-            ->whereIn('n.period_id', $dataIds)
-            ->whereNotNull('n.employee_id')
-            ->selectRaw("
-                COALESCE(b.name, 'Sin sucursal') as sucursal,
-                MAX(e.full_name) as empleado,
-                e.normalized_name,
-                SUM(CASE WHEN LOWER(COALESCE(n.concept_type,''))='percepcion'
-                             AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%bono%'
-                             AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%comisi%'
-                             AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%vacaci%'
-                             AND LOWER(COALESCE(n.concept,'')) NOT LIKE '%prima%'
-                         THEN n.amount ELSE 0 END) as sueldos,
-                SUM(CASE WHEN LOWER(COALESCE(n.concept,'')) LIKE '%comisi%' THEN n.amount ELSE 0 END) as comisiones,
-                SUM(CASE WHEN LOWER(COALESCE(n.concept_type,''))='percepcion'
-                              AND LOWER(COALESCE(n.concept,'')) LIKE '%bono%'
-                         THEN n.amount ELSE 0 END) as bonos,
-                SUM(CASE WHEN LOWER(COALESCE(n.concept,'')) LIKE '%vacaci%' THEN n.amount ELSE 0 END) as vacaciones,
-                SUM(CASE WHEN LOWER(COALESCE(n.concept,'')) LIKE '%prima%' THEN n.amount ELSE 0 END) as prima_vacacional,
-                SUM(CASE WHEN LOWER(COALESCE(n.concept_type,'')) IN ('deduccion','descuento') THEN n.amount ELSE 0 END) as descuentos,
-                COUNT(n.id) as registros,
-                GROUP_CONCAT(DISTINCT e.source_system ORDER BY e.source_system SEPARATOR '+') as fuentes
-            ")
-            ->groupBy('e.normalized_name', 'b.name')
-            ->orderBy('sucursal')
-            ->orderByRaw('e.normalized_name')
-            ->get();
 
         $headers = [
             'A' => 'SUCURSAL', 'B' => 'EMPLEADO / GESTOR',
