@@ -34,36 +34,6 @@ class MonthlyReportController extends Controller {
     ];
 
     public function index(Request $request): Response {
-        $selectedPeriodId = $request->integer('period');
-        $periods = Period::query()->orderByDesc('year')->orderByDesc('month')->orderByDesc('sequence')->get(['id','name','code','type','year','month','sequence','start_date','end_date','is_closed'])->map(fn (Period $period) => [
-            'id' => $period->id,
-            'name' => $period->name,
-            'label' => $period->label,
-            'code' => $period->code,
-            'type' => $period->type,
-            'year' => $period->year,
-            'month' => $period->month,
-            'sequence' => $period->sequence,
-            'start_date' => optional($period->start_date)->format('Y-m-d'),
-            'end_date' => optional($period->end_date)->format('Y-m-d'),
-            'is_closed' => (bool) $period->is_closed,
-        ])->values();
-        $summaryRows = collect();
-        if ($selectedPeriodId) {
-            $summaryRows = MonthlyEmployeeSummary::query()->with(['employee:id,full_name','branch:id,name'])->where('period_id', $selectedPeriodId)->orderByDesc('included_in_report')->orderBy('employee_id')->get()->map(fn (MonthlyEmployeeSummary $summary) => [
-                'id' => $summary->id,
-                'employee_name' => $summary->employee?->full_name,
-                'branch_name' => $summary->branch?->name,
-                'total_payments' => (float) $summary->total_payments,
-                'total_bonuses' => (float) $summary->total_bonuses,
-                'total_discounts' => (float) $summary->total_discounts,
-                'total_expenses' => (float) $summary->total_expenses,
-                'net_amount' => (float) $summary->net_amount,
-                'has_useful_movement' => (bool) $summary->has_useful_movement,
-                'included_in_report' => (bool) $summary->included_in_report,
-                'exclusion_reason' => $summary->exclusion_reason,
-            ])->values();
-        }
         $generatedReports = PeriodSummary::query()
             ->with(['period:id,name,code,type,year,month,sequence,start_date,end_date'])
             ->where('status', 'generated')
@@ -86,10 +56,7 @@ class MonthlyReportController extends Controller {
             ])->values();
 
         return Inertia::render('ReportesMensuales/Index', [
-            'periods' => $periods,
-            'selectedPeriodId' => $selectedPeriodId,
-            'summaryRows' => $summaryRows,
-            'message' => 'Selecciona un periodo para consolidar y revisar el resumen por empleado.',
+            'message' => 'Consulta, previsualiza y descarga los reportes ya generados.',
             'generatedReports' => $generatedReports,
         ]);
     }

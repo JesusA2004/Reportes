@@ -9,6 +9,7 @@ use App\Services\EmployeeNameCanonicalizer;
 use App\Services\Radiography\RadiographySnapshotBuilder;
 use App\Services\Radiography\RadiographyWorkbookBuilder;
 use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use RuntimeException;
@@ -19,6 +20,27 @@ class RadiografiaExportService
         private RadiographyWorkbookBuilder $workbookBuilder,
         private RadiographySnapshotBuilder $snapshotBuilder,
     ) {}
+
+    /**
+     * Excel y PDF de un mismo comparativo se piden en requests HTTP separados (dos
+     * botones/enlaces distintos), y cada uno reconstruye el snapshot de AMBOS
+     * periodos desde fact_* — coste evitable cuando el usuario pide Excel y PDF
+     * seguidos del mismo comparativo. Cachea el snapshot ya calculado por un rato
+     * corto, invalidado automáticamente si el summary se regenera (cambia su
+     * updated_at). No cambia ningún cálculo, solo evita repetirlo.
+     */
+    private function buildSnapshotCached(Period $period, PeriodSummary $summary, array $config = []): array
+    {
+        $key = sprintf(
+            'radiography_snapshot:%d:%d:%d:%s',
+            $period->id,
+            $summary->id,
+            $summary->updated_at?->timestamp ?? 0,
+            md5(json_encode($config))
+        );
+
+        return Cache::remember($key, 180, fn () => $this->snapshotBuilder->build($period, $summary, $config));
+    }
 
     public function export(Period $period, array $config = []): string
     {
@@ -79,7 +101,7 @@ class RadiografiaExportService
         @ini_set('memory_limit', '1024M');
 
         $summary  = $this->requireSummary($period);
-        $snapshot = $this->snapshotBuilder->build($period, $summary);
+        $snapshot = $this->buildSnapshotCached($period, $summary);
 
         $scope      = $config['scope'] ?? 'general';
         $reportType = $config['report_type'] ?? 'simple';
@@ -91,7 +113,7 @@ class RadiografiaExportService
             }
             $comparePeriod = Period::findOrFail($comparePeriodId);
             $compareSummary = $this->requireSummary($comparePeriod);
-            $compareSnap    = $this->snapshotBuilder->build($comparePeriod, $compareSummary);
+            $compareSnap    = $this->buildSnapshotCached($comparePeriod, $compareSummary);
             $spreadsheet    = $this->workbookBuilder->buildComparativeFromSnapshots($period, $snapshot, $comparePeriod, $compareSnap, $config);
             $suffix         = 'comparativo_' . $comparePeriod->code . '_vs_' . ($period->code ?: $period->id);
         } elseif ($scope === 'branch') {
@@ -136,7 +158,7 @@ class RadiografiaExportService
 
         $summary = $this->requireSummary($period);
         $summary->loadMissing(['branchSummaries', 'incidents']);
-        $snapshot = $this->snapshotBuilder->build($period, $summary);
+        $snapshot = $this->buildSnapshotCached($period, $summary);
 
         $scope      = $config['scope'] ?? 'general';
         $reportType = $config['report_type'] ?? 'simple';
@@ -148,7 +170,7 @@ class RadiografiaExportService
             }
             $comparePeriod  = Period::findOrFail($comparePeriodId);
             $compareSummary = $this->requireSummary($comparePeriod);
-            $compareSnap    = $this->snapshotBuilder->build($comparePeriod, $compareSummary);
+            $compareSnap    = $this->buildSnapshotCached($comparePeriod, $compareSummary);
 
             [$rows, $scopeLabel] = $this->buildComparativeRows($snapshot, $compareSnap, $config);
 
@@ -261,16 +283,17 @@ class RadiografiaExportService
             }
         }
 
-        $pagos   = (float)($empRow['pagos']       ?? 0);
-        $bonos   = (float)($empRow['bonos']       ?? 0);
-        $desctos = (float)($empRow['descuentos']  ?? 0);
-        $gastos  = (float)($empRow['gastos']      ?? 0) + $extraExpenseAmount;
-        $neto    = (float)($empRow['neto']        ?? ($pagos + $bonos - $desctos));
-        $coloc   = (float)($empRow['colocacion']  ?? 0);
-        $rec     = (float)($empRow['recuperacion'] ?? 0);
-        $cartera = (float)($empRow['cartera']     ?? 0);
-        $vencida = (float)($empRow['vencida']     ?? 0);
-        $mora    = $cartera > 0 ? round($vencida / $cartera * 100, 2) : (float)($empRow['mora'] ?? 0);
+        $pagos       = (float)($empRow['pagos']       ?? 0);
+        $bonos       = (float)($empRow['bonos']       ?? 0);
+        $desctos     = (float)($empRow['descuentos']  ?? 0);
+        $gastos      = (float)($empRow['gastos']      ?? 0) + $extraExpenseAmount;
+        $neto        = (float)($empRow['neto']        ?? ($pagos + $bonos - $desctos));
+        $coloc       = (float)($empRow['colocacion']  ?? 0);
+        $rec         = (float)($empRow['recuperacion'] ?? 0);
+        $cartera     = (float)($empRow['cartera']     ?? 0);
+        $vencida     = (float)($empRow['vencida']     ?? 0);
+        $mora        = $cartera > 0 ? round($vencida / $cartera * 100, 2) : (float)($empRow['mora'] ?? 0);
+        $ingresoBase = (float)($empRow['ingreso_ebitda_base'] ?? 0);
 
         return [
             'empName'   => $employee->full_name,
@@ -286,8 +309,10 @@ class RadiografiaExportService
             'cartera'   => $cartera,
             'vencida'   => $vencida,
             'mora'      => $mora,
-            // EBITDA estimado = Recuperación − Colocación − (Gastos + NóminaNet) — misma fórmula que Excel.
-            'utilidad'  => $rec - $coloc - ($gastos + $pagos + $bonos - $desctos),
+            // EBITDA = Ingreso base EBITDA (mismos componentes que BranchRadiographyCalculator::
+            // ingresoEbitdaBaseFor(), agregados por gestor) − (Gastos + NóminaNeta). NUNCA
+            // Recuperación − Colocación (esa fórmula quedó obsoleta, ver criterio final 2026-07).
+            'utilidad'  => $ingresoBase - ($gastos + $pagos + $bonos - $desctos),
         ];
     }
 

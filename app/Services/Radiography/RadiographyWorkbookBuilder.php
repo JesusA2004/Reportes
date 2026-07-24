@@ -1827,12 +1827,6 @@ class RadiographyWorkbookBuilder
 
         RadiographyStyleHelper::applyTitleStyle($sheet, 'A1:B1', 'NÓMINA — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'C1', '← GLOBAL', 'GLOBAL');
-        $imssFuente = $snap['sections']['imss_meta']['fuente'] ?? 'derived_noi_fiscal';
-        $imssNota   = $imssFuente === 'derived_noi_fiscal'
-            ? 'IMSS calculado automáticamente desde NOI fiscal: colaboradores únicos × $3,500 (ver hoja IMSS)'
-            : 'IMSS calculado desde NOI fiscal: sin colaboradores detectados en NOI Nómina Fiscal para este periodo';
-        $sheet->setCellValue('D1', $imssNota);
-        $sheet->getStyle('D1')->getFont()->setItalic(true)->setSize(8.5)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
 
         $sheet->getColumnDimension('A')->setWidth(42);
         $sheet->getColumnDimension('B')->setWidth(20);
@@ -4065,9 +4059,6 @@ class RadiographyWorkbookBuilder
 
         $this->sheetTitle($sheet, 'A1:F1', 'ÍNDICE DE ROTACIÓN DE PERSONAL — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
-        $fuenteRotacion = 'Fuente: NOI';
-        $sheet->setCellValue('C2', $fuenteRotacion);
-        $sheet->getStyle('C2')->getFont()->setItalic(true)->setSize(8.5)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
 
         $mes      = $rotation['mes'] ?? '';
         $altas    = (int)($rotation['altas']    ?? 0);
@@ -4099,6 +4090,30 @@ class RadiographyWorkbookBuilder
             $r++;
         }
         $r++;
+
+        $detalleMensual = $rotation['detalle_mensual'] ?? [];
+        if (!empty($detalleMensual)) {
+            RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:F{$r}", 'DETALLE MENSUAL (PERIODO CONSOLIDADO)');
+            $r++;
+            $this->colHeaders($sheet, $r, [
+                'A' => 'MES', 'B' => 'ALTAS', 'C' => 'BAJAS', 'D' => 'PLANTILLA', 'E' => 'ÍNDICE (%)',
+            ]);
+            $r++;
+            foreach ($detalleMensual as $i => $dm) {
+                $sheet->setCellValue("A{$r}", $dm['mes']);
+                $sheet->setCellValue("B{$r}", (int) $dm['altas']);
+                $sheet->setCellValue("C{$r}", (int) $dm['bajas']);
+                $sheet->setCellValue("D{$r}", (float) $dm['plantilla']);
+                $sheet->setCellValue("E{$r}", (float) $dm['indice']);
+                $this->dataRow($sheet, "A{$r}:E{$r}", $i % 2 === 0);
+                RadiographyStyleHelper::applyIntegerFormat($sheet, "B{$r}");
+                RadiographyStyleHelper::applyIntegerFormat($sheet, "C{$r}");
+                RadiographyStyleHelper::applyIntegerFormat($sheet, "D{$r}");
+                RadiographyStyleHelper::applyPercentFormat($sheet, "E{$r}", (float) $dm['indice']);
+                $r++;
+            }
+            $r++;
+        }
 
         $porSucursal = $rotation['por_sucursal'] ?? [];
         if (!empty($porSucursal)) {
@@ -4247,8 +4262,6 @@ class RadiographyWorkbookBuilder
 
         $this->sheetTitle($sheet, 'A1:G1', 'IMSS — CUOTA PATRONAL POR SUCURSAL — ' . $label);
         RadiographyStyleHelper::applyHyperlinkStyle($sheet, 'A2', '← GLOBAL', 'GLOBAL');
-        $sheet->setCellValue('C2', 'IMSS calculado automáticamente desde NOI fiscal: colaboradores únicos × $' . number_format($fee, 2));
-        $sheet->getStyle('C2')->getFont()->setItalic(true)->setSize(8.5)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color(RadiographyStyleHelper::FG_DARK_TEXT));
 
         $r = 4;
 
@@ -4829,9 +4842,12 @@ class RadiographyWorkbookBuilder
         $cartera   = (float)($empRow['cartera']       ?? 0);
         $vencida   = (float)($empRow['vencida']       ?? 0);
         $mora      = $cartera > 0 ? round($vencida / $cartera * 100, 2) : (float)($empRow['mora'] ?? 0);
+        $ingresoBase = (float)($empRow['ingreso_ebitda_base'] ?? 0);
 
-        // EBITDA = Ingresos − Otorgamientos − (Gastos + NóminaNet)
-        $utilidad  = $rec - $coloc - ($gastos + $pagos + $bonos - $desctos);
+        // EBITDA = Ingreso base EBITDA (mismos componentes que BranchRadiographyCalculator::
+        // ingresoEbitdaBaseFor(), agregados por gestor) − (Gastos + NóminaNeta). NUNCA
+        // Recuperación − Colocación (fórmula obsoleta, ver criterio final 2026-07).
+        $utilidad  = $ingresoBase - ($gastos + $pagos + $bonos - $desctos);
 
         $spreadsheet = new Spreadsheet();
         $spreadsheet->getProperties()
@@ -4900,7 +4916,7 @@ class RadiographyWorkbookBuilder
         $r += 2;
 
         $this->sectionHeader($sheet, "A{$r}:D{$r}", '4. EBITDA ESTIMADO'); $r++;
-        $sheet->setCellValue("A{$r}", 'Rec − Otorg − (Gastos + Pagos + Bonos − Desctos)');
+        $sheet->setCellValue("A{$r}", 'Ingreso base EBITDA − (Gastos + Pagos + Bonos − Desctos)');
         $sheet->setCellValue("B{$r}", $utilidad);
         $this->dataRow($sheet, "A{$r}:D{$r}", true);
         $this->applyFmt($sheet, "B{$r}", 'currency', $utilidad);

@@ -996,14 +996,36 @@ class ReportUploadController extends Controller {
             }
         }
 
-        $run = PeriodRadiographyRun::query()->create([
-            'period_id'  => $period->id,
-            'status'     => 'queued',
-            'queued_at'  => now(),
-            'created_by' => auth()->id(),
-            'log'        => "Radiografía en cola. Se generará un {$type} con alcance {$scope}.",
-            'metadata'   => ['config' => $config, 'progress_percent' => 0, 'current_step' => 'En cola'],
-        ]);
+        // Guardia atómica contra doble envío (doble click, dos pestañas, etc.): el
+        // chequeo de resolveWorkflowState() arriba lee el último run fuera de lock,
+        // así que dos requests casi simultáneas pueden pasarlo ambas. Con el lock
+        // aquí, la segunda request ve el run "queued/running" recién creado por la
+        // primera y aborta antes de encolar un segundo job para el mismo periodo.
+        $run = DB::transaction(function () use ($period, $type, $scope, $config) {
+            $activeRun = PeriodRadiographyRun::query()
+                ->where('period_id', $period->id)
+                ->whereIn('status', ['queued', 'running'])
+                ->lockForUpdate()
+                ->latest('id')
+                ->first();
+
+            if ($activeRun) {
+                return null;
+            }
+
+            return PeriodRadiographyRun::query()->create([
+                'period_id'  => $period->id,
+                'status'     => 'queued',
+                'queued_at'  => now(),
+                'created_by' => auth()->id(),
+                'log'        => "Radiografía en cola. Se generará un {$type} con alcance {$scope}.",
+                'metadata'   => ['config' => $config, 'progress_percent' => 0, 'current_step' => 'En cola'],
+            ]);
+        });
+
+        if (!$run) {
+            return back()->with('error', 'Ya hay una generación en curso para este periodo. Espera a que termine antes de volver a generarla.');
+        }
 
         GenerateRadiographyJob::dispatch($period->id, auth()->id(), $run->id, $config);
 

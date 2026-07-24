@@ -551,13 +551,18 @@ const resolveLocationFromIncident = ({ incident_id, action, branch_id }: { incid
     })
 }
 
+const isGeneratingReport = ref(false)
+
 const generateReport = () => {
+    if (isGeneratingReport.value) return
     if (!period.value?.can_generate_radiography) return toastError('Generación bloqueada', period.value?.blocking_reasons?.join(' ') || 'Completa las etapas previas.')
     if (reportConfig.value.report_type !== 'simple' && !reportConfig.value.compare_period_id) return toastError('Falta periodo comparable', 'Selecciona explícitamente el periodo a comparar.')
+    isGeneratingReport.value = true
     router.post(`/historico-general/${selectedPeriodId.value}/generar-radiografia`, { config: reportConfig.value }, {
         preserveScroll: true,
         onSuccess: () => Swal.fire({ title: 'Generación en cola', text: 'El reporte se genera en segundo plano. Puedes cerrar esta ventana; te avisaremos por correo cuando Excel y PDF estén listos.', icon: 'info', confirmButtonText: 'Entendido' }),
         onError:   () => Swal.fire('No se pudo iniciar', 'Ya hay una generación en proceso o faltan pasos previos.', 'error'),
+        onFinish:  () => { isGeneratingReport.value = false },
     })
 }
 
@@ -767,6 +772,7 @@ const processGenerationNow = async () => {
                         :period="period"
                         :report-config="reportConfig"
                         :can-generate="Boolean(period?.can_generate_radiography)"
+                        :is-submitting="isGeneratingReport"
                         @generate="generateReport"
                         @cancel="cancelGeneration"
                         @refresh="() => router.reload({ only: ['periods', 'groupedUploads'] })"

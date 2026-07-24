@@ -248,8 +248,18 @@ class BranchRadiographyCalculator
      *
      * @param array $includedBranchIds When non-empty, only these branch IDs contribute to metrics.
      */
-    public function buildBranches(Period $period, array $dataIds, array $includedBranchIds = []): array
+    /**
+     * @param array $closingDataIds dataIds para métricas de CIERRE (cartera, mora) — un
+     *   estado/snapshot al corte, no un flujo. Para un periodo mensual normal es igual a
+     *   $dataIds (mismo mes). Para un periodo automático (bimestral/trimestral) debe ser
+     *   SOLO el último mes componente — sumar cartera/mora de varios meses la
+     *   tri/duplicaría, porque cada mes es una foto completa de "Saldos Por Cliente", no
+     *   movimientos incrementales. Si se omite, se usa $dataIds (comportamiento anterior,
+     *   sin cambio para todo caller que no pase el 4º argumento).
+     */
+    public function buildBranches(Period $period, array $dataIds, array $includedBranchIds = [], array $closingDataIds = []): array
     {
+        $closingDataIds = empty($closingDataIds) ? $dataIds : $closingDataIds;
         $maps            = $this->buildBranchMap();
         $operativeMap    = $maps['operative'];
         $corporativoIds  = $maps['corporativo'];
@@ -292,11 +302,12 @@ class BranchRadiographyCalculator
             return ['branches' => array_values($summaries), 'unassigned' => $unassigned];
         }
 
-        // Cartera / colocación / recuperación / mora: branch_id / ruta, NO empleados
-        $this->accumulateCartera($dataIds, $operativeIds, $operativeMap, $summaries);
+        // Cartera / mora: estado de cierre — SOLO closingDataIds (ver docblock arriba).
+        // Colocación / recuperación: flujo del periodo — dataIds completo (todos los meses).
+        $this->accumulateCartera($closingDataIds, $operativeIds, $operativeMap, $summaries);
         $this->accumulateColocacion($dataIds, $operativeIds, $operativeMap, $summaries);
         $this->accumulateRecuperacion($dataIds, $operativeIds, $operativeMap, $summaries, $corporativoIds);
-        $this->accumulateMora($dataIds, $operativeIds, $operativeMap, $summaries);
+        $this->accumulateMora($closingDataIds, $operativeIds, $operativeMap, $summaries);
 
         // Gastos: branch_id de Lendus/ERP; Corporativo → unassigned; Norte → excluido
         $this->accumulateGastos($dataIds, $operativeIds, $operativeMap, $summaries, $corporativoIds, $unassigned);
@@ -1129,9 +1140,15 @@ class BranchRadiographyCalculator
         //    listado (ej. P107) cae en 'otros_percepciones' en vez de perderse silenciosamente,
         //    para que el total siempre sea igual a SUM(percepciones) sin excepción.
         $rows = DB::table('fact_noi_movements as n')
-            ->leftJoin('employee_branch_assignments as eba', function ($join) use ($dataIds) {
+            ->leftJoin('employee_branch_assignments as eba', function ($join) {
+                // Match exacto por period_id (NO whereIn sobre todo dataIds): fact_noi_movements
+                // y employee_branch_assignments SIEMPRE se tagean con el period_id MENSUAL (nunca
+                // semanal). Con whereIn($dataIds) — que en un periodo automático combina varios
+                // meses — cada movimiento NOI se unía contra las asignaciones de LOS 3 meses a la
+                // vez (fan-out del JOIN), multiplicando SUM(n.amount) hasta 3x. El match exacto
+                // evita el fan-out y funciona igual para un mes normal (dataIds de un solo mes).
                 $join->on('n.employee_id', '=', 'eba.employee_id')
-                    ->whereIn('eba.period_id', $dataIds);
+                    ->on('eba.period_id', '=', 'n.period_id');
             })
             ->leftJoin('employees as e', 'n.employee_id', '=', 'e.id')
             ->whereIn('n.period_id', $dataIds)
@@ -1180,9 +1197,15 @@ class BranchRadiographyCalculator
         //    nomina_detalle (positivo, informativo) para transparencia — nunca se resta ni se
         //    suma como gasto en ningún consumidor downstream.
         $dedRows = DB::table('fact_noi_movements as n')
-            ->leftJoin('employee_branch_assignments as eba', function ($join) use ($dataIds) {
+            ->leftJoin('employee_branch_assignments as eba', function ($join) {
+                // Match exacto por period_id (NO whereIn sobre todo dataIds): fact_noi_movements
+                // y employee_branch_assignments SIEMPRE se tagean con el period_id MENSUAL (nunca
+                // semanal). Con whereIn($dataIds) — que en un periodo automático combina varios
+                // meses — cada movimiento NOI se unía contra las asignaciones de LOS 3 meses a la
+                // vez (fan-out del JOIN), multiplicando SUM(n.amount) hasta 3x. El match exacto
+                // evita el fan-out y funciona igual para un mes normal (dataIds de un solo mes).
                 $join->on('n.employee_id', '=', 'eba.employee_id')
-                    ->whereIn('eba.period_id', $dataIds);
+                    ->on('eba.period_id', '=', 'n.period_id');
             })
             ->whereIn('n.period_id', $dataIds)
             ->where('n.concept_type', 'deduccion')
@@ -1299,9 +1322,15 @@ class BranchRadiographyCalculator
 
         // Collect per-employee detail for the SIN ASIGNAR sheet
         $unassignedEmps = DB::table('fact_noi_movements as n')
-            ->leftJoin('employee_branch_assignments as eba', function ($join) use ($dataIds) {
+            ->leftJoin('employee_branch_assignments as eba', function ($join) {
+                // Match exacto por period_id (NO whereIn sobre todo dataIds): fact_noi_movements
+                // y employee_branch_assignments SIEMPRE se tagean con el period_id MENSUAL (nunca
+                // semanal). Con whereIn($dataIds) — que en un periodo automático combina varios
+                // meses — cada movimiento NOI se unía contra las asignaciones de LOS 3 meses a la
+                // vez (fan-out del JOIN), multiplicando SUM(n.amount) hasta 3x. El match exacto
+                // evita el fan-out y funciona igual para un mes normal (dataIds de un solo mes).
                 $join->on('n.employee_id', '=', 'eba.employee_id')
-                    ->whereIn('eba.period_id', $dataIds);
+                    ->on('eba.period_id', '=', 'n.period_id');
             })
             ->leftJoin('employees as emp', 'n.employee_id', '=', 'emp.id')
             ->join('report_uploads as ru', 'n.report_upload_id', '=', 'ru.id')

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import { SlidersHorizontal } from 'lucide-vue-next'
 import SectionHeader from './SectionHeader.vue'
 import SearchableSelect from './SearchableSelect.vue'
@@ -104,6 +104,26 @@ const REPORT_TYPES = [
     { k: 'quarter_vs_quarter',   l: 'Comparativo trimestre vs trimestre', d: 'Solo periodos trimestrales completos.' },
 ]
 
+// Un periodo bimestral/trimestral (y semestral/anual) YA es un consolidado de varios meses
+// por sí mismo — no tiene sentido ofrecer "comparativo X vs X" como tipo de reporte aquí,
+// eso generaría un segundo eje de comparación redundante. Solo mensual mantiene la opción
+// de comparativo mes vs mes; el resto de periodos solo ofrece Radiografía simple.
+const availableReportTypes = computed(() =>
+    props.period?.type === 'monthly'
+        ? REPORT_TYPES.filter((rt) => rt.k === 'simple' || rt.k === 'month_vs_month')
+        : REPORT_TYPES.filter((rt) => rt.k === 'simple')
+)
+
+watch(
+    () => props.period?.type,
+    () => {
+        if (!availableReportTypes.value.some((rt) => rt.k === props.modelValue.report_type)) {
+            update({ report_type: 'simple', compare_period_id: null })
+        }
+    },
+    { immediate: true },
+)
+
 const SCOPES = [
     { k: 'general',  l: 'General' },
     { k: 'branch',   l: 'Por sucursal' },
@@ -124,7 +144,7 @@ const SCOPES = [
                     <p class="mb-3 text-sm font-black text-slate-950">Tipo de reporte</p>
                     <div class="grid gap-3 md:grid-cols-2">
                         <button
-                            v-for="option in REPORT_TYPES"
+                            v-for="option in availableReportTypes"
                             :key="option.k"
                             type="button"
                             class="rounded-2xl border p-4 text-left transition hover:-translate-y-0.5 hover:border-indigo-200 hover:bg-indigo-50/40"

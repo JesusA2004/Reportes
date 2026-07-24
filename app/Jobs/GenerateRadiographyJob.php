@@ -21,6 +21,7 @@ use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
@@ -42,6 +43,18 @@ class GenerateRadiographyJob implements ShouldQueue
         public ?int $runId = null,
         public array $config = [],
     ) {
+    }
+
+    /**
+     * Evita ejecución duplicada del mismo periodo si el driver de cola libera el
+     * job antes de que termine (retry_after mal configurado, worker duplicado,
+     * etc.) — sin este guard, dos ejecuciones concurrentes pueden pisarse los
+     * archivos/registros generados y dejar un status="failed" falso aunque la
+     * otra ejecución sí haya terminado bien.
+     */
+    public function middleware(): array
+    {
+        return [(new WithoutOverlapping('generate-radiography-period-' . $this->periodId))->expireAfter(1800)];
     }
 
     public function handle(

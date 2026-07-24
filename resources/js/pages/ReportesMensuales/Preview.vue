@@ -259,10 +259,6 @@ const nomBonosAcel= computed(() => Number(brGlobal.value?.bonos_aceleradores) ||
 const nomOtrosPercep = computed(() => Number(brGlobal.value?.otros_percepciones) || 0)
 const nomImssPatronal = computed(() => Number(brGlobal.value?.imss_patronal) || 0)
 const nomGastosEmpleados = computed(() => Number(brGlobal.value?.gastos_empleados_nomina) || 0)
-const imssFuente = computed(() => snap.value?.sections?.imss_meta?.fuente ?? 'derived_noi_fiscal')
-const imssNota = computed(() => imssFuente.value === 'derived_noi_fiscal'
-    ? 'IMSS calculado automáticamente desde NOI fiscal: colaboradores únicos × $3,500'
-    : 'IMSS calculado desde NOI fiscal: sin colaboradores detectados en NOI Nómina Fiscal para este periodo')
 
 // Deducciones NOI (ya restadas de nomina_total en backend) — SOLO informativo, filas rojas.
 // Debe reflejar exactamente BranchRadiographyCalculator::accumulateNomina()'s deduction labels.
@@ -638,6 +634,7 @@ const rotacionBajas       = computed(() => Number(rotacionData.value?.bajas) || 
 const rotacionPromedio    = computed(() => Number(rotacionData.value?.promedio) || 0)
 const rotacionIndice      = computed(() => Number(rotacionData.value?.indice) || 0)
 const rotacionPorSucursal = computed(() => (rotacionData.value?.por_sucursal ?? []) as any[])
+const rotacionDetalleMensual = computed(() => (rotacionData.value?.detalle_mensual ?? []) as any[])
 
 const rotacionDetalle        = computed(() => snap.value?.sections?.rotation_detail ?? null)
 const rotacionAltasLista     = computed(() => (rotacionDetalle.value?.altas ?? []) as any[])
@@ -1304,7 +1301,6 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                 <h3 class="text-xs font-black uppercase tracking-wider text-blue-700">Nómina y Capital Humano</h3>
                                 <span class="font-black text-blue-800">{{ money(nomTotal) }}</span>
                             </div>
-                            <p class="px-5 py-1.5 text-[11px] italic text-slate-400 border-b bg-white">{{ imssNota }}</p>
                             <table class="w-full text-sm">
                                 <tbody>
                                     <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Sueldos / Nómina</td><td class="px-5 py-2 text-right font-black text-slate-950">{{ money(nomNomina) }}</td></tr>
@@ -1995,7 +1991,6 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                     <template v-if="rotacionData">
                         <div class="flex items-center justify-between">
                             <h3 class="text-lg font-bold text-slate-800">Rotación de personal</h3>
-                            <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500" title="Calculado desde NOI Nómina y NOI Nómina Fiscal">Fuente: NOI</span>
                         </div>
                         <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
                             <KpiCard label="Altas del periodo" :value="num(rotacionAltas)" :icon="TrendingUp" tone="green" />
@@ -2031,6 +2026,32 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                             </table>
                         </div>
                         <p v-else class="text-sm text-slate-500 italic text-center py-4">Sin desglose por sucursal disponible para este periodo.</p>
+
+                        <div v-if="rotacionDetalleMensual.length" class="overflow-x-auto rounded-2xl border bg-white shadow-sm">
+                            <div class="px-5 py-3 border-b">
+                                <span class="font-bold text-sm">Detalle mensual del periodo consolidado</span>
+                            </div>
+                            <table class="w-full text-sm">
+                                <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
+                                    <tr>
+                                        <th class="px-4 py-3 text-left">Mes</th>
+                                        <th class="px-4 py-3 text-right">Altas</th>
+                                        <th class="px-4 py-3 text-right">Bajas</th>
+                                        <th class="px-4 py-3 text-right">Plantilla</th>
+                                        <th class="px-4 py-3 text-right">Índice</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="(d, i) in rotacionDetalleMensual" :key="i" class="border-t hover:bg-slate-50" :class="i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'">
+                                        <td class="px-4 py-2.5 font-bold">{{ d.mes }}</td>
+                                        <td class="px-4 py-2.5 text-right text-emerald-700 font-medium">{{ d.altas }}</td>
+                                        <td class="px-4 py-2.5 text-right text-red-700 font-medium">{{ d.bajas }}</td>
+                                        <td class="px-4 py-2.5 text-right">{{ Number(d.plantilla).toFixed(0) }}</td>
+                                        <td class="px-4 py-2.5 text-right font-semibold">{{ Number(d.indice).toFixed(2) }}%</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
 
                         <div v-if="rotacionDetalle" class="rounded-2xl border bg-white shadow-sm">
                             <button
@@ -2111,7 +2132,6 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                         </div>
                                     </div>
                                 </div>
-                                <p class="text-xs text-slate-400">Fuente: NOI Nómina + NOI Nómina Fiscal.</p>
                             </div>
                         </div>
                     </template>

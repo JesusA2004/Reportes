@@ -91,6 +91,14 @@ class Period extends Model {
             $components   = $allPeriods->whereIn('id', $componentIds)->values();
             $weeklyIds    = [];
             foreach ($components as $component) {
+                // canReceiveUploads() solo es true para 'monthly': todos los fact_* reales
+                // quedan tageados con el period_id del MES, no de sus semanas componentes
+                // (las semanas son solo metadata organizativa, nunca reciben cargas). Si no
+                // incluimos aquí el ID del mes, un trimestre/bimestre que solo recursa hasta
+                // semanas vacías termina sin ningún dataId con datos reales — todo sale en $0.
+                if ($component->isMonthly()) {
+                    $weeklyIds[] = $component->id;
+                }
                 foreach ($component->resolveBaseWeeklyIds($allPeriods, $depth + 1) as $wid) {
                     $weeklyIds[] = $wid;
                 }
@@ -106,6 +114,33 @@ class Period extends Model {
             $week->start_date->lte($this->end_date) &&
             $week->end_date->gte($this->start_date)
         )->pluck('id')->map(fn ($id) => (int) $id)->values()->all();
+    }
+
+    // ── Último mes componente (para métricas de cierre: cartera, mora, préstamo activo) ──
+    // Un periodo automático (bimestral/trimestral/semestral/anual) consolida sus meses
+    // componentes. Las métricas de FLUJO (recuperación, colocación, gastos, nómina...) se
+    // suman entre meses — eso ya sale correcto combinando los dataIds de todos los meses.
+    // Pero cartera/mora/préstamo activo son un estado (snapshot de "Saldos Por Cliente" al
+    // corte de cada mes), no un flujo: sumarlas entre meses las tri/duplicaría. Deben venir
+    // SOLO del último mes componente (el cierre más reciente del periodo).
+
+    public function resolveLastMonthlyComponent(Collection $allPeriods, int $depth = 0): ?self {
+        if ($depth > 5) return null;
+
+        if ($this->isMonthly()) {
+            return $this;
+        }
+
+        if (empty($this->component_period_ids)) {
+            return null;
+        }
+
+        $componentIds = collect($this->component_period_ids)->map(fn ($id) => (int) $id)->all();
+        $components   = $allPeriods->whereIn('id', $componentIds)->values();
+
+        $last = $components->sortBy(fn ($p) => sprintf('%04d%02d%03d', (int) $p->year, (int) $p->month, (int) $p->sequence))->last();
+
+        return $last?->resolveLastMonthlyComponent($allPeriods, $depth + 1);
     }
 
     // ── Periodo mensual anterior ───────────────────────────────────────

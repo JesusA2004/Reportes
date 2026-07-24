@@ -12,6 +12,7 @@ const props = defineProps<{
     period: any
     reportConfig: any
     canGenerate: boolean
+    isSubmitting?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -379,7 +380,7 @@ const statusConfig = computed(() => {
                                 : isDone
                                     ? 'bg-slate-700 text-white shadow-lg shadow-slate-200 hover:bg-slate-800 focus:ring-slate-100'
                                     : 'bg-slate-950 text-white shadow-xl shadow-slate-200 hover:bg-slate-800 focus:ring-slate-100'"
-                        :disabled="!canGenerate && !isFailed && !isCancelled"
+                        :disabled="(!canGenerate && !isFailed && !isCancelled) || isSubmitting"
                         @click="emit('generate')"
                     >
                         <Play class="size-4" />

@@ -90,7 +90,7 @@ $fmtp = fn($v) => number_format((float)$v, 2) . '%';
 </table>
 @endif
 
-<div class="note">EBITDA estimado = Recuperación − Colocación − (Gastos + Nómina neta).</div>
+<div class="note">EBITDA estimado = Ingreso base EBITDA − (Gastos + Nómina neta).</div>
 
 </body>
 </html>

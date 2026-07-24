@@ -768,7 +768,7 @@ $alTotalVencido = array_sum(array_column($activeLoansByBranch, 'vencido'));
         </tr>
     </tfoot>
 </table>
-<div class="note">Descuentos NOI: informativos, no se restan del total. Gastos de empleados sí están incluidos. IMSS calculado automáticamente desde NOI fiscal: colaboradores únicos × $3,500{{ ($snapshot['sections']['imss_meta']['fuente'] ?? 'derived_noi_fiscal') === 'derived_noi_fiscal' ? '' : ' (sin colaboradores detectados en NOI Nómina Fiscal para este periodo)' }}.</div>
+<div class="note">Descuentos NOI: informativos, no se restan del total. Gastos de empleados sí están incluidos.</div>
 @else
 <div class="note">Sin datos de nómina por sucursal para este periodo.</div>
 @endif
