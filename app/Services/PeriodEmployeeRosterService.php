@@ -223,4 +223,147 @@ class PeriodEmployeeRosterService
             'duplicados_fusionados' => $duplicadosFusionados,
         ];
     }
+
+    /**
+     * Colaboradores válidos y deduplicados para ESTE periodo — fuente única para
+     * selectores UI (ej. Etapa 4 "Buscar empleado o gestor"). A diferencia de
+     * buildForPeriod() (que persiste en period_employee_rosters y calcula altas/bajas,
+     * solo para periodos mensuales), este método funciona para cualquier tipo de
+     * periodo y nunca escribe en BD:
+     *   - Si el periodo es mensual y ya tiene roster persistido (se construye durante
+     *     "Actualizar BD" — ver RotacionDerivedFromNoiService/ImssFromNoiFiscalService),
+     *     lo reutiliza tal cual: cero recálculo.
+     *   - En cualquier otro caso (periodo semanal, o mensual sin roster todavía)
+     *     recalcula en memoria con la MISMA lógica de deduplicación por
+     *     nombre_normalizado y resolución de sucursal que buildForPeriod().
+     *
+     * NUNCA usar Employee::all()/where('is_active',true) para poblar un selector de
+     * colaboradores — eso mezcla bajas históricas de cualquier periodo y no deduplica
+     * por identidad real (ver auditoría 2026-08-24: Etapa 4 mostraba a la misma
+     * persona dos veces con una ruta como si fuera sucursal).
+     *
+     * @return array{rows: array<int, array{employee_id:int,name:string,branch_id:?int,branch_name:?string,is_branch_operativa:bool}>, sin_sucursal:int}
+     */
+    public function rosterRowsForSelector(Period $period): array
+    {
+        if ($period->isMonthly()) {
+            $persisted = DB::table('period_employee_rosters')
+                ->where('period_id', $period->id)
+                ->where('is_active_for_period', true)
+                ->orderBy('nombre_normalizado')
+                ->get(['employee_id', 'nombre_normalizado', 'nombre_original', 'branch_id', 'branch_name', 'is_branch_operativa']);
+
+            if ($persisted->isNotEmpty()) {
+                return $this->formatSelectorRows($persisted->map(fn ($r) => [
+                    'employee_id' => (int) $r->employee_id,
+                    'name'        => $r->nombre_original,
+                    'branch_id'   => $r->branch_id ? (int) $r->branch_id : null,
+                    'branch_name' => $r->branch_name,
+                    'is_branch_operativa' => (bool) $r->is_branch_operativa,
+                ])->all());
+            }
+        }
+
+        return $this->formatSelectorRows($this->computeRosterRowsOnTheFly($period));
+    }
+
+    private function formatSelectorRows(array $rows): array
+    {
+        $sinSucursal = 0;
+        foreach ($rows as $r) {
+            if (!$r['branch_id'] || !$r['is_branch_operativa']) {
+                $sinSucursal++;
+            }
+        }
+        usort($rows, fn ($a, $b) => strcmp($a['name'], $b['name']));
+
+        return ['rows' => $rows, 'sin_sucursal' => $sinSucursal];
+    }
+
+    /**
+     * Misma deduplicación/resolución de sucursal que buildForPeriod(), pero sin
+     * persistir y sin calcular altas/bajas — usable para periodos no mensuales.
+     */
+    private function computeRosterRowsOnTheFly(Period $period): array
+    {
+        $allPeriods = Period::all();
+        $weeklyIds  = $period->resolveBaseWeeklyIds($allPeriods);
+        $dataIds    = array_values(array_unique(array_merge(empty($weeklyIds) ? [] : $weeklyIds, [$period->id])));
+
+        $movementRows = DB::table('fact_noi_movements as fnm')
+            ->whereIn('fnm.period_id', $dataIds)
+            ->whereNotNull('fnm.employee_id')
+            ->select('fnm.employee_id')
+            ->distinct()
+            ->pluck('employee_id')
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        if ($movementRows->isEmpty()) {
+            return [];
+        }
+
+        $employees = Employee::query()->whereIn('id', $movementRows)->get()->keyBy('id');
+
+        $byIdentity = [];
+        foreach ($movementRows as $eid) {
+            $emp = $employees->get($eid);
+            if (!$emp) continue;
+            $key = $emp->normalized_name ?: $this->identityResolver->normalizePersonName($emp->full_name);
+            if ($key === '') $key = 'sin_nombre_' . $eid;
+            $byIdentity[$key] ??= ['employee_ids' => [], 'nombre_original' => $emp->full_name];
+            $byIdentity[$key]['employee_ids'][] = $eid;
+        }
+
+        $currentAssignments = DB::table('employee_branch_assignments')
+            ->where('period_id', $period->id)
+            ->whereIn('employee_id', $movementRows)
+            ->whereNotNull('branch_id')
+            ->pluck('branch_id', 'employee_id');
+
+        $needFallback = array_values(array_diff($movementRows->all(), $currentAssignments->keys()->all()));
+        $historicalMap = [];
+        if (!empty($needFallback)) {
+            DB::table('employee_branch_assignments')
+                ->whereIn('employee_id', $needFallback)
+                ->whereNotNull('branch_id')
+                ->orderByDesc('period_id')
+                ->get(['employee_id', 'branch_id'])
+                ->each(function ($hr) use (&$historicalMap) {
+                    $eid = (int) $hr->employee_id;
+                    $historicalMap[$eid] ??= (int) $hr->branch_id;
+                });
+        }
+
+        $allBranchIds = array_values(array_unique(array_filter(array_merge(
+            $currentAssignments->values()->all(), array_values($historicalMap)
+        ))));
+        $branches = empty($allBranchIds) ? collect() : Branch::query()->whereIn('id', $allBranchIds)->get()->keyBy('id');
+
+        $rows = [];
+        foreach ($byIdentity as $data) {
+            $branchId = null;
+            foreach ($data['employee_ids'] as $eid) {
+                if (isset($currentAssignments[$eid])) { $branchId = (int) $currentAssignments[$eid]; break; }
+            }
+            if ($branchId === null) {
+                foreach ($data['employee_ids'] as $eid) {
+                    if (isset($historicalMap[$eid])) { $branchId = $historicalMap[$eid]; break; }
+                }
+            }
+            $branch     = $branchId ? $branches->get($branchId) : null;
+            $branchName = $branch?->name;
+
+            $rows[] = [
+                'employee_id' => $data['employee_ids'][0],
+                'name'        => $data['nombre_original'],
+                'branch_id'   => $branchId,
+                'branch_name' => $branchName,
+                'is_branch_operativa' => $branchName ? $this->branchResolver->isSheetBranch($branchName) : false,
+            ];
+        }
+
+        return $rows;
+    }
 }

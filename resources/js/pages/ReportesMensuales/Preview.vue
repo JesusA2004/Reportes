@@ -29,7 +29,6 @@ const props = defineProps<{
     allPeriods: { id: number; label: string; code: string; type: string; has_snapshot: boolean }[]
     filteredExcelBaseUrl: string
     filteredPdfBaseUrl: string
-    filteredDataUrl: string
     updateSaldoInicialUrl: string
 }>()
 
@@ -99,72 +98,41 @@ const canDownloadFiltered = computed(() => {
     return true
 })
 
-// ── Filtered preview data (AJAX) ─────────────────────────────────────────────
-const filteredPreview   = ref<any>(null)
-const filteredLoading   = ref(false)
-const filteredFetchError = ref<string | null>(null)
-
-async function fetchFilteredPreview() {
-    if (filteredScope.value === 'general' || isComparative.value) {
-        filteredPreview.value = null
-        filteredFetchError.value = null
-        return
+// Mantiene sincronizado el alcance del archivo descargable con los filtros de
+// vista en vivo (vfBranch/vfGestor) — así Excel/PDF SIEMPRE coinciden exactamente
+// con lo que se ve en pantalla, sin tener que elegir la sucursal/gestor dos veces
+// en dos controles distintos. Solo aplica a reportes simples; un comparativo tiene
+// su propio alcance independiente (puede compararse una sucursal aunque la vista
+// en vivo esté en general).
+watch([vfGestor, vfBranch, vfGestorRow, vfBranchRow], () => {
+    if (isComparative.value) return
+    if (vfGestor.value) {
+        filteredScope.value = 'employee'
+        filteredEmployeeId.value = props.employees.find(e => e.name === vfGestor.value)?.id ?? null
+    } else if (vfBranch.value) {
+        filteredScope.value = 'branch'
+        filteredBranchId.value = props.branches.find(b => b.name === vfBranch.value)?.id ?? null
+    } else {
+        filteredScope.value = 'general'
+        filteredBranchId.value = null
+        filteredEmployeeId.value = null
     }
-    if (filteredScope.value === 'branch' && !filteredBranchId.value) {
-        filteredPreview.value = null
-        return
-    }
-    if (filteredScope.value === 'employee' && !filteredEmployeeId.value) {
-        filteredPreview.value = null
-        return
-    }
+}, { immediate: true })
 
-    filteredLoading.value = true
-    filteredFetchError.value = null
-    filteredPreview.value = null
-
-    try {
-        const params = new URLSearchParams({ scope: filteredScope.value })
-        if (filteredScope.value === 'branch' && filteredBranchId.value)
-            params.set('branch_id', String(filteredBranchId.value))
-        if (filteredScope.value === 'employee' && filteredEmployeeId.value)
-            params.set('employee_id', String(filteredEmployeeId.value))
-
-        const resp = await fetch(`${props.filteredDataUrl}?${params}`, {
-            headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-        })
-        const json = await resp.json()
-        if (!resp.ok || json.error) {
-            filteredFetchError.value = json.error ?? `Error ${resp.status}`
-        } else {
-            filteredPreview.value = json
-        }
-    } catch (e: any) {
-        filteredFetchError.value = e?.message ?? 'Error de red al cargar datos filtrados'
-    } finally {
-        filteredLoading.value = false
-    }
-}
-
-watch([filteredScope, filteredBranchId, filteredEmployeeId], fetchFilteredPreview)
-
+// Deep-link (ej. desde Etapa 4 "Ver reporte" con ?scope=...): fija vfBranch/vfGestor,
+// que a su vez propagan a filteredScope/filteredBranchId/filteredEmployeeId vía el
+// watcher de arriba — un único punto de entrada para el alcance del reporte.
 onMounted(() => {
     const params = new URLSearchParams(window.location.search)
     const scope  = params.get('scope')
     if (scope === 'branch') {
         const branchId = Number(params.get('branch_id')) || null
-        if (branchId) {
-            showFilteredPanel.value = true
-            filteredScope.value     = 'branch'
-            filteredBranchId.value  = branchId
-        }
+        const branch = branchId ? props.branches.find(b => b.id === branchId) : null
+        if (branch) vfBranch.value = branch.name
     } else if (scope === 'employee') {
         const employeeId = Number(params.get('employee_id')) || null
-        if (employeeId) {
-            showFilteredPanel.value  = true
-            filteredScope.value      = 'employee'
-            filteredEmployeeId.value = employeeId
-        }
+        const employee = employeeId ? props.employees.find(e => e.id === employeeId) : null
+        if (employee) vfGestor.value = employee.name
     }
 })
 
@@ -522,6 +490,17 @@ const ingresoEbitdaBaseGlobal = computed(() =>
 const utilidadGlobal    = computed(() => ingresoEbitdaBaseGlobal.value - gastosEbitdaTotal.value)
 const ventaGlobal       = computed(() => ingresoEbitdaBaseGlobal.value)
 const margenEbitdaPct   = computed(() => ventaGlobal.value > 0 ? (utilidadGlobal.value / ventaGlobal.value) * 100 : 0)
+// Margen EBITDA con alcance activo: gestor usa su propio ingreso base EBITDA como
+// denominador (mismo componente que kpiUtil); sucursal usa branchesFull.margenEbitda,
+// ya calculado con la misma fórmula que el global.
+const kpiMargenEbitdaPct = computed(() => {
+    if (vfGestorRow.value) {
+        const ingresoBase = Number(vfGestorRow.value.ingreso_ebitda_base) || 0
+        return ingresoBase > 0 ? (vfGestorEbitda.value / ingresoBase) * 100 : 0
+    }
+    if (vfBranchRow.value) return vfBranchRow.value.margenEbitda
+    return margenEbitdaPct.value
+})
 // Diferencia = EBITDA − Envío de utilidad a corporativo. Puede ser negativa — no se fuerza a 0;
 // ese es justamente el saldo a llevar como saldo inicial del siguiente periodo.
 const diferencia        = computed(() => utilidadGlobal.value - excGlobal.value)
@@ -745,27 +724,64 @@ const branchesFiltered = computed(() => {
     return rows
 })
 
-// ── KPIs principales (recalculados con el filtro de sucursal activo) ─────────
-const kpiRec     = computed(() => vfBranchRow.value ? vfBranchRow.value.recuperacion : recGlobal.value)
-const kpiCol     = computed(() => vfBranchRow.value ? vfBranchRow.value.colocacion   : colGlobal.value)
-const kpiCartera = computed(() => vfBranchRow.value ? vfBranchRow.value.cartera      : carteraGlobal.value)
+// ── KPIs principales (recalculados con el filtro de sucursal/gestor activo) ──
+// Alcance ÚNICO: gestor > sucursal > general. Nunca una tarjeta aparte con los
+// mismos datos — seleccionar un gestor o una sucursal transforma directamente
+// las tarjetas superiores, exactamente igual que Excel/PDF filtrados (mismos
+// campos que RadiografiaExportService::resolveEmployeeRow()/resolveBranchRow()).
+const NOT_ATTRIBUTABLE = null as number | null
+
+// EBITDA por gestor: ingreso base EBITDA − (gastos atribuibles + nómina neta),
+// misma fórmula que RadiografiaExportService::resolveEmployeeRow()['utilidad'].
+const vfGestorEbitda = computed(() => {
+    const g = vfGestorRow.value
+    if (!g) return 0
+    const ingresoBase = Number(g.ingreso_ebitda_base) || 0
+    const gastos = Number(g.gastos) || 0
+    const neto = Number(g.pagos ?? 0) + Number(g.bonos ?? 0) - Number(g.descuentos ?? 0)
+    return ingresoBase - (gastos + neto)
+})
+
+const kpiRec     = computed(() => vfGestorRow.value ? Number(vfGestorRow.value.recuperacion) || 0 : (vfBranchRow.value ? vfBranchRow.value.recuperacion : recGlobal.value))
+const kpiCol     = computed(() => vfGestorRow.value ? Number(vfGestorRow.value.colocacion) || 0 : (vfBranchRow.value ? vfBranchRow.value.colocacion : colGlobal.value))
+const kpiCartera = computed(() => vfGestorRow.value ? Number(vfGestorRow.value.cartera) || 0 : (vfBranchRow.value ? vfBranchRow.value.cartera : carteraGlobal.value))
 const kpiMora = computed(() => {
+    if (vfGestorRow.value) return Number(vfGestorRow.value.vencida) || 0
     if (vfBucketValue.value !== null) return vfBucketValue.value
     if (vfBranchRow.value) return vfBranchRow.value.vencida
     return moraTotalGlobal.value
 })
 const kpiMoraPct = computed(() => {
+    if (vfGestorRow.value) return Number(vfGestorRow.value.mora) || 0
     if (vfBucketValue.value !== null) return kpiCartera.value > 0 ? (vfBucketValue.value / kpiCartera.value) * 100 : 0
     if (vfBranchRow.value) return vfBranchRow.value.mora
     return kpiCartera.value > 0 ? (kpiMora.value / kpiCartera.value) * 100 : 0
 })
-const kpiGastos = computed(() => vfBranchRow.value ? vfBranchRow.value.gastos : brGlobalGastosTotal.value)
-const kpiNomina = computed(() => vfBranchRow.value ? vfBranchRow.value.nomina : nomTotal.value)
-const kpiUtil = computed(() => vfBranchRow.value ? vfBranchRow.value.ebitda : (brGlobal.value ? utilidadGlobal.value : 0))
+// Gastos por gestor: SOLO los directamente atribuibles (fact_expenses.employee_id) —
+// nunca un prorrateo de gastos de sucursal/corporativo (ver sección 6 de la spec).
+const kpiGastos = computed(() => vfGestorRow.value ? Number(vfGestorRow.value.gastos) || 0 : (vfBranchRow.value ? vfBranchRow.value.gastos : brGlobalGastosTotal.value))
+// "Nómina" por gestor = su propio neto (pagos + bonos − descuentos). No incluye IMSS/otros
+// conceptos globales que no pueden atribuirse a una sola persona.
+const kpiNomina = computed(() => {
+    if (vfGestorRow.value) return Number(vfGestorRow.value.neto) || (Number(vfGestorRow.value.pagos ?? 0) + Number(vfGestorRow.value.bonos ?? 0) - Number(vfGestorRow.value.descuentos ?? 0))
+    return vfBranchRow.value ? vfBranchRow.value.nomina : nomTotal.value
+})
+const kpiUtil = computed(() => vfGestorRow.value ? vfGestorEbitda.value : (vfBranchRow.value ? vfBranchRow.value.ebitda : (brGlobal.value ? utilidadGlobal.value : 0)))
 
 const kpiMoraLabel = computed(() => vfBucket.value ? `Mora · ${vfBucket.value}` : 'Mora total')
-const kpiUtilLabel = computed(() => vfBranchRow.value ? 'EBITDA estimado' : 'EBITDA')
-const vfActiveBadge = computed(() => vfBranchRow.value ? `Vista filtrada · ${vfBranch.value}` : null)
+const kpiUtilLabel = computed(() => vfGestorRow.value ? 'EBITDA del colaborador' : (vfBranchRow.value ? 'EBITDA estimado' : 'EBITDA'))
+// "Préstamo activo" no tiene desglose por colaborador en el snapshot — mostrar
+// explícitamente "No atribuible" en vez de heredar el total general en silencio.
+const prestamoActivoAttributable = computed(() => !vfGestorRow.value)
+
+// Chips de alcance activo — reemplaza la antigua "ficha" duplicada de gestor/sucursal.
+// Limpiar filtros (vfClearAll) regresa inmediatamente al reporte general.
+const scopeChips = computed(() => {
+    const chips: { label: string; clear: () => void }[] = []
+    if (vfBranch.value) chips.push({ label: vfBranch.value, clear: () => { vfBranch.value = '' } })
+    if (vfGestor.value) chips.push({ label: vfGestorRow.value?.name ?? vfGestor.value, clear: () => { vfGestor.value = '' } })
+    return chips
+})
 
 // ── Alertas (Resumen) — vacías; colores suaves en cifras cubren el feedback visual
 const alertas = computed(() => [] as { text: string; tone: 'red' | 'amber' }[])
@@ -1084,11 +1100,20 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
 
             <div class="mx-auto max-w-screen-2xl space-y-5 px-6 py-5">
 
+                <!-- ALCANCE ACTIVO — chips + limpiar filtros. Seleccionar sucursal o gestor
+                     transforma las tarjetas KPI y las pestañas directamente (mismo dataset que
+                     Excel/PDF filtrados); ya NO se agrega una tarjeta redundante aparte. -->
+                <div v-if="scopeChips.length" class="flex flex-wrap items-center gap-2">
+                    <span class="text-xs font-bold uppercase tracking-wider text-slate-400">Alcance:</span>
+                    <button v-for="chip in scopeChips" :key="chip.label" type="button" @click="chip.clear()"
+                            class="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-3 py-1 text-xs font-black text-white transition hover:bg-indigo-500">
+                        {{ chip.label }} <span class="text-indigo-200">×</span>
+                    </button>
+                    <button type="button" @click="vfClearAll" class="text-xs font-bold text-slate-500 underline hover:text-slate-800">Limpiar filtros</button>
+                </div>
+
                 <!-- KPI CARDS -->
                 <div>
-                    <p v-if="vfActiveBadge" class="mb-3 inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-3 py-1 text-xs font-black text-indigo-700">
-                        {{ vfActiveBadge }}
-                    </p>
                     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
                         <KpiCard label="Recuperación" :value="money(kpiRec)" :icon="HandCoins" tone="teal" />
                         <KpiCard label="Colocación" :value="money(kpiCol)" :icon="TrendingUp" tone="blue" />
@@ -1098,13 +1123,20 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                         <KpiCard label="OPEX" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
                         <KpiCard label="Nómina y Capital Humano" :value="money(kpiNomina)" :icon="Wallet" tone="blue" />
                         <KpiCard :label="kpiUtilLabel" :value="money(kpiUtil)" :icon="Gauge" :tone="kpiUtil < 0 ? 'red' : 'green'" />
-                        <KpiCard label="Margen EBITDA" :value="pct(margenEbitdaPct)" :icon="Percent" :tone="margenEbitdaPct < 0 ? 'red' : 'green'" />
-                        <KpiCard label="Préstamo activo" :value="money(prestamoActivoKpi)" :icon="Banknote" tone="blue" />
+                        <KpiCard label="Margen EBITDA" :value="pct(kpiMargenEbitdaPct)" :icon="Percent" :tone="kpiMargenEbitdaPct < 0 ? 'red' : 'green'" />
+                        <KpiCard label="Préstamo activo" :value="prestamoActivoAttributable ? money(prestamoActivoKpi) : 'No atribuible'" :icon="Banknote" tone="blue" />
                     </div>
                     <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
-                        <KpiCard label="Percepciones" :value="money(noiPercepciones)" :icon="Wallet" tone="teal" />
-                        <KpiCard label="Deducciones" :value="money(noiDeducciones)" :icon="Receipt" tone="amber" />
-                        <KpiCard label="Neto pagado a trabajadores" :value="money(noiNetoPagado)" :icon="HandCoins" tone="blue" />
+                        <template v-if="vfGestorRow">
+                            <KpiCard label="Percepciones del colaborador" :value="money(Number(vfGestorRow.pagos ?? 0) + Number(vfGestorRow.bonos ?? 0))" :icon="Wallet" tone="teal" />
+                            <KpiCard label="Deducciones del colaborador" :value="money(Number(vfGestorRow.descuentos ?? 0))" :icon="Receipt" tone="amber" />
+                            <KpiCard label="Neto recibido" :value="money(kpiNomina)" :icon="HandCoins" tone="blue" />
+                        </template>
+                        <template v-else>
+                            <KpiCard label="Percepciones" :value="money(noiPercepciones)" :icon="Wallet" tone="teal" />
+                            <KpiCard label="Deducciones" :value="money(noiDeducciones)" :icon="Receipt" tone="amber" />
+                            <KpiCard label="Neto pagado a trabajadores" :value="money(noiNetoPagado)" :icon="HandCoins" tone="blue" />
+                        </template>
                     </div>
                 </div>
 
@@ -1122,21 +1154,9 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                     :categoria-options="vfCategoriaOptions"
                 />
 
-                <!-- Ficha gestor / producto seleccionados -->
-                <div v-if="vfGestor || vfProduct" class="rounded-2xl border bg-white p-4 shadow-sm">
-                    <div v-if="vfGestor" class="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4 lg:grid-cols-7">
-                        <template v-if="vfGestorRow">
-                            <div><p class="text-xs text-slate-400">Gestor</p><p class="font-black text-slate-900 truncate">{{ vfGestorRow.name }}</p></div>
-                            <div><p class="text-xs text-slate-400">Sucursal</p><p class="font-bold text-slate-700">{{ vfGestorRow.branch }}</p></div>
-                            <div><p class="text-xs text-slate-400">Colocación</p><p class="font-bold text-indigo-700">{{ vfGestorRow.colocacion > 0 ? money(vfGestorRow.colocacion) : '—' }}</p></div>
-                            <div><p class="text-xs text-slate-400">Recuperación</p><p class="font-bold">{{ vfGestorRow.recuperacion > 0 ? money(vfGestorRow.recuperacion) : '—' }}</p></div>
-                            <div><p class="text-xs text-slate-400">Cartera</p><p class="font-bold">{{ vfGestorRow.cartera > 0 ? money(vfGestorRow.cartera) : '—' }}</p></div>
-                            <div><p class="text-xs text-slate-400">Mora %</p><p class="font-bold" :class="vfGestorRow.mora > 25 ? 'text-red-700' : ''">{{ vfGestorRow.cartera > 0 ? pct(vfGestorRow.mora) : '—' }}</p></div>
-                            <div><p class="text-xs text-slate-400">Neto nómina</p><p class="font-bold">{{ vfGestorRow.neto > 0 ? money(vfGestorRow.neto) : '—' }}</p></div>
-                        </template>
-                        <p v-else class="text-sm text-slate-400 italic">Sin información disponible para este gestor.</p>
-                    </div>
-                    <div v-if="vfProduct" class="mt-3 border-t pt-3" :class="!vfGestor ? 'mt-0 border-t-0 pt-0' : ''">
+                <!-- Ficha producto seleccionado (el gestor ya se refleja arriba en las tarjetas KPI) -->
+                <div v-if="vfProduct" class="rounded-2xl border bg-white p-4 shadow-sm">
+                    <div class="mt-3 border-t pt-3" :class="!vfGestor ? 'mt-0 border-t-0 pt-0' : ''">
                         <div v-if="vfProductRow" class="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
                             <div><p class="text-xs text-slate-400">Producto</p><p class="font-black text-slate-900 truncate">{{ vfProductRow.producto }}</p></div>
                             <div><p class="text-xs text-slate-400">Colocación</p><p class="font-bold text-indigo-700">{{ money(vfProductRow.colocacion) }}</p></div>
@@ -1147,16 +1167,24 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                     </div>
                 </div>
 
-                <!-- EXPORTACIÓN FILTRADA (Excel/PDF por sucursal, gestor o comparativo) -->
+                <!-- EXPORTACIÓN — Excel/PDF SIEMPRE respetan el alcance activo arriba (chips).
+                     Comparativos (mes/bimestre/trimestre vs X) tienen su propio alcance
+                     independiente, porque comparan un periodo distinto al que se ve en pantalla. -->
                 <div class="rounded-2xl border bg-white shadow-sm overflow-hidden">
                     <button @click="showFilteredPanel = !showFilteredPanel"
                             class="flex w-full items-center justify-between px-5 py-3.5 text-sm font-bold text-slate-700 hover:bg-slate-50 transition">
-                        <span class="flex items-center gap-2"><Download class="size-4 text-indigo-500" /> Reportes filtrados (por sucursal, gestor o comparativo)</span>
+                        <span class="flex items-center gap-2"><Download class="size-4 text-indigo-500" /> Descargar / Comparativos</span>
                         <ChevronDown v-if="!showFilteredPanel" class="size-4 text-slate-400" />
                         <ChevronUp v-else class="size-4 text-slate-400" />
                     </button>
 
                     <div v-if="showFilteredPanel" class="border-t px-5 py-4 space-y-4">
+                        <p class="text-xs text-slate-500">
+                            El Excel/PDF descargado abajo corresponde exactamente al alcance activo:
+                            <span class="font-black text-slate-800">{{ scopeChips.length ? scopeChips.map(c => c.label).join(' · ') : 'General (todas las sucursales)' }}</span>.
+                            Cambia la sucursal/gestor en los filtros de arriba para modificarlo.
+                        </p>
+
                         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                             <div>
                                 <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Tipo de comparación</label>
@@ -1167,14 +1195,6 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                     <option value="quarter_vs_quarter">Trimestre vs Trimestre</option>
                                 </select>
                             </div>
-                            <div>
-                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Alcance del archivo</label>
-                                <select v-model="filteredScope" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
-                                    <option value="general">General</option>
-                                    <option value="branch">Por sucursal</option>
-                                    <option value="employee">Por gestor</option>
-                                </select>
-                            </div>
                             <div v-if="isComparative">
                                 <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Periodo a comparar</label>
                                 <select v-model="filteredComparePeriodId" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
@@ -1182,14 +1202,22 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                     <option v-for="p in comparePeriodOptions" :key="p.id" :value="p.id" :disabled="!p.has_snapshot">{{ p.label }}{{ !p.has_snapshot ? ' (sin radiografía)' : '' }}</option>
                                 </select>
                             </div>
-                            <div v-if="filteredScope === 'branch'">
+                            <div v-if="isComparative">
+                                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Alcance del comparativo</label>
+                                <select v-model="filteredScope" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                                    <option value="general">General</option>
+                                    <option value="branch">Por sucursal</option>
+                                    <option value="employee">Por gestor</option>
+                                </select>
+                            </div>
+                            <div v-if="isComparative && filteredScope === 'branch'">
                                 <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Sucursal</label>
                                 <select v-model="filteredBranchId" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
                                     <option :value="null">— Seleccionar —</option>
                                     <option v-for="b in branches" :key="b.id" :value="b.id">{{ b.name }}</option>
                                 </select>
                             </div>
-                            <div v-if="filteredScope === 'employee'">
+                            <div v-if="isComparative && filteredScope === 'employee'">
                                 <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Gestor / Empleado</label>
                                 <select v-model="filteredEmployeeId" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100">
                                     <option :value="null">— Seleccionar —</option>
@@ -1198,7 +1226,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                             </div>
                         </div>
 
-                        <div v-if="filteredScope === 'employee'" class="grid gap-4 sm:grid-cols-2">
+                        <div v-if="!isComparative && filteredScope === 'employee'" class="grid gap-4 sm:grid-cols-2">
                             <div>
                                 <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Gasto general asignado ($)</label>
                                 <input v-model="filteredExtraAmount" type="number" min="0" step="0.01" placeholder="0.00"
@@ -1224,13 +1252,10 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                             </a>
                             <p v-if="!canDownloadFiltered" class="self-center text-xs text-amber-600 font-semibold">
                                 <span v-if="isComparative && !filteredComparePeriodId">Selecciona un periodo a comparar.</span>
-                                <span v-else-if="filteredScope === 'branch'">Selecciona una sucursal.</span>
-                                <span v-else-if="filteredScope === 'employee'">Selecciona un gestor.</span>
+                                <span v-else-if="isComparative && filteredScope === 'branch'">Selecciona una sucursal.</span>
+                                <span v-else-if="isComparative && filteredScope === 'employee'">Selecciona un gestor.</span>
                             </p>
                         </div>
-
-                        <div v-if="filteredLoading" class="text-xs text-slate-500 italic">Cargando datos…</div>
-                        <div v-else-if="filteredFetchError" class="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">{{ filteredFetchError }}</div>
                     </div>
                 </div>
 

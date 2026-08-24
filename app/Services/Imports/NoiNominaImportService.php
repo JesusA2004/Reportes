@@ -5,6 +5,7 @@ namespace App\Services\Imports;
 use App\Models\Employee;
 use App\Models\NoiMovement;
 use App\Models\ReportUpload;
+use App\Services\PersonIdentityResolverService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -17,6 +18,13 @@ use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 class NoiNominaImportService
 {
     private array $employeeCache = [];
+
+    /** Cache de evaluateNoiCandidateEvidence() por nombre normalizado, vigente solo dentro de una corrida de handle(). */
+    private array $evidenceCache = [];
+
+    public function __construct(
+        private readonly PersonIdentityResolverService $identityResolver,
+    ) {}
 
     public function handle(ReportUpload $upload, ?callable $progress = null): array
     {
@@ -32,6 +40,7 @@ class NoiNominaImportService
         // Resultado: empleados fusionados o perdidos en el roster/IMSS derivado. Debe
         // reiniciarse en cada import — el cache solo es válido DENTRO de un mismo archivo.
         $this->employeeCache = [];
+        $this->evidenceCache = [];
 
         if (!$upload->stored_path) {
             throw new \RuntimeException('El archivo no tiene stored_path.');
@@ -85,6 +94,16 @@ class NoiNominaImportService
         $rowsInserted = 0;
         $rowsSkipped = 0;
         $rowsWithErrors = 0;
+
+        // Clasificación de identidad (regla 2026-08-24): cada colaborador detectado en NOI
+        // debe cruzarse contra Lendus/cartera antes de contar como operativo. Ver
+        // PersonIdentityResolverService::evaluateNoiCandidateEvidence().
+        $identityStats = [
+            'matched' => 0, 'matched_non_portfolio_role' => 0,
+            'needs_review' => 0, 'skipped_stale_zero' => 0,
+        ];
+        $identityIncidents = [];
+        $flaggedNeedsReview = []; // normalized_name => true, evita incidencias duplicadas
 
         $currentEmployeeName = null;
         $currentEmployeeCode = null;
@@ -155,6 +174,28 @@ class NoiNominaImportService
                     $insertedCodes[$mapped['employee_code']] = true;
                 }
 
+                // Clasificar identidad UNA vez por persona (no por fila) — el colaborador
+                // trae dinero real este periodo, así que NUNCA se bloquea su inserción (eso
+                // haría desaparecer nómina real de los reportes), pero si no hay ninguna
+                // evidencia fuera de NOI se marca como incidencia NEEDS_REVIEW para que un
+                // humano confirme identidad/sucursal en el panel de incidencias.
+                $normEmpName = $this->normalizeName($mapped['employee_name']);
+                if ($normEmpName !== '' && !isset($flaggedNeedsReview[$normEmpName])) {
+                    $evidence = $this->evaluateEvidence($normEmpName, $mapped['employee_name']);
+                    if ($evidence['found']) {
+                        $identityStats[$evidence['is_non_portfolio_role'] ? 'matched_non_portfolio_role' : 'matched']++;
+                    } else {
+                        $identityStats['needs_review']++;
+                        $identityIncidents[] = [
+                            'type'     => 'noi_identidad.sin_respaldo',
+                            'severity' => 'warning',
+                            'message'  => "\"{$mapped['employee_name']}\" tiene pago en NOI pero no se encontró en el directorio Lendus, cartera/colocación/cobranza ni asignaciones históricas. Verificar identidad y sucursal antes de confiar en el reporte.",
+                            'context'  => ['normalized_name' => $normEmpName, 'employee_id' => $employee->id],
+                        ];
+                    }
+                    $flaggedNeedsReview[$normEmpName] = true;
+                }
+
                 $normalizedRow = json_encode($mapped['raw_payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
                 NoiMovement::query()->create([
@@ -208,11 +249,36 @@ class NoiNominaImportService
         // Sin esta fila sintética, esos colaboradores nunca generan un Employee/NoiMovement y
         // desaparecen del roster/IMSS derivado aunque su "Clave del trabajador" sí esté en el
         // archivo (regla 2026-07-23: el conteo de colaboradores no depende de tener importe).
+        //
+        // REGLA 2026-08-24: esta ancla YA NO es incondicional. NOI trae bajas/empleados
+        // obsoletos con $0 que ya no existen en ninguna fuente Lendus vigente — anclarlos
+        // los resucita como "colaborador operativo" y contamina roster/selector/reportes
+        // (ver PersonIdentityResolverService::evaluateNoiCandidateEvidence()). Un colaborador
+        // legítimo con $0 (ej. alta reciente sin percepciones fiscales, gerente sin cartera)
+        // SIGUE anclándose normalmente porque tiene evidencia fuera de NOI. Uno sin ninguna
+        // evidencia se descarta silenciosamente del lado operativo — solo cuenta en las
+        // estadísticas de importación como "ignorado".
         $rowsAnchored = 0;
         foreach ($blockEmployees as $code => $name) {
             if (isset($insertedCodes[$code])) {
                 continue;
             }
+
+            $normBlockName = $this->normalizeName($name);
+            $evidence = $normBlockName !== '' ? $this->evaluateEvidence($normBlockName, $name) : ['found' => false, 'is_non_portfolio_role' => false, 'detail' => 'Nombre vacío'];
+
+            if (!$evidence['found']) {
+                $identityStats['skipped_stale_zero']++;
+                $identityIncidents[] = [
+                    'type'     => 'noi_identidad.stale_zero_ignorado',
+                    'severity' => 'info',
+                    'message'  => "Ignorado: \"{$name}\" aparece en NOI con \$0 y sin actividad en el periodo, y no se encontró en el directorio Lendus, cartera/colocación/cobranza ni asignaciones históricas. No se creó como colaborador operativo.",
+                    'context'  => ['normalized_name' => $normBlockName, 'employee_code' => $code],
+                ];
+                continue;
+            }
+
+            $identityStats[$evidence['is_non_portfolio_role'] ? 'matched_non_portfolio_role' : 'matched']++;
 
             $mapped = [
                 'employee_code' => $code,
@@ -252,14 +318,35 @@ class NoiNominaImportService
             'rows_anchored' => $rowsAnchored,
             'rows_skipped' => $rowsSkipped,
             'rows_with_errors' => $rowsWithErrors,
+            'identity_stats' => $identityStats,
+            'incidents' => $identityIncidents,
             'log' => sprintf(
-                'Importación NOI completada. Leídas: %d, insertadas: %d, omitidas: %d, con error: %d.',
+                'Importación NOI completada. Leídas: %d, insertadas: %d, omitidas: %d, con error: %d. '
+                . 'Identidad — vinculados: %d, roles sin cartera: %d, requieren revisión: %d, ignorados ($0 sin respaldo): %d.',
                 $rowsRead,
                 $rowsInserted,
                 $rowsSkipped,
-                $rowsWithErrors
+                $rowsWithErrors,
+                $identityStats['matched'],
+                $identityStats['matched_non_portfolio_role'],
+                $identityStats['needs_review'],
+                $identityStats['skipped_stale_zero'],
             ),
         ];
+    }
+
+    /**
+     * Cached wrapper around PersonIdentityResolverService::evaluateNoiCandidateEvidence(),
+     * scoped to a single handle() run — a NOI file can repeat the same person across many
+     * rows (one per concepto), so the underlying DB lookups only need to run once per name.
+     */
+    private function evaluateEvidence(string $normalizedName, string $displayName): array
+    {
+        if (!array_key_exists($normalizedName, $this->evidenceCache)) {
+            $this->evidenceCache[$normalizedName] = $this->identityResolver->evaluateNoiCandidateEvidence($displayName);
+        }
+
+        return $this->evidenceCache[$normalizedName];
     }
 
     public function scanForDatabaseUpdate(ReportUpload $upload): array

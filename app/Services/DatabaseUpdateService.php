@@ -126,6 +126,7 @@ class DatabaseUpdateService
 
         $importErrors = [];
         $importErrorDetails = [];
+        $identityIncidents = [];
 
         foreach ($latestByCode as $code => $upload) {
             if (!$upload->stored_path || !Storage::disk('public')->exists($upload->stored_path)) {
@@ -134,6 +135,7 @@ class DatabaseUpdateService
             $this->checkCancelled($run);
             try {
                 $this->reportAnalysisService->analyze($upload);
+                $identityIncidents = array_merge($identityIncidents, $this->reportAnalysisService->pullLastImportIncidents());
             } catch (\Throwable $e) {
                 $message = mb_strimwidth($e->getMessage(), 0, 120);
                 $importErrors[] = ($upload->dataSource?->name ?? $code) . ': ' . $message;
@@ -277,7 +279,7 @@ class DatabaseUpdateService
             ];
         }
 
-        $allIncidents = array_merge($noiResult['incidents'] ?? [], $cobranzaResult['incidents'] ?? [], $importFailureIncidents, $rotationImssIncidents);
+        $allIncidents = array_merge($noiResult['incidents'] ?? [], $cobranzaResult['incidents'] ?? [], $importFailureIncidents, $rotationImssIncidents, $identityIncidents);
         foreach ($allIncidents as $incident) {
             PeriodIncident::query()->create([
                 'period_summary_id' => $summary->id,

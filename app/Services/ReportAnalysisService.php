@@ -38,6 +38,23 @@ class ReportAnalysisService
     ) {
     }
 
+    /** Incidencias de identidad (NOI) del ÚLTIMO analyze() — ver pullLastImportIncidents(). */
+    private array $lastImportIncidents = [];
+
+    /**
+     * Devuelve y limpia las incidencias de identidad detectadas en el análisis más
+     * reciente (por ahora solo NoiNominaImportService las produce — ver
+     * PersonIdentityResolverService::evaluateNoiCandidateEvidence()). Pensado para que
+     * DatabaseUpdateService las recolecte tras cada llamada a analyze() sin cambiar la
+     * firma pública del método (usado por 10 llamadores distintos).
+     */
+    public function pullLastImportIncidents(): array
+    {
+        $incidents = $this->lastImportIncidents;
+        $this->lastImportIncidents = [];
+        return $incidents;
+    }
+
     public function analyze(ReportUpload $upload): ProcessRun
     {
         $sourceCode = $upload->dataSource?->code;
@@ -86,6 +103,7 @@ class ReportAnalysisService
                     default => throw new \RuntimeException("La fuente [{$sourceCode}] aún no tiene importador implementado."),
                 };
             });
+            $this->lastImportIncidents = $result['incidents'] ?? [];
             $rowsRead = (int) ($result['rows_read'] ?? 0);
             $rowsInserted = (int) ($result['rows_inserted'] ?? 0);
             $rowsSkipped = (int) ($result['rows_skipped'] ?? 0);

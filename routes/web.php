@@ -29,6 +29,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::post('/{period}/actualizacion-bd/procesar-ahora', [ReportUploadController::class, 'processNow'])->name('process-now');
             Route::post('/{period}/actualizacion-bd/reencolar', [ReportUploadController::class, 'requeueRun'])->name('requeue-run');
             Route::get('/{period}/incidencias', [ReportUploadController::class, 'incidents'])->name('incidents');
+            Route::get('/{period}/colaboradores', [ReportUploadController::class, 'periodEmployeesForConfig'])->name('period-employees');
             Route::post('/{period}/incidencias/{incident}/resolver', [ReportUploadController::class, 'resolveIncident'])->name('incidents.resolve');
             Route::post('/{period}/incidencias/refrescar', [ReportUploadController::class, 'refreshIncidents'])->name('incidents.refresh');
             Route::get('/{period}/personas-sin-sucursal', [ReportUploadController::class, 'personasSinSucursal'])->name('personas-sin-sucursal');
@@ -97,7 +98,6 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::get('/{period}/radiografia.pdf', [MonthlyReportController::class, 'exportRadiographyPdf'])->name('export-radiography-pdf');
             Route::get('/{period}/export-filtrado.xlsx', [MonthlyReportController::class, 'exportFilteredRadiography'])->name('export-filtered-radiography');
             Route::get('/{period}/export-filtrado.pdf', [MonthlyReportController::class, 'exportFilteredRadiographyPdf'])->name('export-filtered-radiography-pdf');
-            Route::get('/{period}/filtrado-datos', [MonthlyReportController::class, 'filteredPreviewData'])->name('filtered-preview-data');
             Route::get('/{period}/consolidado.csv', [MonthlyReportController::class, 'exportSummary'])->name('export-summary');
             // Descargas/"Ver" ligadas a un run específico (identidad real: simple vs
             // comparativo vs por sucursal/gestor) — nunca caen al reporte simple del

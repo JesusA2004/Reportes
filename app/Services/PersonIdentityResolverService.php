@@ -603,6 +603,94 @@ class PersonIdentityResolverService
     }
 
     /**
+     * Evaluate whether a person detected in NOI (nómina) has any evidence of being
+     * a legitimate, currently-operating collaborator — cross-checked against Lendus
+     * (directorio de empleados + cartera/colocación/cobranza) and against employees
+     * that already carry a confirmed operative sucursal from a prior period.
+     *
+     * NOI is never trusted on its own as proof of operative existence (see
+     * NoiNominaImportService::resolveEmployee() docblock — "Clave del trabajador"
+     * is reused across periods for different people, and NOI carries stale/baja
+     * records). This is the single gate used both when scanning NOI for the
+     * employee catalog and when anchoring "sin percepciones" ($0) blocks, so a
+     * name is never treated as valid in one path and invalid in the other.
+     *
+     * @return array{
+     *   found: bool,
+     *   source: ?string,
+     *   is_non_portfolio_role: bool,
+     *   branch_hint: ?string,
+     *   detail: string,
+     * }
+     */
+    public function evaluateNoiCandidateEvidence(string $fullName): array
+    {
+        $normalized = $this->normalizePersonName($fullName);
+
+        if ($normalized === '') {
+            return ['found' => false, 'source' => null, 'is_non_portfolio_role' => false, 'branch_hint' => null, 'detail' => 'Nombre vacío tras normalizar.'];
+        }
+
+        // 1) Directorio oficial de empleados Lendus — exacto, luego fuzzy conservador (≥90%).
+        $lendus = DB::table('lendus_employee_directory')
+            ->whereNotNull('normalized_name')
+            ->get(['normalized_name', 'puesto', 'is_operational', 'inferred_branch_name']);
+
+        if ($lendus->isNotEmpty()) {
+            $exact = $lendus->firstWhere('normalized_name', $normalized);
+            if ($exact) {
+                return [
+                    'found' => true, 'source' => 'lendus_directory', 'is_non_portfolio_role' => !$exact->is_operational,
+                    'branch_hint' => $exact->inferred_branch_name, 'detail' => "Directorio Lendus (exacto) — puesto: {$exact->puesto}",
+                ];
+            }
+
+            $best = null; $bestScore = 0.0;
+            foreach ($lendus as $rec) {
+                $score = $this->scoreNameSimilarity($normalized, (string) $rec->normalized_name);
+                if ($score > $bestScore) { $bestScore = $score; $best = $rec; }
+            }
+            if ($best && $bestScore >= 90.0) {
+                return [
+                    'found' => true, 'source' => 'lendus_directory_fuzzy', 'is_non_portfolio_role' => !$best->is_operational,
+                    'branch_hint' => $best->inferred_branch_name, 'detail' => "Directorio Lendus (variante {$bestScore}%) — puesto: {$best->puesto}",
+                ];
+            }
+        }
+
+        // 2) Evidencia de cartera/colocación/cobranza vigente (promotor).
+        $inRecoveries = DB::table('fact_recoveries')->whereRaw('LOWER(promoter_name) = ?', [$normalized])->exists();
+        if ($inRecoveries) {
+            return ['found' => true, 'source' => 'fact_recoveries', 'is_non_portfolio_role' => false, 'branch_hint' => null, 'detail' => 'Registrado como promotor en cobranza.'];
+        }
+        $inPlacements = DB::table('fact_placements')->where('normalized_promoter_name', $normalized)->exists();
+        if ($inPlacements) {
+            return ['found' => true, 'source' => 'fact_placements', 'is_non_portfolio_role' => false, 'branch_hint' => null, 'detail' => 'Registrado como promotor en colocación.'];
+        }
+        $inPortfolios = DB::table('fact_portfolios')->whereRaw('LOWER(promoter_name) = ?', [$normalized])->exists();
+        if ($inPortfolios) {
+            return ['found' => true, 'source' => 'fact_portfolios', 'is_non_portfolio_role' => false, 'branch_hint' => null, 'detail' => 'Registrado como promotor en cartera.'];
+        }
+
+        // 3) Empleado ya existente con sucursal operativa confirmada en CUALQUIER periodo
+        //    anterior — evidencia de continuidad (evita expulsar a alguien vigente que
+        //    simplemente tuvo un periodo en $0).
+        $existing = Employee::query()->where('normalized_name', $normalized)->pluck('id');
+        if ($existing->isNotEmpty()) {
+            $hasOperativeAssignment = DB::table('employee_branch_assignments as eba')
+                ->join('branches as b', 'eba.branch_id', '=', 'b.id')
+                ->whereIn('eba.employee_id', $existing)
+                ->whereNotNull('eba.branch_id')
+                ->exists();
+            if ($hasOperativeAssignment) {
+                return ['found' => true, 'source' => 'historical_assignment', 'is_non_portfolio_role' => false, 'branch_hint' => null, 'detail' => 'Sucursal confirmada en un periodo anterior.'];
+            }
+        }
+
+        return ['found' => false, 'source' => null, 'is_non_portfolio_role' => false, 'branch_hint' => null, 'detail' => 'Sin evidencia en directorio Lendus, cartera/colocación/cobranza ni asignación histórica.'];
+    }
+
+    /**
      * Return all near-duplicate candidates for a name, sorted by score desc.
      */
     public function suggestPossibleMatches(string $name, float $minScore = 75.0, ?int $excludeId = null): array

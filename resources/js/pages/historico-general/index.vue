@@ -35,6 +35,7 @@ const OPERATIVE_BRANCH_NAMES_INIT = new Set([
 ])
 
 const selectedPeriodId    = ref<number | null>(props.currentPeriodId ?? null)
+const periodEmployees     = ref<Array<{ id: number; full_name: string; branch_name?: string }>>(props.employees ?? [])
 const incidents           = ref<any[]>([])
 const incidentsHasData    = ref<boolean | null>(null)  // null = not loaded yet
 const incidentsNoDataMsg  = ref<string>('')
@@ -90,11 +91,27 @@ async function loadIncidents() {
     }
 }
 
+// El colaborador debe seleccionarse SIEMPRE del roster canónico del periodo en
+// curso (deduplicado, sucursal resuelta) — nunca de la lista estática que llegó
+// en el primer render de la página, que corresponde a otro periodo en cuanto el
+// usuario cambia la selección en el stepper.
+async function loadPeriodEmployees() {
+    if (!selectedPeriodId.value) { periodEmployees.value = []; return }
+    try {
+        const res  = await fetch(`/historico-general/${selectedPeriodId.value}/colaboradores`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+        const data = await res.json()
+        periodEmployees.value = data.employees ?? []
+    } catch {
+        periodEmployees.value = []
+    }
+}
+
 watch(selectedPeriodId, () => {
     incidents.value        = []
     incidentsHasData.value = null
     incidentsNoDataMsg.value = ''
     currentStep.value      = 'files'
+    loadPeriodEmployees()
     // Solo cargar incidencias si los registros ya fueron cargados
     if (period.value?.database_updated) loadIncidents()
 }, { immediate: true })
@@ -766,7 +783,7 @@ const processGenerationNow = async () => {
                             :period="period"
                             :periods="periods"
                             :branches="branches"
-                            :employees="employees"
+                            :employees="periodEmployees"
                             :can-generate="Boolean(period?.can_generate_radiography)"
                             @next="selectStep('generate')"
                         />

@@ -364,7 +364,6 @@ class MonthlyReportController extends Controller {
             'allPeriods'     => $allPeriods,
             'filteredExcelBaseUrl' => route('reportes-mensuales.export-filtered-radiography', $period->id),
             'filteredPdfBaseUrl'   => route('reportes-mensuales.export-filtered-radiography-pdf', $period->id),
-            'filteredDataUrl'      => route('reportes-mensuales.filtered-preview-data', $period->id),
             'updateSaldoInicialUrl' => route('reportes-mensuales.update-saldo-inicial', $period->id),
         ]);
     }
@@ -558,117 +557,6 @@ class MonthlyReportController extends Controller {
         ]);
     }
 
-    public function filteredPreviewData(Period $period, Request $request): JsonResponse
-    {
-        $summary = PeriodSummary::query()
-            ->where('period_id', $period->id)
-            ->where('status', 'generated')
-            ->whereNull('invalidated_at')
-            ->first();
-
-        if (!$summary) {
-            return response()->json(['error' => 'Sin radiografía generada para este periodo.'], 404);
-        }
-
-        $snapshot   = app(RadiographySnapshotBuilder::class)->build($period, $summary);
-        $scope      = $request->input('scope', 'general');
-        $branchId   = (int) $request->input('branch_id', 0);
-        $employeeId = (int) $request->input('employee_id', 0);
-
-        if ($scope === 'branch') {
-            if (!$branchId) {
-                return response()->json(['error' => 'Selecciona una sucursal.'], 422);
-            }
-            $branch = Branch::find($branchId);
-            if (!$branch || !in_array($branch->name, self::OPERATIVE_BRANCH_NAMES, true)) {
-                return response()->json(['error' => 'Selecciona una sucursal operativa válida.'], 422);
-            }
-            $brName  = strtoupper(trim($branch->name));
-            $brCalc  = collect($snapshot['branch_radiography']['branches'] ?? [])
-                ->first(fn ($b) => strtoupper(trim($b['sucursal'])) === $brName);
-            if (!$brCalc) {
-                return response()->json(['error' => "Sin datos de radiografía para {$branch->name} en este periodo."], 404);
-            }
-            return response()->json([
-                'scope'  => 'branch',
-                'label'  => $branch->name,
-                'data'   => [
-                    'recuperacion' => (float)($brCalc['recuperacion_total'] ?? 0),
-                    'colocacion'   => (float)($brCalc['colocacion'] ?? 0),
-                    'cartera'      => (float)($brCalc['valor_cartera'] ?? 0),
-                    'mora_total'   => (float)($brCalc['mora_0_30'] ?? 0) + (float)($brCalc['mora_31_60'] ?? 0)
-                        + (float)($brCalc['mora_61_90'] ?? 0) + (float)($brCalc['mora_91_120'] ?? 0)
-                        + (float)($brCalc['mora_120_plus'] ?? 0),
-                    'mora_pct'     => (float)($brCalc['valor_cartera'] ?? 0) > 0
-                        ? round((((float)($brCalc['mora_0_30'] ?? 0) + (float)($brCalc['mora_31_60'] ?? 0)
-                            + (float)($brCalc['mora_61_90'] ?? 0) + (float)($brCalc['mora_91_120'] ?? 0)
-                            + (float)($brCalc['mora_120_plus'] ?? 0)) / (float)($brCalc['valor_cartera'])) * 100, 2)
-                        : 0,
-                    'gastos'       => (float)($brCalc['gastos_operativos'] ?? 0),
-                    'nomina'       => (float)($brCalc['nomina_total'] ?? 0) + (float)($brCalc['comisiones'] ?? 0)
-                        + (float)($brCalc['bonos'] ?? 0),
-                ],
-            ]);
-        }
-
-        if ($scope === 'employee') {
-            if (!$employeeId) {
-                return response()->json(['error' => 'Selecciona un gestor.'], 422);
-            }
-            $employee = Employee::find($employeeId);
-            if (!$employee) {
-                return response()->json(['error' => 'Gestor no encontrado.'], 404);
-            }
-            $empNorm  = strtoupper(trim($employee->full_name ?? ''));
-            $gestores = $snapshot['sections']['employees_gestores'] ?? [];
-            $gestRow  = null;
-            foreach ($gestores as $g) {
-                if (strtoupper(trim($g['name'] ?? '')) === $empNorm) {
-                    $gestRow = $g;
-                    break;
-                }
-            }
-            // Partial match fallback
-            if (!$gestRow) {
-                foreach ($gestores as $g) {
-                    $norm = strtoupper(trim($g['name'] ?? ''));
-                    if ($norm && (str_contains($norm, $empNorm) || str_contains($empNorm, $norm))) {
-                        $gestRow = $g;
-                        break;
-                    }
-                }
-            }
-            if (!$gestRow) {
-                return response()->json([
-                    'scope' => 'employee',
-                    'label' => $employee->full_name,
-                    'error' => 'Sin registros para este gestor en el periodo.',
-                    'data'  => null,
-                ]);
-            }
-            return response()->json([
-                'scope'  => 'employee',
-                'label'  => $employee->full_name,
-                'data'   => [
-                    'branch'       => $gestRow['branch']       ?? '',
-                    'route'        => $gestRow['route']        ?? '',
-                    'recuperacion' => (float)($gestRow['recuperacion']  ?? 0),
-                    'colocacion'   => (float)($gestRow['colocacion']    ?? 0),
-                    'operaciones'  => (int)($gestRow['operaciones']     ?? 0),
-                    'cartera'      => (float)($gestRow['cartera']       ?? 0),
-                    'mora_total'   => (float)($gestRow['vencida']       ?? 0),
-                    'mora_pct'     => (float)($gestRow['mora']          ?? 0),
-                    'pagos'        => (float)($gestRow['pagos']         ?? 0),
-                    'bonos'        => (float)($gestRow['bonos']         ?? 0),
-                    'descuentos'   => (float)($gestRow['descuentos']    ?? 0),
-                    'neto'         => (float)($gestRow['neto']          ?? 0),
-                    'gastos'       => (float)($gestRow['gastos']        ?? 0),
-                ],
-            ]);
-        }
-
-        return response()->json(['error' => 'Scope no válido. Usa branch o employee.'], 422);
-    }
 
     public function exportFilteredRadiography(Period $period, Request $request, RadiografiaExportService $service)
     {

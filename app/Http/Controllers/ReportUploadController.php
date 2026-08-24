@@ -19,7 +19,9 @@ use App\Models\PeriodReprocessRun;
 use App\Models\MonthlyEmployeeSummary;
 use App\Models\PeriodSummary;
 use App\Models\ReportUpload;
+use App\Services\PeriodEmployeeRosterService;
 use App\Services\ReportUploadService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -253,22 +255,24 @@ class ReportUploadController extends Controller {
             ->whereIn('name', self::OPERATIVE_BRANCH_NAMES)
             ->orderBy('name')
             ->get(['id', 'name']);
-        // Load employees with their assignment for the CURRENT period only.
-        // Using ->latest() without a period_id filter was showing employees as "Sin sucursal"
-        // even when they had a valid assignment in a different period.
-        $employees = Employee::query()->where('is_active', true)->orderBy('full_name')
-            ->with(['employeeBranchAssignments' => fn ($q) => $q
-                ->where('period_id', $currentPeriodId)
-                ->with('branch:id,name')
-            ])
-            ->get(['id', 'full_name', 'normalized_name'])
-            ->unique(fn (Employee $e) => $e->normalized_name ?: mb_strtolower(trim($e->full_name)))
-            ->values()
-            ->map(fn (Employee $e) => [
-                'id'          => $e->id,
-                'full_name'   => $e->full_name,
-                'branch_name' => $e->employeeBranchAssignments->first()?->branch?->name,
-            ]);
+        // Colaboradores válidos del periodo actual — roster canónico (dedup por
+        // nombre_normalizado, sucursal solo si es operativa), NUNCA Employee::all().
+        // Etapa 4 vuelve a pedir esto por AJAX cuando el usuario cambia de periodo en
+        // el stepper (ver periodEmployeesForConfig()) — este valor inicial solo cubre
+        // la primera carga de página para currentPeriodId.
+        $employees = collect();
+        if ($currentPeriodId) {
+            $currentPeriod = $allPeriods->firstWhere('id', $currentPeriodId);
+            if ($currentPeriod) {
+                $employees = collect(app(PeriodEmployeeRosterService::class)->rosterRowsForSelector($currentPeriod)['rows'])
+                    ->map(fn (array $r) => [
+                        'id'          => $r['employee_id'],
+                        'full_name'   => $r['name'],
+                        'branch_name' => $r['is_branch_operativa'] ? $r['branch_name'] : null,
+                    ])
+                    ->values();
+            }
+        }
 
         return Inertia::render('historico-general/index', [
             'periods'         => $periods,
@@ -278,6 +282,28 @@ class ReportUploadController extends Controller {
             'preview'         => $this->previewPayload($allPeriods->firstWhere('id', $currentPeriodId)),
             'branches'        => $branches,
             'employees'       => $employees,
+        ]);
+    }
+
+    /**
+     * Colaboradores válidos del periodo dado, para el selector "Buscar empleado o
+     * gestor" de la Etapa 4. Reemplaza el prop estático `employees` (que solo refleja
+     * el periodo cargado en el primer render) cada vez que el usuario cambia de
+     * periodo en el stepper — ver PeriodEmployeeRosterService::rosterRowsForSelector().
+     */
+    public function periodEmployeesForConfig(Period $period, PeriodEmployeeRosterService $rosterService): JsonResponse
+    {
+        $result = $rosterService->rosterRowsForSelector($period);
+
+        $employees = collect($result['rows'])->map(fn (array $r) => [
+            'id'          => $r['employee_id'],
+            'full_name'   => $r['name'],
+            'branch_name' => $r['is_branch_operativa'] ? $r['branch_name'] : null,
+        ])->values();
+
+        return response()->json([
+            'employees'    => $employees,
+            'sin_sucursal' => $result['sin_sucursal'],
         ]);
     }
 
