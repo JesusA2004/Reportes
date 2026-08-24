@@ -11,7 +11,7 @@ import ChartCard from '@/components/radiography/ChartCard.vue'
 import EbitdaBadge from '@/components/radiography/EbitdaBadge.vue'
 import EmptyState from '@/components/radiography/EmptyState.vue'
 import FilterBar from '@/components/radiography/FilterBar.vue'
-import { money, percent as fmtPercent, num } from '@/lib/format'
+import { money, percent as fmtPercent, num, moneyOrNa } from '@/lib/format'
 import { chartColors, categoryPalette, horizontalBarOptions, columnOptions, stackedBarOptions, donutOptions, countColumnOptions, countDonutOptions } from '@/lib/chart-theme'
 
 defineOptions({ layout: AppLayout })
@@ -19,6 +19,7 @@ defineOptions({ layout: AppLayout })
 const props = defineProps<{
     period: any
     snapshot: any | null
+    initialScope: { type: string; branch_id: number | null; branch_name: string | null; employee_id: number | null; employee_name: string | null; available: boolean } | null
     run: any | null
     hasExcelExport: boolean
     hasPdfExport: boolean
@@ -29,8 +30,39 @@ const props = defineProps<{
     allPeriods: { id: number; label: string; code: string; type: string; has_snapshot: boolean }[]
     filteredExcelBaseUrl: string
     filteredPdfBaseUrl: string
+    scopedDataUrl: string
     updateSaldoInicialUrl: string
 }>()
+
+// ════════════════════════════════════════════════════════════════════════════
+// ALCANCE DEL REPORTE (ReportScope) — general | sucursal | colaborador. TODO el
+// dashboard (KPI, resumen ejecutivo, gráficas, tablas, pestañas) lee de
+// `activeDataset`, nunca de `props.snapshot` directamente — así un cambio de
+// alcance transforma el reporte completo, no solo unas tarjetas sueltas. El
+// dataset filtrado viene SIEMPRE del backend (RadiographySnapshotBuilder::
+// applyScope(), misma función que ya usa Excel/PDF filtrados) — Vue solo pinta.
+// ════════════════════════════════════════════════════════════════════════════
+type ScopeType = 'general' | 'branch' | 'employee'
+const scopedSnapshot = ref<any | null>(null)
+const scopedLoading  = ref(false)
+const scopedError    = ref<string | null>(null)
+
+// El snapshot inicial ya puede venir pre-filtrado desde el servidor (deep-link
+// ?scope=... resuelto en previewPage()) — evita un parpadeo general→filtrado en F5.
+if (props.initialScope && props.initialScope.type !== 'general' && props.snapshot) {
+    scopedSnapshot.value = props.snapshot
+}
+
+const activeDataset = computed(() => scopedSnapshot.value ?? props.snapshot)
+
+// Alcance realmente activo — del dataset ya resuelto (backend), no de los selectores
+// crudos, para que loading/labels siempre reflejen lo que se está VIENDO, no lo que
+// se acaba de tocar.
+const activeScope = computed<{ type: ScopeType; branch_id: number | null; branch_name: string | null; employee_id: number | null; employee_name: string | null; available: boolean }>(() => {
+    const s = activeDataset.value?.scope
+    if (s) return s
+    return { type: 'general', branch_id: null, branch_name: null, employee_id: null, employee_name: null, available: true }
+})
 
 // ── Filtered export config (genera Excel/PDF por sucursal, gestor o comparativo) ──
 const showFilteredPanel = ref(false)
@@ -87,6 +119,38 @@ function buildFilteredUrl(format: 'xlsx' | 'pdf'): string {
 const filteredXlsxUrl = computed(() => buildFilteredUrl('xlsx'))
 const filteredPdfUrl  = computed(() => buildFilteredUrl('pdf'))
 
+// ── Botones Excel/PDF de cabecera — SIEMPRE el alcance que se está viendo ─────
+// Un solo lugar para descargar (requisito: no duplicar "botón de arriba" vs "panel
+// filtrado"): estos usan report_type=simple + el alcance activo sin importar lo que
+// el usuario haya tocado en el panel "Descargar / Comparativos" de abajo.
+const hasActiveScope = computed(() => activeScope.value.type !== 'general')
+
+function buildActiveScopeUrl(format: 'xlsx' | 'pdf'): string {
+    if (!hasActiveScope.value) return format === 'xlsx' ? props.excelUrl : props.pdfUrl
+    const base = format === 'xlsx' ? props.filteredExcelBaseUrl : props.filteredPdfBaseUrl
+    const params = new URLSearchParams({ report_type: 'simple', scope: activeScope.value.type })
+    if (activeScope.value.type === 'branch' && activeScope.value.branch_id) params.set('branch_id', String(activeScope.value.branch_id))
+    if (activeScope.value.type === 'employee' && activeScope.value.employee_id) params.set('employee_id', String(activeScope.value.employee_id))
+    return `${base}?${params.toString()}`
+}
+
+const activeExcelUrl = computed(() => buildActiveScopeUrl('xlsx'))
+const activePdfUrl   = computed(() => buildActiveScopeUrl('pdf'))
+
+// Deshabilitado SOLO mientras carga, si no hay datos para el alcance, o (alcance
+// general) si el archivo general todavía no existe — nunca por el simple hecho de
+// tener un filtro activo (requisito explícito: eso NO debe deshabilitar el botón).
+const canDownloadActiveExcel = computed(() => {
+    if (scopedLoading.value) return false
+    if (hasActiveScope.value) return activeScope.value.available !== false
+    return props.hasExcelExport
+})
+const canDownloadActivePdf = computed(() => {
+    if (scopedLoading.value) return false
+    if (hasActiveScope.value) return activeScope.value.available !== false
+    return props.hasPdfExport
+})
+
 const canDownloadFiltered = computed(() => {
     if (isComparative.value) {
         if (!filteredComparePeriodId.value) return false
@@ -96,44 +160,6 @@ const canDownloadFiltered = computed(() => {
     if (!isComparative.value && filteredScope.value === 'branch' && !filteredBranchId.value) return false
     if (!isComparative.value && filteredScope.value === 'employee' && !filteredEmployeeId.value) return false
     return true
-})
-
-// Mantiene sincronizado el alcance del archivo descargable con los filtros de
-// vista en vivo (vfBranch/vfGestor) — así Excel/PDF SIEMPRE coinciden exactamente
-// con lo que se ve en pantalla, sin tener que elegir la sucursal/gestor dos veces
-// en dos controles distintos. Solo aplica a reportes simples; un comparativo tiene
-// su propio alcance independiente (puede compararse una sucursal aunque la vista
-// en vivo esté en general).
-watch([vfGestor, vfBranch, vfGestorRow, vfBranchRow], () => {
-    if (isComparative.value) return
-    if (vfGestor.value) {
-        filteredScope.value = 'employee'
-        filteredEmployeeId.value = props.employees.find(e => e.name === vfGestor.value)?.id ?? null
-    } else if (vfBranch.value) {
-        filteredScope.value = 'branch'
-        filteredBranchId.value = props.branches.find(b => b.name === vfBranch.value)?.id ?? null
-    } else {
-        filteredScope.value = 'general'
-        filteredBranchId.value = null
-        filteredEmployeeId.value = null
-    }
-}, { immediate: true })
-
-// Deep-link (ej. desde Etapa 4 "Ver reporte" con ?scope=...): fija vfBranch/vfGestor,
-// que a su vez propagan a filteredScope/filteredBranchId/filteredEmployeeId vía el
-// watcher de arriba — un único punto de entrada para el alcance del reporte.
-onMounted(() => {
-    const params = new URLSearchParams(window.location.search)
-    const scope  = params.get('scope')
-    if (scope === 'branch') {
-        const branchId = Number(params.get('branch_id')) || null
-        const branch = branchId ? props.branches.find(b => b.id === branchId) : null
-        if (branch) vfBranch.value = branch.name
-    } else if (scope === 'employee') {
-        const employeeId = Number(params.get('employee_id')) || null
-        const employee = employeeId ? props.employees.find(e => e.id === employeeId) : null
-        if (employee) vfGestor.value = employee.name
-    }
 })
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -183,13 +209,19 @@ onUnmounted(() => {
     window.removeEventListener('resize', updateTabsScrollState)
 })
 
-const snap   = computed(() => props.snapshot)
+// ÚNICA fuente de verdad visual: general o filtrado, TODO el dashboard cuelga de aquí.
+const snap   = computed(() => activeDataset.value)
 const periodComposite = computed(() => snap.value?.period?.composite ?? null)
 const sum    = computed(() => snap.value?.summary ?? {})
 const charts = computed(() => snap.value?.charts ?? {})
 
 const branchRadiography = computed(() => snap.value?.branch_radiography ?? null)
-const brGlobal  = computed(() => branchRadiography.value?.global ?? null)
+// brGlobal puede ser un marcador { not_attributable: true, ... } bajo alcance colaborador
+// (una persona no es una sucursal) — sus campos numéricos leen undefined→0 en las tablas
+// de detalle; esas pestañas se ocultan explícitamente con brGlobalNotAttributable más abajo
+// en vez de mostrar ceros como si fueran datos reales.
+const brGlobalNotAttributable = computed(() => !!(branchRadiography.value?.global as any)?.not_attributable)
+const brGlobal  = computed(() => (brGlobalNotAttributable.value ? null : branchRadiography.value?.global) ?? null)
 const brRaw     = computed(() => (branchRadiography.value?.branches ?? []) as any[])
 
 type EbitdaCategory = 'DIAMANTE' | 'MASTER' | 'SENIOR' | 'JUNIOR' | 'MANTENIDO'
@@ -490,17 +522,6 @@ const ingresoEbitdaBaseGlobal = computed(() =>
 const utilidadGlobal    = computed(() => ingresoEbitdaBaseGlobal.value - gastosEbitdaTotal.value)
 const ventaGlobal       = computed(() => ingresoEbitdaBaseGlobal.value)
 const margenEbitdaPct   = computed(() => ventaGlobal.value > 0 ? (utilidadGlobal.value / ventaGlobal.value) * 100 : 0)
-// Margen EBITDA con alcance activo: gestor usa su propio ingreso base EBITDA como
-// denominador (mismo componente que kpiUtil); sucursal usa branchesFull.margenEbitda,
-// ya calculado con la misma fórmula que el global.
-const kpiMargenEbitdaPct = computed(() => {
-    if (vfGestorRow.value) {
-        const ingresoBase = Number(vfGestorRow.value.ingreso_ebitda_base) || 0
-        return ingresoBase > 0 ? (vfGestorEbitda.value / ingresoBase) * 100 : 0
-    }
-    if (vfBranchRow.value) return vfBranchRow.value.margenEbitda
-    return margenEbitdaPct.value
-})
 // Diferencia = EBITDA − Envío de utilidad a corporativo. Puede ser negativa — no se fuerza a 0;
 // ese es justamente el saldo a llevar como saldo inicial del siguiente periodo.
 const diferencia        = computed(() => utilidadGlobal.value - excGlobal.value)
@@ -696,8 +717,9 @@ const vfBucketOptions    = computed(() => moraBucketsGlobal.value.map(b => b.lab
 const vfGestorOptions    = computed(() => (empGest.value as any[]).map(e => e.name).sort())
 const vfCategoriaOptions = ['DIAMANTE', 'MASTER', 'SENIOR', 'JUNIOR', 'MANTENIDO']
 
+// vfBranchRow: usado SOLO por el drill-down visual de bucket de mora (vfBucketValue) —
+// el alcance real (sucursal/colaborador) ya lo resuelve el backend en activeScope/sum.
 const vfBranchRow  = computed(() => vfBranch.value ? branchesFull.value.find(b => b.nombre === vfBranch.value) ?? null : null)
-const vfGestorRow  = computed(() => vfGestor.value ? (empGest.value as any[]).find(e => e.name === vfGestor.value) ?? null : null)
 const vfProductRow = computed(() => vfProduct.value ? productosRows.value.find((p: any) => p.producto === vfProduct.value) ?? null : null)
 
 const MORA_BUCKET_FIELD: Record<string, string> = {
@@ -724,63 +746,174 @@ const branchesFiltered = computed(() => {
     return rows
 })
 
-// ── KPIs principales (recalculados con el filtro de sucursal/gestor activo) ──
-// Alcance ÚNICO: gestor > sucursal > general. Nunca una tarjeta aparte con los
-// mismos datos — seleccionar un gestor o una sucursal transforma directamente
-// las tarjetas superiores, exactamente igual que Excel/PDF filtrados (mismos
-// campos que RadiografiaExportService::resolveEmployeeRow()/resolveBranchRow()).
-const NOT_ATTRIBUTABLE = null as number | null
+// ── KPIs principales — leen DIRECTO del dataset activo (general o filtrado) ──
+// Ya NO hay una rama especial "si hay gestor.../si hay sucursal..." aquí: el backend
+// (RadiographySnapshotBuilder::applyScope()) ya proyectó summary.* al alcance correcto
+// — general, sucursal o colaborador — con las MISMAS fórmulas que Excel/PDF filtrados.
+// Vue solo lee `sum.value.<campo>`. Un valor `null` significa "no atribuible a este
+// alcance" (nunca se reemplaza por 0 ni por el total general).
+// Estos 9 campos SIEMPRE vienen poblados (0 real cuando corresponde) para los 3 alcances
+// — ver RadiographySnapshotBuilder::summaryFromRow(), nunca emite null aquí. Los campos
+// que sí pueden ser "no atribuible" (excedentes/fondeo/seguros puente) se leen aparte,
+// más abajo, con attrOrNull() + moneyOrNa().
+function attrNum(value: unknown): number {
+    return Number(value) || 0
+}
+function attrOrNull(value: unknown): number | null {
+    return value === null || value === undefined ? null : Number(value) || 0
+}
 
-// EBITDA por gestor: ingreso base EBITDA − (gastos atribuibles + nómina neta),
-// misma fórmula que RadiografiaExportService::resolveEmployeeRow()['utilidad'].
-const vfGestorEbitda = computed(() => {
-    const g = vfGestorRow.value
-    if (!g) return 0
-    const ingresoBase = Number(g.ingreso_ebitda_base) || 0
-    const gastos = Number(g.gastos) || 0
-    const neto = Number(g.pagos ?? 0) + Number(g.bonos ?? 0) - Number(g.descuentos ?? 0)
-    return ingresoBase - (gastos + neto)
-})
-
-const kpiRec     = computed(() => vfGestorRow.value ? Number(vfGestorRow.value.recuperacion) || 0 : (vfBranchRow.value ? vfBranchRow.value.recuperacion : recGlobal.value))
-const kpiCol     = computed(() => vfGestorRow.value ? Number(vfGestorRow.value.colocacion) || 0 : (vfBranchRow.value ? vfBranchRow.value.colocacion : colGlobal.value))
-const kpiCartera = computed(() => vfGestorRow.value ? Number(vfGestorRow.value.cartera) || 0 : (vfBranchRow.value ? vfBranchRow.value.cartera : carteraGlobal.value))
-const kpiMora = computed(() => {
-    if (vfGestorRow.value) return Number(vfGestorRow.value.vencida) || 0
-    if (vfBucketValue.value !== null) return vfBucketValue.value
-    if (vfBranchRow.value) return vfBranchRow.value.vencida
-    return moraTotalGlobal.value
-})
+const kpiRec     = computed(() => attrNum(sum.value?.recovery_total))
+const kpiCol     = computed(() => attrNum(sum.value?.placement_total))
+const kpiCartera = computed(() => attrNum(sum.value?.portfolio_total))
+// El filtro visual de bucket de mora (vfBucket) sigue siendo un recorte adicional sobre
+// la cartera YA filtrada por alcance — no es parte del ReportScope del backend.
+const kpiMora = computed(() => vfBucketValue.value !== null ? vfBucketValue.value : attrNum(sum.value?.overdue_portfolio))
 const kpiMoraPct = computed(() => {
-    if (vfGestorRow.value) return Number(vfGestorRow.value.mora) || 0
-    if (vfBucketValue.value !== null) return kpiCartera.value > 0 ? (vfBucketValue.value / kpiCartera.value) * 100 : 0
-    if (vfBranchRow.value) return vfBranchRow.value.mora
-    return kpiCartera.value > 0 ? (kpiMora.value / kpiCartera.value) * 100 : 0
+    if (vfBucketValue.value !== null) {
+        return kpiCartera.value > 0 ? (vfBucketValue.value / kpiCartera.value) * 100 : 0
+    }
+    return attrNum(sum.value?.mora_index)
 })
-// Gastos por gestor: SOLO los directamente atribuibles (fact_expenses.employee_id) —
-// nunca un prorrateo de gastos de sucursal/corporativo (ver sección 6 de la spec).
-const kpiGastos = computed(() => vfGestorRow.value ? Number(vfGestorRow.value.gastos) || 0 : (vfBranchRow.value ? vfBranchRow.value.gastos : brGlobalGastosTotal.value))
-// "Nómina" por gestor = su propio neto (pagos + bonos − descuentos). No incluye IMSS/otros
-// conceptos globales que no pueden atribuirse a una sola persona.
-const kpiNomina = computed(() => {
-    if (vfGestorRow.value) return Number(vfGestorRow.value.neto) || (Number(vfGestorRow.value.pagos ?? 0) + Number(vfGestorRow.value.bonos ?? 0) - Number(vfGestorRow.value.descuentos ?? 0))
-    return vfBranchRow.value ? vfBranchRow.value.nomina : nomTotal.value
-})
-const kpiUtil = computed(() => vfGestorRow.value ? vfGestorEbitda.value : (vfBranchRow.value ? vfBranchRow.value.ebitda : (brGlobal.value ? utilidadGlobal.value : 0)))
+const kpiGastos = computed(() => attrNum(sum.value?.expenses_total))
+const kpiNomina = computed(() => attrNum(sum.value?.nomina_capital_humano_total))
+const kpiUtil   = computed(() => attrNum(sum.value?.ebitda_final))
+const kpiMargenEbitdaPct = computed(() => attrNum(sum.value?.margen_ebitda))
 
 const kpiMoraLabel = computed(() => vfBucket.value ? `Mora · ${vfBucket.value}` : 'Mora total')
-const kpiUtilLabel = computed(() => vfGestorRow.value ? 'EBITDA del colaborador' : (vfBranchRow.value ? 'EBITDA estimado' : 'EBITDA'))
+const kpiUtilLabel = computed(() => activeScope.value.type === 'employee' ? 'EBITDA del colaborador' : (activeScope.value.type === 'branch' ? 'EBITDA de la sucursal' : 'EBITDA'))
 // "Préstamo activo" no tiene desglose por colaborador en el snapshot — mostrar
 // explícitamente "No atribuible" en vez de heredar el total general en silencio.
-const prestamoActivoAttributable = computed(() => !vfGestorRow.value)
+const prestamoActivoAttributable = computed(() => activeScope.value.type !== 'employee')
 
-// Chips de alcance activo — reemplaza la antigua "ficha" duplicada de gestor/sucursal.
-// Limpiar filtros (vfClearAll) regresa inmediatamente al reporte general.
+// Chips de alcance activo — el backend (activeScope) es la fuente de verdad del label,
+// no el texto crudo del selector, para que coincida exactamente con lo que se pintó.
 const scopeChips = computed(() => {
-    const chips: { label: string; clear: () => void }[] = []
-    if (vfBranch.value) chips.push({ label: vfBranch.value, clear: () => { vfBranch.value = '' } })
-    if (vfGestor.value) chips.push({ label: vfGestorRow.value?.name ?? vfGestor.value, clear: () => { vfGestor.value = '' } })
+    const chips: { label: string; clear: () => void; removable: boolean }[] = []
+    if (activeScope.value.type === 'branch') {
+        chips.push({ label: activeScope.value.branch_name ?? vfBranch.value, clear: () => { vfBranch.value = '' }, removable: true })
+    }
+    if (activeScope.value.type === 'employee') {
+        // Sucursal del colaborador — informativa, no se quita sola (sección 35: la sucursal
+        // de un colaborador es implícita a su propia sucursal histórica, no un filtro aparte).
+        if (activeScope.value.branch_name) {
+            chips.push({ label: activeScope.value.branch_name, clear: () => {}, removable: false })
+        }
+        chips.push({ label: activeScope.value.employee_name ?? vfGestor.value, clear: () => { vfGestor.value = '' }, removable: true })
+    }
     return chips
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// CARGA DEL DATASET FILTRADO — backend, con cancelación de peticiones obsoletas.
+// ════════════════════════════════════════════════════════════════════════════
+let scopedRequestController: AbortController | null = null
+let scopedRequestVersion = 0
+let suppressNextScopeFetch = false
+
+function updateScopeQueryString(params: URLSearchParams | null) {
+    const url = new URL(window.location.href)
+    url.search = params && [...params.keys()].length ? `?${params.toString()}` : ''
+    window.history.replaceState({}, '', url)
+}
+
+async function fetchScopedDataset() {
+    const gestor = vfGestor.value
+    const branch = vfBranch.value
+
+    scopedRequestController?.abort()
+
+    if (!gestor && !branch) {
+        // Alcance general: ya está cargado en props.snapshot — respuesta instantánea,
+        // sin request (requisito de performance: no pedir de nuevo lo que ya tenemos).
+        scopedRequestVersion++
+        scopedSnapshot.value = null
+        scopedLoading.value  = false
+        scopedError.value    = null
+        updateScopeQueryString(null)
+        return
+    }
+
+    let params: URLSearchParams
+    if (gestor) {
+        const emp = props.employees.find(e => e.name === gestor)
+        if (!emp) { scopedError.value = 'Colaborador no reconocido en este periodo.'; return }
+        params = new URLSearchParams({ scope: 'employee', employee_id: String(emp.id) })
+    } else {
+        const br = props.branches.find(b => b.name === branch)
+        if (!br) { scopedError.value = 'Sucursal no reconocida.'; return }
+        params = new URLSearchParams({ scope: 'branch', branch_id: String(br.id) })
+    }
+
+    const controller = new AbortController()
+    scopedRequestController = controller
+    const myVersion = ++scopedRequestVersion
+
+    scopedLoading.value = true
+    scopedError.value   = null
+
+    try {
+        const resp = await fetch(`${props.scopedDataUrl}?${params}`, {
+            signal: controller.signal,
+            headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        })
+        const json = await resp.json()
+
+        if (myVersion !== scopedRequestVersion) return // llegó tarde — una selección más nueva ya ganó
+
+        if (!resp.ok && !json.snapshot) {
+            scopedError.value = json.error ?? `Error ${resp.status} al actualizar la radiografía.`
+            return
+        }
+
+        scopedSnapshot.value = json.snapshot
+        if (json.error) scopedError.value = json.error // ej. "sin datos para este alcance" — dataset vacío pero válido
+        updateScopeQueryString(params)
+    } catch (e: any) {
+        if (e?.name === 'AbortError') return
+        if (myVersion !== scopedRequestVersion) return
+        scopedError.value = e?.message ?? 'Error de red al actualizar la radiografía.'
+    } finally {
+        if (myVersion === scopedRequestVersion) scopedLoading.value = false
+    }
+}
+
+function retryScopedFetch() { fetchScopedDataset() }
+
+// Mantiene sincronizado el alcance del archivo descargable (usado por buildFilteredUrl())
+// con el alcance REALMENTE activo (backend, no el texto crudo del selector) — así
+// Excel/PDF nunca pueden divergir de lo que se ve en pantalla. Solo aplica a reportes
+// simples; un comparativo tiene su propio alcance independiente (compara otro periodo).
+watch(activeScope, (s) => {
+    if (isComparative.value) return
+    filteredScope.value      = s.type as 'general' | 'branch' | 'employee'
+    filteredBranchId.value   = s.branch_id
+    filteredEmployeeId.value = s.employee_id
+}, { immediate: true })
+
+// vfBranch/vfGestor son <select> nativos (FilterBar.vue) — solo cambian al confirmar una
+// selección, nunca por tecla, así que no hace falta debounce (requisito de UX cumplido
+// por construcción). Declarado DESPUÉS de vfBranch/vfGestor (const) — referenciarlos antes
+// de su declaración revienta en runtime con TDZ, no solo un warning de tipos.
+watch([vfGestor, vfBranch], () => {
+    if (suppressNextScopeFetch) { suppressNextScopeFetch = false; return }
+    fetchScopedDataset()
+})
+
+// Deep-link (ej. desde Etapa 4 "Ver reporte" con ?scope=...): sincroniza vfBranch/vfGestor
+// con lo que el servidor YA resolvió en el primer render (previewPage() ya entregó el
+// snapshot filtrado — ver scopedSnapshot inicial arriba) para que el FilterBar refleje el
+// alcance activo sin disparar una segunda petición redundante.
+onMounted(() => {
+    if (!props.initialScope || props.initialScope.type === 'general') return
+    suppressNextScopeFetch = true
+    if (props.initialScope.type === 'branch' && props.initialScope.branch_name) {
+        vfBranch.value = props.initialScope.branch_name
+    } else if (props.initialScope.type === 'employee' && props.initialScope.employee_name) {
+        vfGestor.value = props.initialScope.employee_name
+    } else {
+        suppressNextScopeFetch = false
+    }
 })
 
 // ── Alertas (Resumen) — vacías; colores suaves en cifras cubren el feedback visual
@@ -1065,13 +1198,15 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                         </p>
                     </div>
                     <div class="flex flex-wrap gap-2">
-                        <a :href="hasExcelExport ? excelUrl : '#'"
-                           :class="hasExcelExport ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-slate-700 opacity-40 pointer-events-none'"
+                        <a :href="canDownloadActiveExcel ? activeExcelUrl : '#'"
+                           :title="scopedLoading ? 'Actualizando información…' : undefined"
+                           :class="canDownloadActiveExcel ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-slate-700 opacity-40 pointer-events-none'"
                            class="inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm font-bold text-white transition">
                             <FileSpreadsheet class="size-4" /> Excel
                         </a>
-                        <a :href="hasPdfExport ? pdfUrl : '#'"
-                           :class="hasPdfExport ? 'bg-rose-600 hover:bg-rose-500' : 'bg-slate-700 opacity-40 pointer-events-none'"
+                        <a :href="canDownloadActivePdf ? activePdfUrl : '#'"
+                           :title="scopedLoading ? 'Actualizando información…' : undefined"
+                           :class="canDownloadActivePdf ? 'bg-rose-600 hover:bg-rose-500' : 'bg-slate-700 opacity-40 pointer-events-none'"
                            class="inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm font-bold text-white transition">
                             <FileText class="size-4" /> PDF
                         </a>
@@ -1105,43 +1240,45 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                      Excel/PDF filtrados); ya NO se agrega una tarjeta redundante aparte. -->
                 <div v-if="scopeChips.length" class="flex flex-wrap items-center gap-2">
                     <span class="text-xs font-bold uppercase tracking-wider text-slate-400">Alcance:</span>
-                    <button v-for="chip in scopeChips" :key="chip.label" type="button" @click="chip.clear()"
+                    <span v-for="chip in scopeChips.filter(c => !c.removable)" :key="'ro-' + chip.label"
+                          class="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-600">
+                        {{ chip.label }}
+                    </span>
+                    <button v-for="chip in scopeChips.filter(c => c.removable)" :key="chip.label" type="button" @click="chip.clear()"
                             class="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-3 py-1 text-xs font-black text-white transition hover:bg-indigo-500">
                         {{ chip.label }} <span class="text-indigo-200">×</span>
                     </button>
                     <button type="button" @click="vfClearAll" class="text-xs font-bold text-slate-500 underline hover:text-slate-800">Limpiar filtros</button>
                 </div>
 
-                <!-- KPI CARDS -->
-                <div>
-                    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
-                        <KpiCard label="Recuperación" :value="money(kpiRec)" :icon="HandCoins" tone="teal" />
-                        <KpiCard label="Colocación" :value="money(kpiCol)" :icon="TrendingUp" tone="blue" />
-                        <KpiCard label="Valor cartera" :value="money(kpiCartera)" :icon="Landmark" tone="teal" />
-                        <KpiCard label="Cartera vencida" :value="money(kpiMora)" :icon="AlertTriangle" :tone="kpiMoraPct > 25 ? 'red' : 'amber'" />
-                        <KpiCard label="Mora %" :value="pct(kpiMoraPct)" :icon="Percent" :tone="kpiMoraPct > 25 ? 'red' : 'teal'" />
-                        <KpiCard label="OPEX" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
-                        <KpiCard label="Nómina y Capital Humano" :value="money(kpiNomina)" :icon="Wallet" tone="blue" />
-                        <KpiCard :label="kpiUtilLabel" :value="money(kpiUtil)" :icon="Gauge" :tone="kpiUtil < 0 ? 'red' : 'green'" />
-                        <KpiCard label="Margen EBITDA" :value="pct(kpiMargenEbitdaPct)" :icon="Percent" :tone="kpiMargenEbitdaPct < 0 ? 'red' : 'green'" />
-                        <KpiCard label="Préstamo activo" :value="prestamoActivoAttributable ? money(prestamoActivoKpi) : 'No atribuible'" :icon="Banknote" tone="blue" />
-                    </div>
-                    <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
-                        <template v-if="vfGestorRow">
-                            <KpiCard label="Percepciones del colaborador" :value="money(Number(vfGestorRow.pagos ?? 0) + Number(vfGestorRow.bonos ?? 0))" :icon="Wallet" tone="teal" />
-                            <KpiCard label="Deducciones del colaborador" :value="money(Number(vfGestorRow.descuentos ?? 0))" :icon="Receipt" tone="amber" />
-                            <KpiCard label="Neto recibido" :value="money(kpiNomina)" :icon="HandCoins" tone="blue" />
-                        </template>
-                        <template v-else>
+                <!-- DASHBOARD — overlay de carga cubre KPI + pestañas al cambiar de alcance,
+                     nunca deja ver una mezcla de tarjetas nuevas con tablas/gráficas viejas. -->
+                <div class="relative">
+                    <div :class="scopedLoading ? 'pointer-events-none opacity-40 blur-[1px] transition' : 'transition'">
+
+                    <!-- KPI CARDS -->
+                    <div>
+                        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+                            <KpiCard label="Recuperación" :value="money(kpiRec)" :icon="HandCoins" tone="teal" />
+                            <KpiCard label="Colocación" :value="money(kpiCol)" :icon="TrendingUp" tone="blue" />
+                            <KpiCard label="Valor cartera" :value="money(kpiCartera)" :icon="Landmark" tone="teal" />
+                            <KpiCard label="Cartera vencida" :value="money(kpiMora)" :icon="AlertTriangle" :tone="kpiMoraPct > 25 ? 'red' : 'amber'" />
+                            <KpiCard label="Mora %" :value="pct(kpiMoraPct)" :icon="Percent" :tone="kpiMoraPct > 25 ? 'red' : 'teal'" />
+                            <KpiCard label="OPEX" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
+                            <KpiCard label="Nómina y Capital Humano" :value="money(kpiNomina)" :icon="Wallet" tone="blue" />
+                            <KpiCard :label="kpiUtilLabel" :value="money(kpiUtil)" :icon="Gauge" :tone="kpiUtil < 0 ? 'red' : 'green'" />
+                            <KpiCard label="Margen EBITDA" :value="pct(kpiMargenEbitdaPct)" :icon="Percent" :tone="kpiMargenEbitdaPct < 0 ? 'red' : 'green'" />
+                            <KpiCard label="Préstamo activo" :value="prestamoActivoAttributable ? money(prestamoActivoKpi) : 'No atribuible'" :icon="Banknote" tone="blue" />
+                        </div>
+                        <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
                             <KpiCard label="Percepciones" :value="money(noiPercepciones)" :icon="Wallet" tone="teal" />
                             <KpiCard label="Deducciones" :value="money(noiDeducciones)" :icon="Receipt" tone="amber" />
                             <KpiCard label="Neto pagado a trabajadores" :value="money(noiNetoPagado)" :icon="HandCoins" tone="blue" />
-                        </template>
+                        </div>
                     </div>
-                </div>
 
-                <!-- FILTROS DE VISTA EN VIVO -->
-                <FilterBar
+                    <!-- FILTROS DE VISTA EN VIVO -->
+                    <FilterBar
                     v-model:branch="vfBranch"
                     v-model:product="vfProduct"
                     v-model:bucket="vfBucket"
@@ -2348,6 +2485,33 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                         <p class="text-xs text-slate-400">Mostrando {{ empVisible.length }} de {{ filteredEmp.length }} registros.</p>
                     </template>
                     <EmptyState v-else title="Sin datos de gestores" description="Verifica que el archivo de nómina fue procesado para este periodo." />
+                </div>
+
+                    </div>
+                    <!-- OVERLAY DE CARGA — cubre KPI+filtros+pestañas mientras el backend
+                         resuelve el nuevo alcance. Nunca deja ver datos del filtro anterior
+                         mezclados con el nuevo (requisito de UX explícito). -->
+                    <div v-if="scopedLoading" class="absolute inset-0 z-20 flex items-center justify-center">
+                        <div class="flex flex-col items-center gap-3 rounded-2xl border border-slate-200 bg-white/95 px-8 py-6 shadow-xl backdrop-blur-sm">
+                            <span class="size-10 animate-spin rounded-full border-4 border-indigo-200 border-t-indigo-600"></span>
+                            <p class="text-sm font-black text-slate-900">Actualizando radiografía</p>
+                            <p class="max-w-xs text-center text-xs text-slate-500">
+                                Cargando información para
+                                <span class="font-bold text-slate-700">{{ vfGestor || vfBranch }}</span>… Espera un momento.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ERROR AL FILTRAR — conserva el dataset anterior internamente, pero jamás
+                     lo presenta como si correspondiera al nuevo filtro. -->
+                <div v-if="scopedError" class="rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-800">
+                    <p class="font-bold">No se pudo actualizar la radiografía para este filtro.</p>
+                    <p class="mt-1 text-rose-700">{{ scopedError }}</p>
+                    <div class="mt-3 flex gap-2">
+                        <button type="button" @click="retryScopedFetch" class="rounded-xl bg-rose-600 px-4 py-1.5 text-xs font-bold text-white hover:bg-rose-500">Reintentar</button>
+                        <button type="button" @click="vfClearAll" class="rounded-xl border border-rose-300 bg-white px-4 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-100">Volver al reporte general</button>
+                    </div>
                 </div>
 
             </div>

@@ -509,14 +509,17 @@ class RadiografiaExportService
     }
 
     /**
-     * Build the snapshot for use in the web preview page.
-     * This avoids recalculating in the controller.
+     * Build the snapshot for use in the web preview page — general o proyectado a un
+     * scope (sucursal/colaborador) según $config['scope']/'branch_id'/'employee_id'.
+     * Pasa por el mismo caché de 180s que Excel/PDF (buildSnapshotCached ya incluye el
+     * config completo en su clave), así que cambiar de filtro repetidamente durante la
+     * misma sesión no recalcula desde cero cada vez.
      */
     public function buildSnapshot(Period $period, array $config = []): array
     {
         $summary = $this->requireSummary($period);
         $summary->loadMissing(['branchSummaries', 'incidents']);
-        return $this->snapshotBuilder->build($period, $summary, $config);
+        return $this->buildSnapshotCached($period, $summary, $config);
     }
 
     private function requireSummary(Period $period): PeriodSummary

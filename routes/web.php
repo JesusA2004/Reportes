@@ -93,6 +93,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
             Route::post('/{period}/consolidar', [MonthlyReportController::class, 'consolidate'])->name('consolidate');
             Route::get('/{period}/estado-radiografia', [MonthlyReportController::class, 'status'])->name('status');
             Route::get('/{period}/preview', [MonthlyReportController::class, 'previewPage'])->name('preview');
+            Route::get('/{period}/scoped-data', [MonthlyReportController::class, 'scopedData'])->name('scoped-data');
             Route::post('/{period}/saldo-inicial', [MonthlyReportController::class, 'updateSaldoInicial'])->name('update-saldo-inicial');
             Route::get('/{period}/radiografia.xlsx', [MonthlyReportController::class, 'exportRadiography'])->name('export-radiography');
             Route::get('/{period}/radiografia.pdf', [MonthlyReportController::class, 'exportRadiographyPdf'])->name('export-radiography-pdf');

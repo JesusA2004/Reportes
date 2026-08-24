@@ -27,3 +27,19 @@ export function percent(v: number | null | undefined): string {
 export function num(v: number | null | undefined): string {
     return integer.format(Number(v ?? 0))
 }
+
+/**
+ * Money that distinguishes a real $0 from "not attributable at this scope" (null).
+ * Never collapse null into $0.00 — that's exactly the silent fallback the
+ * scoped radiography dashboard must never do (see RadiographySnapshotBuilder::
+ * applyScope()/summaryFromRow(), which emits null for fields that can't be
+ * attributed to a branch/employee).
+ */
+export function moneyOrNa(v: number | null | undefined, label = 'No atribuible'): string {
+    return v === null || v === undefined ? label : money(v)
+}
+
+/** Percent counterpart of moneyOrNa(). */
+export function percentOrNa(v: number | null | undefined, label = 'No atribuible'): string {
+    return v === null || v === undefined ? label : percent(v)
+}

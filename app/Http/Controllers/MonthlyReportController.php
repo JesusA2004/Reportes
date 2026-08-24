@@ -239,7 +239,7 @@ class MonthlyReportController extends Controller {
         return redirect()->route('reportes-mensuales.index', ['period' => $period->id]);
     }
 
-    public function previewPage(Period $period, RadiographySnapshotBuilder $snapshotBuilder): Response
+    public function previewPage(Period $period, Request $request, RadiographySnapshotBuilder $snapshotBuilder, RadiografiaExportService $exportService): Response
     {
         $summary = PeriodSummary::query()
             ->with(['branchSummaries', 'incidents'])
@@ -256,7 +256,9 @@ class MonthlyReportController extends Controller {
 
         $hasExcelExport = false;
         $hasPdfExport   = false;
-        $snapshot       = null;
+        $snapshot       = null;   // snapshot GENERAL — nunca se filtra, alimenta los selectores
+        $initialSnapshot = null;  // lo que realmente se manda a la página (general o ya-filtrado)
+        $initialScope     = null;
 
         if ($summary) {
             $excelExport = PeriodRadiographyExport::query()
@@ -272,9 +274,32 @@ class MonthlyReportController extends Controller {
             $hasExcelExport = $excelExport && is_string($excelExport->export_path) && File::exists($excelExport->export_path);
             $hasPdfExport   = $pdfExport && is_string($pdfExport->export_path) && File::exists($pdfExport->export_path);
 
-            // Build full snapshot (single source of truth)
+            // Build full GENERAL snapshot (single source of truth) — SIEMPRE sin scope,
+            // porque de aquí salen las listas de sucursales/gestores del selector.
             $snapshot = $snapshotBuilder->build($period, $summary);
+
+            // Deep-link (?scope=branch|employee&branch_id=/employee_id=): si la URL ya trae
+            // un alcance válido, la primera respuesta del servidor entrega directamente el
+            // reporte filtrado — sin esto, un F5 con filtro activo mostraría un parpadeo del
+            // reporte general antes de que el frontend pida el dataset filtrado por AJAX.
+            $scopeParam = $request->query('scope');
+            if (in_array($scopeParam, ['branch', 'employee'], true)) {
+                $config = ['scope' => $scopeParam];
+                if ($scopeParam === 'branch') {
+                    $config['branch_id'] = (int) $request->query('branch_id', 0);
+                } else {
+                    $config['employee_id'] = (int) $request->query('employee_id', 0);
+                }
+                try {
+                    $initialSnapshot = $exportService->buildSnapshot($period, $config);
+                    $initialScope    = $initialSnapshot['scope'] ?? null;
+                } catch (\Throwable $e) {
+                    report($e);
+                }
+            }
         }
+
+        $activeSnapshot = $initialSnapshot ?? $snapshot;
 
         // Operative branches: hardcoded constant — never shows routes or non-op branches
         $operativeBranches = Branch::query()
@@ -349,7 +374,8 @@ class MonthlyReportController extends Controller {
                 'start_date' => optional($period->start_date)->format('Y-m-d'),
                 'end_date'   => optional($period->end_date)->format('Y-m-d'),
             ],
-            'snapshot'       => $snapshot,
+            'snapshot'       => $activeSnapshot,
+            'initialScope'   => $initialScope,
             'run'            => $run ? [
                 'status'      => $run->status,
                 'started_at'  => optional($run->started_at)->format('d/m/Y H:i'),
@@ -362,6 +388,7 @@ class MonthlyReportController extends Controller {
             'branches'       => $operativeBranches,
             'employees'      => $employees,
             'allPeriods'     => $allPeriods,
+            'scopedDataUrl'  => route('reportes-mensuales.scoped-data', $period->id),
             'filteredExcelBaseUrl' => route('reportes-mensuales.export-filtered-radiography', $period->id),
             'filteredPdfBaseUrl'   => route('reportes-mensuales.export-filtered-radiography-pdf', $period->id),
             'updateSaldoInicialUrl' => route('reportes-mensuales.update-saldo-inicial', $period->id),
@@ -644,6 +671,66 @@ class MonthlyReportController extends Controller {
             'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
             'Pragma'        => 'no-cache',
         ]);
+    }
+
+    /**
+     * Dataset COMPLETO del reporte proyectado a un alcance (sucursal/colaborador) — misma
+     * forma que el snapshot general (period/summary/branch_radiography/sections/charts),
+     * consumido por Preview.vue para reemplazar TODO el dashboard (no solo las tarjetas
+     * KPI) cuando el usuario cambia de filtro. Nunca reimporta ni regenera: proyecta el
+     * snapshot ya calculado del periodo (ver RadiographySnapshotBuilder::applyScope()).
+     * La misma función (RadiografiaExportService::buildSnapshot) es la que ya usa
+     * previewPage() para el deep-link inicial, así que ambos caminos son idénticos.
+     */
+    public function scopedData(Period $period, Request $request, RadiografiaExportService $exportService): JsonResponse
+    {
+        $scope = $request->query('scope', 'general');
+
+        if (!in_array($scope, ['general', 'branch', 'employee'], true)) {
+            return response()->json(['error' => 'Alcance no válido. Usa general, branch o employee.'], 422);
+        }
+
+        $config = ['scope' => $scope];
+
+        if ($scope === 'branch') {
+            $branchId = (int) $request->query('branch_id', 0);
+            if (!$branchId) {
+                return response()->json(['error' => 'Selecciona una sucursal.'], 422);
+            }
+            $branch = Branch::find($branchId);
+            if (!$branch || !in_array($branch->name, self::OPERATIVE_BRANCH_NAMES, true)) {
+                return response()->json(['error' => 'Selecciona una sucursal operativa válida.'], 422);
+            }
+            $config['branch_id'] = $branchId;
+        }
+
+        if ($scope === 'employee') {
+            $employeeId = (int) $request->query('employee_id', 0);
+            if (!$employeeId) {
+                return response()->json(['error' => 'Selecciona un colaborador.'], 422);
+            }
+            if (!Employee::query()->whereKey($employeeId)->exists()) {
+                return response()->json(['error' => 'Colaborador no encontrado.'], 404);
+            }
+            $config['employee_id'] = $employeeId;
+        }
+
+        try {
+            $snapshot = $exportService->buildSnapshot($period, $config);
+        } catch (\Throwable $e) {
+            report($e);
+            return response()->json(['error' => 'No se pudo construir la radiografía para este alcance.'], 500);
+        }
+
+        if ($scope !== 'general' && (($snapshot['scope']['available'] ?? true) === false)) {
+            $label = $scope === 'branch' ? ($snapshot['scope']['branch_name'] ?? 'la sucursal seleccionada') : ($snapshot['scope']['employee_name'] ?? 'el colaborador seleccionado');
+            return response()->json([
+                'error'    => "Sin datos de radiografía para {$label} en este periodo.",
+                'snapshot' => $snapshot,
+            ], 404);
+        }
+
+        return response()->json(['snapshot' => $snapshot]);
     }
 
     public function status(Period $period) {

@@ -306,7 +306,421 @@ class RadiographySnapshotBuilder
 
         $this->assertRecoveryReconciles($branchCalcGlobal, $branchCalcBranches, $recoveryByProduct);
 
+        // ── SCOPE (sucursal / colaborador) — proyección del snapshot ya calculado ──
+        // Se aplica AL FINAL, después de que el snapshot general (y su guardia de cuadre)
+        // ya están completos. Nunca reimporta ni recalcula desde cero: todo lo que sigue
+        // reutiliza $branchCalcBranches/$empGestores/$this->dataIds ya resueltos arriba,
+        // más un puñado de consultas puntuales ya acotadas a una sola sucursal/promotor
+        // (equivalentes a lo que ya hacía RadiografiaExportService::resolveBranchRow()/
+        // resolveEmployeeRow() para Excel/PDF — ahora es la MISMA función la que alimenta
+        // Web/Excel/PDF, ver applyScope()). scope=general deja $snapshot intacto.
+        $scope = $config['scope'] ?? 'general';
+        if ($scope === 'branch' || $scope === 'employee') {
+            $snapshot = $this->applyScope($snapshot, $config, $period, $empGestores, $gm);
+        } else {
+            $snapshot['scope'] = ['type' => 'general', 'branch_id' => null, 'branch_name' => null, 'employee_id' => null, 'employee_name' => null, 'available' => true];
+        }
+
         return $snapshot;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // SCOPE — proyecta el snapshot general ya construido a sucursal o colaborador.
+    // Toda métrica NO atribuible con la granularidad disponible se expone como NULL
+    // (nunca hereda silenciosamente el total general) y las secciones sin dimensión
+    // de sucursal/colaborador se marcan explícitamente 'not_attributable' => true.
+    // ════════════════════════════════════════════════════════════════════════════
+
+    private function applyScope(array $snapshot, array $config, Period $period, array $empGestores, array $gm): array
+    {
+        $scope = $config['scope'];
+
+        if ($scope === 'branch') {
+            $branchId = (int) ($config['branch_id'] ?? 0);
+            if (!$branchId) return $snapshot;
+            return $this->applyBranchScope($snapshot, $branchId, $period);
+        }
+
+        if ($scope === 'employee') {
+            $employeeId = (int) ($config['employee_id'] ?? 0);
+            if (!$employeeId) return $snapshot;
+            return $this->applyEmployeeScope($snapshot, $employeeId, $empGestores, $period);
+        }
+
+        return $snapshot;
+    }
+
+    private function eqName(mixed $value): string
+    {
+        return strtoupper(trim((string) $value));
+    }
+
+    /** Filtra un array de filas a las que coincidan (comparación insensible a mayúsculas) en cualquiera de los campos dados. */
+    private function filterRowsByField(array $rows, array $fields, string $needle): array
+    {
+        $needle = $this->eqName($needle);
+        return array_values(array_filter($rows, function ($row) use ($fields, $needle) {
+            foreach ($fields as $field) {
+                if (isset($row[$field]) && $this->eqName($row[$field]) === $needle) {
+                    return true;
+                }
+            }
+            return false;
+        }));
+    }
+
+    private function notAttributable(string $reason = 'No se puede atribuir de forma inequívoca a este alcance.'): array
+    {
+        return ['not_attributable' => true, 'reason' => $reason];
+    }
+
+    /**
+     * Alcance sin datos (sucursal/colaborador sin ningún movimiento este periodo). NUNCA se
+     * deja pasar el summary/secciones generales — eso sería exactamente el "fallback
+     * silencioso a total general" que la spec prohíbe. `scope.available=false` es la señal
+     * que el frontend usa para mostrar un estado vacío en vez del dashboard.
+     */
+    private function emptyScopedSnapshot(array $snapshot): array
+    {
+        $snapshot['scope']['available'] = false;
+        $snapshot['summary'] = array_map(fn () => null, $snapshot['summary']);
+        $snapshot['branch_radiography']['global']     = $this->notAttributable('Sin datos para este alcance en el periodo.');
+        $snapshot['branch_radiography']['branches']   = [];
+        $snapshot['branch_radiography']['unassigned'] = $this->notAttributable();
+        foreach (array_keys($snapshot['sections']) as $key) {
+            $snapshot['sections'][$key] = is_array($snapshot['sections'][$key]) && array_is_list($snapshot['sections'][$key])
+                ? []
+                : $this->notAttributable('Sin datos para este alcance en el periodo.');
+        }
+        $snapshot['charts'] = array_map(fn () => [], $snapshot['charts']);
+
+        return $snapshot;
+    }
+
+    private function applyBranchScope(array $snapshot, int $branchId, Period $period): array
+    {
+        $branch = Branch::find($branchId);
+        if (!$branch) {
+            $snapshot['scope'] = ['type' => 'branch', 'branch_id' => $branchId, 'branch_name' => null, 'employee_id' => null, 'employee_name' => null, 'available' => false];
+            return $snapshot;
+        }
+
+        $name = $branch->name;
+        $eq   = $this->eqName($name);
+
+        $row = collect($snapshot['branch_radiography']['branches'] ?? [])
+            ->first(fn ($b) => $this->eqName($b['sucursal'] ?? '') === $eq);
+
+        $snapshot['scope'] = [
+            'type' => 'branch', 'branch_id' => $branchId, 'branch_name' => $name,
+            'employee_id' => null, 'employee_name' => null, 'available' => (bool) $row,
+        ];
+
+        if (!$row) {
+            // Sucursal operativa válida pero sin ningún movimiento este periodo — NUNCA dejar
+            // pasar el summary/secciones generales tal cual (eso sería el fallback silencioso
+            // prohibido). Se limpia explícitamente para que el frontend muestre "sin datos".
+            return $this->emptyScopedSnapshot($snapshot);
+        }
+
+        $percepDeducc = $this->branchCalculator->computeNoiPercepcionesDeduccionesForBranch($this->dataIds, $period->id, $branchId);
+
+        $snapshot['summary'] = $this->summaryFromRow($row, $percepDeducc, null);
+        $snapshot['branch_radiography']['global']   = $row;
+        $snapshot['branch_radiography']['branches'] = [$row];
+        $snapshot['branch_radiography']['unassigned'] = $this->notAttributable('Los montos "sin sucursal" son, por definición, ajenos a cualquier sucursal individual.');
+
+        $s = $snapshot['sections'];
+        $s['employees_gestores']         = $this->filterRowsByField($s['employees_gestores'] ?? [], ['branch'], $name);
+        $s['mora_by_gestor']             = $this->filterRowsByField($s['mora_by_gestor'] ?? [], ['sucursal'], $name);
+        $s['active_loans']               = $this->filterRowsByField($s['active_loans'] ?? [], ['sucursal'], $name);
+        $s['portfolio_by_branch_product']= $this->filterRowsByField($s['portfolio_by_branch_product'] ?? [], ['branch'], $name);
+        $s['placement_by_branch_product']= $this->filterRowsByField($s['placement_by_branch_product'] ?? [], ['branch'], $name);
+        $s['mora_by_branch_product']     = $this->filterRowsByField($s['mora_by_branch_product'] ?? [], ['branch'], $name);
+        $s['mora_by_branch']             = $this->filterRowsByField($s['mora_by_branch'] ?? [], ['sucursal', 'branch'], $name);
+
+        $payrollData = $s['payroll_by_branch_concept']['data'] ?? [];
+        $matchedPayrollKey = collect(array_keys($payrollData))->first(fn ($k) => $this->eqName($k) === $eq);
+        $s['payroll_by_branch_concept'] = [
+            'data'      => $matchedPayrollKey ? [$matchedPayrollKey => $payrollData[$matchedPayrollKey]] : [],
+            'incidents' => [],
+        ];
+
+        $expByBranchRow = collect($s['expenses_detail']['byBranch'] ?? [])->first(fn ($r) => $this->eqName($r['sucursal'] ?? '') === $eq);
+        $s['expenses_detail'] = [
+            'total'      => (float) ($expByBranchRow['total'] ?? 0),
+            'byBranch'   => $expByBranchRow ? [$expByBranchRow] : [],
+            'byCategory' => null,
+            'byConcept'  => null,
+            'byEmployee' => null,
+            'bySource'   => null,
+            'detail_not_attributable' => 'El desglose por categoría/concepto/fuente solo está disponible a nivel general en este snapshot.',
+        ];
+
+        if (isset($s['imss']['colaboradores'])) {
+            $s['imss'] = [
+                'porSucursal'   => collect($s['imss']['porSucursal'] ?? [])->filter(fn ($r) => $this->eqName($r['sucursal'] ?? '') === $eq)->values()->all(),
+                'colaboradores' => $this->filterRowsByField($s['imss']['colaboradores'], ['sucursal'], $name),
+            ];
+        }
+        if (isset($s['rotation_detail'])) {
+            foreach (['altas', 'bajas', 'activos', 'empleados_mes_actual', 'empleados_mes_anterior'] as $k) {
+                if (isset($s['rotation_detail'][$k]) && is_array($s['rotation_detail'][$k])) {
+                    $s['rotation_detail'][$k] = $this->filterRowsByField($s['rotation_detail'][$k], ['sucursal'], $name);
+                }
+            }
+        }
+
+        foreach (['interbranch_loans', 'corporate_funding', 'fondeo_detalle'] as $k) {
+            if (isset($s[$k])) {
+                $s[$k] = $this->notAttributable('Transferencia entre sucursales/corporativo — no se puede atribuir de forma inequívoca a una sola sucursal.');
+            }
+        }
+
+        $snapshot['sections'] = $s;
+        $snapshot['charts']   = $this->scopeChartsByLabel($snapshot['charts'], $name);
+
+        return $snapshot;
+    }
+
+    private function applyEmployeeScope(array $snapshot, int $employeeId, array $empGestores, Period $period): array
+    {
+        $employee = Employee::find($employeeId);
+        if (!$employee) {
+            $snapshot['scope'] = ['type' => 'employee', 'branch_id' => null, 'branch_name' => null, 'employee_id' => $employeeId, 'employee_name' => null, 'available' => false];
+            return $snapshot;
+        }
+
+        $target = $this->canonicalizer->normalize($employee->full_name ?? '');
+        $row = null;
+        foreach ($empGestores as $e) {
+            if ($this->canonicalizer->normalize($e['name'] ?? '') === $target) { $row = $e; break; }
+        }
+        if (!$row) {
+            foreach ($empGestores as $e) {
+                $norm = $this->canonicalizer->normalize($e['name'] ?? '');
+                if ($norm && (str_contains($norm, $target) || str_contains($target, $norm))) { $row = $e; break; }
+            }
+        }
+
+        $branchName = $row['branch'] ?? null;
+        $snapshot['scope'] = [
+            'type' => 'employee', 'branch_id' => null, 'branch_name' => $branchName,
+            'employee_id' => $employeeId, 'employee_name' => $employee->full_name, 'available' => (bool) $row,
+        ];
+
+        if (!$row) {
+            return $this->emptyScopedSnapshot($snapshot);
+        }
+
+        $percepDeducc = $this->branchCalculator->computeNoiPercepcionesDeduccionesForEmployee($this->dataIds, $employeeId);
+
+        $snapshot['summary'] = $this->summaryFromRow($row, $percepDeducc, $row);
+        $snapshot['branch_radiography']['global']     = $this->notAttributable('El colaborador no representa una sucursal completa — ver sections.employees_gestores.');
+        $snapshot['branch_radiography']['branches']   = [];
+        $snapshot['branch_radiography']['unassigned'] = $this->notAttributable();
+
+        $s = $snapshot['sections'];
+        $s['employees_gestores'] = [$row];
+        $s['mora_by_gestor']     = $this->filterRowsByField($s['mora_by_gestor'] ?? [], ['gestor'], $row['name']);
+
+        // Colocación por producto — solo la del promotor (fact_placements), consulta puntual
+        // acotada a un promoter_name, no un recálculo general.
+        $s['products'] = $this->buildProductsForPromoter($employee->full_name);
+
+        $expByEmployeeRow = collect($s['expenses_detail']['byEmployee'] ?? [])->first(fn ($r) => $this->eqName($r['empleado'] ?? '') === $this->eqName($employee->full_name));
+        $s['expenses_detail'] = [
+            'total'      => (float) ($expByEmployeeRow['total'] ?? 0),
+            'byEmployee' => $expByEmployeeRow ? [$expByEmployeeRow] : [],
+            'byCategory' => null, 'byConcept' => null, 'byBranch' => null, 'bySource' => null,
+            'detail_not_attributable' => 'El desglose por categoría/concepto/sucursal/fuente solo está disponible a nivel general en este snapshot.',
+        ];
+
+        // Percepciones/deducciones por concepto (NOI), acotado a este empleado.
+        $s['payroll_by_branch_concept'] = [
+            'data' => [
+                $employee->full_name => DB::table('fact_noi_movements')
+                    ->whereIn('period_id', $this->dataIds)
+                    ->where('employee_id', $employeeId)
+                    ->selectRaw("COALESCE(concept, concept_type, 'Sin concepto') as concept, SUM(amount) as total")
+                    ->groupBy('concept', 'concept_type')
+                    ->pluck('total', 'concept')
+                    ->all(),
+            ],
+            'incidents' => [],
+        ];
+
+        if (isset($s['imss']['colaboradores'])) {
+            $s['imss'] = ['colaboradores' => $this->filterRowsByField($s['imss']['colaboradores'], ['nombre'], $employee->full_name)];
+        }
+        if (isset($s['rotation_detail'])) {
+            foreach (['altas', 'bajas', 'activos', 'empleados_mes_actual', 'empleados_mes_anterior'] as $k) {
+                if (isset($s['rotation_detail'][$k]) && is_array($s['rotation_detail'][$k])) {
+                    $s['rotation_detail'][$k] = $this->filterRowsByField($s['rotation_detail'][$k], ['nombre'], $employee->full_name);
+                }
+            }
+        }
+
+        foreach ([
+            'active_loans', 'portfolio_by_branch_product', 'placement_by_branch_product', 'mora_by_branch_product',
+            'mora_by_branch', 'interbranch_loans', 'corporate_funding', 'fondeo_detalle',
+        ] as $k) {
+            if (isset($s[$k])) {
+                $s[$k] = $this->notAttributable('No existe desglose por colaborador para este dato en el snapshot del periodo.');
+            }
+        }
+
+        $snapshot['sections'] = $s;
+        $snapshot['charts']   = $this->scopeChartsByLabel($snapshot['charts'], $row['name']);
+
+        return $snapshot;
+    }
+
+    /**
+     * Colocación por producto de UN promotor — misma tabla/exclusiones que buildProducts(),
+     * acotada por promoter_name. No incluye cartera/recuperación por producto del colaborador
+     * porque fact_portfolios/fact_recoveries no siempre traen promoter_name confiable a nivel
+     * de contrato para ese cruce; se deja como colocación únicamente (dato real, no inventado).
+     */
+    private function buildProductsForPromoter(string $promoterName): array
+    {
+        $rows = DB::table('fact_placements')
+            ->whereIn('period_id', $this->dataIds)
+            ->whereRaw('LOWER(promoter_name) = ?', [mb_strtolower(trim($promoterName))])
+            ->selectRaw('COALESCE(NULLIF(product_name, \'\'), \'Sin producto\') as producto, COUNT(*) as operaciones, SUM(amount) as colocacion')
+            ->groupBy('product_name')
+            ->orderByDesc('colocacion')
+            ->get()
+            ->map(fn ($r) => ['producto' => $r->producto, 'operaciones' => (int) $r->operaciones, 'colocacion' => (float) $r->colocacion, 'cartera' => null, 'recuperacion' => null])
+            ->values()->all();
+
+        return $rows;
+    }
+
+    /**
+     * Reduce cada gráfica {label,value,pct}[] a la entrada cuyo label coincide con el
+     * alcance activo (recalculando pct=100). Gráficas sin esa dimensión (ej. por producto)
+     * quedan sin tocar — siguen siendo información general válida, no del colaborador/sucursal.
+     */
+    private function scopeChartsByLabel(array $charts, string $needle): array
+    {
+        $eq = $this->eqName($needle);
+        foreach ($charts as $key => $rows) {
+            if (!is_array($rows) || empty($rows) || !isset($rows[0]['label'])) continue;
+            $match = collect($rows)->first(fn ($r) => $this->eqName($r['label'] ?? '') === $eq);
+            $charts[$key] = $match ? [array_merge($match, ['pct' => 100.0])] : [];
+        }
+        return $charts;
+    }
+
+    /**
+     * Construye el bloque `summary` (mismas llaves que el summary general) a partir de UNA
+     * fila de sucursal (branchCalcBranches) o de gestor (employees_gestores). Reutiliza las
+     * MISMAS fórmulas estáticas que el global (BranchRadiographyCalculator::nominaTotalFor()/
+     * ingresoEbitdaBaseFor()/gastosTotalesFor()/ebitdaFinalFor()/margenEbitdaFor()) para que
+     * "sucursal"/"colaborador" nunca diverja de "general" salvo en el dato de entrada.
+     *
+     * $branchRow: fila de branchCalcBranches (shape completo) para scope=branch, o null.
+     * $employeeRow: fila de employees_gestores para scope=employee, o null.
+     */
+    private function summaryFromRow(array $row, array $percepDeducc, ?array $employeeRow): array
+    {
+        if ($employeeRow !== null) {
+            // Alcance colaborador: la fila YA trae recuperacion/colocacion/cartera/vencida/mora/
+            // gastos/pagos/bonos/descuentos/neto/ingreso_ebitda_base — mismos campos que usa
+            // RadiografiaExportService::resolveEmployeeRow() para Excel/PDF.
+            $pagos       = (float) ($employeeRow['pagos'] ?? 0);
+            $bonos       = (float) ($employeeRow['bonos'] ?? 0);
+            $descuentos  = (float) ($employeeRow['descuentos'] ?? 0);
+            $gastos      = (float) ($employeeRow['gastos'] ?? 0);
+            $neto        = (float) ($employeeRow['neto'] ?? ($pagos + $bonos - $descuentos));
+            $ingresoBase = (float) ($employeeRow['ingreso_ebitda_base'] ?? 0);
+            $cartera     = (float) ($employeeRow['cartera'] ?? 0);
+            $vencida     = (float) ($employeeRow['vencida'] ?? 0);
+            $ebitda      = $ingresoBase - ($gastos + $neto);
+
+            return [
+                'employees_count'              => 1,
+                'recovery_total'                => (float) ($employeeRow['recuperacion'] ?? 0),
+                'placement_total'               => (float) ($employeeRow['colocacion'] ?? 0),
+                'portfolio_total'               => $cartera,
+                'overdue_portfolio'             => $vencida,
+                'mora_index'                    => $cartera > 0 ? round($vencida / $cartera * 100, 2) : 0.0,
+                'expenses_total'                => $gastos,
+                'payroll_total'                 => $pagos + $bonos,
+                'net_payroll'                   => $neto,
+                'noi_percepciones'              => $percepDeducc['percepciones'],
+                'noi_deducciones'               => $percepDeducc['deducciones'],
+                'noi_neto_pagado'               => $percepDeducc['neto_pagado'],
+                'opex_total'                    => $gastos,
+                'nomina_capital_humano_total'   => $neto,
+                'nomina_ebitda_total'           => $neto,
+                'total_gastos_ebitda'           => $gastos + $neto,
+                'ebitda_global'                 => $ebitda,
+                'venta_global'                  => $ingresoBase,
+                'margen_ebitda'                 => $ingresoBase > 0 ? round($ebitda / $ingresoBase * 100, 2) : 0.0,
+                'ebitda_categoria'               => $this->ebitdaCategory($ebitda),
+                'ingreso_ebitda_base'           => $ingresoBase,
+                'gastos_totales'                => $gastos + $neto,
+                'ebitda_final'                  => $ebitda,
+                // No atribuible a un solo colaborador con la granularidad disponible:
+                'unificacion_excluida'          => null,
+                'condonacion_excluida'          => null,
+                'excedentes_total'              => null,
+                'fondeo_total'                  => null,
+                'seguros_lendus_puente'         => null,
+            ];
+        }
+
+        // Alcance sucursal: $row viene de branchCalcBranches, mismo shape que branchCalcGlobal.
+        $nomina      = BranchRadiographyCalculator::nominaTotalFor($row);
+        $gastosTot   = BranchRadiographyCalculator::gastosTotalesFor($row);
+        $ingresoBase = BranchRadiographyCalculator::ingresoEbitdaBaseFor($row);
+        $ebitda      = BranchRadiographyCalculator::ebitdaFinalFor($row);
+        $margen      = BranchRadiographyCalculator::margenEbitdaFor($row);
+        $moraTotal   = (float) ($row['mora_0_30'] ?? 0) + (float) ($row['mora_31_60'] ?? 0) + (float) ($row['mora_61_90'] ?? 0)
+            + (float) ($row['mora_91_120'] ?? 0) + (float) ($row['mora_120_plus'] ?? 0);
+        $cartera     = (float) ($row['valor_cartera'] ?? 0);
+
+        return [
+            'employees_count'              => null,
+            'recovery_total'               => (float) ($row['recuperacion_total'] ?? 0),
+            'recovery_bruta'               => (float) ($row['recuperacion_bruta'] ?? 0),
+            'recovery_seguro_excluido'     => (float) ($row['seguro_excluido_bruto'] ?? 0),
+            'recovery_savehearts_bruto'    => (float) ($row['seguro_savehearts_bruto'] ?? 0),
+            'recovery_comadres_bruto'      => (float) ($row['seguro_comadres_bruto'] ?? 0),
+            'recovery_crece_bruto'         => (float) ($row['seguro_crece_bruto'] ?? 0),
+            'recovery_crece_reconocido'    => (float) ($row['seguro_crece_reconocido'] ?? 0),
+            'recovery_crece_no_reconocido' => max(0.0, (float) ($row['seguro_crece_bruto'] ?? 0) - (float) ($row['seguro_crece_reconocido'] ?? 0)),
+            'placement_total'              => (float) ($row['colocacion'] ?? 0),
+            'portfolio_total'              => $cartera,
+            'overdue_portfolio'            => $moraTotal,
+            'mora_index'                   => $cartera > 0 ? round($moraTotal / $cartera * 100, 2) : 0.0,
+            'expenses_total'               => (float) ($row['gastos_operativos'] ?? 0),
+            'expenses_erp'                 => (float) ($row['gastos_erp_total'] ?? 0),
+            'expenses_lendus'              => (float) ($row['gastos_lendus_total'] ?? 0),
+            'seguros_lendus_puente'        => (float) ($row['seguros_lendus_puente'] ?? 0),
+            'excedentes_total'             => (float) ($row['excedentes'] ?? 0),
+            'fondeo_total'                 => (float) ($row['prestamos_fondea'] ?? 0),
+            'payroll_total'                => $nomina,
+            'net_payroll'                  => $nomina,
+            'noi_percepciones'             => $percepDeducc['percepciones'],
+            'noi_deducciones'              => $percepDeducc['deducciones'],
+            'noi_neto_pagado'              => $percepDeducc['neto_pagado'],
+            'opex_total'                   => (float) ($row['gastos_operativos'] ?? 0),
+            'nomina_capital_humano_total'  => $nomina,
+            'nomina_ebitda_total'          => $nomina,
+            'total_gastos_ebitda'          => $gastosTot,
+            'ebitda_global'                => $ebitda,
+            'venta_global'                 => $ingresoBase,
+            'margen_ebitda'                => $margen,
+            'ebitda_categoria'             => $this->ebitdaCategory($ebitda),
+            'ingreso_ebitda_base'          => $ingresoBase,
+            'gastos_totales'               => $gastosTot,
+            'ebitda_final'                 => $ebitda,
+            'unificacion_excluida'         => (float) ($row['unificacion_excluida'] ?? 0),
+            'condonacion_excluida'         => (float) ($row['condonacion_excluida'] ?? 0),
+        ];
     }
 
     /**

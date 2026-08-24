@@ -240,6 +240,63 @@ class BranchRadiographyCalculator
         ];
     }
 
+    /** Igual que computeNoiPercepcionesDeducciones() pero para UN solo colaborador. */
+    public function computeNoiPercepcionesDeduccionesForEmployee(array $dataIds, int $employeeId): array
+    {
+        $percepciones = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->where('employee_id', $employeeId)
+            ->where('concept_type', 'percepcion')
+            ->sum('amount');
+
+        $deducciones = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->where('employee_id', $employeeId)
+            ->where('concept_type', 'deduccion')
+            ->sum('amount');
+
+        return [
+            'percepciones' => $percepciones,
+            'deducciones'  => $deducciones,
+            'neto_pagado'  => $percepciones - $deducciones,
+        ];
+    }
+
+    /**
+     * Igual que computeNoiPercepcionesDeducciones() pero restringido a los colaboradores
+     * con employee_branch_assignments → $branchId en este periodo. Empleados NOI sin
+     * asignación resuelta no se cuentan aquí (quedan fuera del alcance de la sucursal).
+     */
+    public function computeNoiPercepcionesDeduccionesForBranch(array $dataIds, int $periodId, int $branchId): array
+    {
+        $employeeIds = DB::table('employee_branch_assignments')
+            ->where('period_id', $periodId)
+            ->where('branch_id', $branchId)
+            ->pluck('employee_id');
+
+        if ($employeeIds->isEmpty()) {
+            return ['percepciones' => 0.0, 'deducciones' => 0.0, 'neto_pagado' => 0.0];
+        }
+
+        $percepciones = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('employee_id', $employeeIds)
+            ->where('concept_type', 'percepcion')
+            ->sum('amount');
+
+        $deducciones = (float) DB::table('fact_noi_movements')
+            ->whereIn('period_id', $dataIds)
+            ->whereIn('employee_id', $employeeIds)
+            ->where('concept_type', 'deduccion')
+            ->sum('amount');
+
+        return [
+            'percepciones' => $percepciones,
+            'deducciones'  => $deducciones,
+            'neto_pagado'  => $percepciones - $deducciones,
+        ];
+    }
+
     /**
      * Builds per-branch summaries for the 12 operative branches plus an unassigned bucket.
      *
