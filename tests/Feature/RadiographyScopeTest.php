@@ -221,3 +221,151 @@ it('reconciles placement-by-product against the same colocacion total shown in t
     expect($result['sections']['employees_gestores'][0])->not->toHaveKey('_norm_key')
         ->and($result['sections']['employees_gestores'][0])->not->toHaveKey('_placements_by_product');
 });
+
+/**
+ * Regresión del bug reportado 2026-08-24: se marcaba "no disponible"/"no atribuible"
+ * información que SÍ existe en BD (fact_recoveries/fact_portfolios/fact_noi_movements
+ * tienen promoter_name/employee_id/days_past_due/concept). Esta prueba usa fact_recoveries
+ * y fact_portfolios REALES (no fixtures sintéticas) para verificar que los 4 desgloses
+ * nuevos (componentes de recuperación, recuperación por producto, buckets de mora,
+ * categorías de nómina) reconcilian EXACTO contra los mismos totales que ya muestra el KPI
+ * — nunca un "not_attributable" cuando la BD sí tiene la dimensión.
+ */
+it('computes real recovery components, recovery by product, mora buckets and payroll categories for an employee scope, all reconciling to the KPI totals', function () {
+    $period = Period::query()->create(['name' => 'Junio 2026', 'code' => 'M-SCOPE-DETAIL', 'type' => 'monthly', 'year' => 2026, 'month' => 6, 'sequence' => 1, 'start_date' => '2026-06-01', 'end_date' => '2026-06-30', 'is_closed' => false]);
+    $branch   = Branch::query()->create(['code' => 'ORIZABA', 'name' => 'ORIZABA', 'normalized_name' => 'orizaba', 'is_active' => true]);
+    $employee = Employee::query()->create(['full_name' => 'MARGARITA JAZMIN NOLASCO DOMINGUEZ', 'normalized_name' => 'margarita jazmin nolasco dominguez', 'is_active' => true, 'source_system' => 'noi']);
+
+    // fact_recoveries: capital/interés/impuesto + una comisión de apertura + un residual sin
+    // componente nombrado (para forzar un otros_recuperacion > 0), en dos productos distintos.
+    // Nota: no se combina aquí con una fila ACUERDO CON CLIENTE con charges_due>0 porque esa
+    // fila contribuye TANTO a 'charges' (Pass 1, sin filtro de operación) COMO a 'cargos_inicio'
+    // (Pass 5, filtrado a ACUERDO CON CLIENTE) — el mismo comportamiento que
+    // accumulateRecuperacion() replica intencionalmente a nivel sucursal; se prueba por
+    // separado si se necesita, para no mezclar dos aserciones en un solo monto ambiguo.
+    $recBase = ['period_id' => $period->id, 'branch_id' => $branch->id, 'promoter_name' => 'MARGARITA JAZMIN NOLASCO DOMINGUEZ', 'is_savehearts' => 0, 'transaction' => 'PAGO', 'capital' => 0, 'interest' => 0, 'tax' => 0, 'charges_due' => 0, 'charges' => 0, 'excedente' => 0, 'savehearts_crece_share' => 0, 'created_at' => now(), 'updated_at' => now()];
+    DB::table('fact_recoveries')->insert([
+        array_merge($recBase, ['product_name' => 's12', 'operation' => 'PAGO A CONTRATO', 'capital' => 5000, 'interest' => 800, 'tax' => 100, 'total_amount' => 5900]),
+        array_merge($recBase, ['product_name' => 'i30', 'operation' => 'COMISIÓN POR APERTURA', 'total_amount' => 50]),
+        array_merge($recBase, ['product_name' => 'i30', 'operation' => 'GASTOS DE COBRANZA', 'total_amount' => 20]),
+    ]);
+
+    // fact_portfolios: un contrato al corriente y uno vencido (31-60), con las 5 columnas.
+    $poBase = ['period_id' => $period->id, 'branch_id' => $branch->id, 'promoter_name' => 'MARGARITA JAZMIN NOLASCO DOMINGUEZ', 'capital_due' => 0, 'interes_atrasado' => 0, 'impuesto_atrasado' => 0, 'saldo_interes_moratorio' => 0, 'saldo_impuesto_interes_moratorio' => 0, 'created_at' => now(), 'updated_at' => now()];
+    DB::table('fact_portfolios')->insert([
+        array_merge($poBase, ['contract' => 'C-1', 'days_past_due' => 0, 'balance' => 10000]),
+        array_merge($poBase, ['contract' => 'C-2', 'days_past_due' => 45, 'balance' => 2000, 'capital_due' => 900, 'interes_atrasado' => 400, 'impuesto_atrasado' => 60, 'saldo_interes_moratorio' => 90, 'saldo_impuesto_interes_moratorio' => 10]),
+    ]);
+
+    // fact_noi_movements: percepciones clasificables (P001 Sueldo, P002 Comisiones) + una
+    // deducción, para verificar buildEmployeePayrollDetail().
+    DB::table('fact_noi_movements')->insert([
+        ['period_id' => $period->id, 'employee_id' => $employee->id, 'concept' => 'P001 SUELDO', 'concept_type' => 'percepcion', 'amount' => 8000, 'quantity' => 1, 'payroll_type' => 'NOI', 'raw_row_hash' => 'p1', 'source_row_key' => 'p1', 'created_at' => now(), 'updated_at' => now()],
+        ['period_id' => $period->id, 'employee_id' => $employee->id, 'concept' => 'P002 COMISIONES', 'concept_type' => 'percepcion', 'amount' => 3000, 'quantity' => 1, 'payroll_type' => 'NOI', 'raw_row_hash' => 'p2', 'source_row_key' => 'p2', 'created_at' => now(), 'updated_at' => now()],
+        ['period_id' => $period->id, 'employee_id' => $employee->id, 'concept' => 'D004 PRESTAMO PERSONAL', 'concept_type' => 'deduccion', 'amount' => 500, 'quantity' => 1, 'payroll_type' => 'NOI', 'raw_row_hash' => 'd1', 'source_row_key' => 'd1', 'created_at' => now(), 'updated_at' => now()],
+    ]);
+
+    $builder = app(RadiographySnapshotBuilder::class);
+    $dataIdsProp = new ReflectionProperty($builder, 'dataIds');
+    $dataIdsProp->setAccessible(true);
+    $dataIdsProp->setValue($builder, [$period->id]);
+    $closingProp = new ReflectionProperty($builder, 'closingDataIds');
+    $closingProp->setAccessible(true);
+    $closingProp->setValue($builder, [$period->id]);
+
+    $gestoresMethod = new ReflectionMethod($builder, 'buildEmployeesGestores');
+    $gestoresMethod->setAccessible(true);
+    $empGestores = $gestoresMethod->invoke($builder, $period)['rows'];
+
+    $row = collect($empGestores)->firstWhere('name', 'MARGARITA JAZMIN NOLASCO DOMINGUEZ');
+    expect($row)->not->toBeNull();
+    // recuperacion total = 5900 + 50 + 20 = 5970.
+    expect((float) $row['recuperacion'])->toBe(5970.0);
+    // vencida = suma de las 5 columnas del contrato C-2 = 900+400+60+90+10 = 1460.
+    expect((float) $row['vencida'])->toBe(1460.0);
+
+    $snapshot = makeGeneralSnapshotFixture($period->id, [], $empGestores);
+    $result = invokeScopeMethod($builder, 'applyEmployeeScope', ['dataIds' => [$period->id], 'args' => [$snapshot, $employee->id, $empGestores, $period]]);
+
+    // ── Componentes de recuperación: NUNCA not_attributable cuando reconcilian ──────
+    $rc = $result['sections']['recovery_components'];
+    expect($rc)->not->toHaveKey('not_attributable');
+    $rcSum = array_sum($rc);
+    expect($rcSum)->toEqualWithDelta((float) $result['summary']['recovery_total'], 0.01)
+        ->and((float) $rc['comision_apertura'])->toBe(50.0)
+        ->and((float) $rc['cargos_inicio'])->toBe(0.0)
+        // El monto de GASTOS DE COBRANZA (20) no tiene componente nombrado → cae en el residual.
+        ->and((float) $rc['otros_recuperacion'])->toBe(20.0);
+
+    // ── Recuperación por producto: reconcilia contra el mismo total, clave distinta de la
+    //    sección general (recovery_by_product) que se marca not_attributable más abajo ────
+    $rbp = $result['sections']['recovery_by_product_scope'];
+    expect($rbp)->not->toHaveKey('not_attributable');
+    $rbpSum = array_sum(array_column($rbp, 'recuperacion'));
+    expect($rbpSum)->toEqualWithDelta((float) $result['summary']['recovery_total'], 0.01)
+        ->and(collect($rbp)->pluck('producto')->all())->toEqualCanonicalizing(['s12', 'i30']);
+
+    // ── Buckets de mora (5 columnas por bucket) — reconcilian contra 'vencida' ──────────
+    $buckets = collect($result['sections']['mora_buckets']);
+    expect($buckets)->toHaveCount(6); // al_corriente + 5 buckets de mora
+    $bucket3160 = $buckets->firstWhere('key', 'mora_31_60');
+    expect((float) $bucket3160['capital_due'])->toBe(900.0)
+        ->and((float) $bucket3160['interes_atrasado'])->toBe(400.0)
+        ->and((float) $bucket3160['monto'])->toBe(1460.0);
+    $vencidaSum = $buckets->reject(fn ($b) => $b['key'] === 'al_corriente')->sum('monto');
+    expect($vencidaSum)->toEqualWithDelta((float) $result['summary']['overdue_portfolio'], 0.01);
+
+    // ── Categorías de nómina — reconcilian contra noi_percepciones/noi_deducciones ──────
+    $payroll = $result['sections']['payroll_detail'];
+    $percepSum = array_sum(array_column($payroll['percepciones'], 'monto'));
+    expect($percepSum)->toEqualWithDelta((float) $result['summary']['noi_percepciones'], 0.01)
+        ->and((float) $payroll['percepciones_total'])->toBe(11000.0)
+        ->and((float) $payroll['deducciones_total'])->toBe(500.0)
+        ->and(collect($payroll['percepciones'])->firstWhere('concepto', 'Sueldo')['monto'])->toBe(8000.0)
+        ->and(collect($payroll['percepciones'])->firstWhere('concepto', 'Comisiones')['monto'])->toBe(3000.0);
+
+    // ── Efectividad de cobranza — ahora calculada por colaborador, no marcada not_attributable ──
+    expect($result['sections']['efectividad_cobranza'])->not->toHaveKey('not_attributable');
+});
+
+/**
+ * "Fuga de datos generales bajo scope individual" — el bug encontrado 2026-08-24: varias
+ * secciones quedaban SIN TOCAR bajo scope=employee y mostraban la distribución de TODA la
+ * empresa (ej. portfolio_buckets con miles de contratos) en vez del colaborador. Esta prueba
+ * verifica explícitamente que, bajo scope=employee, ninguna de esas secciones es idéntica al
+ * array general de la fixture.
+ */
+it('never leaks the company-wide portfolio_buckets / recovery_by_product arrays under employee scope', function () {
+    $period = Period::query()->create(['name' => 'Junio 2026', 'code' => 'M-SCOPE-NOLEAK', 'type' => 'monthly', 'year' => 2026, 'month' => 6, 'sequence' => 1, 'start_date' => '2026-06-01', 'end_date' => '2026-06-30', 'is_closed' => false]);
+    $employee = Employee::query()->create(['full_name' => 'EMP SIN DATOS', 'normalized_name' => 'emp sin datos', 'is_active' => true, 'source_system' => 'noi']);
+
+    $employeeRow = ['name' => 'EMP SIN DATOS', 'branch' => 'ORIZABA', 'pagos' => 1000.0, 'bonos' => 0.0, 'descuentos' => 0.0, 'neto' => 1000.0, 'gastos' => 0.0, 'colocacion' => 0.0, 'operaciones' => 0, 'recuperacion' => 0.0, 'cartera' => 0.0, 'vencida' => 0.0, 'mora' => 0.0, 'ingreso_ebitda_base' => 0.0];
+
+    $builder = app(RadiographySnapshotBuilder::class);
+    $dataIdsProp = new ReflectionProperty($builder, 'dataIds');
+    $dataIdsProp->setAccessible(true);
+    $dataIdsProp->setValue($builder, [$period->id]);
+    $closingProp = new ReflectionProperty($builder, 'closingDataIds');
+    $closingProp->setAccessible(true);
+    $closingProp->setValue($builder, [$period->id]);
+
+    $snapshot = makeGeneralSnapshotFixture($period->id, [], [$employeeRow]);
+    // Simula secciones generales "grandes" (compañía completa) que un fallback silencioso
+    // dejaría pasar tal cual bajo scope=employee.
+    $snapshot['sections']['portfolio_buckets'] = [
+        ['label' => 'Al corriente', 'contratos' => 4011, 'balance' => 24289499.0, 'vencida' => 0.0],
+    ];
+    $snapshot['sections']['recovery_by_product'] = ['rows' => [['product' => 'GENERAL', 'total' => 17000000.0]], 'total' => 17000000.0];
+
+    $result = invokeScopeMethod($builder, 'applyEmployeeScope', ['dataIds' => [$period->id], 'args' => [$snapshot, $employee->id, [$employeeRow], $period]]);
+
+    expect($result['sections']['portfolio_buckets'])->not->toBe($snapshot['sections']['portfolio_buckets'])
+        ->and($result['sections']['recovery_by_product'])->toHaveKey('not_attributable')
+        ->and($result['sections']['recovery_by_product']['not_attributable'])->toBeTrue();
+
+    // Con 0 cartera/recuperación este colaborador, el bucket "fugado" (4011 contratos) no
+    // puede seguir presente bajo ningún nombre de sección expuesta.
+    foreach ($result['sections']['portfolio_buckets'] as $bucket) {
+        expect($bucket['contratos'])->not->toBe(4011);
+    }
+});

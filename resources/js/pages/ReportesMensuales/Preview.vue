@@ -63,6 +63,14 @@ if (props.initialScope && props.initialScope.type !== 'general' && props.snapsho
     scopedSnapshot.value = props.snapshot
 }
 
+// Si el snapshot inicial vino pre-filtrado, `props.snapshot` NUNCA representa el alcance
+// general — "Limpiar filtros" no puede caer de vuelta a él (ver bug real: el botón parecía
+// no hacer nada porque activeDataset seguía leyendo el snapshot filtrado original). En ese
+// caso hace falta pedir el alcance general real al backend la primera vez; se cachea aquí
+// para que limpiar filtros una segunda vez sea instantáneo, igual que en el caso normal.
+const initialSnapshotIsGeneral = !props.initialScope || props.initialScope.type === 'general'
+let generalSnapshotOverride: any = null
+
 const activeDataset = computed(() => scopedSnapshot.value ?? props.snapshot)
 
 // Alcance realmente activo — del dataset ya resuelto (backend), no de los selectores
@@ -74,14 +82,35 @@ const activeScope = computed<{ type: ScopeType; branch_id: number | null; branch
     return { type: 'general', branch_id: null, branch_name: null, employee_id: null, employee_name: null, available: true }
 })
 
-// Desglose granular por CONCEPTO (componentes de recuperación intereses/impuestos/etc.,
-// buckets de mora con capital/interés desglosados, nómina línea por línea) solo existe a
-// nivel sucursal en este snapshot — `branch_radiography.global` es un colaborador NO es
-// una fila de sucursal. El TOTAL sí está siempre disponible vía summary.* (ver kpiRec,
-// recGlobal, nomTotal, etc., todos leen summary directo). Usar este flag para decidir si
-// una tabla de detalle se pinta o se reemplaza por "Desglose no disponible para este
-// alcance" — nunca para decidir si el TOTAL se muestra.
-const granularDetailAvailable = computed(() => activeScope.value.type !== 'employee')
+// Capacidades específicas por sección — NUNCA un flag único "granular sí/no" (ese enfoque
+// ocultaba desgloses que la BD sí puede calcular para scope=employee: fact_recoveries/
+// fact_portfolios/fact_noi_movements SÍ tienen promoter_name/employee_id/days_past_due/
+// concept, ver RadiographySnapshotBuilder::applyEmployeeScope()). La regla es: ¿la
+// dimensión existe en BD para este alcance? Sí → se calcula y se expone; no → sigue
+// marcada 'not_attributable' por el backend y el flag correspondiente da false.
+//
+// Componentes de Recuperación (capital/interés/impuesto/moratorios/...) — calculados por
+// backend para general/branch (branch_radiography.global) Y employee (sections.
+// recovery_components) desde 2026-08.
+const hasRecoveryComponents = computed(() => {
+    if (activeScope.value.type === 'employee') {
+        const rc = snap.value?.sections?.recovery_components
+        return !!rc && !rc.not_attributable
+    }
+    return !!brGlobal.value
+})
+// Buckets de mora con sus 5 columnas — calculados por backend para los 3 alcances.
+const hasMoraComponents = computed(() => moraComponentes.value.length > 0)
+// Excedente corporativo / Fondeo intersucursal / Seguros canalizados — SÍ atribuibles a una
+// sucursal completa (summary.excedentes_total/fondeo_total/seguros_lendus_puente vienen
+// reales para branch), NUNCA a un solo colaborador (movimiento entre sucursales/corporativo,
+// summary los expone `null` — ver applyEmployeeScope()).
+const hasBranchLevelTransfers = computed(() => activeScope.value.type !== 'employee')
+// La pestaña "Fondeos/Excedentes" completa (tabla de movimientos individuales, no solo el
+// total) solo tiene sentido a nivel general — el backend marca interbranch_loans/
+// corporate_funding/fondeo_detalle como not_attributable tanto para branch como para
+// employee (son transferencias ENTRE sucursales/corporativo, no de una sola).
+const hasFondeoTab = computed(() => activeScope.value.type === 'general')
 
 // ── Filtered export config (genera Excel/PDF por sucursal, gestor o comparativo) ──
 const showFilteredPanel = ref(false)
@@ -253,22 +282,35 @@ function ebitdaCategoryOf(value: number): EbitdaCategory {
 }
 
 // ── Ingresos / Cobranza ───────────────────────────────────────────────────────
-const ingrCapital      = computed(() => Number(brGlobal.value?.capital_recuperado)   || 0)
-const ingrInteres      = computed(() => Number(brGlobal.value?.interes_recuperado)   || 0)
-const ingrImpuesto     = computed(() => Number(brGlobal.value?.impuesto_recuperado)  || 0)
-const ingrMultas       = computed(() => Number(brGlobal.value?.charges)              || 0)
-const ingrCargosAdic   = computed(() => Number(brGlobal.value?.cargos_adicionales)   || 0)
-const ingrExcedente    = computed(() => Number(brGlobal.value?.excedente_recuperado) || 0)
-const ingrCargosIni    = computed(() => Number(brGlobal.value?.cargos_inicio)        || 0)
-const ingrComAper      = computed(() => Number(brGlobal.value?.comision_apertura)    || 0)
-const ingrCrece30      = computed(() => Number(brGlobal.value?.seguro_crece_reconocido) || 0)
-const ingrOtros        = computed(() => Number(brGlobal.value?.otros_recuperacion)   || 0)
+// General/branch: branch_radiography.global (brGlobal) ya trae estos campos (accumulateRecuperacion()
+// los calcula por sucursal). Employee: sections.recovery_components (mismo cálculo por
+// promotor canónico, ver RadiographySnapshotBuilder::buildEmployeesGestores()) — MISMOS
+// nombres de campo en ambas fuentes, así que un solo computed sirve para los 3 alcances.
+const recoveryComponentsSource = computed(() => {
+    if (activeScope.value.type === 'employee') {
+        const rc = snap.value?.sections?.recovery_components
+        return (rc && !rc.not_attributable) ? rc : null
+    }
+    return brGlobal.value
+})
+const ingrCapital      = computed(() => Number(recoveryComponentsSource.value?.capital_recuperado)   || 0)
+const ingrInteres      = computed(() => Number(recoveryComponentsSource.value?.interes_recuperado)   || 0)
+const ingrImpuesto     = computed(() => Number(recoveryComponentsSource.value?.impuesto_recuperado)  || 0)
+const ingrMultas       = computed(() => Number(recoveryComponentsSource.value?.charges)              || 0)
+const ingrCargosAdic   = computed(() => Number(recoveryComponentsSource.value?.cargos_adicionales)   || 0)
+const ingrExcedente    = computed(() => Number(recoveryComponentsSource.value?.excedente_recuperado) || 0)
+const ingrCargosIni    = computed(() => Number(recoveryComponentsSource.value?.cargos_inicio)        || 0)
+const ingrComAper      = computed(() => Number(recoveryComponentsSource.value?.comision_apertura)    || 0)
+const ingrCrece30      = computed(() => Number(recoveryComponentsSource.value?.seguro_crece_reconocido) || 0)
+const ingrOtros        = computed(() => Number(recoveryComponentsSource.value?.otros_recuperacion)   || 0)
 const ingrSumaDesglose = computed(() =>
     ingrCapital.value + ingrInteres.value + ingrImpuesto.value
     + ingrMultas.value + ingrCargosAdic.value + ingrExcedente.value
     + ingrCargosIni.value + ingrComAper.value + ingrCrece30.value + ingrOtros.value
 )
-// "Otros" desglosado por su concepto real de origen — nunca como bolsa genérica.
+// "Otros" desglosado por su concepto real de origen — nunca como bolsa genérica. Solo existe
+// a nivel branch/general (otros_detalle); a nivel employee el residual se muestra como una
+// única línea "Otros" vía ingrOtros (ver template).
 const ingrOtrosDetalle = computed<{ label: string; value: number }[]>(() => {
     const det = brGlobal.value?.otros_detalle as Record<string, number> | undefined
     if (!det) return []
@@ -309,13 +351,35 @@ const recuperacionPorProducto = computed(() => {
 })
 
 // ── Nómina ─────────────────────────────────────────────────────────────────────
-const nomNomina   = computed(() => Number(brGlobal.value?.nomina_total)    || 0)
-const nomComis    = computed(() => Number(brGlobal.value?.comisiones)      || 0)
-const nomVac      = computed(() => Number(brGlobal.value?.vacaciones)      || 0)
-const nomPrimaVac = computed(() => Number(brGlobal.value?.prima_vacacional)|| 0)
-const nomBonos    = computed(() => Number(brGlobal.value?.bonos)           || 0)
-const nomBonosAcel= computed(() => Number(brGlobal.value?.bonos_aceleradores) || 0)
-const nomOtrosPercep = computed(() => Number(brGlobal.value?.otros_percepciones) || 0)
+// Employee: sections.payroll_detail.percepciones (backend, ver buildEmployeePayrollDetail())
+// clasifica las mismas categorías que accumulateNomina() usa por sucursal
+// (BranchRadiographyCalculator::classifyPercepcionConcept()) — se traduce de [{concepto,monto}]
+// a un mapa por clave para reusar el mismo shape que brGlobal en toda la plantilla. IMSS
+// patronal y gastos reales de empleados (imss_patronal/gastos_empleados_nomina) no tienen
+// equivalente por colaborador en este snapshot — quedan en 0 para employee, no inventados.
+const PERCEP_LABEL_TO_KEY: Record<string, string> = {
+    'Sueldo': 'nomina_total', 'Comisiones': 'comisiones', 'Vacaciones': 'vacaciones',
+    'Prima vacacional': 'prima_vacacional', 'Bonos': 'bonos', 'Bonos aceleradores': 'bonos_aceleradores',
+    'Otras percepciones': 'otros_percepciones',
+}
+const payrollCategorySource = computed(() => {
+    if (activeScope.value.type !== 'employee') return brGlobal.value
+    const detail = snap.value?.sections?.payroll_detail
+    if (!detail || detail.not_attributable) return null
+    const map: Record<string, number> = {}
+    for (const row of (detail.percepciones ?? []) as { concepto: string; monto: number }[]) {
+        const key = PERCEP_LABEL_TO_KEY[row.concepto]
+        if (key) map[key] = Number(row.monto) || 0
+    }
+    return map
+})
+const nomNomina   = computed(() => Number(payrollCategorySource.value?.nomina_total)    || 0)
+const nomComis    = computed(() => Number(payrollCategorySource.value?.comisiones)      || 0)
+const nomVac      = computed(() => Number(payrollCategorySource.value?.vacaciones)      || 0)
+const nomPrimaVac = computed(() => Number(payrollCategorySource.value?.prima_vacacional)|| 0)
+const nomBonos    = computed(() => Number(payrollCategorySource.value?.bonos)           || 0)
+const nomBonosAcel= computed(() => Number(payrollCategorySource.value?.bonos_aceleradores) || 0)
+const nomOtrosPercep = computed(() => Number(payrollCategorySource.value?.otros_percepciones) || 0)
 const nomImssPatronal = computed(() => Number(brGlobal.value?.imss_patronal) || 0)
 const nomGastosEmpleados = computed(() => Number(brGlobal.value?.gastos_empleados_nomina) || 0)
 
@@ -371,11 +435,10 @@ const nomGastoEmpleado = computed(() => nomDetalle.value.filter(r => nomRowTipo(
 // Fuente CANÓNICA — summary.nomina_capital_humano_total ya viene resuelto por el backend
 // para los 3 alcances (general/sucursal: fórmula completa vía BranchRadiographyCalculator::
 // nominaTotalFor(); colaborador: su neto NOI). Los nomXxx de arriba (nomina_total, comisiones,
-// bonos, IMSS...) solo existen a nivel sucursal — se conservan para el desglose por concepto
-// de la pestaña Nómina (ver nomDetalle, vacío bajo scope=employee), pero el TOTAL nunca se
-// vuelve a sumar aquí para evitar que diverja de la tarjeta KPI/Resumen Ejecutivo.
+// bonos...) ahora también reconcilian bajo scope=employee (ver payrollCategorySource), pero
+// el TOTAL nunca se vuelve a sumar aquí para evitar que diverja de la tarjeta KPI/Resumen
+// Ejecutivo.
 const nomTotal = computed(() => Number(sum.value?.nomina_capital_humano_total) || 0)
-const nomTotalDetalleDisponible = computed(() => activeScope.value.type !== 'employee')
 const nomNeto = computed(() => nomTotal.value)
 
 // Percepciones/Deducciones/Neto pagado a trabajadores: informativo — "lo que el trabajador
@@ -455,7 +518,7 @@ const carteraGlobal = computed(() => Number(snap.value?.summary?.portfolio_total
 const moraTotalGlobal = computed(() => Number(snap.value?.summary?.overdue_portfolio) || 0)
 // Excedentes (envío de utilidad a corporativo): NO atribuible a un colaborador individual
 // (summary.excedentes_total llega `null` en ese caso) — se coerciona a 0 solo para la
-// aritmética de `diferencia`; la plantilla usa granularDetailAvailable para decidir si
+// aritmética de `diferencia`; la plantilla usa hasBranchLevelTransfers para decidir si
 // muestra el número o "No atribuible".
 const excGlobal     = computed(() => Number(sum.value?.excedentes_total ?? brGlobal.value?.excedentes) || 0)
 const mora0_30g    = computed(() => Number(brGlobal.value?.mora_0_30)     || 0)
@@ -473,7 +536,28 @@ const moraBucketsGlobal = computed(() => [
 ])
 
 const g = (k: string) => Number(brGlobal.value?.[k]) || 0
+// Employee: sections.mora_buckets (backend, ver applyEmployeeScope()) trae las mismas 5
+// columnas por bucket que branch_radiography.global a nivel sucursal/general, solo con
+// nombres de campo distintos (capital_due/interes_atrasado/... en vez de mora_X_Y_capital/
+// interes/...) — se traduce aquí para reutilizar el mismo shape en toda la plantilla.
+const moraComponentesEmployee = computed<{ label: string; key: string; capital: number; interes: number; impuesto: number; moratorio: number; imp_moratorio: number; total: number; pct: number }[] | null>(() => {
+    const buckets = snap.value?.sections?.mora_buckets
+    if (activeScope.value.type !== 'employee' || !Array.isArray(buckets)) return null
+    const totalMora = moraTotalGlobal.value || 1
+    return buckets.filter((b: any) => b.key !== 'al_corriente').map((b: any) => ({
+        label: b.label, key: b.key,
+        capital: Number(b.capital_due) || 0,
+        interes: Number(b.interes_atrasado) || 0,
+        impuesto: Number(b.impuesto_atrasado) || 0,
+        moratorio: Number(b.saldo_interes_moratorio) || 0,
+        imp_moratorio: Number(b.saldo_impuesto_interes_moratorio) || 0,
+        total: Number(b.monto) || 0,
+        pct: (Number(b.monto) || 0) / totalMora * 100,
+    }))
+})
 const moraComponentes = computed(() => {
+    if (moraComponentesEmployee.value !== null) return moraComponentesEmployee.value
+
     const totalMora = moraTotalGlobal.value || 1
     return [
         {
@@ -514,14 +598,23 @@ const moraComponentes = computed(() => {
     ]
 })
 
-const moraTotalesComponentes = computed(() => ({
-    capital:      g('mora_total_capital'),
-    interes:      g('mora_total_interes'),
-    impuesto:     g('mora_total_impuesto'),
-    moratorio:    g('mora_total_moratorio'),
-    imp_moratorio: g('mora_total_imp_moratorio'),
-    total:        moraTotalGlobal.value,
-}))
+const moraTotalesComponentes = computed(() => {
+    if (moraComponentesEmployee.value !== null) {
+        return moraComponentesEmployee.value.reduce((acc, b) => ({
+            capital: acc.capital + b.capital, interes: acc.interes + b.interes,
+            impuesto: acc.impuesto + b.impuesto, moratorio: acc.moratorio + b.moratorio,
+            imp_moratorio: acc.imp_moratorio + b.imp_moratorio, total: acc.total + b.total,
+        }), { capital: 0, interes: 0, impuesto: 0, moratorio: 0, imp_moratorio: 0, total: 0 })
+    }
+    return {
+        capital:      g('mora_total_capital'),
+        interes:      g('mora_total_interes'),
+        impuesto:     g('mora_total_impuesto'),
+        moratorio:    g('mora_total_moratorio'),
+        imp_moratorio: g('mora_total_imp_moratorio'),
+        total:        moraTotalGlobal.value,
+    }
+})
 
 // ── Gastos ─────────────────────────────────────────────────────────────────────
 const brGlobalGastos = computed(() => {
@@ -880,11 +973,13 @@ async function fetchScopedDataset() {
 
     scopedRequestController?.abort()
 
-    if (!gestor && !branch) {
-        // Alcance general: ya está cargado en props.snapshot — respuesta instantánea,
-        // sin request (requisito de performance: no pedir de nuevo lo que ya tenemos).
+    const clearingFilters = !gestor && !branch
+
+    if (clearingFilters && (initialSnapshotIsGeneral || generalSnapshotOverride)) {
+        // Alcance general ya conocido (props.snapshot ya era general, o ya se pidió antes
+        // en esta sesión) — respuesta instantánea, sin request.
         scopedRequestVersion++
-        scopedSnapshot.value = null
+        scopedSnapshot.value = generalSnapshotOverride
         scopedLoading.value  = false
         scopedError.value    = null
         updateScopeQueryString(null)
@@ -905,10 +1000,14 @@ async function fetchScopedDataset() {
         const emp = props.employees.find(e => norm(e.name) === norm(gestor))
         if (!emp) { scopedError.value = 'Colaborador no reconocido en este periodo.'; return }
         params = new URLSearchParams({ scope: 'employee', employee_id: String(emp.id) })
-    } else {
+    } else if (branch) {
         const br = props.branches.find(b => norm(b.name) === norm(branch))
         if (!br) { scopedError.value = 'Sucursal no reconocida.'; return }
         params = new URLSearchParams({ scope: 'branch', branch_id: String(br.id) })
+    } else {
+        // clearingFilters === true pero el snapshot inicial vino pre-filtrado (deep-link) y
+        // todavía no se conoce el alcance general real — hay que pedirlo al backend.
+        params = new URLSearchParams({ scope: 'general' })
     }
 
     const controller = new AbortController()
@@ -934,7 +1033,14 @@ async function fetchScopedDataset() {
 
         scopedSnapshot.value = json.snapshot
         if (json.error) scopedError.value = json.error // ej. "sin datos para este alcance" — dataset vacío pero válido
-        updateScopeQueryString(params)
+        if (clearingFilters) {
+            // Se cachea para que la próxima vez que se limpien filtros sea instantáneo,
+            // y se limpia la query string igual que en el caso "ya era general".
+            generalSnapshotOverride = json.snapshot
+            updateScopeQueryString(null)
+        } else {
+            updateScopeQueryString(params)
+        }
     } catch (e: any) {
         if (e?.name === 'AbortError') return
         if (myVersion !== scopedRequestVersion) return
@@ -1502,9 +1608,9 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                 <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Nómina y Capital Humano</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ money(nomTotal) }}</td></tr>
                                 <tr class="border-b-2 border-indigo-200 bg-indigo-50"><td class="px-5 py-2.5 font-black text-indigo-900">EBITDA</td><td class="px-5 py-2.5 text-right font-black text-lg" :class="utilidadGlobal < 0 ? 'text-red-700' : 'text-indigo-900'">{{ money(utilidadGlobal) }}</td></tr>
                                 <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-500 font-medium">Margen EBITDA</td><td class="px-5 py-2.5 text-right font-black" :class="margenEbitdaPct < 0 ? 'text-red-700' : 'text-slate-950'">{{ pct(margenEbitdaPct) }}</td></tr>
-                                <tr class="border-b bg-amber-50/40"><td class="px-5 py-2.5 text-slate-700 font-semibold">Excedente enviado a corporativo</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ granularDetailAvailable ? money(excGlobal) : 'No atribuible' }}</td></tr>
-                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Fondeo entre sucursales (rastreo, no afecta EBITDA)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ granularDetailAvailable ? money(fondeoGlobal) : 'No atribuible' }}</td></tr>
-                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguros y coberturas canalizadas</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ granularDetailAvailable ? money(segurosPuenteTotal) : 'No atribuible' }}</td></tr>
+                                <tr class="border-b bg-amber-50/40"><td class="px-5 py-2.5 text-slate-700 font-semibold">Excedente enviado a corporativo</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ hasBranchLevelTransfers ? money(excGlobal) : 'No atribuible' }}</td></tr>
+                                <tr class="border-b"><td class="px-5 py-2.5 text-slate-600 font-medium">Fondeo entre sucursales (rastreo, no afecta EBITDA)</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ hasBranchLevelTransfers ? money(fondeoGlobal) : 'No atribuible' }}</td></tr>
+                                <tr class="border-b bg-slate-50/60"><td class="px-5 py-2.5 text-slate-600 font-medium">Seguros y coberturas canalizadas</td><td class="px-5 py-2.5 text-right font-black text-slate-950">{{ hasBranchLevelTransfers ? money(segurosPuenteTotal) : 'No atribuible' }}</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -1520,7 +1626,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                             <table class="w-full text-sm">
                                 <tbody>
                                     <tr class="border-b"><td class="px-5 py-2 text-slate-600 font-medium">Recuperación final (ingreso)</td><td class="px-5 py-2 text-right font-black text-emerald-700">{{ money(recGlobal) }}</td></tr>
-                                    <template v-if="granularDetailAvailable">
+                                    <template v-if="hasRecoveryComponents">
                                         <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Capital recuperado</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrCapital) }}</td></tr>
                                         <tr class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Intereses</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrInteres) }}</td></tr>
                                         <tr class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Impuestos</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrImpuesto) }}</td></tr>
@@ -1531,6 +1637,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                                         <tr class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Comisión por apertura</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrComAper) }}</td></tr>
                                         <tr v-if="ingrCrece30 > 0" class="border-b bg-slate-50/60"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Seguro CRECE reconocido (30%)</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrCrece30) }}</td></tr>
                                         <tr v-for="(o, i) in ingrOtrosDetalle" :key="o.label" class="border-b" :class="i % 2 === 1 ? 'bg-slate-50/60' : ''"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ {{ o.label }}</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(o.value) }}</td></tr>
+                                        <tr v-if="!ingrOtrosDetalle.length && ingrOtros > 0" class="border-b"><td class="px-5 py-2 pl-8 text-slate-500 text-xs">→ Otros</td><td class="px-5 py-2 text-right text-xs text-slate-600">{{ money(ingrOtros) }}</td></tr>
                                     </template>
                                     <tr v-else class="border-b"><td colspan="2" class="px-5 py-2 pl-8 text-xs italic text-slate-400">Desglose por componente no disponible para este alcance — solo el total.</td></tr>
                                 </tbody>
@@ -2092,7 +2199,7 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                             <h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Desglose por componente / bucket</h3>
                             <span class="text-xs font-bold text-slate-700">Total vencida: {{ money(kpiMora) }}</span>
                         </div>
-                        <template v-if="granularDetailAvailable">
+                        <template v-if="hasMoraComponents">
                             <table class="w-full text-sm">
                                 <thead class="bg-slate-50 text-xs font-bold uppercase tracking-wider text-slate-500">
                                     <tr>
@@ -2195,7 +2302,6 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                             No incluye seguros ni coberturas canalizadas — mismas reglas que la recuperación total.
                         </div>
                     </template>
-                    <EmptyState v-else-if="!granularDetailAvailable" title="No disponible para este alcance" description="La efectividad de cobranza está agregada por estatus de crédito a nivel empresa completa en este snapshot — no se puede filtrar por colaborador." />
                     <EmptyState v-else title="Sin datos de efectividad de cobranza" description="Genera el reporte para ver esta sección." />
                 </div>
 
@@ -2226,8 +2332,8 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
 
                 <!-- ══════════ FONDEOS / EXCEDENTES ══════════ -->
                 <div v-show="activeTab === 'fondeos'" class="space-y-5">
-                    <EmptyState v-if="!granularDetailAvailable" title="No atribuible al colaborador"
-                        description="Los fondeos entre sucursales y los excedentes a corporativo son movimientos entre sucursales/corporativo — no se pueden atribuir a un colaborador individual." />
+                    <EmptyState v-if="!hasFondeoTab" title="No atribuible a este alcance"
+                        description="Los fondeos entre sucursales y los excedentes a corporativo son movimientos entre sucursales/corporativo — no se pueden atribuir a una sola sucursal ni a un colaborador individual." />
                     <template v-else>
                     <!-- KPIs fondeo -->
                     <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -2596,10 +2702,13 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                     <div v-if="scopedLoading" class="fixed inset-0 z-[9999] flex items-center justify-center bg-white/60 backdrop-blur-sm">
                         <div class="flex flex-col items-center gap-3 rounded-2xl border border-slate-200 bg-white px-8 py-6 shadow-2xl">
                             <span class="size-10 animate-spin rounded-full border-4 border-indigo-200 border-t-indigo-600"></span>
-                            <p class="text-sm font-black text-slate-900">Actualizando radiografía</p>
+                            <p class="text-sm font-black text-slate-900">{{ vfGestor || vfBranch ? 'Actualizando radiografía' : 'Limpiando filtros' }}</p>
                             <p class="max-w-xs text-center text-xs text-slate-500">
-                                Cargando información para
-                                <span class="font-bold text-slate-700">{{ vfGestor || vfBranch }}</span>… Espera un momento.
+                                <template v-if="vfGestor || vfBranch">
+                                    Cargando información para
+                                    <span class="font-bold text-slate-700">{{ vfGestor || vfBranch }}</span>… Espera un momento.
+                                </template>
+                                <template v-else>Volviendo al reporte general… Espera un momento.</template>
                             </p>
                         </div>
                     </div>

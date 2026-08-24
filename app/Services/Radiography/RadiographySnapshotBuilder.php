@@ -277,7 +277,7 @@ class RadiographySnapshotBuilder
                 // se quitan de la copia expuesta — $empGestores (con ellos) sigue disponible
                 // más abajo para applyScope(), que se ejecuta con la variable original, no con
                 // este array ya construido.
-                'employees_gestores'         => array_map(fn (array $r) => Arr::except($r, ['_norm_key', '_placements_by_product']), $empGestores),
+                'employees_gestores'         => array_map(fn (array $r) => Arr::except($r, self::EMPLOYEE_GESTOR_INTERNAL_FIELDS), $empGestores),
                 'portfolio_buckets'          => $this->buildPortfolioBuckets($period),
                 'expenses_detail'            => $this->buildExpensesDetail($period),
                 'incidents'                  => $this->buildIncidents($summary, $period, $mergedIncidents),
@@ -445,6 +445,30 @@ class RadiographySnapshotBuilder
         $s['mora_by_branch_product']     = $this->filterRowsByField($s['mora_by_branch_product'] ?? [], ['branch'], $name);
         $s['mora_by_branch']             = $this->filterRowsByField($s['mora_by_branch'] ?? [], ['sucursal', 'branch'], $name);
 
+        // Componentes de Recuperación — YA vienen en $row (accumulateRecuperacion() los
+        // calcula por sucursal); no es un cálculo nuevo, solo se expone lo que ya existe.
+        $s['recovery_components'] = [
+            'capital_recuperado'      => round((float) ($row['capital_recuperado'] ?? 0), 2),
+            'interes_recuperado'      => round((float) ($row['interes_recuperado'] ?? 0), 2),
+            'impuesto_recuperado'     => round((float) ($row['impuesto_recuperado'] ?? 0), 2),
+            'charges'                 => round((float) ($row['charges'] ?? 0), 2),
+            'cargos_adicionales'      => round((float) ($row['cargos_adicionales'] ?? 0), 2),
+            'excedente_recuperado'    => round((float) ($row['excedente_recuperado'] ?? 0), 2),
+            'comision_apertura'       => round((float) ($row['comision_apertura'] ?? 0), 2),
+            'cargos_inicio'           => round((float) ($row['cargos_inicio'] ?? 0), 2),
+            'seguro_crece_reconocido' => round((float) ($row['seguro_crece_reconocido'] ?? 0), 2),
+            'otros_recuperacion'      => round((float) ($row['otros_recuperacion'] ?? 0), 2),
+        ];
+
+        // portfolio_buckets — antes quedaba SIN TOCAR bajo alcance sucursal (fuga: mostraba la
+        // distribución de TODA la cartera de la empresa). $row (branchCalcBranches) ya trae los
+        // mismos campos mora_X_Y/_cnt que branchCalcGlobal, así que se reutiliza el mismo cálculo.
+        $s['portfolio_buckets'] = $this->buildPortfolioBuckets($period, $row);
+
+        // Efectividad de cobranza — antes quedaba SIN TOCAR bajo alcance sucursal (misma fuga).
+        // fact_recoveries sí tiene branch_id directo, sin ambigüedad de resolución de ruta.
+        $s['efectividad_cobranza'] = $this->buildEfectividadCobranza($period, null, $branchId);
+
         $payrollData = $s['payroll_by_branch_concept']['data'] ?? [];
         $matchedPayrollKey = collect(array_keys($payrollData))->first(fn ($k) => $this->eqName($k) === $eq);
         $s['payroll_by_branch_concept'] = [
@@ -482,6 +506,12 @@ class RadiographySnapshotBuilder
                 $s[$k] = $this->notAttributable('Transferencia entre sucursales/corporativo — no se puede atribuir de forma inequívoca a una sola sucursal.');
             }
         }
+
+        // 'recovery_by_product' (buildRecoveryByProduct()) es un desglose a nivel EMPRESA
+        // completa — antes quedaba sin tocar bajo alcance sucursal (fuga: mostraba el
+        // desglose de TODAS las sucursales). No hay un equivalente por-sucursal construido
+        // todavía (ver sections.recovery_components arriba, que sí es por-sucursal).
+        $s['recovery_by_product'] = $this->notAttributable('El desglose de recuperación por producto en este snapshot está agregado a nivel empresa completa — no filtrable por sucursal todavía.');
 
         $snapshot['sections'] = $s;
         $snapshot['charts']   = $this->scopeChartsByLabel($snapshot['charts'], $name);
@@ -549,7 +579,96 @@ class RadiographySnapshotBuilder
             $s['products'] = $productRows;
         }
 
-        $s['employees_gestores'] = [Arr::except($row, ['_norm_key', '_placements_by_product'])];
+        $s['employees_gestores'] = [Arr::except($row, self::EMPLOYEE_GESTOR_INTERNAL_FIELDS)];
+
+        $recuperacionRow = round((float) ($row['recuperacion'] ?? 0), 2);
+
+        // Componentes de Recuperación — MISMA agregación por promotor canónico que produjo
+        // 'recuperacion' arriba (ver buildEmployeesGestores()::$recoveryComponentsByNorm,
+        // que replica accumulateRecuperacion() Pass 1+3+5+residual). Guardia: SUM(componentes)
+        // == recuperación total ($0.01) — si no reconcilia, no se inventa el desglose.
+        $rc = $row['_recovery_components'] ?? null;
+        if ($rc === null) {
+            $s['recovery_components'] = $this->notAttributable('Sin movimientos de recuperación para este colaborador en el periodo.');
+        } else {
+            $rcSum = round(array_sum($rc), 2);
+            if (abs($rcSum - $recuperacionRow) > 0.01) {
+                Log::warning('RadiographySnapshotBuilder::applyEmployeeScope — componentes de recuperación no reconcilian.', [
+                    'employee_id' => $employeeId, 'employee_name' => $employee->full_name,
+                    'components_sum' => $rcSum, 'recuperacion_total' => $recuperacionRow,
+                ]);
+                $s['recovery_components'] = $this->notAttributable("Desglose por componente no disponible: no reconcilia contra recuperación total (\${$rcSum} vs \${$recuperacionRow}). Ver logs.");
+            } else {
+                $s['recovery_components'] = $rc;
+            }
+        }
+
+        // Recuperación por producto — misma fuente (_recovery_by_product), misma guardia.
+        // Clave DISTINTA de la sección general 'recovery_by_product' (buildRecoveryByProduct(),
+        // shape rico con capital/interés/impuesto/moratorios por producto a nivel EMPRESA) —
+        // nunca se sobrescribe esa sección con este shape más simple (solo recuperacion total
+        // por producto); esa sección general se marca 'not_attributable' más abajo para este
+        // colaborador, evitando la fuga de mostrar el desglose de TODA la empresa.
+        $rbp    = $row['_recovery_by_product'] ?? [];
+        $rbpSum = round(array_sum(array_column($rbp, 'recuperacion')), 2);
+        if (!empty($rbp) && abs($rbpSum - $recuperacionRow) > 0.01) {
+            Log::warning('RadiographySnapshotBuilder::applyEmployeeScope — recuperación por producto no reconcilia.', [
+                'employee_id' => $employeeId, 'employee_name' => $employee->full_name,
+                'product_sum' => $rbpSum, 'recuperacion_total' => $recuperacionRow,
+            ]);
+            $s['recovery_by_product_scope'] = $this->notAttributable("Desglose por producto no disponible: no reconcilia contra recuperación total (\${$rbpSum} vs \${$recuperacionRow}). Ver logs.");
+        } else {
+            $s['recovery_by_product_scope'] = $rbp;
+        }
+
+        // Mora por bucket (5 columnas por bucket) — MISMA agregación por promotor canónico que
+        // produjo 'cartera'/'vencida' arriba (ver buildEmployeesGestores()::$moraBucketsByNorm).
+        // Guardia: SUM(buckets != al_corriente) == vencida ($0.01).
+        $moraBuckets = $row['_mora_buckets'] ?? [];
+        $vencidaSum  = 0.0;
+        foreach ($moraBuckets as $bucketKey => $b) {
+            if ($bucketKey !== 'al_corriente') $vencidaSum += (float) ($b['monto'] ?? 0);
+        }
+        $vencidaSum  = round($vencidaSum, 2);
+        $vencidaRow  = round((float) ($row['vencida'] ?? 0), 2);
+
+        if (!empty($moraBuckets) && abs($vencidaSum - $vencidaRow) > 0.01) {
+            Log::warning('RadiographySnapshotBuilder::applyEmployeeScope — buckets de mora no reconcilian.', [
+                'employee_id' => $employeeId, 'employee_name' => $employee->full_name,
+                'buckets_sum' => $vencidaSum, 'vencida_total' => $vencidaRow,
+            ]);
+            $s['mora_buckets']      = $this->notAttributable("Desglose por bucket no disponible: no reconcilia contra vencida total (\${$vencidaSum} vs \${$vencidaRow}). Ver logs.");
+            $s['portfolio_buckets'] = $this->notAttributable('Ver mora_buckets — no reconcilia, no se expone un desglose que contradiga el KPI.');
+        } else {
+            $defs = $this->moraBucketDefs();
+            $orderedBuckets = array_map(function (array $def) use ($moraBuckets) {
+                $b = $moraBuckets[$def['key']] ?? [];
+                return [
+                    'key'                              => $def['key'],
+                    'label'                            => $def['label'],
+                    'contratos'                        => (int) ($b['contratos'] ?? 0),
+                    'monto'                            => round((float) ($b['monto'] ?? 0), 2),
+                    'capital_due'                      => round((float) ($b['capital_due'] ?? 0), 2),
+                    'interes_atrasado'                 => round((float) ($b['interes_atrasado'] ?? 0), 2),
+                    'impuesto_atrasado'                => round((float) ($b['impuesto_atrasado'] ?? 0), 2),
+                    'saldo_interes_moratorio'          => round((float) ($b['saldo_interes_moratorio'] ?? 0), 2),
+                    'saldo_impuesto_interes_moratorio' => round((float) ($b['saldo_impuesto_interes_moratorio'] ?? 0), 2),
+                ];
+            }, $defs);
+
+            $s['mora_buckets'] = $orderedBuckets;
+
+            // portfolio_buckets — mismo shape que el general (label/contratos/balance/vencida),
+            // pero acotado a ESTE colaborador. Antes esta sección quedaba intacta bajo alcance
+            // individual: mostraba la distribución de TODA la cartera de la empresa (fuga de
+            // datos generales bajo un scope individual).
+            $s['portfolio_buckets'] = array_values(array_filter(array_map(fn (array $b) => $b['contratos'] > 0 ? [
+                'label'     => $b['label'],
+                'contratos' => $b['contratos'],
+                'balance'   => $b['monto'],
+                'vencida'   => $b['key'] === 'al_corriente' ? 0.0 : $b['monto'],
+            ] : null, $orderedBuckets)));
+        }
 
         $expByEmployeeRow = collect($s['expenses_detail']['byEmployee'] ?? [])->first(fn ($r) => $this->eqName($r['empleado'] ?? '') === $this->eqName($employee->full_name));
         $s['expenses_detail'] = [
@@ -559,19 +678,30 @@ class RadiographySnapshotBuilder
             'detail_not_attributable' => 'El desglose por categoría/concepto/sucursal/fuente solo está disponible a nivel general en este snapshot.',
         ];
 
-        // Percepciones/deducciones por concepto (NOI), acotado a este empleado.
+        // Nómina por categoría canónica (Sueldo/Comisiones/Vacaciones/Prima vacacional/Bonos/
+        // Bonos aceleradores/Otras percepciones) — MISMA clasificación que accumulateNomina() a
+        // nivel sucursal (BranchRadiographyCalculator::classifyPercepcionConcept()). Partición
+        // exhaustiva de las mismas filas de fact_noi_movements que noi_percepciones/deducciones
+        // ya usan, así SUM(categorías) == esos totales por construcción, no por coincidencia.
+        $s['payroll_detail'] = $this->buildEmployeePayrollDetail($employeeId, $percepDeducc);
         $s['payroll_by_branch_concept'] = [
             'data' => [
-                $employee->full_name => DB::table('fact_noi_movements')
-                    ->whereIn('period_id', $this->dataIds)
-                    ->where('employee_id', $employeeId)
-                    ->selectRaw("COALESCE(concept, concept_type, 'Sin concepto') as concept, SUM(amount) as total")
-                    ->groupBy('concept', 'concept_type')
-                    ->pluck('total', 'concept')
-                    ->all(),
+                $employee->full_name => array_merge(
+                    array_column($s['payroll_detail']['percepciones'], 'monto', 'concepto'),
+                    array_column($s['payroll_detail']['deducciones'], 'monto', 'concepto'),
+                ),
             ],
             'incidents' => [],
         ];
+
+        // Efectividad de cobranza — MISMA clasificación vigente/atrasado/vencido que el
+        // alcance general (buildEfectividadCobranza()), acotada por promoter_name (fact_recoveries
+        // SÍ tiene esa columna). Nota: esta sección usa su propia exclusión (distinta de
+        // recoveryExclusionSql — excluye TODO seguro no-CRECE por concepto/operación en vez de
+        // solo is_savehearts) por lo que su total puede no coincidir centavo a centavo con
+        // 'recuperacion' — es una vista complementaria por estatus de crédito, no una
+        // redefinición del KPI.
+        $s['efectividad_cobranza'] = $this->buildEfectividadCobranza($period, $row['name'] ?? null);
 
         if (isset($s['imss']['colaboradores'])) {
             $s['imss'] = ['colaboradores' => $this->filterRowsByField($s['imss']['colaboradores'], ['nombre'], $employee->full_name)];
@@ -586,15 +716,19 @@ class RadiographySnapshotBuilder
 
         foreach ([
             'active_loans', 'portfolio_by_branch_product', 'placement_by_branch_product', 'mora_by_branch_product',
-            'mora_by_branch', 'interbranch_loans', 'corporate_funding', 'fondeo_detalle',
+            'mora_by_branch',
+            // Transferencias entre sucursales/corporativo — nunca atribuibles a un solo
+            // colaborador, sin excepción.
+            'interbranch_loans', 'corporate_funding', 'fondeo_detalle',
             // Rotación/IMSS agregados (plantilla, altas/bajas de TODA la empresa) no aplican a
             // un individuo — el contexto personal (alta/baja/sucursal este periodo) sigue
             // disponible vía sections.rotation_detail (ya filtrado arriba) e imss.colaboradores.
             'rotation', 'imss_meta',
-            // Efectividad de cobranza está agregada por estatus de crédito a nivel EMPRESA
-            // completa en este snapshot — no existe columna promoter_name/employee_id en esa
-            // agregación, así que no se puede filtrar de forma confiable. No se inventa.
-            'efectividad_cobranza',
+            // 'recovery_by_product' (buildRecoveryByProduct()) es un desglose a nivel EMPRESA
+            // completa — antes quedaba sin tocar bajo alcance colaborador (fuga: mostraba el
+            // desglose de TODOS los promotores). El equivalente por-colaborador reconciliado
+            // se expone arriba como 'recovery_by_product_scope', clave distinta a propósito.
+            'recovery_by_product',
         ] as $k) {
             if (isset($s[$k])) {
                 $s[$k] = $this->notAttributable('No existe desglose por colaborador para este dato en el snapshot del periodo.');
@@ -1024,6 +1158,13 @@ class RadiographySnapshotBuilder
 
     // ── PRODUCTS ─────────────────────────────────────────────────────────────
 
+    // Campos internos de employees_gestores (ver buildEmployeesGestores()) — nunca se exponen
+    // tal cual en sections.employees_gestores; applyEmployeeScope() los usa para reconstruir
+    // desgloses reconciliados por construcción y luego los quita con Arr::except().
+    private const EMPLOYEE_GESTOR_INTERNAL_FIELDS = [
+        '_norm_key', '_placements_by_product', '_recovery_components', '_recovery_by_product', '_mora_buckets',
+    ];
+
     private const PRODUCT_SPECIAL_PATTERN    = 'A LA MEDIDA|DIARIO|CREDITO CONSUMO';
     private const PRODUCT_RESTRUCTURE_PATTERN = 'REESTRUCTURA|UNIFICACION|MIGRACION|INSOLUTOS';
     // Excludes multi-option grouped product names like "S12 / S16" or "I20 / I30"
@@ -1347,9 +1488,14 @@ class RadiographySnapshotBuilder
     // Fuente ÚNICA de cartera/mora: deriva de BranchRadiographyCalculator::sumGlobal()
     // (mismo cálculo que alimenta cartera total, mora total, mora%, por sucursal, Excel y PDF).
     // No ejecuta una query propia — evita que buckets y totales salgan de filtros distintos.
-    private function buildPortfolioBuckets(Period $period): array
+    /**
+     * $row: fila de branchCalcGlobal (general) o de branchCalcBranches (una sola sucursal,
+     * ver applyBranchScope()) — mismo shape, mismos campos mora_X_Y/mora_X_Y_cnt, así que
+     * el mismo cálculo sirve para ambos alcances sin reescribirlo.
+     */
+    private function buildPortfolioBuckets(Period $period, ?array $row = null): array
     {
-        $g = $this->branchCalcGlobal;
+        $g = $row ?? $this->branchCalcGlobal;
         if (empty($g)) {
             return [];
         }
@@ -1623,11 +1769,73 @@ class RadiographySnapshotBuilder
             $portfolioByNorm[$norm]['ruta']     ??= $po->ruta;
         }
 
+        // Mora por bucket (5 columnas SEPARADAS, no combinadas) por promotor canónico — misma
+        // fuente/regla que buildMoraByGestor() (fact_portfolios, closingDataIds, moraBucketDefs())
+        // pero integrada en ESTE pipeline de fuzzy-merge para que nunca pueda divergir de
+        // 'cartera'/'vencida' calculados arriba en $portfolioByNorm. SUM(buckets != al_corriente)
+        // == vencida por construcción (misma partición de filas, ver applyEmployeeScope()).
+        $moraBucketDefs    = $this->moraBucketDefs();
+        $moraBucketsByNorm = [];
+        DB::table('fact_portfolios as po')
+            ->whereIn('po.period_id', $this->closingDataIds)
+            ->where(fn ($q) => $q->whereNotNull('po.promoter_name')->orWhereNotNull('po.promoter_code'))
+            ->selectRaw('
+                COALESCE(po.promoter_name, po.promoter_code) as raw_name,
+                po.days_past_due,
+                COUNT(*) as contratos,
+                SUM(po.balance) as balance,
+                SUM(COALESCE(po.capital_due, 0)) as capital_due,
+                SUM(COALESCE(po.interes_atrasado, 0)) as interes_atrasado,
+                SUM(COALESCE(po.impuesto_atrasado, 0)) as impuesto_atrasado,
+                SUM(COALESCE(po.saldo_interes_moratorio, 0)) as saldo_interes_moratorio,
+                SUM(COALESCE(po.saldo_impuesto_interes_moratorio, 0)) as saldo_impuesto_interes_moratorio
+            ')
+            ->groupBy('po.promoter_name', 'po.promoter_code', 'po.days_past_due')
+            ->get()
+            ->each(function ($row) use (&$moraBucketsByNorm, &$rawNameByNorm, $moraBucketDefs) {
+                $norm = $this->canonicalizer->normalize($row->raw_name ?? '');
+                if (!$norm) return;
+                $rawNameByNorm[$norm] ??= mb_strtoupper(trim($row->raw_name ?? ''));
+
+                $dpd = (int) $row->days_past_due;
+                $bucketKey = null;
+                foreach ($moraBucketDefs as $def) {
+                    if ($dpd >= $def['min'] && $dpd <= $def['max']) { $bucketKey = $def['key']; break; }
+                }
+                if (!$bucketKey) return;
+
+                $moraBucketsByNorm[$norm][$bucketKey] ??= [
+                    'contratos' => 0, 'monto' => 0.0, 'capital_due' => 0.0, 'interes_atrasado' => 0.0,
+                    'impuesto_atrasado' => 0.0, 'saldo_interes_moratorio' => 0.0, 'saldo_impuesto_interes_moratorio' => 0.0,
+                ];
+                $b = &$moraBucketsByNorm[$norm][$bucketKey];
+                $b['contratos'] += (int) $row->contratos;
+                if ($bucketKey === 'al_corriente') {
+                    $b['monto'] += (float) $row->balance;
+                } else {
+                    $b['capital_due']                       += (float) $row->capital_due;
+                    $b['interes_atrasado']                   += (float) $row->interes_atrasado;
+                    $b['impuesto_atrasado']                  += (float) $row->impuesto_atrasado;
+                    $b['saldo_interes_moratorio']             += (float) $row->saldo_interes_moratorio;
+                    $b['saldo_impuesto_interes_moratorio']    += (float) $row->saldo_impuesto_interes_moratorio;
+                    $b['monto'] += (float) $row->capital_due + (float) $row->interes_atrasado + (float) $row->impuesto_atrasado
+                        + (float) $row->saldo_interes_moratorio + (float) $row->saldo_impuesto_interes_moratorio;
+                }
+                unset($b);
+            });
+
+        // Recuperación total por promotor canónico — MISMA exclusión que recuperacion_total a
+        // nivel sucursal/global (BranchRadiographyCalculator::recoveryExclusionSql()['recovery']).
+        // Antes esto era un SUM(total_amount) sin exclusiones, lo que hacía imposible que un
+        // desglose por componentes (que SÍ respeta las exclusiones) reconciliara jamás contra
+        // este total — se corrige aquí, en la fuente, no inventando un total distinto para el
+        // desglose.
         $recoveryByNorm = [];
+        ['recovery' => $exclRecoveryNorm] = \App\Services\Radiography\BranchRadiographyCalculator::recoveryExclusionSql();
         DB::table('fact_recoveries')
             ->whereIn('period_id', $this->dataIds)
             ->whereNotNull('promoter_name')
-            ->selectRaw('promoter_name, SUM(total_amount) as recuperacion')
+            ->selectRaw("promoter_name, SUM(CASE {$exclRecoveryNorm} ELSE total_amount END) as recuperacion")
             ->groupBy('promoter_name')
             ->get()
             ->each(function ($r) use (&$recoveryByNorm, &$rawNameByNorm) {
@@ -1668,6 +1876,73 @@ class RadiographySnapshotBuilder
                     + \App\Services\Radiography\BranchRadiographyCalculator::ingresoEbitdaBaseFor((array) $r);
             });
 
+        // Desglose de Recuperación por componente, por promotor canónico — MISMAS pasadas que
+        // BranchRadiographyCalculator::accumulateRecuperacion() (Pass 1 capital/interés/impuesto/
+        // moratorios/cargos/excedente, Pass 3 comisión de apertura, Pass 5 cargos de inicio, y el
+        // residual otros_recuperacion). Las pasadas 2/4/6 de accumulateRecuperacion() (fallback de
+        // sucursal vía prefijo de contrato) no aplican aquí: agrupamos por promoter_name, que ya
+        // viene resuelto en la fila — no hay ambigüedad de sucursal que resolver.
+        $recoveryComponentsByNorm = [];
+        DB::table('fact_recoveries')
+            ->whereIn('period_id', $this->dataIds)
+            ->whereNotNull('promoter_name')
+            ->selectRaw("
+                promoter_name,
+                SUM(CASE {$exclComponents} ELSE capital END) as capital_recuperado,
+                SUM(CASE {$exclComponents} ELSE interest END) as interes_recuperado,
+                SUM(CASE {$exclComponents} ELSE tax END) as impuesto_recuperado,
+                SUM(CASE {$exclComponents} ELSE charges_due END) as charges,
+                SUM(CASE {$exclComponents} ELSE charges END) as cargos_adicionales,
+                SUM(CASE {$exclComponents} ELSE excedente END) as excedente_recuperado,
+                SUM(CASE WHEN operation = 'COMISIÓN POR APERTURA' THEN total_amount ELSE 0 END) as comision_apertura,
+                SUM(CASE WHEN operation = 'ACUERDO CON CLIENTE' AND charges_due > 0
+                    AND `transaction` IN ('PAGO', 'DESCUENTO') AND is_savehearts != 1
+                    THEN charges_due ELSE 0 END) as cargos_inicio,
+                SUM(CASE WHEN `transaction` IN ('PAGO', 'DESCUENTO') THEN COALESCE(savehearts_crece_share, 0) ELSE 0 END) as seguro_crece_reconocido
+            ")
+            ->groupBy('promoter_name')
+            ->get()
+            ->each(function ($r) use (&$recoveryComponentsByNorm, &$rawNameByNorm) {
+                $norm = $this->canonicalizer->normalize($r->promoter_name);
+                if (!$norm) return;
+                $rawNameByNorm[$norm] ??= mb_strtoupper(trim($r->promoter_name));
+                $recoveryComponentsByNorm[$norm] ??= [
+                    'capital_recuperado' => 0.0, 'interes_recuperado' => 0.0, 'impuesto_recuperado' => 0.0,
+                    'charges' => 0.0, 'cargos_adicionales' => 0.0, 'excedente_recuperado' => 0.0,
+                    'comision_apertura' => 0.0, 'cargos_inicio' => 0.0, 'seguro_crece_reconocido' => 0.0,
+                ];
+                $recoveryComponentsByNorm[$norm]['capital_recuperado']      += (float) $r->capital_recuperado;
+                $recoveryComponentsByNorm[$norm]['interes_recuperado']      += (float) $r->interes_recuperado;
+                $recoveryComponentsByNorm[$norm]['impuesto_recuperado']     += (float) $r->impuesto_recuperado;
+                $recoveryComponentsByNorm[$norm]['charges']                 += (float) $r->charges;
+                $recoveryComponentsByNorm[$norm]['cargos_adicionales']      += (float) $r->cargos_adicionales;
+                $recoveryComponentsByNorm[$norm]['excedente_recuperado']    += (float) $r->excedente_recuperado;
+                $recoveryComponentsByNorm[$norm]['comision_apertura']       += (float) $r->comision_apertura;
+                $recoveryComponentsByNorm[$norm]['cargos_inicio']           += (float) $r->cargos_inicio;
+                $recoveryComponentsByNorm[$norm]['seguro_crece_reconocido'] += (float) $r->seguro_crece_reconocido;
+            });
+
+        // Recuperación por producto, por promotor canónico — MISMA exclusión 'recovery' que el
+        // total de arriba, así SUM(recoveryByProductNorm[norm]) == recoveryByNorm[norm] siempre.
+        $recoveryByProductNorm = [];
+        DB::table('fact_recoveries')
+            ->whereIn('period_id', $this->dataIds)
+            ->whereNotNull('promoter_name')
+            ->selectRaw("
+                promoter_name,
+                COALESCE(NULLIF(product_name,''),'Sin producto') as producto,
+                SUM(CASE {$exclRecoveryNorm} ELSE total_amount END) as recuperacion
+            ")
+            ->groupBy('promoter_name', 'product_name')
+            ->get()
+            ->each(function ($r) use (&$recoveryByProductNorm, &$rawNameByNorm) {
+                $norm = $this->canonicalizer->normalize($r->promoter_name);
+                if (!$norm) return;
+                $rawNameByNorm[$norm] ??= mb_strtoupper(trim($r->promoter_name));
+                $recoveryByProductNorm[$norm][$r->producto] ??= ['producto' => $r->producto, 'recuperacion' => 0.0];
+                $recoveryByProductNorm[$norm][$r->producto]['recuperacion'] += (float) $r->recuperacion;
+            });
+
         $expensesByNorm = [];
         DB::table('fact_expenses as e')
             ->join('employees as emp', 'e.employee_id', '=', 'emp.id')
@@ -1692,6 +1967,9 @@ class RadiographySnapshotBuilder
             array_keys($recoveryByNorm),
             array_keys($expensesByNorm),
             array_keys($ingresoBaseByNorm),
+            array_keys($moraBucketsByNorm),
+            array_keys($recoveryComponentsByNorm),
+            array_keys($recoveryByProductNorm),
         )));
 
         $mergeMap        = $this->canonicalizer->buildCanonicalMap($allUniqueKeys, array_keys($payroll));
@@ -1760,6 +2038,41 @@ class RadiographySnapshotBuilder
                 unset($ingresoBaseByNorm[$key]);
             }
 
+            if (isset($moraBucketsByNorm[$key])) {
+                foreach ($moraBucketsByNorm[$key] as $bucketKey => $data) {
+                    if (isset($moraBucketsByNorm[$canonical][$bucketKey])) {
+                        foreach ($data as $field => $val) {
+                            $moraBucketsByNorm[$canonical][$bucketKey][$field] += $val;
+                        }
+                    } else {
+                        $moraBucketsByNorm[$canonical][$bucketKey] = $data;
+                    }
+                }
+                unset($moraBucketsByNorm[$key]);
+            }
+
+            if (isset($recoveryComponentsByNorm[$key])) {
+                if (isset($recoveryComponentsByNorm[$canonical])) {
+                    foreach ($recoveryComponentsByNorm[$key] as $field => $val) {
+                        $recoveryComponentsByNorm[$canonical][$field] += $val;
+                    }
+                } else {
+                    $recoveryComponentsByNorm[$canonical] = $recoveryComponentsByNorm[$key];
+                }
+                unset($recoveryComponentsByNorm[$key]);
+            }
+
+            if (isset($recoveryByProductNorm[$key])) {
+                foreach ($recoveryByProductNorm[$key] as $producto => $data) {
+                    if (isset($recoveryByProductNorm[$canonical][$producto])) {
+                        $recoveryByProductNorm[$canonical][$producto]['recuperacion'] += $data['recuperacion'];
+                    } else {
+                        $recoveryByProductNorm[$canonical][$producto] = $data;
+                    }
+                }
+                unset($recoveryByProductNorm[$key]);
+            }
+
             $rawNameByNorm[$canonical] ??= $rawNameByNorm[$key] ?? mb_strtoupper($key);
             unset($rawNameByNorm[$key]);
         }
@@ -1771,7 +2084,10 @@ class RadiographySnapshotBuilder
             ->filter(fn ($k) => $k !== '')
             ->values();
 
-        $rows = $allKeys->map(function (string $key) use ($payroll, $gestorPlacements, $portfolioByNorm, $recoveryByNorm, $expensesByNorm, $ingresoBaseByNorm, $rawNameByNorm, $placementsByProduct) {
+        $rows = $allKeys->map(function (string $key) use (
+            $payroll, $gestorPlacements, $portfolioByNorm, $recoveryByNorm, $expensesByNorm, $ingresoBaseByNorm,
+            $rawNameByNorm, $placementsByProduct, $moraBucketsByNorm, $recoveryComponentsByNorm, $recoveryByProductNorm,
+        ) {
             $emp    = $payroll[$key] ?? null;
             $ges    = $gestorPlacements[$key] ?? null;
             $po     = $portfolioByNorm[$key] ?? null;
@@ -1786,6 +2102,22 @@ class RadiographySnapshotBuilder
 
             $cartera = (float)($po['cartera'] ?? 0);
             $vencida = (float)($po['vencida'] ?? 0);
+
+            // Residual "otros_recuperacion" — MISMA fórmula que accumulateRecuperacion(): lo que
+            // no explica ningún componente nombrado. Se calcula aquí (no en la query) porque
+            // depende del total ya fusionado por fuzzy-merge ($rec), no del total pre-merge.
+            $rcRaw = $recoveryComponentsByNorm[$key] ?? null;
+            $recoveryComponents = null;
+            if ($rcRaw !== null) {
+                $otros = round(
+                    $rec
+                    - $rcRaw['capital_recuperado'] - $rcRaw['interes_recuperado'] - $rcRaw['impuesto_recuperado']
+                    - $rcRaw['charges'] - $rcRaw['cargos_adicionales'] - $rcRaw['excedente_recuperado']
+                    - $rcRaw['cargos_inicio'] - $rcRaw['comision_apertura'] - $rcRaw['seguro_crece_reconocido'],
+                    2
+                );
+                $recoveryComponents = array_map(fn ($v) => round($v, 2), $rcRaw) + ['otros_recuperacion' => $otros];
+            }
 
             return [
                 'name'         => $name,
@@ -1805,10 +2137,14 @@ class RadiographySnapshotBuilder
                 'mora'         => $cartera > 0 ? round($vencida / $cartera * 100, 2) : 0.0,
                 'ingreso_ebitda_base' => round($ingresoBase, 2),
                 // Campos internos (no se muestran en tablas UI) — permiten a applyEmployeeScope()
-                // reconstruir "colocación por producto" del colaborador reconciliada EXACTO
-                // contra 'colocacion' de arriba, sin recalcular por un camino distinto.
+                // reconstruir desgloses del colaborador reconciliados EXACTO contra los totales
+                // de arriba, sin recalcular por un camino distinto (ver notas en cada bloque de
+                // construcción más arriba en este mismo método).
                 '_norm_key' => $key,
                 '_placements_by_product' => array_values($placementsByProduct[$key] ?? []),
+                '_recovery_components'   => $recoveryComponents,
+                '_recovery_by_product'   => array_values($recoveryByProductNorm[$key] ?? []),
+                '_mora_buckets'          => $moraBucketsByNorm[$key] ?? [],
             ];
         })->sortByDesc(fn ($r) => $r['colocacion'] + $r['pagos'])->values()->all();
 
@@ -3731,7 +4067,83 @@ class RadiographySnapshotBuilder
     //   - transaction = 'CONDONACION'
     //   - Conceptos COBERTURA/SEGURO en is_savehearts=0
 
-    private function buildEfectividadCobranza(Period $period): array
+    /**
+     * Nómina de UN colaborador, clasificada en las MISMAS categorías canónicas que
+     * accumulateNomina() usa a nivel sucursal (BranchRadiographyCalculator::
+     * classifyPercepcionConcept()) — Sueldo/Comisiones/Vacaciones/Prima vacacional/Bonos/
+     * Bonos aceleradores/Otras percepciones. Deducciones se listan por concepto real (sin
+     * categorizar, no se pidió desglose ahí). Es una partición exhaustiva de las mismas filas
+     * que computeNoiPercepcionesDeduccionesForEmployee() ya suma, así SUM(categorías) ==
+     * $percepDeducc['percepciones']/['deducciones'] por construcción, no por coincidencia.
+     */
+    private function buildEmployeePayrollDetail(int $employeeId, array $percepDeducc): array
+    {
+        $categoryLabels = [
+            'nomina_total'       => 'Sueldo',
+            'comisiones'         => 'Comisiones',
+            'vacaciones'         => 'Vacaciones',
+            'prima_vacacional'   => 'Prima vacacional',
+            'bonos'              => 'Bonos',
+            'bonos_aceleradores' => 'Bonos aceleradores',
+            'otros_percepciones' => 'Otras percepciones',
+        ];
+
+        $categoryTotals = array_fill_keys(array_keys($categoryLabels), 0.0);
+        DB::table('fact_noi_movements')
+            ->whereIn('period_id', $this->dataIds)
+            ->where('employee_id', $employeeId)
+            ->where('concept_type', 'percepcion')
+            ->selectRaw('concept, SUM(amount) as total')
+            ->groupBy('concept')
+            ->get()
+            ->each(function ($r) use (&$categoryTotals) {
+                $bucket = \App\Services\Radiography\BranchRadiographyCalculator::classifyPercepcionConcept((string) ($r->concept ?? ''));
+                $categoryTotals[$bucket] = ($categoryTotals[$bucket] ?? 0.0) + (float) $r->total;
+            });
+
+        $percepciones = [];
+        foreach ($categoryLabels as $key => $label) {
+            $percepciones[] = ['concepto' => $label, 'tipo' => 'Percepción', 'monto' => round($categoryTotals[$key], 2)];
+        }
+
+        $deducciones = DB::table('fact_noi_movements')
+            ->whereIn('period_id', $this->dataIds)
+            ->where('employee_id', $employeeId)
+            ->where('concept_type', 'deduccion')
+            ->selectRaw("COALESCE(concept, 'Sin concepto') as concept, SUM(amount) as total")
+            ->groupBy('concept')
+            ->get()
+            ->map(fn ($r) => ['concepto' => (string) $r->concept, 'tipo' => 'Deducción', 'monto' => round((float) $r->total, 2)])
+            ->values()->all();
+
+        $percepcionesTotal = round(array_sum($categoryTotals), 2);
+        $deduccionesTotal  = round((float) array_sum(array_column($deducciones, 'monto')), 2);
+
+        if (abs($percepcionesTotal - round((float) $percepDeducc['percepciones'], 2)) > 0.01
+            || abs($deduccionesTotal - round((float) $percepDeducc['deducciones'], 2)) > 0.01) {
+            Log::warning('RadiographySnapshotBuilder::buildEmployeePayrollDetail — categorías NOI no reconcilian.', [
+                'employee_id' => $employeeId,
+                'percepciones_categorias' => $percepcionesTotal, 'percepciones_noi' => $percepDeducc['percepciones'],
+                'deducciones_categorias'  => $deduccionesTotal,  'deducciones_noi'  => $percepDeducc['deducciones'],
+            ]);
+        }
+
+        return [
+            'percepciones'        => $percepciones,
+            'deducciones'         => $deducciones,
+            'percepciones_total'  => $percepcionesTotal,
+            'deducciones_total'   => $deduccionesTotal,
+        ];
+    }
+
+    /**
+     * $promoterName: acota a un colaborador (fact_recoveries SÍ tiene promoter_name — NO tiene
+     * promoter_code, a diferencia de fact_placements/fact_portfolios, así que ese match no
+     * aplica aquí). $branchId: acota a una sucursal. Sin ninguno → alcance general
+     * (comportamiento previo, sin cambio). Nunca redefine la clasificación vigente/atrasado/
+     * vencido ni las exclusiones — solo agrega un filtro de fila adicional.
+     */
+    private function buildEfectividadCobranza(Period $period, ?string $promoterName = null, ?int $branchId = null): array
     {
         $dataIds = $this->dataIds;
 
@@ -3762,6 +4174,8 @@ class RadiographySnapshotBuilder
                       ))");
                   });
             })
+            ->when($promoterName, fn ($q) => $q->whereRaw('UPPER(TRIM(r.promoter_name)) = ?', [mb_strtoupper(trim($promoterName))]))
+            ->when($branchId, fn ($q) => $q->where('r.branch_id', $branchId))
             ->whereNotNull('r.contract')
             ->select(
                 'r.contract',

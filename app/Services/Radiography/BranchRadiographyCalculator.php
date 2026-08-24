@@ -101,6 +101,27 @@ class BranchRadiographyCalculator
      * RadiographyStyleHelper::branchEbitdaEstimate(), RadiographyWorkbookBuilder, PDF,
      * Preview.vue) DEBE usar este método — no reimplementar la suma.
      */
+    /**
+     * Clasificación canónica ÚNICA de un concepto NOI de percepción (código "P0xx") a su
+     * categoría de nómina. Usada tanto por accumulateNomina() (agregado por sucursal) como
+     * por RadiographySnapshotBuilder::buildEmployeePayrollDetail() (desglose por colaborador)
+     * — mismo criterio siempre, nunca una copia de texto divergente. Un código no listado
+     * (ej. P107) cae en 'otros_percepciones' en vez de perderse silenciosamente, para que
+     * SUM(categorías) == SUM(percepciones) sin excepción.
+     */
+    public static function classifyPercepcionConcept(string $concept): string
+    {
+        return match (true) {
+            str_starts_with($concept, 'P001')                                        => 'nomina_total',
+            (bool) preg_match('/^P(002|119)/', $concept)                             => 'comisiones',
+            (bool) preg_match('/^P(009|027|113)/', $concept)                         => 'vacaciones',
+            str_starts_with($concept, 'P010')                                        => 'prima_vacacional',
+            str_starts_with($concept, 'P118')                                        => 'bonos_aceleradores',
+            (bool) preg_match('/^P(108|109|110|112|114|115|120|123|124)/', $concept) => 'bonos',
+            default                                                                   => 'otros_percepciones',
+        };
+    }
+
     public static function ingresoEbitdaBaseFor(array $branchOrGlobal): float
     {
         return (float) ($branchOrGlobal['interes_recuperado'] ?? 0)
@@ -1224,15 +1245,7 @@ class BranchRadiographyCalculator
             $concept  = (string) $row->concept;
             $amount   = (float) $row->total;
 
-            $bucket = match (true) {
-                str_starts_with($concept, 'P001')                                  => 'nomina_total',
-                (bool) preg_match('/^P(002|119)/', $concept)                       => 'comisiones',
-                (bool) preg_match('/^P(009|027|113)/', $concept)                   => 'vacaciones',
-                str_starts_with($concept, 'P010')                                  => 'prima_vacacional',
-                str_starts_with($concept, 'P118')                                  => 'bonos_aceleradores',
-                (bool) preg_match('/^P(108|109|110|112|114|115|120|123|124)/', $concept) => 'bonos',
-                default                                                             => 'otros_percepciones',
-            };
+            $bucket = self::classifyPercepcionConcept($concept);
 
             if ($branchId === -1) {
                 $unassigned[$bucket] += $amount;
