@@ -17,7 +17,9 @@ use App\Services\BranchResolverService;
 use App\Services\EmployeeNameCanonicalizer;
 use App\Support\OperationalExclusion;
 use App\Support\RegionNorteFilter;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Builds a single comprehensive snapshot array from all DB tables.
@@ -271,7 +273,11 @@ class RadiographySnapshotBuilder
                 'branches'                   => $this->buildBranches($period, $summary),
                 'employees'                  => $this->buildEmployees($period),
                 'promoters'                  => $this->buildPromoters($period),
-                'employees_gestores'         => $empGestores,
+                // Campos internos (_norm_key/_placements_by_product, ver applyEmployeeScope())
+                // se quitan de la copia expuesta — $empGestores (con ellos) sigue disponible
+                // más abajo para applyScope(), que se ejecuta con la variable original, no con
+                // este array ya construido.
+                'employees_gestores'         => array_map(fn (array $r) => Arr::except($r, ['_norm_key', '_placements_by_product']), $empGestores),
                 'portfolio_buckets'          => $this->buildPortfolioBuckets($period),
                 'expenses_detail'            => $this->buildExpensesDetail($period),
                 'incidents'                  => $this->buildIncidents($summary, $period, $mergedIncidents),
@@ -521,12 +527,29 @@ class RadiographySnapshotBuilder
         $snapshot['branch_radiography']['unassigned'] = $this->notAttributable();
 
         $s = $snapshot['sections'];
-        $s['employees_gestores'] = [$row];
         $s['mora_by_gestor']     = $this->filterRowsByField($s['mora_by_gestor'] ?? [], ['gestor'], $row['name']);
 
-        // Colocación por producto — solo la del promotor (fact_placements), consulta puntual
-        // acotada a un promoter_name, no un recálculo general.
-        $s['products'] = $this->buildProductsForPromoter($employee->full_name);
+        // Colocación por producto — MISMA agregación (por promoter_name/promoter_code) que
+        // produjo 'colocacion' en $row (ver buildEmployeesGestores()::$placementsByProduct),
+        // nunca una consulta independiente — así reconcilia por construcción, no por
+        // coincidencia. Guardia explícita: si por algún motivo no reconciliara (ej. un
+        // producto con amount NULL agrupado aparte), NO se muestra un desglose que
+        // contradiga el KPI — se marca no disponible y se registra en logs.
+        $productRows = $row['_placements_by_product'] ?? [];
+        $productSum  = round(array_sum(array_column($productRows, 'colocacion')), 2);
+        $colocacionRow = round((float) ($row['colocacion'] ?? 0), 2);
+
+        if (!empty($productRows) && abs($productSum - $colocacionRow) > 0.01) {
+            Log::warning('RadiographySnapshotBuilder::applyEmployeeScope — colocación por producto no reconcilia contra el total del colaborador.', [
+                'employee_id' => $employeeId, 'employee_name' => $employee->full_name,
+                'product_sum' => $productSum, 'colocacion_total' => $colocacionRow,
+            ]);
+            $s['products'] = $this->notAttributable("Desglose por producto no disponible: no reconcilia contra el total de colocación (\${$productSum} vs \${$colocacionRow}). Ver logs.");
+        } else {
+            $s['products'] = $productRows;
+        }
+
+        $s['employees_gestores'] = [Arr::except($row, ['_norm_key', '_placements_by_product'])];
 
         $expByEmployeeRow = collect($s['expenses_detail']['byEmployee'] ?? [])->first(fn ($r) => $this->eqName($r['empleado'] ?? '') === $this->eqName($employee->full_name));
         $s['expenses_detail'] = [
@@ -564,6 +587,14 @@ class RadiographySnapshotBuilder
         foreach ([
             'active_loans', 'portfolio_by_branch_product', 'placement_by_branch_product', 'mora_by_branch_product',
             'mora_by_branch', 'interbranch_loans', 'corporate_funding', 'fondeo_detalle',
+            // Rotación/IMSS agregados (plantilla, altas/bajas de TODA la empresa) no aplican a
+            // un individuo — el contexto personal (alta/baja/sucursal este periodo) sigue
+            // disponible vía sections.rotation_detail (ya filtrado arriba) e imss.colaboradores.
+            'rotation', 'imss_meta',
+            // Efectividad de cobranza está agregada por estatus de crédito a nivel EMPRESA
+            // completa en este snapshot — no existe columna promoter_name/employee_id en esa
+            // agregación, así que no se puede filtrar de forma confiable. No se inventa.
+            'efectividad_cobranza',
         ] as $k) {
             if (isset($s[$k])) {
                 $s[$k] = $this->notAttributable('No existe desglose por colaborador para este dato en el snapshot del periodo.');
@@ -574,27 +605,6 @@ class RadiographySnapshotBuilder
         $snapshot['charts']   = $this->scopeChartsByLabel($snapshot['charts'], $row['name']);
 
         return $snapshot;
-    }
-
-    /**
-     * Colocación por producto de UN promotor — misma tabla/exclusiones que buildProducts(),
-     * acotada por promoter_name. No incluye cartera/recuperación por producto del colaborador
-     * porque fact_portfolios/fact_recoveries no siempre traen promoter_name confiable a nivel
-     * de contrato para ese cruce; se deja como colocación únicamente (dato real, no inventado).
-     */
-    private function buildProductsForPromoter(string $promoterName): array
-    {
-        $rows = DB::table('fact_placements')
-            ->whereIn('period_id', $this->dataIds)
-            ->whereRaw('LOWER(promoter_name) = ?', [mb_strtolower(trim($promoterName))])
-            ->selectRaw('COALESCE(NULLIF(product_name, \'\'), \'Sin producto\') as producto, COUNT(*) as operaciones, SUM(amount) as colocacion')
-            ->groupBy('product_name')
-            ->orderByDesc('colocacion')
-            ->get()
-            ->map(fn ($r) => ['producto' => $r->producto, 'operaciones' => (int) $r->operaciones, 'colocacion' => (float) $r->colocacion, 'cartera' => null, 'recuperacion' => null])
-            ->values()->all();
-
-        return $rows;
     }
 
     /**
@@ -1540,6 +1550,12 @@ class RadiographySnapshotBuilder
         }
 
         $gestorPlacements = [];
+        // Desglose por producto EN LA MISMA agregación que colocacion (gestor = COALESCE
+        // (promoter_name, promoter_code), idéntico criterio) — así SUM(placementsByProduct)
+        // reconcilia por construcción contra $gestorPlacements[norm]['colocacion'], nunca
+        // dos totales calculados por caminos distintos que puedan divergir (ver
+        // applyEmployeeScope(), que expone esto para "Colocación por producto" del scope).
+        $placementsByProduct = [];
         DB::table('fact_placements as p')
             ->leftJoin('branches as b', 'p.branch_id', '=', 'b.id')
             ->whereIn('p.period_id', $this->dataIds)
@@ -1548,12 +1564,13 @@ class RadiographySnapshotBuilder
                 COALESCE(p.promoter_name, p.promoter_code,'Sin nombre') as gestor,
                 COALESCE(p.promoter_code,'') as codigo,
                 b.name as sucursal,
+                COALESCE(NULLIF(p.product_name, ''), 'Sin producto') as producto,
                 COUNT(*) as operaciones,
                 SUM(p.amount) as colocacion
             ")
-            ->groupBy('p.promoter_name', 'p.promoter_code', 'b.name')
+            ->groupBy('p.promoter_name', 'p.promoter_code', 'b.name', 'p.product_name')
             ->get()
-            ->each(function ($row) use (&$gestorPlacements, &$rawNameByNorm) {
+            ->each(function ($row) use (&$gestorPlacements, &$placementsByProduct, &$rawNameByNorm) {
                 $norm = $this->canonicalizer->normalize($row->gestor ?? '');
                 if (!$norm) return;
                 $rawNameByNorm[$norm] ??= mb_strtoupper(trim($row->gestor ?? ''));
@@ -1570,6 +1587,10 @@ class RadiographySnapshotBuilder
                     $gestorPlacements[$norm]['colocacion']  += (float)$row->colocacion;
                     $gestorPlacements[$norm]['sucursal'] ??= $row->sucursal;
                 }
+
+                $placementsByProduct[$norm][$row->producto] ??= ['producto' => $row->producto, 'operaciones' => 0, 'colocacion' => 0.0];
+                $placementsByProduct[$norm][$row->producto]['operaciones'] += (int) $row->operaciones;
+                $placementsByProduct[$norm][$row->producto]['colocacion']  += (float) $row->colocacion;
             });
 
         $portfolioByNorm = [];
@@ -1701,6 +1722,18 @@ class RadiographySnapshotBuilder
                 unset($gestorPlacements[$key]);
             }
 
+            if (isset($placementsByProduct[$key])) {
+                foreach ($placementsByProduct[$key] as $producto => $data) {
+                    if (isset($placementsByProduct[$canonical][$producto])) {
+                        $placementsByProduct[$canonical][$producto]['operaciones'] += $data['operaciones'];
+                        $placementsByProduct[$canonical][$producto]['colocacion']  += $data['colocacion'];
+                    } else {
+                        $placementsByProduct[$canonical][$producto] = $data;
+                    }
+                }
+                unset($placementsByProduct[$key]);
+            }
+
             if (isset($portfolioByNorm[$key])) {
                 if (isset($portfolioByNorm[$canonical])) {
                     $portfolioByNorm[$canonical]['cartera'] += $portfolioByNorm[$key]['cartera'];
@@ -1738,7 +1771,7 @@ class RadiographySnapshotBuilder
             ->filter(fn ($k) => $k !== '')
             ->values();
 
-        $rows = $allKeys->map(function (string $key) use ($payroll, $gestorPlacements, $portfolioByNorm, $recoveryByNorm, $expensesByNorm, $ingresoBaseByNorm, $rawNameByNorm) {
+        $rows = $allKeys->map(function (string $key) use ($payroll, $gestorPlacements, $portfolioByNorm, $recoveryByNorm, $expensesByNorm, $ingresoBaseByNorm, $rawNameByNorm, $placementsByProduct) {
             $emp    = $payroll[$key] ?? null;
             $ges    = $gestorPlacements[$key] ?? null;
             $po     = $portfolioByNorm[$key] ?? null;
@@ -1771,6 +1804,11 @@ class RadiographySnapshotBuilder
                 'vencida'      => $vencida,
                 'mora'         => $cartera > 0 ? round($vencida / $cartera * 100, 2) : 0.0,
                 'ingreso_ebitda_base' => round($ingresoBase, 2),
+                // Campos internos (no se muestran en tablas UI) — permiten a applyEmployeeScope()
+                // reconstruir "colocación por producto" del colaborador reconciliada EXACTO
+                // contra 'colocacion' de arriba, sin recalcular por un camino distinto.
+                '_norm_key' => $key,
+                '_placements_by_product' => array_values($placementsByProduct[$key] ?? []),
             ];
         })->sortByDesc(fn ($r) => $r['colocacion'] + $r['pagos'])->values()->all();
 

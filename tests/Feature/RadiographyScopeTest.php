@@ -167,3 +167,57 @@ it('branch scope resolves percepciones/deducciones scoped to employees assigned 
     // Solo el empleado de ORIZABA cuenta — nunca el de TULA (5000).
     expect((float) $result['summary']['noi_percepciones'])->toBe(1000.0);
 });
+
+/**
+ * Regresión real del bug reportado: "colocación por producto" (207,130) no reconciliaba
+ * contra el KPI de colocación (445,260) porque buildProductsForPromoter() filtraba por
+ * promoter_name EXACTO, perdiendo filas donde promoter_name es NULL y solo hay
+ * promoter_code (fact_placements usa COALESCE(promoter_name, promoter_code) como
+ * identidad del gestor). Prueba contra fact_placements REAL (buildEmployeesGestores()
+ * no usa SQL MySQL-only, a diferencia de build() completo) para que esto no regrese.
+ */
+it('reconciles placement-by-product against the same colocacion total shown in the KPI, including promoter_code-only rows', function () {
+    $period = Period::query()->create(['name' => 'Junio 2026', 'code' => 'M-SCOPE-PROD', 'type' => 'monthly', 'year' => 2026, 'month' => 6, 'sequence' => 1, 'start_date' => '2026-06-01', 'end_date' => '2026-06-30', 'is_closed' => false]);
+    $branch = Branch::query()->create(['code' => 'ORIZABA', 'name' => 'ORIZABA', 'normalized_name' => 'orizaba', 'is_active' => true]);
+    $employee = Employee::query()->create(['full_name' => 'MARGARITA JAZMIN NOLASCO DOMINGUEZ', 'normalized_name' => 'margarita jazmin nolasco dominguez', 'is_active' => true, 'source_system' => 'noi']);
+
+    DB::table('fact_placements')->insert([
+        // Fila normal: promoter_name presente.
+        ['period_id' => $period->id, 'branch_id' => $branch->id, 'promoter_name' => 'MARGARITA JAZMIN NOLASCO DOMINGUEZ', 'promoter_code' => 'G17', 'product_name' => 's12', 'amount' => 122000, 'created_at' => now(), 'updated_at' => now()],
+        // Fila con promoter_name NULL — solo promoter_code (caso que antes se perdía).
+        ['period_id' => $period->id, 'branch_id' => $branch->id, 'promoter_name' => null, 'promoter_code' => 'MARGARITA JAZMIN NOLASCO DOMINGUEZ', 'product_name' => 'i30', 'amount' => 166000, 'created_at' => now(), 'updated_at' => now()],
+        ['period_id' => $period->id, 'branch_id' => $branch->id, 'promoter_name' => 'MARGARITA JAZMIN NOLASCO DOMINGUEZ', 'promoter_code' => 'G17', 'product_name' => 's16', 'amount' => 74000, 'created_at' => now(), 'updated_at' => now()],
+    ]);
+
+    $builder = app(RadiographySnapshotBuilder::class);
+    $dataIdsProp = new ReflectionProperty($builder, 'dataIds');
+    $dataIdsProp->setAccessible(true);
+    $dataIdsProp->setValue($builder, [$period->id]);
+    $closingProp = new ReflectionProperty($builder, 'closingDataIds');
+    $closingProp->setAccessible(true);
+    $closingProp->setValue($builder, [$period->id]);
+
+    $gestoresMethod = new ReflectionMethod($builder, 'buildEmployeesGestores');
+    $gestoresMethod->setAccessible(true);
+    $empGestoresResult = $gestoresMethod->invoke($builder, $period);
+    $empGestores = $empGestoresResult['rows'];
+
+    $row = collect($empGestores)->firstWhere('name', 'MARGARITA JAZMIN NOLASCO DOMINGUEZ');
+    expect($row)->not->toBeNull();
+    // colocacion ya suma las 3 filas, incluida la de promoter_code-only.
+    expect((float) $row['colocacion'])->toBe(362000.0);
+
+    $snapshot = makeGeneralSnapshotFixture($period->id, [], $empGestores);
+    $result = invokeScopeMethod($builder, 'applyEmployeeScope', ['dataIds' => [$period->id], 'args' => [$snapshot, $employee->id, $empGestores, $period]]);
+
+    expect($result['summary']['placement_total'])->toEqualWithDelta(362000.0, 0.01);
+    $productSum = array_sum(array_column($result['sections']['products'], 'colocacion'));
+    // La garantía central: SUM(colocación por producto) == KPI de colocación, SIEMPRE.
+    expect($productSum)->toEqualWithDelta((float) $result['summary']['placement_total'], 0.01)
+        ->and($result['sections']['products'])->not->toBeEmpty()
+        ->and(collect($result['sections']['products'])->pluck('producto')->all())->toEqualCanonicalizing(['s12', 'i30', 's16']);
+
+    // Los campos internos nunca deben llegar a la fila expuesta en employees_gestores.
+    expect($result['sections']['employees_gestores'][0])->not->toHaveKey('_norm_key')
+        ->and($result['sections']['employees_gestores'][0])->not->toHaveKey('_placements_by_product');
+});
