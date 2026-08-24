@@ -201,7 +201,7 @@ class RadiografiaExportService
             }
             $extraAmount = (float) ($config['extra_employee_expense_amount'] ?? 0);
             $extraNotes  = (string) ($config['extra_employee_expense_notes'] ?? '');
-            $empData = $this->resolveEmployeeRow($snapshot, $employeeId, $extraAmount);
+            $empData = $this->resolveEmployeeRow($period, $snapshot, $employeeId, $extraAmount);
 
             $pdf = Pdf::loadView('reports.radiography-pdf-employee', array_merge($empData, [
                 'period'      => $period,
@@ -285,10 +285,13 @@ class RadiografiaExportService
     }
 
     /**
-     * Resolve a single employee's gestor metrics, mirroring buildEmployeeFromSnapshot's
-     * lookup (exact normalized-name match, then partial match fallback).
+     * Resolve a single employee's gestor metrics. Identidad PRIMERO por employee_id, vía
+     * RadiographySnapshotBuilder::findEmployeeGestorRowByEmployeeId() — la MISMA vinculación
+     * robusta que usa Web (applyEmployeeScope()), en vez de comparar texto contra el nombre
+     * de display de la fila ya expuesta (frágil: causa raíz real de "funciona un mes, falla
+     * otro" — ver auditoría 2026-08-24). El nombre solo se usa como fallback explícito.
      */
-    private function resolveEmployeeRow(array $snapshot, int $employeeId, float $extraExpenseAmount = 0.0): array
+    private function resolveEmployeeRow(Period $period, array $snapshot, int $employeeId, float $extraExpenseAmount = 0.0): array
     {
         $employee = Employee::find($employeeId);
         if (!$employee) {
@@ -298,12 +301,15 @@ class RadiografiaExportService
         $canonicalizer = app(EmployeeNameCanonicalizer::class);
         $target        = $canonicalizer->normalize($employee->full_name ?? '');
 
+        $empRow = $this->snapshotBuilder->findEmployeeGestorRowByEmployeeId($period, $employeeId);
+
         $empGest = $snapshot['sections']['employees_gestores'] ?? [];
-        $empRow  = null;
-        foreach ($empGest as $e) {
-            if ($canonicalizer->normalize($e['name'] ?? '') === $target) {
-                $empRow = $e;
-                break;
+        if (!$empRow) {
+            foreach ($empGest as $e) {
+                if ($canonicalizer->normalize($e['name'] ?? '') === $target) {
+                    $empRow = $e;
+                    break;
+                }
             }
         }
         if (!$empRow) {

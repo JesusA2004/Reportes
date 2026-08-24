@@ -264,15 +264,35 @@ class BranchRadiographyCalculator
     /** Igual que computeNoiPercepcionesDeducciones() pero para UN solo colaborador. */
     public function computeNoiPercepcionesDeduccionesForEmployee(array $dataIds, int $employeeId): array
     {
+        return $this->computeNoiPercepcionesDeduccionesForEmployees($dataIds, [$employeeId]);
+    }
+
+    /**
+     * Igual que computeNoiPercepcionesDeduccionesForEmployee() pero para un GRUPO de
+     * employee_id que representan a la MISMA persona real (identidad fusionada por
+     * RadiographySnapshotBuilder::buildEmployeesGestores()::$employeeIdsByNorm — ver
+     * applyEmployeeScope()). Necesario porque `fact_period_employee_summary`/`fact_expenses`
+     * pueden haber resuelto un employee_id distinto al que trae `fact_noi_movements` para el
+     * mismo periodo (fila duplicada histórica, importada antes de una fusión de identidad) —
+     * filtrar solo por el employee_id "canónico" perdería el NOI real de esa persona, dando
+     * el patrón "total > 0 pero NOI = 0" reportado.
+     */
+    public function computeNoiPercepcionesDeduccionesForEmployees(array $dataIds, array $employeeIds): array
+    {
+        $employeeIds = array_values(array_unique(array_filter(array_map('intval', $employeeIds))));
+        if (empty($employeeIds)) {
+            return ['percepciones' => 0.0, 'deducciones' => 0.0, 'neto_pagado' => 0.0];
+        }
+
         $percepciones = (float) DB::table('fact_noi_movements')
             ->whereIn('period_id', $dataIds)
-            ->where('employee_id', $employeeId)
+            ->whereIn('employee_id', $employeeIds)
             ->where('concept_type', 'percepcion')
             ->sum('amount');
 
         $deducciones = (float) DB::table('fact_noi_movements')
             ->whereIn('period_id', $dataIds)
-            ->where('employee_id', $employeeId)
+            ->whereIn('employee_id', $employeeIds)
             ->where('concept_type', 'deduccion')
             ->sum('amount');
 

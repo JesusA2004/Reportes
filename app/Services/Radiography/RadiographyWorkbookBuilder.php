@@ -6305,12 +6305,20 @@ class RadiographyWorkbookBuilder
         $canonicalizer = app(\App\Services\EmployeeNameCanonicalizer::class);
         $empNormTarget = $canonicalizer->normalize($employee->full_name ?? '');
 
+        // Identidad PRIMERO por employee_id — la MISMA vinculación robusta que usa Web
+        // (RadiographySnapshotBuilder::applyEmployeeScope()), en vez de comparar texto contra
+        // el nombre de display ya expuesto (frágil: causa raíz real de "funciona un mes,
+        // falla otro" — ver auditoría 2026-08-24). El nombre solo se usa como fallback.
+        $empRow = app(\App\Services\Radiography\RadiographySnapshotBuilder::class)
+            ->findEmployeeGestorRowByEmployeeId($period, $employeeId);
+
         $empGest = $snap['sections']['employees_gestores'] ?? [];
-        $empRow  = null;
-        foreach ($empGest as $e) {
-            if ($canonicalizer->normalize($e['name'] ?? '') === $empNormTarget) {
-                $empRow = $e;
-                break;
+        if (!$empRow) {
+            foreach ($empGest as $e) {
+                if ($canonicalizer->normalize($e['name'] ?? '') === $empNormTarget) {
+                    $empRow = $e;
+                    break;
+                }
             }
         }
 

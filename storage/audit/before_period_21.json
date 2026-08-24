@@ -1,0 +1,2406 @@
+{
+    "rows": [
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "general",
+            "ref_id": null,
+            "ref_name": null,
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 95,
+            "ref_name": "ATLACOMULCO",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 88,
+            "ref_name": "ATLIXCO",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 90,
+            "ref_name": "CORDOBA",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 89,
+            "ref_name": "CUERNAVACA",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 91,
+            "ref_name": "HUAMANTLA",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 96,
+            "ref_name": "IXTLAHUACA",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 93,
+            "ref_name": "MIACATLAN",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 94,
+            "ref_name": "ORIZABA",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 92,
+            "ref_name": "SAN JUAN DEL RÍO",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 100,
+            "ref_name": "SAN LUIS POTOSI",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 98,
+            "ref_name": "TENANGO DEL VALLE",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 97,
+            "ref_name": "TLAXCALA",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "branch",
+            "ref_id": 99,
+            "ref_name": "TULA",
+            "status": "OK",
+            "modules": {
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 73,
+            "ref_name": "ADRIAN DIAZ MENA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 38,
+            "ref_name": "ALBERTO FLORENTINO BRAVO BRAVO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 125,
+            "ref_name": "ALBINO REYES VASQUEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 14,
+            "ref_name": "ALEJANDRA ROSAS JUAREZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 55,
+            "ref_name": "ALEJANDRO REYES PEREA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 22,
+            "ref_name": "ALEJANDRO RIVERA DEL VALLE",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 63,
+            "ref_name": "ALMMER ARIM CRUZ BALLESTEROS",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 31,
+            "ref_name": "ANA KAREN BERNABE GAMBOA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 54,
+            "ref_name": "ANA LAURA SANCHEZ ALDAMA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 40,
+            "ref_name": "ANDRES RAYON SAN JUAN",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 89,
+            "ref_name": "ANGEL DE JESUS RODRIGUEZ SANCHEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 2,
+            "ref_name": "ANGELICA AZUCENA GONZALEZ GRANADOS",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 109,
+            "ref_name": "ANOHARD SANCHEZ JIMENEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 64,
+            "ref_name": "ANTONIO SANCHEZ ROJAS",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 10,
+            "ref_name": "BERENICE JUAREZ TEMOXTLE",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 94,
+            "ref_name": "BLANCA CASANDRA CRUZ CRUZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 765,
+            "ref_name": "BRYAN ADAMS MEJIA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 44,
+            "ref_name": "CARLOS ALBERTO MONTALVO SANTIAGO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 59,
+            "ref_name": "CARLOS ALEXIS ARAGON PONCE",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 41,
+            "ref_name": "CARLOS EDUARDO TORRES CASTILLO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 77,
+            "ref_name": "CLAUDIA IVETTE ZETINA AKE",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 118,
+            "ref_name": "DANIEL ALEJANDRO GUZMAN GARCIA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 69,
+            "ref_name": "DAVID GAMBOA CANO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 120,
+            "ref_name": "DAVID NAVARRO PONCIANO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 774,
+            "ref_name": "DAVID RUIZ SALGADO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 49,
+            "ref_name": "DENISE SARAI DE LA SANCHA ARELLANO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 98,
+            "ref_name": "DEYANIRA LOPEZ QUIJANO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 29,
+            "ref_name": "DIANA BORGES BRISEÑO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 90,
+            "ref_name": "DIEGO FERNANDO CHAVARRIA CARRANCO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 1,
+            "ref_name": "DIEGO MARTINEZ ROMERO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 46,
+            "ref_name": "EDEN DIAZ VAZQUEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 16,
+            "ref_name": "EDER ISAI GABRIEL AMADOR",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 48,
+            "ref_name": "ELIOT SERRANO SANCHEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 43,
+            "ref_name": "ELISEO ACEVEDO MENDEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 32,
+            "ref_name": "ENRIQUE HERNANDEZ CARDENAS",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 6,
+            "ref_name": "ERNESTO LOPEZ LOPEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 18,
+            "ref_name": "EVA CRISTINA SANCHEZ VELASCO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 19,
+            "ref_name": "FELIPE ADRIAN PATIÑO CASTAÑEDA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 75,
+            "ref_name": "FELIPE MIGUEL GUTIERREZ SALGADO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 80,
+            "ref_name": "GABRIEL JIMENEZ LOPEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 35,
+            "ref_name": "GERSON MALDONADO MARTINEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 21,
+            "ref_name": "GRISELDA MARCELINO PELLICO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 100,
+            "ref_name": "GUADALUPE MODESTO OCAMPO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 60,
+            "ref_name": "GUIDO HUMBERTO RUIZ ROQUE",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 9,
+            "ref_name": "HEIDY ORTIZ MENDEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 8,
+            "ref_name": "HESIQUIO MARTINEZ ZUÑIGA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 56,
+            "ref_name": "HUGO CESAR CARRIOLA PEÑA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 103,
+            "ref_name": "ISAAC SACRAMENTO HERNANDEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 65,
+            "ref_name": "ISAI BARRERA BERNABE",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 45,
+            "ref_name": "ISAIAS FARIAS BONILLA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 7,
+            "ref_name": "ISAIT DANIEL REYES DE LOS SANTOS",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 111,
+            "ref_name": "ISIDRO HERNANDEZ MORALES",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 23,
+            "ref_name": "IVAN QUEVEDO LOPEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 95,
+            "ref_name": "JESSICA JUNUEN DIAZ VELAZQUEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 86,
+            "ref_name": "JESUS ADRIAN CADENA VELASQUEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 52,
+            "ref_name": "JESUS ERICK CACHO URIBE",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 68,
+            "ref_name": "JESUS IVAN PORRAS CORONA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 116,
+            "ref_name": "JESUS LOZADA GUILLEN",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 770,
+            "ref_name": "JONATHAN DAVID ZARATE MIRANDA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 105,
+            "ref_name": "JORGE IVAN FUENTES PASTRANA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 91,
+            "ref_name": "JOSE ALBERTO AMECA RODRIGUEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 11,
+            "ref_name": "JOSE ALFREDO JIMENEZ FLORES",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 88,
+            "ref_name": "JOSE EDUARDO AVELAR MORALES",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 115,
+            "ref_name": "JOSE GUADALUPE CAMACHO ALCANTARA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 27,
+            "ref_name": "JOSE JUAN MUÑOZ VAZQUEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 97,
+            "ref_name": "JOSE MIGUEL ALONSO MARTINEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 61,
+            "ref_name": "JOSUE ALEJANDRO LUGARDO JUAREZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 104,
+            "ref_name": "JUAN ANGEL GONZALEZ RUIZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 76,
+            "ref_name": "JUAN CARLOS FIBELA BAEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 39,
+            "ref_name": "JUAN FERNANDO ACEVEDO MORALES",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 117,
+            "ref_name": "JULIO RODRIGUEZ MARTINEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 42,
+            "ref_name": "LIDIA MONTSERRAT JIMENEZ CASTILLO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 15,
+            "ref_name": "LIZETTE ALEJANDRA AGUILAR RIVAS",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 13,
+            "ref_name": "LORENZO CAMPOS GUTIERREZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 84,
+            "ref_name": "LORENZO VAZQUEZ AGUILLEN",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 83,
+            "ref_name": "LUIS ALBERTO AGUILAR BARRERA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 113,
+            "ref_name": "LUIS ALBERTO CASTAÑEDA GONZALEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 53,
+            "ref_name": "LUIS ANGEL CRUZ VELAZQUEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 3,
+            "ref_name": "LUIS ANGEL LOPEZ RAMIREZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 30,
+            "ref_name": "LUIS ANTONIO HERRERA ROSAS",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 121,
+            "ref_name": "LUIS ANTONIO PEÑA JERONIMO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 123,
+            "ref_name": "LUIS CARLOS   LOVERA   CASIMIRO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 62,
+            "ref_name": "LUIS GARAY PEREZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 37,
+            "ref_name": "LUIS GERARDO ROMERO ROMERO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 93,
+            "ref_name": "LUIS JONATHAN DOMINGUEZ JUAREZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 50,
+            "ref_name": "LUIS LUGO LOZANO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 112,
+            "ref_name": "MARCOS URBANO LUCAS",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 17,
+            "ref_name": "MARGARITA JAZMIN NOLASCO DOMINGUEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 85,
+            "ref_name": "MARIA FLOR LOPEZ CORTES",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 33,
+            "ref_name": "MARIBEL DIAZ SUAREZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 66,
+            "ref_name": "MARICELA FLORES CABRERA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 127,
+            "ref_name": "MARLEN RAZO SALDAÑA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 20,
+            "ref_name": "MAURICIO VELAZQUEZ CECILIO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 79,
+            "ref_name": "MAYRA ROSARIO AVILA HERNANDEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 101,
+            "ref_name": "MERCEDES RODRIGUEZ CAMPOS",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 82,
+            "ref_name": "MIGUEL ALONSO RAMIREZ CONTRERAS",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 47,
+            "ref_name": "MIGUEL ANGEL TREJO PERALTA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 126,
+            "ref_name": "MIGUEL SANTIAGO ORTIZ GUTIERREZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 28,
+            "ref_name": "MONICA ANA KAREN GARCIA CANCINO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 96,
+            "ref_name": "MONICA OCAMPO NIETO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 67,
+            "ref_name": "OMAR MUÑOZ SANCHEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 81,
+            "ref_name": "PAVEL CASTRO MARTINEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 122,
+            "ref_name": "PHOL RAMIREZ HERNANDEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 34,
+            "ref_name": "RAFAEL JACOBO HERRERA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 107,
+            "ref_name": "RAFAEL PEREZ CHAO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 108,
+            "ref_name": "RAMSES LEONIDES ROJAS PEREZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 775,
+            "ref_name": "RICARDO EUMIR CONTRERAS MARTINEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 5,
+            "ref_name": "RICARDO ROCHA MORA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 74,
+            "ref_name": "ROBERTO CARLOS FLORES MORENO",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 36,
+            "ref_name": "ROBERTO CHRISTIAN GONZALEZ RAMIREZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 12,
+            "ref_name": "ROBERTO GALICIA VELAZQUEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 772,
+            "ref_name": "ROGELIO HERNANDEZ HERNANDEZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 51,
+            "ref_name": "ROSALINDA MARIBEL CUELLAR FLORES",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 4,
+            "ref_name": "SAUL VALERIO VALENTIN",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 87,
+            "ref_name": "TERESA DE JESUS CAZARES ROBLES",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 92,
+            "ref_name": "TOMAS PEREZ PEREZ",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 773,
+            "ref_name": "VERONICA ELIZABETH LOZADA MONDRAGON",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 24,
+            "ref_name": "VICTOR ANGEL CANO GARCIA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 114,
+            "ref_name": "VICTOR HUGO CRUZ BARRIOS",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        },
+        {
+            "period_id": 21,
+            "period_label": "Junio 2026",
+            "scope_type": "employee",
+            "ref_id": 25,
+            "ref_name": "YAEL ISMAEL AVILA MEJIA",
+            "status": "OK",
+            "modules": {
+                "IDENTITY": "OK",
+                "RECOVERY": "OK",
+                "PLACEMENT": "OK",
+                "PORTFOLIO": "OK",
+                "PAYROLL": "OK",
+                "EBITDA": "OK",
+                "GLOBAL_LEAK": "OK"
+            },
+            "detail": []
+        }
+    ],
+    "tally": {
+        "total": 134,
+        "OK": 134
+    }
+}

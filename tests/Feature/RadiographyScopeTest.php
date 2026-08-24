@@ -369,3 +369,104 @@ it('never leaks the company-wide portfolio_buckets / recovery_by_product arrays 
         expect($bucket['contratos'])->not->toBe(4011);
     }
 });
+
+/**
+ * Regresión de la causa raíz real del bug reportado (auditoría 2026-08-24, ver
+ * applyEmployeeScope()): antes, la fila fusionada de un colaborador se ubicaba comparando
+ * el nombre CANÓNICO del Employee contra el nombre de DISPLAY de la fila (igual o
+ * substring). Cuando un periodo no tenía nómina para ese colaborador, el nombre de display
+ * venía de un promoter_name crudo de cartera/colocación — si ese promoter_name era una
+ * variante tipográfica (ej. "DOMIGUEZ" en vez de "DOMINGUEZ"), NO es substring literal del
+ * nombre canónico aunque el fuzzy-merge (buildCanonicalMap) ya sepa que es la misma persona
+ * — el lookup fallaba y el colaborador aparecía sin datos ("funciona un mes, falla otro").
+ * Esta prueba reproduce EXACTAMENTE ese patrón en dos periodos distintos: en el periodo A
+ * el nombre de display coincide con el canónico (vía nómina), en el B no (solo cartera, con
+ * typo) — ambos deben resolver por employee_id, sin excepción de persona/mes.
+ */
+it('resolves the employee row by employee_id across periods even when the raw promoter name is a typo variant not literally contained in the canonical name', function () {
+    $employee = Employee::query()->create(['full_name' => 'MARGARITA JAZMIN NOLASCO DOMINGUEZ', 'normalized_name' => 'margarita jazmin nolasco dominguez', 'is_active' => true, 'source_system' => 'noi']);
+    $branch   = Branch::query()->create(['code' => 'ORIZABA', 'name' => 'ORIZABA', 'normalized_name' => 'orizaba', 'is_active' => true]);
+
+    $periodA = Period::query()->create(['name' => 'Mayo 2026', 'code' => 'M-SCOPE-XPER-A', 'type' => 'monthly', 'year' => 2026, 'month' => 5, 'sequence' => 1, 'start_date' => '2026-05-01', 'end_date' => '2026-05-31', 'is_closed' => false]);
+    DB::table('fact_noi_movements')->insert([
+        ['period_id' => $periodA->id, 'employee_id' => $employee->id, 'concept' => 'P001 SUELDO', 'concept_type' => 'percepcion', 'amount' => 8000, 'quantity' => 1, 'payroll_type' => 'NOI', 'raw_row_hash' => 'a-p1', 'source_row_key' => 'a-p1', 'created_at' => now(), 'updated_at' => now()],
+    ]);
+    DB::table('fact_portfolios')->insert([
+        ['period_id' => $periodA->id, 'branch_id' => $branch->id, 'promoter_name' => 'MARGARITA JAZMIN NOLASCO DOMINGUEZ', 'contract' => 'A-1', 'days_past_due' => 0, 'balance' => 5000, 'capital_due' => 0, 'interes_atrasado' => 0, 'impuesto_atrasado' => 0, 'saldo_interes_moratorio' => 0, 'saldo_impuesto_interes_moratorio' => 0, 'created_at' => now(), 'updated_at' => now()],
+    ]);
+
+    // Periodo B: SIN nómina, solo cartera con promoter_name con typo (no substring del canónico).
+    $periodB = Period::query()->create(['name' => 'Junio 2026', 'code' => 'M-SCOPE-XPER-B', 'type' => 'monthly', 'year' => 2026, 'month' => 6, 'sequence' => 1, 'start_date' => '2026-06-01', 'end_date' => '2026-06-30', 'is_closed' => false]);
+    DB::table('fact_portfolios')->insert([
+        ['period_id' => $periodB->id, 'branch_id' => $branch->id, 'promoter_name' => 'MARGARITA JAZMIN NOLASCO DOMIGUEZ', 'contract' => 'B-1', 'days_past_due' => 45, 'balance' => 3000, 'capital_due' => 900, 'interes_atrasado' => 100, 'impuesto_atrasado' => 10, 'saldo_interes_moratorio' => 5, 'saldo_impuesto_interes_moratorio' => 1, 'created_at' => now(), 'updated_at' => now()],
+    ]);
+
+    $builder = app(RadiographySnapshotBuilder::class);
+
+    foreach ([$periodA, $periodB] as $period) {
+        $dataIdsProp = new ReflectionProperty($builder, 'dataIds');
+        $dataIdsProp->setAccessible(true);
+        $dataIdsProp->setValue($builder, [$period->id]);
+        $closingProp = new ReflectionProperty($builder, 'closingDataIds');
+        $closingProp->setAccessible(true);
+        $closingProp->setValue($builder, [$period->id]);
+
+        $gestoresMethod = new ReflectionMethod($builder, 'buildEmployeesGestores');
+        $gestoresMethod->setAccessible(true);
+        $empGestores = $gestoresMethod->invoke($builder, $period)['rows'];
+
+        expect($empGestores)->toHaveCount(1);
+        expect($empGestores[0]['_employee_ids'])->toContain($employee->id);
+
+        $snapshot = makeGeneralSnapshotFixture($period->id, [], $empGestores);
+        $result = invokeScopeMethod($builder, 'applyEmployeeScope', ['dataIds' => [$period->id], 'args' => [$snapshot, $employee->id, $empGestores, $period]]);
+
+        expect($result['scope']['available'])->toBeTrue()
+            ->and($result['scope']['identity_resolution'])->toBe('employee_id');
+    }
+});
+
+/**
+ * Regresión del patrón "Nómina y Capital Humano > 0 pero NOI = 0" (José Alberto Ameca
+ * Rodríguez, ver spec del usuario): ocurre cuando una fuente resolvió un employee_id
+ * DISTINTO al que trae fact_noi_movements para el mismo colaborador y periodo (fila
+ * histórica duplicada sin fusionar). computeNoiPercepcionesDeduccionesForEmployees() debe
+ * consultar TODO el grupo de employee_id fusionado, no solo el id que llegó por parámetro
+ * — de lo contrario se pierde el NOI real de esa persona.
+ */
+it('finds NOI perceptions even when they were recorded under a different (duplicate) employee_id merged into the same gestor row', function () {
+    $canonical = Employee::query()->create(['full_name' => 'JOSE ALBERTO AMECA RODRIGUEZ', 'normalized_name' => 'jose alberto ameca rodriguez', 'is_active' => true, 'source_system' => 'noi']);
+    $duplicate = Employee::query()->create(['full_name' => 'JOSE ALBERTO AMECA RODRIGUEZ', 'normalized_name' => 'jose alberto ameca rodriguez', 'is_active' => true, 'source_system' => 'noi_fiscal']);
+
+    $period = Period::query()->create(['name' => 'Junio 2026', 'code' => 'M-SCOPE-DUPID', 'type' => 'monthly', 'year' => 2026, 'month' => 6, 'sequence' => 1, 'start_date' => '2026-06-01', 'end_date' => '2026-06-30', 'is_closed' => false]);
+
+    // El NOI real quedó bajo el employee_id "duplicado", no el canónico que se usa para buscar.
+    DB::table('fact_noi_movements')->insert([
+        ['period_id' => $period->id, 'employee_id' => $duplicate->id, 'concept' => 'P001 SUELDO', 'concept_type' => 'percepcion', 'amount' => 7076.26, 'quantity' => 1, 'payroll_type' => 'NOI', 'raw_row_hash' => 'dup1', 'source_row_key' => 'dup1', 'created_at' => now(), 'updated_at' => now()],
+    ]);
+
+    $builder = app(RadiographySnapshotBuilder::class);
+    $dataIdsProp = new ReflectionProperty($builder, 'dataIds');
+    $dataIdsProp->setAccessible(true);
+    $dataIdsProp->setValue($builder, [$period->id]);
+    $closingProp = new ReflectionProperty($builder, 'closingDataIds');
+    $closingProp->setAccessible(true);
+    $closingProp->setValue($builder, [$period->id]);
+
+    $gestoresMethod = new ReflectionMethod($builder, 'buildEmployeesGestores');
+    $gestoresMethod->setAccessible(true);
+    $empGestores = $gestoresMethod->invoke($builder, $period)['rows'];
+
+    $row = collect($empGestores)->firstWhere('name', 'JOSE ALBERTO AMECA RODRIGUEZ');
+    expect($row)->not->toBeNull();
+    // Ambos employee_id (canónico + duplicado histórico) quedan en el mismo grupo fusionado.
+    expect($row['_employee_ids'])->toContain($canonical->id)->toContain($duplicate->id);
+
+    $snapshot = makeGeneralSnapshotFixture($period->id, [], $empGestores);
+    // Se busca por el employee_id CANÓNICO (el que el selector de la UI usaría).
+    $result = invokeScopeMethod($builder, 'applyEmployeeScope', ['dataIds' => [$period->id], 'args' => [$snapshot, $canonical->id, $empGestores, $period]]);
+
+    expect($result['scope']['available'])->toBeTrue()
+        // Antes de consultar el grupo fusionado, esto habría sido 0 (buscaba solo employee_id=canonical).
+        ->and((float) $result['summary']['noi_percepciones'])->toBe(7076.26);
+});

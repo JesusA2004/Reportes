@@ -33,6 +33,13 @@ class RadiographySnapshotBuilder
     private array $branchCalcGlobal   = [];
     private array $branchCalcBranches = [];
 
+    // Cacheado por la última llamada a build(scope=general) en esta instancia — permite
+    // proyectar sucursal/colaborador vía projectScope() sin repetir la agregación pesada de
+    // fact_* (ver projectScope() y reports:audit-scopes).
+    private array $lastEmpGestores = [];
+    private array $lastGm          = [];
+    private ?int  $lastPeriodId    = null;
+
     public function __construct(
         private readonly EmployeeNameCanonicalizer $canonicalizer,
         private readonly BranchRadiographyCalculator $branchCalculator,
@@ -320,6 +327,13 @@ class RadiographySnapshotBuilder
         // (equivalentes a lo que ya hacía RadiografiaExportService::resolveBranchRow()/
         // resolveEmployeeRow() para Excel/PDF — ahora es la MISMA función la que alimenta
         // Web/Excel/PDF, ver applyScope()). scope=general deja $snapshot intacto.
+        // Cachear el estado de ESTA corrida general para permitir proyecciones baratas
+        // subsecuentes vía projectScope() (ver docblock del método) — build() sigue siendo
+        // 100% igual que antes para cualquier llamador existente, esto solo añade memoria.
+        $this->lastEmpGestores = $empGestores;
+        $this->lastGm          = $gm;
+        $this->lastPeriodId    = $period->id;
+
         $scope = $config['scope'] ?? 'general';
         if ($scope === 'branch' || $scope === 'employee') {
             $snapshot = $this->applyScope($snapshot, $config, $period, $empGestores, $gm);
@@ -354,6 +368,62 @@ class RadiographySnapshotBuilder
         }
 
         return $snapshot;
+    }
+
+    /**
+     * Proyecta un scope (sucursal/colaborador) sobre un snapshot GENERAL ya construido por
+     * build() para ESE MISMO periodo en esta misma instancia, sin repetir la agregación
+     * pesada de fact_* (reutiliza $empGestores/$gm cacheados por build() — ver
+     * $lastEmpGestores/$lastGm). build() completo tarda ~30s en datos reales; esta
+     * proyección solo agrega un puñado de queries puntuales ya acotadas a una sola
+     * sucursal/colaborador (las mismas que applyBranchScope()/applyEmployeeScope() siempre
+     * hicieron). Pensada para barridos masivos (ver `php artisan reports:audit-scopes`):
+     * 1 build() por periodo + N proyecciones baratas, en vez de 1 build() por cada
+     * sucursal/colaborador del roster.
+     *
+     * @throws \LogicException si build() no se llamó para este mismo periodo en esta instancia.
+     */
+    public function projectScope(array $generalSnapshot, Period $period, array $config): array
+    {
+        if ($this->lastPeriodId !== $period->id) {
+            throw new \LogicException(
+                'RadiographySnapshotBuilder::projectScope() requiere haber llamado build() '
+                . "para el periodo {$period->id} (scope=general) en esta misma instancia antes de proyectar."
+            );
+        }
+
+        $scope = $config['scope'] ?? 'general';
+        if ($scope === 'branch' || $scope === 'employee') {
+            return $this->applyScope($generalSnapshot, $config, $period, $this->lastEmpGestores, $this->lastGm);
+        }
+
+        $generalSnapshot['scope'] = ['type' => 'general', 'branch_id' => null, 'branch_name' => null, 'employee_id' => null, 'employee_name' => null, 'available' => true];
+        return $generalSnapshot;
+    }
+
+    /**
+     * Fila fusionada de employees_gestores (CON _employee_ids, sin Arr::except) para un
+     * colaborador y periodo — expone la MISMA identidad robusta que usa Web
+     * (applyEmployeeScope()) a consumidores que solo tienen el snapshot GENERAL ya construido
+     * y expuesto (RadiografiaExportService::resolveEmployeeRow(), RadiographyWorkbookBuilder::
+     * buildEmployeeFromSnapshot() — Excel/PDF), en vez de que cada uno repita su propio
+     * matching por texto contra la sección ya expuesta (que nunca lleva _employee_ids, por
+     * diseño — ver EMPLOYEE_GESTOR_INTERNAL_FIELDS). Recalcula buildEmployeesGestores() para
+     * este periodo (no se cachea entre llamadas: se usa en exportaciones bajo demanda, no en
+     * el hot path del dashboard) — mismo pipeline, cero lógica paralela.
+     */
+    public function findEmployeeGestorRowByEmployeeId(Period $period, int $employeeId): ?array
+    {
+        $this->dataIds        = $this->resolveDataIds($period);
+        $this->closingDataIds = $this->resolveClosingDataIds($period);
+
+        foreach ($this->buildEmployeesGestores($period)['rows'] as $row) {
+            if (in_array($employeeId, $row['_employee_ids'] ?? [], true)) {
+                return $row;
+            }
+        }
+
+        return null;
     }
 
     private function eqName(mixed $value): string
@@ -523,19 +593,43 @@ class RadiographySnapshotBuilder
     {
         $employee = Employee::find($employeeId);
         if (!$employee) {
-            $snapshot['scope'] = ['type' => 'employee', 'branch_id' => null, 'branch_name' => null, 'employee_id' => $employeeId, 'employee_name' => null, 'available' => false];
+            $snapshot['scope'] = ['type' => 'employee', 'branch_id' => null, 'branch_name' => null, 'employee_id' => $employeeId, 'employee_name' => null, 'available' => false, 'identity_resolution' => 'employee_not_found'];
             return $snapshot;
         }
 
-        $target = $this->canonicalizer->normalize($employee->full_name ?? '');
+        // Identidad PRIMERO por employee_id: la fila fusionada que ya trae a este colaborador
+        // entre sus _employee_ids (ver buildEmployeesGestores()::$employeeIdsByNorm, resuelto
+        // sobre el MISMO $mergeMap de variantes de escritura que fusiona 'colocacion'/
+        // 'recuperacion'/etc.). Causa raíz real (auditoría 2026-08-24) de "funciona un mes,
+        // falla otro": el fallback de abajo compara el nombre canónico del Employee contra el
+        // nombre de DISPLAY de la fila — que en un periodo puede venir de nómina (igual al
+        // canónico) y en otro de un promoter_name crudo de cartera/colocación (variante que no
+        // es substring literal del canónico aunque el merge ya sepa que es la misma persona).
         $row = null;
+        $identityResolution = 'not_found';
         foreach ($empGestores as $e) {
-            if ($this->canonicalizer->normalize($e['name'] ?? '') === $target) { $row = $e; break; }
+            if (in_array($employeeId, $e['_employee_ids'] ?? [], true)) { $row = $e; $identityResolution = 'employee_id'; break; }
         }
+
+        // Fallback por nombre — SOLO si la vinculación por employee_id no encontró nada.
+        // Nunca silencioso: su uso es en sí una señal de identidad incompleta para este
+        // periodo (ver `php artisan reports:audit-scopes`, código ERROR_IDENTITY).
         if (!$row) {
+            $target = $this->canonicalizer->normalize($employee->full_name ?? '');
             foreach ($empGestores as $e) {
-                $norm = $this->canonicalizer->normalize($e['name'] ?? '');
-                if ($norm && (str_contains($norm, $target) || str_contains($target, $norm))) { $row = $e; break; }
+                if ($this->canonicalizer->normalize($e['name'] ?? '') === $target) { $row = $e; $identityResolution = 'name_fallback_exact'; break; }
+            }
+            if (!$row) {
+                foreach ($empGestores as $e) {
+                    $norm = $this->canonicalizer->normalize($e['name'] ?? '');
+                    if ($norm && (str_contains($norm, $target) || str_contains($target, $norm))) { $row = $e; $identityResolution = 'name_fallback_substring'; break; }
+                }
+            }
+            if ($row) {
+                Log::warning('RadiographySnapshotBuilder::applyEmployeeScope — fila resuelta por nombre, no por employee_id (vinculación de identidad incompleta este periodo).', [
+                    'employee_id' => $employeeId, 'employee_name' => $employee->full_name,
+                    'period_id' => $period->id, 'resolution' => $identityResolution, 'matched_row_name' => $row['name'] ?? null,
+                ]);
             }
         }
 
@@ -543,13 +637,20 @@ class RadiographySnapshotBuilder
         $snapshot['scope'] = [
             'type' => 'employee', 'branch_id' => null, 'branch_name' => $branchName,
             'employee_id' => $employeeId, 'employee_name' => $employee->full_name, 'available' => (bool) $row,
+            'identity_resolution' => $identityResolution,
         ];
 
         if (!$row) {
             return $this->emptyScopedSnapshot($snapshot);
         }
 
-        $percepDeducc = $this->branchCalculator->computeNoiPercepcionesDeduccionesForEmployee($this->dataIds, $employeeId);
+        // NOI (percepciones/deducciones/detalle) se consulta con TODO el grupo de employee_id
+        // fusionado este periodo (no solo el id que llegó por parámetro) — si nómina/gastos
+        // resolvieron a un employee_id distinto al que originó la búsqueda (mismo colaborador,
+        // fila duplicada histórica no fusionada), no se pierde su NOI. Ver
+        // computeNoiPercepcionesDeduccionesForEmployees()/buildEmployeePayrollDetail().
+        $employeeIdsForNoi = !empty($row['_employee_ids']) ? $row['_employee_ids'] : [$employeeId];
+        $percepDeducc = $this->branchCalculator->computeNoiPercepcionesDeduccionesForEmployees($this->dataIds, $employeeIdsForNoi);
 
         $snapshot['summary'] = $this->summaryFromRow($row, $percepDeducc, $row);
         $snapshot['branch_radiography']['global']     = $this->notAttributable('El colaborador no representa una sucursal completa — ver sections.employees_gestores.');
@@ -683,7 +784,7 @@ class RadiographySnapshotBuilder
         // nivel sucursal (BranchRadiographyCalculator::classifyPercepcionConcept()). Partición
         // exhaustiva de las mismas filas de fact_noi_movements que noi_percepciones/deducciones
         // ya usan, así SUM(categorías) == esos totales por construcción, no por coincidencia.
-        $s['payroll_detail'] = $this->buildEmployeePayrollDetail($employeeId, $percepDeducc);
+        $s['payroll_detail'] = $this->buildEmployeePayrollDetail($employeeIdsForNoi, $percepDeducc);
         $s['payroll_by_branch_concept'] = [
             'data' => [
                 $employee->full_name => array_merge(
@@ -1163,6 +1264,7 @@ class RadiographySnapshotBuilder
     // desgloses reconciliados por construcción y luego los quita con Arr::except().
     private const EMPLOYEE_GESTOR_INTERNAL_FIELDS = [
         '_norm_key', '_placements_by_product', '_recovery_components', '_recovery_by_product', '_mora_buckets',
+        '_employee_ids',
     ];
 
     private const PRODUCT_SPECIAL_PATTERN    = 'A LA MEDIDA|DIARIO|CREDITO CONSUMO';
@@ -1615,6 +1717,25 @@ class RadiographySnapshotBuilder
     {
         $rawNameByNorm = []; // UPPERCASE display name per normalized lowercase key
 
+        // Identidad → employee_id: acumula, para cada nombre normalizado, TODOS los
+        // employee_id que una fuente con FK nativa (nómina/NOI, gastos) trajo este periodo.
+        // Se funde con el mismo $mergeMap que fusiona 'colocacion'/'recuperacion'/etc. más
+        // abajo, así que cada fila final del merge termina con su propio grupo de
+        // employee_id — sin esto, applyEmployeeScope() solo podía ubicar la fila comparando
+        // el nombre canónico del Employee contra el nombre de DISPLAY de la fila (frágil: en
+        // un periodo puede venir de nómina —igual al canónico— y en otro de un promoter_name
+        // crudo de cartera/colocación —variante que el merge ya sabe que es la misma persona
+        // pero que no es substring literal del canónico—). Causa raíz real, confirmada en
+        // código, de "funciona un mes, falla otro" (auditoría 2026-08-24).
+        $employeeIdsByNorm = [];
+        $linkEmployeeId = function (?string $rawName, $id) use (&$employeeIdsByNorm) {
+            $id = (int) $id;
+            if ($id <= 0) return;
+            $norm = $this->canonicalizer->normalize($rawName ?? '');
+            if ($norm === '') return;
+            $employeeIdsByNorm[$norm][] = $id;
+        };
+
         $payroll = [];
         $mesRows = MonthlyEmployeeSummary::query()
             ->with(['employee:id,full_name,normalized_name', 'branch:id,name'])
@@ -1629,6 +1750,7 @@ class RadiographySnapshotBuilder
                 $norm = $this->canonicalizer->normalize($mes->employee?->full_name ?? '');
                 if (!$norm) continue;
                 $rawNameByNorm[$norm] = $mes->employee?->full_name ?? '';
+                $linkEmployeeId($mes->employee?->full_name, $mes->employee_id);
                 if (isset($payroll[$norm])) {
                     // Same employee in both fiscal + non-fiscal: accumulate, don't overwrite
                     $payroll[$norm]['pagos']      += (float)$mes->total_payments;
@@ -1694,6 +1816,19 @@ class RadiographySnapshotBuilder
                 }
             }
         }
+
+        // Vincula employee_id ↔ nombre normalizado desde CUALQUIER movimiento NOI de este
+        // periodo, independientemente de si $payroll se llenó desde MonthlyEmployeeSummary o
+        // desde el fallback de arriba (ese fallback agrupa por nombre, no por employee_id, y
+        // puede ocultar que dos employee_id distintos —duplicado histórico sin fusionar—
+        // comparten el mismo nombre). Consulta aparte y barata: solo identidad, sin montos.
+        DB::table('fact_noi_movements as n')
+            ->join('employees as e', 'n.employee_id', '=', 'e.id')
+            ->whereIn('n.period_id', $this->dataIds)
+            ->select('e.id', 'e.full_name')
+            ->distinct()
+            ->get()
+            ->each(fn ($r) => $linkEmployeeId($r->full_name, $r->id));
 
         $gestorPlacements = [];
         // Desglose por producto EN LA MISMA agregación que colocacion (gestor = COALESCE
@@ -1948,16 +2083,28 @@ class RadiographySnapshotBuilder
             ->join('employees as emp', 'e.employee_id', '=', 'emp.id')
             ->whereIn('e.period_id', $this->dataIds)
             ->whereNotNull('e.employee_id')
-            ->selectRaw('emp.full_name as full_name, SUM(COALESCE(NULLIF(e.paid_amount,0),e.amount)) as gastos')
+            ->selectRaw('emp.id as employee_id, emp.full_name as full_name, SUM(COALESCE(NULLIF(e.paid_amount,0),e.amount)) as gastos')
             ->groupBy('emp.id', 'emp.full_name')
             ->get()
-            ->each(function ($ex) use (&$expensesByNorm, &$rawNameByNorm) {
+            ->each(function ($ex) use (&$expensesByNorm, &$rawNameByNorm, $linkEmployeeId) {
                 $norm = $this->canonicalizer->normalize($ex->full_name ?? '');
                 if ($norm) {
                     $rawNameByNorm[$norm] ??= mb_strtoupper(trim($ex->full_name ?? ''));
                     $expensesByNorm[$norm] = ($expensesByNorm[$norm] ?? 0.0) + (float)$ex->gastos;
+                    $linkEmployeeId($ex->full_name, $ex->employee_id);
                 }
             });
+
+        // Semilla: el nombre normalizado de CADA Employee entra al mismo pool de fusión que
+        // los nombres crudos de nómina/promotor. Necesario para que un colaborador SIN
+        // ninguna otra fuente este periodo (ej. solo aparece en cartera, con una variante
+        // tipográfica de su nombre) igual quede vinculado por employee_id vía el mismo
+        // buildCanonicalMap() (Levenshtein≤2 + ≥3 tokens) que ya fusiona esas variantes —
+        // sin esto, _employee_ids solo cubriría personas con presencia en nómina/gastos ese
+        // periodo, dejando el mismo hueco de identidad que esta corrección busca cerrar.
+        foreach (Employee::query()->select('id', 'full_name')->get() as $emp) {
+            $linkEmployeeId($emp->full_name, $emp->id);
+        }
 
         // ── FUZZY MERGE: unify near-duplicate names across sources ───────────
         $allUniqueKeys = array_values(array_unique(array_merge(
@@ -1965,6 +2112,7 @@ class RadiographySnapshotBuilder
             array_keys($gestorPlacements),
             array_keys($portfolioByNorm),
             array_keys($recoveryByNorm),
+            array_keys($employeeIdsByNorm),
             array_keys($expensesByNorm),
             array_keys($ingresoBaseByNorm),
             array_keys($moraBucketsByNorm),
@@ -2033,6 +2181,13 @@ class RadiographySnapshotBuilder
                 unset($expensesByNorm[$key]);
             }
 
+            if (isset($employeeIdsByNorm[$key])) {
+                $employeeIdsByNorm[$canonical] = array_values(array_unique(array_merge(
+                    $employeeIdsByNorm[$canonical] ?? [], $employeeIdsByNorm[$key]
+                )));
+                unset($employeeIdsByNorm[$key]);
+            }
+
             if (isset($ingresoBaseByNorm[$key])) {
                 $ingresoBaseByNorm[$canonical] = ($ingresoBaseByNorm[$canonical] ?? 0.0) + $ingresoBaseByNorm[$key];
                 unset($ingresoBaseByNorm[$key]);
@@ -2077,6 +2232,10 @@ class RadiographySnapshotBuilder
             unset($rawNameByNorm[$key]);
         }
 
+        foreach ($employeeIdsByNorm as $normKey => $ids) {
+            $employeeIdsByNorm[$normKey] = array_values(array_unique($ids));
+        }
+
         $allKeys = collect(array_keys($payroll))
             ->merge(array_keys($gestorPlacements))
             ->merge(array_keys($portfolioByNorm))
@@ -2087,6 +2246,7 @@ class RadiographySnapshotBuilder
         $rows = $allKeys->map(function (string $key) use (
             $payroll, $gestorPlacements, $portfolioByNorm, $recoveryByNorm, $expensesByNorm, $ingresoBaseByNorm,
             $rawNameByNorm, $placementsByProduct, $moraBucketsByNorm, $recoveryComponentsByNorm, $recoveryByProductNorm,
+            $employeeIdsByNorm,
         ) {
             $emp    = $payroll[$key] ?? null;
             $ges    = $gestorPlacements[$key] ?? null;
@@ -2145,6 +2305,9 @@ class RadiographySnapshotBuilder
                 '_recovery_components'   => $recoveryComponents,
                 '_recovery_by_product'   => array_values($recoveryByProductNorm[$key] ?? []),
                 '_mora_buckets'          => $moraBucketsByNorm[$key] ?? [],
+                // employee_id(s) fusionados en esta fila — ver $employeeIdsByNorm arriba.
+                // applyEmployeeScope() la usa para ubicar esta fila SIN comparar texto.
+                '_employee_ids'          => array_values(array_unique($employeeIdsByNorm[$key] ?? [])),
             ];
         })->sortByDesc(fn ($r) => $r['colocacion'] + $r['pagos'])->values()->all();
 
@@ -4076,7 +4239,7 @@ class RadiographySnapshotBuilder
      * que computeNoiPercepcionesDeduccionesForEmployee() ya suma, así SUM(categorías) ==
      * $percepDeducc['percepciones']/['deducciones'] por construcción, no por coincidencia.
      */
-    private function buildEmployeePayrollDetail(int $employeeId, array $percepDeducc): array
+    private function buildEmployeePayrollDetail(array $employeeIds, array $percepDeducc): array
     {
         $categoryLabels = [
             'nomina_total'       => 'Sueldo',
@@ -4091,7 +4254,7 @@ class RadiographySnapshotBuilder
         $categoryTotals = array_fill_keys(array_keys($categoryLabels), 0.0);
         DB::table('fact_noi_movements')
             ->whereIn('period_id', $this->dataIds)
-            ->where('employee_id', $employeeId)
+            ->whereIn('employee_id', $employeeIds)
             ->where('concept_type', 'percepcion')
             ->selectRaw('concept, SUM(amount) as total')
             ->groupBy('concept')
@@ -4108,7 +4271,7 @@ class RadiographySnapshotBuilder
 
         $deducciones = DB::table('fact_noi_movements')
             ->whereIn('period_id', $this->dataIds)
-            ->where('employee_id', $employeeId)
+            ->whereIn('employee_id', $employeeIds)
             ->where('concept_type', 'deduccion')
             ->selectRaw("COALESCE(concept, 'Sin concepto') as concept, SUM(amount) as total")
             ->groupBy('concept')
@@ -4122,7 +4285,7 @@ class RadiographySnapshotBuilder
         if (abs($percepcionesTotal - round((float) $percepDeducc['percepciones'], 2)) > 0.01
             || abs($deduccionesTotal - round((float) $percepDeducc['deducciones'], 2)) > 0.01) {
             Log::warning('RadiographySnapshotBuilder::buildEmployeePayrollDetail — categorías NOI no reconcilian.', [
-                'employee_id' => $employeeId,
+                'employee_ids' => $employeeIds,
                 'percepciones_categorias' => $percepcionesTotal, 'percepciones_noi' => $percepDeducc['percepciones'],
                 'deducciones_categorias'  => $deduccionesTotal,  'deducciones_noi'  => $percepDeducc['deducciones'],
             ]);
