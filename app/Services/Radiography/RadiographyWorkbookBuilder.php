@@ -1500,6 +1500,40 @@ class RadiographyWorkbookBuilder
         }
         $r++;
 
+        // ── Gráficas nativas GLOBAL (2026-08-25) ──────────────────────────────
+        // Recuperación vs Colocación, Cartera vs Cartera Vencida, Mora por Bucket y
+        // EBITDA YA existían como charts nativos en esta hoja (ver más arriba en esta
+        // misma función: "Gráficas EBITDA / Gastos / Nómina / OPEX" /
+        // addComparativeChart()/RadiographyStyleHelper::addComparativeBarChart() —
+        // pre-existentes de una sesión anterior). NO se duplican. Solo se agregan los
+        // 2 desgloses por producto que sí faltaban, reutilizando
+        // RadiographyExcelChartHelper (adaptador sobre el mismo
+        // RadiographyStyleHelper::addBarChart nativo) y las secciones ya calculadas.
+        if (!$isComparative) {
+            $chartHelper = app(RadiographyExcelChartHelper::class);
+
+            $productsGeneral = $snap['sections']['products'] ?? [];
+            if (!empty($productsGeneral) && !($productsGeneral['not_attributable'] ?? false) && array_is_list($productsGeneral)) {
+                $chartHelper->addBarChartFromData(
+                    $sheet,
+                    array_map(fn ($p) => ['label' => $p['producto'] ?? '—', 'value' => (float) ($p['colocacion'] ?? 0)], $productsGeneral),
+                    'Colocación por producto', 'general_coloc_producto', 20, $r + 2, "W{$r}",
+                );
+            }
+
+            // buildRecoveryByProduct() envuelve las filas en ['rows' => [...], 'total' => ...]
+            // (no es una lista plana como 'products') — ver
+            // BranchRadiographyCalculator::buildRecoveryByProduct().
+            $recoveryByProductGeneral = $snap['sections']['recovery_by_product']['rows'] ?? [];
+            if (!empty($recoveryByProductGeneral) && array_is_list($recoveryByProductGeneral)) {
+                $chartHelper->addBarChartFromData(
+                    $sheet,
+                    array_map(fn ($p) => ['label' => $p['product'] ?? '—', 'value' => (float) ($p['total'] ?? 0)], $recoveryByProductGeneral),
+                    'Recuperación por producto', 'general_rec_producto', 20, $r + 16, 'W' . ($r + 14),
+                );
+            }
+        }
+
         // Freeze mínimo: solo título/subtítulo/meta (filas 1-3). Antes se congelaba
         // hasta la fila del encabezado de tabla (~21), dejando muy poco espacio
         // visible para navegar hacia las secciones inferiores.
@@ -5911,19 +5945,28 @@ class RadiographyWorkbookBuilder
         $recIdx = [];
         foreach ($recDet as $row) { $recIdx[strtoupper(trim($row['branch']))] = $row; }
 
-        $carteraB  = (float)($branchRow['cartera']      ?? 0);
-        $vencidaB  = (float)($branchRow['vencida']      ?? 0);
-        $recB      = (float)($branchRow['recuperacion']  ?? 0);
-        $colB      = (float)($branchRow['colocacion']    ?? 0);
-        $gastosB   = (float)($branchRow['gastos']        ?? 0);
-        $moraPct   = $carteraB > 0 ? round($vencidaB / $carteraB * 100, 2) : 0.0;
+        // FIX 2026-08-25 (encontrado por tests/Integration/WebExcelPdfDatasetConsistencyTest):
+        // estos KPIs venían de $branchRow (sections.branches — un cálculo DISTINTO/legacy)
+        // mientras Web (applyBranchScope()/summaryFromRow()) los lee de $brCalc
+        // (branch_radiography.branches, BranchRadiographyCalculator — la fuente única
+        // documentada en todo el proyecto). Divergían de verdad, no solo de código:
+        // ATLIXCO llegó a diferir ~$270K entre Web y Excel para el mismo periodo. Ahora
+        // ambos leen exactamente los mismos campos de la misma fila canónica.
+        if (!$brCalc) {
+            throw new \RuntimeException("Sucursal \"{$branchName}\" (ID {$branchId}) no tiene fila en branch_radiography para este periodo — no se puede generar un Excel consistente con Web.");
+        }
+        $mora0_30  = (float)($brCalc['mora_0_30']     ?? 0);
+        $mora31_60 = (float)($brCalc['mora_31_60']   ?? 0);
+        $mora61_90 = (float)($brCalc['mora_61_90']   ?? 0);
+        $mora91120 = (float)($brCalc['mora_91_120']  ?? 0);
+        $mora120p  = (float)($brCalc['mora_120_plus'] ?? 0);
 
-        $morRow    = $morIdx[$brUp] ?? [];
-        $mora0_30  = (float)($morRow['mora_1_30']    ?? 0);
-        $mora31_60 = (float)($morRow['mora_31_60']  ?? 0);
-        $mora61_90 = (float)($morRow['mora_61_90']  ?? 0);
-        $mora91120 = (float)($morRow['mora_91_120'] ?? 0);
-        $mora120p  = (float)($morRow['mora_120_plus'] ?? 0);
+        $carteraB  = (float)($brCalc['valor_cartera']      ?? 0);
+        $vencidaB  = $mora0_30 + $mora31_60 + $mora61_90 + $mora91120 + $mora120p;
+        $recB      = (float)($brCalc['recuperacion_total']  ?? 0);
+        $colB      = (float)($brCalc['colocacion']    ?? 0);
+        $gastosB   = (float)($brCalc['gastos_operativos'] ?? 0);
+        $moraPct   = $carteraB > 0 ? round($vencidaB / $carteraB * 100, 2) : 0.0;
 
         $branchPayroll = $payBC[$branchName] ?? $payBC[$brUp] ?? [];
         $nomTotal = 0.0;
@@ -6135,6 +6178,35 @@ class RadiographyWorkbookBuilder
         $sheet->getColumnDimension('B')->setWidth(22);
         $sheet->getColumnDimension('C')->setWidth(10);
         $sheet->getColumnDimension('D')->setWidth(30);
+
+        // ── Gráficas nativas de sucursal (2026-08-25) — mismo helper que empleado y
+        // GENERAL, sobre los MISMOS escalares ya calculados arriba (nunca recalculados).
+        $chartHelper = app(RadiographyExcelChartHelper::class);
+        $chartHelper->addBarChartFromData(
+            $sheet, [['label' => 'Recuperación', 'value' => $recB], ['label' => 'Colocación', 'value' => $colB]],
+            'Recuperación vs Colocación', 'branch_rec_vs_coloc_' . $branchId, 6, $r + 2, "F{$r}",
+        );
+        $chartHelper->addBarChartFromData(
+            $sheet, [
+                ['label' => 'Ingreso base EBITDA', 'value' => $ingresoEbitdaBaseBW],
+                ['label' => 'Gastos totales', 'value' => $bwGastosTotal],
+                ['label' => 'EBITDA', 'value' => $utilidad],
+            ],
+            'EBITDA vs Gastos', 'branch_ebitda_vs_gastos_' . $branchId, 6, $r + 16, 'F' . ($r + 14),
+        );
+        $chartHelper->addBarChartFromData(
+            $sheet, [['label' => 'Al corriente', 'value' => max(0, $carteraB - $vencidaB)], ['label' => 'Vencida', 'value' => $vencidaB]],
+            'Cartera sana vs vencida', 'branch_cartera_sana_vencida_' . $branchId, 6, $r + 30, 'F' . ($r + 28),
+        );
+        $chartHelper->addBarChartFromData(
+            $sheet, [
+                ['label' => 'Mora 1-30', 'value' => $mora0_30], ['label' => 'Mora 31-60', 'value' => $mora31_60],
+                ['label' => 'Mora 61-90', 'value' => $mora61_90], ['label' => 'Mora 91-120', 'value' => $mora91120],
+                ['label' => 'Mora 120+', 'value' => $mora120p],
+            ],
+            'Mora por bucket', 'branch_mora_bucket_' . $branchId, 6, $r + 44, 'F' . ($r + 42),
+        );
+
         $sheet->freezePane('A4');
 
         // ── Sheet 2: EMPLEADOS ───────────────────────────────────────────────

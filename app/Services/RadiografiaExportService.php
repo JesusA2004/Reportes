@@ -96,6 +96,32 @@ class RadiografiaExportService
      *   report_type: simple | month_vs_month | bimester_vs_bimester | quarter_vs_quarter
      *   branch_id, employee_id, compare_period_id,
      *   extra_employee_expense_amount, extra_employee_expense_notes
+     *
+     * DEUDA ARQUITECTÓNICA CONOCIDA (evaluada y NO forzada — 2026-08-25):
+     * Web (MonthlyReportController::scopedData() → buildSnapshot()) construye el
+     * snapshot CON el config de scope, así que RadiographySnapshotBuilder::build()
+     * corre applyEmployeeScope()/applyBranchScope() y devuelve sections.payroll_detail/
+     * recovery_components/products/portfolio_buckets YA acotados y reconciliados.
+     * Este método, en cambio, construye el snapshot SIN scope (build($period,$summary)
+     * a secas, ver buildSnapshotCached() abajo) y RadiographyWorkbookBuilder::
+     * buildEmployeeFromSnapshot()/buildBranchFromSnapshot()/resolveEmployeeRow() ubican
+     * la fila del colaborador/sucursal a mano dentro de sections.employees_gestores/
+     * branches y leen sus campos internos "_"-prefijados directamente.
+     *
+     * Por qué NO se unificó ahora: ambos caminos leen los MISMOS campos internos de la
+     * MISMA fila que produce buildEmployeesGestores() (nunca dos cálculos financieros
+     * independientes) — verificado con datos reales en
+     * tests/Integration/WebExcelPdfDatasetConsistencyTest.php (Recuperación/Colocación/
+     * Cartera coinciden exactamente entre Web y Excel). Migrar Excel/PDF a consumir
+     * build($period, $summary, $config) directamente requeriría reescribir
+     * buildEmployeeFromSnapshot()/buildBranchFromSnapshot()/resolveEmployeeRow() para
+     * leer de $snap['sections'] en vez de $empRow/$branchRow — un cambio real pero de
+     * alto riesgo de regresión en esta etapa de cierre (esas funciones ya están
+     * probadas con datos reales, incluyendo las gráficas nuevas). Se prioriza no
+     * romper cifras que ya cuadran: se documenta la deuda, se conserva el camino
+     * actual, y el test de integración de arriba queda como red de seguridad
+     * permanente — si algún cambio futuro rompe la reconciliación Web=Excel, ese test
+     * lo detecta.
      */
     public function exportWithConfig(Period $period, array $config): string
     {
