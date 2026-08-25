@@ -137,10 +137,20 @@ watch(
 
 onMounted(() => {
     syncFromProps()
-    // Si el reporte ya estaba generado al montar (isDone desde props), pide de una
-    // vez las URLs reales al backend — nunca confiar en un fallback plano adivinado,
-    // que podría apuntar al reporte simple aunque lo generado fuera un comparativo.
-    if (props.period?.radiography_ready) pollProgress()
+    // BUG REAL (2026-08-25, producción/VPS julio): props.period.* (radiography_ready,
+    // radiography_run_status, etc.) SIEMPRE describen la identidad SIMPLE/GENERAL del
+    // periodo (ver ReportUploadController::index() — $runsByPeriod se filtra a
+    // report_type=simple/scope=general a propósito, para que la lista de periodos no
+    // se contamine con runs de otro alcance). Si Etapa 4 configuró un alcance
+    // DISTINTO (por sucursal/gestor), esos props pueden pertenecer a un run viejo y
+    // completamente ajeno (ej. un GENERAL fallido de hace semanas) — antes, esta
+    // tarjeta solo pedía el estado real (pollProgress(), que SÍ resuelve por
+    // identidad completa vía generationProgress()) cuando radiography_ready(GENERAL)
+    // era true, así que un GENERAL fallido/nunca-generado dejaba la tarjeta mostrando
+    // ese run ajeno PARA SIEMPRE (el polling nunca arrancaba porque 'failed' no es
+    // queued/running). Ahora siempre se pide el estado real de la identidad activa al
+    // montar, sin importar qué diga el prop general.
+    pollProgress()
 })
 onUnmounted(() => { clearTicker(); clearPoll() })
 
@@ -149,7 +159,12 @@ const isQueued    = computed(() => liveStatus.value === 'queued')
 const isRunning   = computed(() => ['queued', 'running'].includes(liveStatus.value ?? ''))
 const isFailed    = computed(() => liveStatus.value === 'failed')
 const isCancelled = computed(() => liveStatus.value === 'cancelled')
-const isDone              = computed(() => props.period?.radiography_ready)
+// isDone se basa en el liveStatus de la IDENTIDAD ACTIVA (resuelto por pollProgress()),
+// nunca en props.period.radiography_ready — ese prop es siempre sobre el alcance
+// simple/general, y para un alcance por sucursal/gestor podía quedar en false aunque
+// ESE run sí hubiera terminado en success (mostraba "Bloqueado"/"Lista para generar"
+// en vez de "Reporte generado" pese a que el Excel/PDF ya existían).
+const isDone              = computed(() => liveStatus.value === 'success')
 const hasPreviousReport   = computed(() => props.period?.has_previous_radiography)
 const previousReportAt    = computed(() => props.period?.previous_radiography_at ?? null)
 

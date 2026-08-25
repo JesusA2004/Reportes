@@ -20,10 +20,16 @@ uses(RefreshDatabase::class);
  */
 function makeIdentityPeriodo(): Period
 {
+    static $seq = 0;
+    $seq++;
+    // (type, year, month, sequence) es único — cada llamada usa un mes distinto
+    // (1-12) para no chocar, sin importar cuántos periodos necesite un mismo test.
+    $month = (($seq - 1) % 12) + 1;
+
     return Period::query()->create([
-        'name' => 'Junio 2026', 'code' => 'M-2026-06', 'type' => 'monthly',
-        'year' => 2026, 'month' => 6, 'sequence' => 1,
-        'start_date' => '2026-06-01', 'end_date' => '2026-06-30', 'is_closed' => false,
+        'name' => "Periodo test {$seq}", 'code' => "M-2026-{$month}-{$seq}", 'type' => 'monthly',
+        'year' => 2026, 'month' => $month, 'sequence' => 1,
+        'start_date' => sprintf('2026-%02d-01', $month), 'end_date' => sprintf('2026-%02d-28', $month), 'is_closed' => false,
     ]);
 }
 
@@ -171,4 +177,105 @@ it('gives each BRANCH its own run/exports when two branches were generated for t
     $progressB = $this->actingAs($user)->getJson("/historico-general/{$period->id}/generar-reporte/progreso?report_type=simple&scope=branch&branch_id={$branchB->id}");
     $progressB->assertOk()->assertJson(['run_id' => $runB->id, 'status' => 'success']);
     expect($progressB->json('excel_url'))->toContain((string) $runB->id);
+});
+
+it('takes the NEW success run over an old failed run of the exact same identity', function () {
+    $user = User::factory()->create();
+    $period = makeIdentityPeriodo();
+    $summary = makeIdentitySummary($period);
+    $employee = Employee::query()->create([
+        'employee_code' => 'EMP017', 'full_name' => 'Colaborador Retry', 'normalized_name' => 'colaborador retry',
+        'first_name' => 'Colaborador', 'paternal_last_name' => 'Retry', 'is_active' => true, 'source_system' => 'noi',
+    ]);
+
+    PeriodRadiographyRun::query()->create([
+        'period_id' => $period->id, 'period_summary_id' => $summary->id,
+        'report_type' => 'simple', 'scope' => 'employee', 'employee_id' => $employee->id, 'status' => 'failed',
+        'started_at' => now()->subDays(19), 'finished_at' => now()->subDays(19),
+        'error_message' => 'Intento viejo fallido.',
+    ]);
+
+    $newRun = PeriodRadiographyRun::query()->create([
+        'period_id' => $period->id, 'period_summary_id' => $summary->id,
+        'report_type' => 'simple', 'scope' => 'employee', 'employee_id' => $employee->id, 'status' => 'success',
+        'started_at' => now(), 'finished_at' => now(),
+        'output_excel_path' => 'radiografias/retry.xlsx', 'output_pdf_path' => 'radiografias/retry.pdf',
+    ]);
+
+    $progress = $this->actingAs($user)->getJson("/historico-general/{$period->id}/generar-reporte/progreso?report_type=simple&scope=employee&employee_id={$employee->id}");
+    $progress->assertOk()->assertJson(['run_id' => $newRun->id, 'status' => 'success', 'error_message' => null]);
+});
+
+it('keeps two comparative runs (different comparison_period_id) from contaminating each other', function () {
+    $user = User::factory()->create();
+    $period = makeIdentityPeriodo();
+    $summary = makeIdentitySummary($period);
+    $comparePeriodA = makeIdentityPeriodo();
+    $comparePeriodB = makeIdentityPeriodo();
+
+    $runCmpA = PeriodRadiographyRun::query()->create([
+        'period_id' => $period->id, 'period_summary_id' => $summary->id,
+        'report_type' => 'month_vs_month', 'scope' => 'general', 'comparison_period_id' => $comparePeriodA->id,
+        'status' => 'success', 'started_at' => now(), 'finished_at' => now(),
+        'output_excel_path' => 'radiografias/cmp_a.xlsx', 'output_pdf_path' => 'radiografias/cmp_a.pdf',
+    ]);
+    PeriodRadiographyRun::query()->create([
+        'period_id' => $period->id, 'period_summary_id' => $summary->id,
+        'report_type' => 'month_vs_month', 'scope' => 'general', 'comparison_period_id' => $comparePeriodB->id,
+        'status' => 'failed', 'started_at' => now(), 'finished_at' => now(), 'error_message' => 'Fallo simulado B.',
+    ]);
+
+    $progressA = $this->actingAs($user)->getJson("/historico-general/{$period->id}/generar-reporte/progreso?report_type=month_vs_month&scope=general&compare_period_id={$comparePeriodA->id}");
+    $progressA->assertOk()->assertJson(['run_id' => $runCmpA->id, 'status' => 'success']);
+
+    $progressB = $this->actingAs($user)->getJson("/historico-general/{$period->id}/generar-reporte/progreso?report_type=month_vs_month&scope=general&compare_period_id={$comparePeriodB->id}");
+    $progressB->assertOk()->assertJson(['status' => 'failed']);
+});
+
+it('reproduces the exact production fixture (julio 2026): GENERAL failed + comparative failed must not shadow the EMPLOYEE success run', function () {
+    $user = User::factory()->create();
+    $period = makeIdentityPeriodo();
+    $summary = makeIdentitySummary($period);
+    $employee = Employee::query()->create([
+        'employee_code' => 'EMP017', 'full_name' => 'Empleado Diecisiete', 'normalized_name' => 'empleado diecisiete',
+        'first_name' => 'Empleado', 'paternal_last_name' => 'Diecisiete', 'is_active' => true, 'source_system' => 'noi',
+    ]);
+    $comparePeriod = makeIdentityPeriodo();
+
+    // RUN 12 (producción real): simple/general, failed, hace semanas.
+    PeriodRadiographyRun::query()->create([
+        'period_id' => $period->id, 'period_summary_id' => $summary->id,
+        'report_type' => 'simple', 'scope' => 'general', 'status' => 'failed',
+        'started_at' => '2026-08-06 11:59:38', 'finished_at' => '2026-08-06 11:59:50',
+        'error_message' => 'No se pudo generar la Radiografía.',
+    ]);
+
+    // RUN 17 (producción real): month_vs_month/general/comparison=X, failed.
+    PeriodRadiographyRun::query()->create([
+        'period_id' => $period->id, 'period_summary_id' => $summary->id,
+        'report_type' => 'month_vs_month', 'scope' => 'general', 'comparison_period_id' => $comparePeriod->id,
+        'status' => 'failed', 'started_at' => now()->subDay(), 'finished_at' => now()->subDay(),
+        'error_message' => 'Fallo comparativo simulado.',
+    ]);
+
+    // RUN 22 (producción real): simple/employee/employee_id=17, success.
+    $run22 = PeriodRadiographyRun::query()->create([
+        'period_id' => $period->id, 'period_summary_id' => $summary->id,
+        'report_type' => 'simple', 'scope' => 'employee', 'employee_id' => $employee->id, 'status' => 'success',
+        'started_at' => '2026-08-25 14:37:40', 'finished_at' => '2026-08-25 14:37:49',
+        'output_excel_path' => 'radiografias/gestor_17.xlsx', 'output_pdf_path' => 'radiografias/gestor_17.pdf',
+    ]);
+
+    // La config activa del wizard (Etapa 4): simple / employee / employee_id=17.
+    $progress = $this->actingAs($user)->getJson(
+        "/historico-general/{$period->id}/generar-reporte/progreso?report_type=simple&scope=employee&employee_id={$employee->id}"
+    );
+
+    $progress->assertOk()->assertJson([
+        'run_id'        => $run22->id,
+        'status'        => 'success',
+        'error_message' => null,
+    ]);
+    expect($progress->json('excel_url'))->not->toBeNull();
+    expect($progress->json('pdf_url'))->not->toBeNull();
 });
