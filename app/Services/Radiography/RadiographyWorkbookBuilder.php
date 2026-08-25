@@ -6298,6 +6298,12 @@ class RadiographyWorkbookBuilder
         $colSheet->getStyle("B{$cr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $this->setColWidths($colSheet, ['A' => 28, 'B' => 20, 'C' => 12, 'D' => 10]);
 
+        $chartHelper->addBarChartFromData(
+            $colSheet,
+            $colRows->map(fn ($row) => ['label' => $row['product'] ?? $row['producto'] ?? '—', 'value' => (float) ($row['monto'] ?? $row['amount'] ?? 0)])->all(),
+            'Colocación por producto', 'branch_colocacion_producto_' . $branchId, 6, 3, 'F3',
+        );
+
         // ── Sheet 6: RECUPERACIÓN ────────────────────────────────────────────
         $recSheet = $spreadsheet->createSheet()->setTitle('RECUPERACIÓN');
         $this->sheetTitle($recSheet, 'A1:E1', 'RECUPERACIÓN — ' . $branchName . ' — ' . strtoupper($period->label));
@@ -6321,6 +6327,16 @@ class RadiographyWorkbookBuilder
         $recSheet->getStyle("E{$rr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $this->setColWidths($recSheet, ['A' => 22, 'B' => 18, 'C' => 18, 'D' => 14, 'E' => 18]);
 
+        $chartHelper->addBarChartFromData(
+            $recSheet, [
+                ['label' => 'Capital', 'value' => (float) ($recRow['capital'] ?? 0)],
+                ['label' => 'Intereses', 'value' => (float) ($recRow['interest'] ?? 0)],
+                ['label' => 'IVA', 'value' => (float) ($recRow['tax'] ?? 0)],
+                ['label' => 'Cargos', 'value' => (float) ($recRow['charges'] ?? 0)],
+            ],
+            'Recuperación por componente', 'branch_recuperacion_componentes_' . $branchId, 7, 3, 'G3',
+        );
+
         // ── Sheet 7: P. INTERSUC. ────────────────────────────────────────────
         $lSheet = $spreadsheet->createSheet()->setTitle('P. INTERSUC.');
         $this->sheetTitle($lSheet, 'A1:D1', 'PRÉSTAMOS INTERSUCURSALES — ' . $branchName . ' — ' . strtoupper($period->label));
@@ -6342,6 +6358,57 @@ class RadiographyWorkbookBuilder
         }
         if ($lr === 3) { $lSheet->setCellValue('A3', 'Sin préstamos intersucursales para esta sucursal en el periodo.'); }
         $this->setColWidths($lSheet, ['A' => 14, 'B' => 28, 'C' => 18, 'D' => 16]);
+
+        // ── Sheet 8: EFECTIVIDAD (2026-08-25) ────────────────────────────────
+        // Misma llamada que ya usa el PDF de sucursal (buildEfectividadCobranza($period,
+        // null, $branchId)) — nunca recalculado aparte. warmDataIds() es necesario porque
+        // esta instancia se resuelve ad-hoc vía app() y nunca pasó por build().
+        $snapshotBuilderForEf = app(\App\Services\Radiography\RadiographySnapshotBuilder::class);
+        $snapshotBuilderForEf->warmDataIds($period);
+        $efectividadB = $snapshotBuilderForEf->buildEfectividadCobranza($period, null, $branchId);
+
+        $efSheetB = $spreadsheet->createSheet()->setTitle('EFECTIVIDAD');
+        $this->sheetTitle($efSheetB, 'A1:F1', 'EFECTIVIDAD DE COBRANZA — ' . $branchName . ' — ' . strtoupper($period->label));
+        $this->colHeaders($efSheetB, 2, ['A' => 'ESTATUS', 'B' => 'CONTRATOS', 'C' => 'CAPITAL', 'D' => 'INTERÉS', 'E' => 'IMPUESTO', 'F' => 'TOTAL']);
+        $ebr = 3;
+        $efBHasData = false;
+        foreach (['vigente' => 'Vigente', 'atrasado' => 'Atrasado', 'vencido' => 'Vencido'] as $key => $label) {
+            $e = $efectividadB[$key] ?? null;
+            if (!$e) continue;
+            $efBHasData = true;
+            $efSheetB->setCellValue("A{$ebr}", $label);
+            $efSheetB->setCellValue("B{$ebr}", (int) $e['contratos']);
+            $efSheetB->setCellValue("C{$ebr}", (float) $e['capital']);
+            $efSheetB->setCellValue("D{$ebr}", (float) $e['interes']);
+            $efSheetB->setCellValue("E{$ebr}", (float) $e['impuesto']);
+            $efSheetB->setCellValue("F{$ebr}", (float) $e['total']);
+            $this->dataRow($efSheetB, "A{$ebr}:F{$ebr}", ($ebr - 3) % 2 === 0);
+            foreach (['C', 'D', 'E', 'F'] as $col) { $efSheetB->getStyle("{$col}{$ebr}")->getNumberFormat()->setFormatCode(self::CURRENCY); }
+            $ebr++;
+        }
+        if ($efBHasData && !empty($efectividadB['total'])) {
+            $t = $efectividadB['total'];
+            $efSheetB->setCellValue("A{$ebr}", 'Total');
+            $efSheetB->setCellValue("B{$ebr}", (int) $t['contratos']);
+            $efSheetB->setCellValue("C{$ebr}", (float) $t['capital']);
+            $efSheetB->setCellValue("D{$ebr}", (float) $t['interes']);
+            $efSheetB->setCellValue("E{$ebr}", (float) $t['impuesto']);
+            $efSheetB->setCellValue("F{$ebr}", (float) $t['total']);
+            $this->totalsRow($efSheetB, "A{$ebr}:F{$ebr}");
+            foreach (['C', 'D', 'E', 'F'] as $col) { $efSheetB->getStyle("{$col}{$ebr}")->getNumberFormat()->setFormatCode(self::CURRENCY); }
+        }
+        if (!$efBHasData) { $efSheetB->setCellValue('A3', 'Sin datos de efectividad de cobranza para esta sucursal en el periodo.'); }
+        $this->setColWidths($efSheetB, ['A' => 16, 'B' => 12, 'C' => 16, 'D' => 16, 'E' => 16, 'F' => 16]);
+
+        $chartHelper->addBarChartFromData(
+            $efSheetB, [
+                ['label' => 'Vigente', 'value' => (float) ($efectividadB['vigente']['total'] ?? 0)],
+                ['label' => 'Atrasado', 'value' => (float) ($efectividadB['atrasado']['total'] ?? 0)],
+                ['label' => 'Vencido', 'value' => (float) ($efectividadB['vencido']['total'] ?? 0)],
+            ],
+            // dataStartCol=8 (H): la tabla ocupa A:F (incluye TOTAL en F).
+            'Efectividad de cobranza', 'branch_efectividad_' . $branchId, 8, 3, 'H3',
+        );
 
         if ($spreadsheet->getSheetCount() > 1) {
             try {
@@ -6381,8 +6448,13 @@ class RadiographyWorkbookBuilder
         // (RadiographySnapshotBuilder::applyEmployeeScope()), en vez de comparar texto contra
         // el nombre de display ya expuesto (frágil: causa raíz real de "funciona un mes,
         // falla otro" — ver auditoría 2026-08-24). El nombre solo se usa como fallback.
-        $empRow = app(\App\Services\Radiography\RadiographySnapshotBuilder::class)
-            ->findEmployeeGestorRowByEmployeeId($period, $employeeId);
+        // NOTA: se guarda la instancia (no solo el resultado) porque
+        // findEmployeeGestorRowByEmployeeId() la "calienta" (fija $this->dataIds internamente,
+        // ver su implementación) — reutilizarla más abajo para buildEfectividadCobranza() evita
+        // llamar ese método sobre una instancia nueva sin dataIds resuelto (dataIds vacío →
+        // resultado todo-ceros silencioso).
+        $snapshotBuilder = app(\App\Services\Radiography\RadiographySnapshotBuilder::class);
+        $empRow = $snapshotBuilder->findEmployeeGestorRowByEmployeeId($period, $employeeId);
 
         $empGest = $snap['sections']['employees_gestores'] ?? [];
         if (!$empRow) {
@@ -6491,11 +6563,33 @@ class RadiographyWorkbookBuilder
         $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
 
+        // Desglose completo (2026-08-25) — antes solo mostraba la fórmula en una fila;
+        // ahora expone Ingreso base/Gastos totales/EBITDA/Margen por separado, igual que el
+        // PDF de gestor (RadiografiaExportService::resolveEmployeeRow()), MISMOS valores ya
+        // calculados arriba, nunca recalculados.
+        $margen    = $ingresoBase > 0 ? round($utilidad / $ingresoBase * 100, 2) : 0.0;
+        $categoria = RadiographyStyleHelper::ebitdaCategory($utilidad);
+        $catColors = RadiographyStyleHelper::categoryColors($categoria);
+
         $this->sectionHeader($sheet, "A{$r}:D{$r}", '4. EBITDA ESTIMADO'); $r++;
-        $sheet->setCellValue("A{$r}", 'Ingreso base EBITDA − (Gastos + Pagos + Bonos − Desctos)');
-        $sheet->setCellValue("B{$r}", $utilidad);
+        foreach ([
+            ['Ingreso base EBITDA', $ingresoBase, 'currency'],
+            ['Gastos totales (Gastos + Nómina neta)', $gastos + $pagos + $bonos - $desctos, 'currency'],
+            ['EBITDA', $utilidad, 'currency'],
+            ['Margen EBITDA', $margen, 'percent'],
+        ] as $i => [$label, $val, $fmt]) {
+            $sheet->setCellValue("A{$r}", $label); $sheet->setCellValue("B{$r}", $val);
+            $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+            $this->applyFmt($sheet, "B{$r}", $fmt, $val);
+            $r++;
+        }
+        $sheet->setCellValue("A{$r}", 'Categoría EBITDA'); $sheet->setCellValue("B{$r}", $categoria);
         $this->dataRow($sheet, "A{$r}:D{$r}", true);
-        $this->applyFmt($sheet, "B{$r}", 'currency', $utilidad);
+        $sheet->getStyle("B{$r}")->applyFromArray([
+            'font'      => ['bold' => true, 'size' => 9, 'color' => ['argb' => $catColors['fg']]],
+            'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $catColors['bg']]],
+            'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
+        ]);
         $r += 2;
 
         if ($extraExpenseNotes) {
@@ -6544,8 +6638,7 @@ class RadiographyWorkbookBuilder
         $noiSheet = $spreadsheet->createSheet()->setTitle('NÓMINA');
         $this->sheetTitle($noiSheet, 'A1:E1', 'DETALLE DE NÓMINA — ' . mb_strtoupper($empName));
         $this->colHeaders($noiSheet, 2, ['A' => 'CONCEPTO', 'B' => 'TIPO', 'C' => 'MONTO', 'D' => 'FECHA', 'E' => 'PERIODO NÓMINA']);
-        $resolveDataIds = app(\App\Services\Radiography\RadiographySnapshotBuilder::class)
-            ->resolveDataIdsPublic($period);
+        $resolveDataIds = $snapshotBuilder->resolveDataIdsPublic($period);
         $noiEmployeeIds = !empty($empRow['_employee_ids']) ? $empRow['_employee_ids'] : [$employeeId];
         $noiRows = \Illuminate\Support\Facades\DB::table('fact_noi_movements as n')
             ->join('employees as e', 'n.employee_id', '=', 'e.id')
@@ -6638,6 +6731,108 @@ class RadiographyWorkbookBuilder
             $portEmpSheet,
             array_map(fn ($k, $b) => ['label' => $b['label'] ?? $k, 'value' => (float) ($b['monto'] ?? 0)], array_keys($moraBucketsRows), $moraBucketsRows),
             'Mora por bucket', 'mora_bucket_' . $employeeId, 6, 20, 'F20',
+        );
+
+        // ── Sheet 5: RECUPERACIÓN (2026-08-25) ───────────────────────────────
+        // Componentes + desglose por producto — MISMOS campos internos que ya usa el PDF
+        // de gestor (RadiografiaExportService::resolveEmployeeRow()) y Web
+        // (applyEmployeeScope()) — nunca recalculados aparte.
+        $recEmpSheet = $spreadsheet->createSheet()->setTitle('RECUPERACIÓN');
+        $this->sheetTitle($recEmpSheet, 'A1:D1', 'RECUPERACIÓN — ' . mb_strtoupper($empName));
+        $recoveryComponents = $empRow['_recovery_components'] ?? null;
+        $recoveryByProduct  = $empRow['_recovery_by_product']  ?? [];
+        $recoveryComponentLabels = [
+            'capital' => 'Capital recuperado', 'interes' => 'Intereses', 'impuesto' => 'Impuestos',
+            'moratorios' => 'Moratorios', 'cargos_adicionales' => 'Cargos adicionales',
+            'cargos_inicio' => 'Cargos al inicio', 'comision_apertura' => 'Comisión por apertura',
+            'excedentes' => 'Excedentes recuperados', 'otros' => 'Otros',
+        ];
+        $this->colHeaders($recEmpSheet, 2, ['A' => 'COMPONENTE', 'B' => 'MONTO', 'C' => '', 'D' => '']);
+        $rr = 3;
+        if (is_array($recoveryComponents)) {
+            foreach ($recoveryComponents as $key => $val) {
+                $recEmpSheet->setCellValue("A{$rr}", $recoveryComponentLabels[$key] ?? ucfirst(str_replace('_', ' ', $key)));
+                $recEmpSheet->setCellValue("B{$rr}", (float) $val);
+                $this->dataRow($recEmpSheet, "A{$rr}:D{$rr}", ($rr - 3) % 2 === 0);
+                $recEmpSheet->getStyle("B{$rr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $rr++;
+            }
+            $recEmpSheet->setCellValue("A{$rr}", 'Total recuperación');
+            $recEmpSheet->setCellValue("B{$rr}", $rec);
+            $this->totalsRow($recEmpSheet, "A{$rr}:D{$rr}");
+            $recEmpSheet->getStyle("B{$rr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $rr += 2;
+        } else {
+            $recEmpSheet->setCellValue('A3', 'Sin movimientos de recuperación para este gestor en el periodo.');
+            $rr = 5;
+        }
+        $this->sectionHeader($recEmpSheet, "A{$rr}:D{$rr}", 'RECUPERACIÓN POR PRODUCTO'); $rr++;
+        $this->colHeaders($recEmpSheet, $rr, ['A' => 'PRODUCTO', 'B' => 'RECUPERACIÓN', 'C' => '% DEL TOTAL', 'D' => '']); $rr++;
+        $rbpStart = $rr;
+        foreach ($recoveryByProduct as $i => $rp) {
+            $recEmpSheet->setCellValue("A{$rr}", $rp['producto'] ?? '—');
+            $recEmpSheet->setCellValue("B{$rr}", (float) ($rp['recuperacion'] ?? 0));
+            $recEmpSheet->setCellValue("C{$rr}", $rec > 0 ? round(((float) ($rp['recuperacion'] ?? 0)) / $rec, 4) : 0);
+            $this->dataRow($recEmpSheet, "A{$rr}:D{$rr}", $i % 2 === 0);
+            $recEmpSheet->getStyle("B{$rr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $recEmpSheet->getStyle("C{$rr}")->getNumberFormat()->setFormatCode(self::PERCENT);
+            $rr++;
+        }
+        if (empty($recoveryByProduct)) { $recEmpSheet->setCellValue("A{$rbpStart}", 'Sin desglose por producto disponible para este gestor.'); }
+        $this->setColWidths($recEmpSheet, ['A' => 28, 'B' => 18, 'C' => 12, 'D' => 12]);
+
+        $chartHelper->addBarChartFromData(
+            $recEmpSheet,
+            array_map(fn ($p) => ['label' => $p['producto'] ?? '—', 'value' => (float) ($p['recuperacion'] ?? 0)], $recoveryByProduct),
+            'Recuperación por producto', 'recuperacion_producto_' . $employeeId, 6, 3, 'F3',
+        );
+
+        // ── Sheet 6: EFECTIVIDAD (2026-08-25) ────────────────────────────────
+        // Vigente/atrasado/vencido — misma llamada que ya usa el PDF de gestor
+        // (buildEfectividadCobranza($period, $empRow['name'])), nunca recalculado aparte.
+        $efSheet = $spreadsheet->createSheet()->setTitle('EFECTIVIDAD');
+        $this->sheetTitle($efSheet, 'A1:F1', 'EFECTIVIDAD DE COBRANZA — ' . mb_strtoupper($empName));
+        $efectividad = $snapshotBuilder->buildEfectividadCobranza($period, $empRow['name'] ?? null);
+        $this->colHeaders($efSheet, 2, ['A' => 'ESTATUS', 'B' => 'CONTRATOS', 'C' => 'CAPITAL', 'D' => 'INTERÉS', 'E' => 'IMPUESTO', 'F' => 'TOTAL']);
+        $er = 3;
+        $efHasData = false;
+        foreach (['vigente' => 'Vigente', 'atrasado' => 'Atrasado', 'vencido' => 'Vencido'] as $key => $label) {
+            $e = $efectividad[$key] ?? null;
+            if (!$e) continue;
+            $efHasData = true;
+            $efSheet->setCellValue("A{$er}", $label);
+            $efSheet->setCellValue("B{$er}", (int) $e['contratos']);
+            $efSheet->setCellValue("C{$er}", (float) $e['capital']);
+            $efSheet->setCellValue("D{$er}", (float) $e['interes']);
+            $efSheet->setCellValue("E{$er}", (float) $e['impuesto']);
+            $efSheet->setCellValue("F{$er}", (float) $e['total']);
+            $this->dataRow($efSheet, "A{$er}:F{$er}", ($er - 3) % 2 === 0);
+            foreach (['C', 'D', 'E', 'F'] as $col) { $efSheet->getStyle("{$col}{$er}")->getNumberFormat()->setFormatCode(self::CURRENCY); }
+            $er++;
+        }
+        if ($efHasData && !empty($efectividad['total'])) {
+            $t = $efectividad['total'];
+            $efSheet->setCellValue("A{$er}", 'Total');
+            $efSheet->setCellValue("B{$er}", (int) $t['contratos']);
+            $efSheet->setCellValue("C{$er}", (float) $t['capital']);
+            $efSheet->setCellValue("D{$er}", (float) $t['interes']);
+            $efSheet->setCellValue("E{$er}", (float) $t['impuesto']);
+            $efSheet->setCellValue("F{$er}", (float) $t['total']);
+            $this->totalsRow($efSheet, "A{$er}:F{$er}");
+            foreach (['C', 'D', 'E', 'F'] as $col) { $efSheet->getStyle("{$col}{$er}")->getNumberFormat()->setFormatCode(self::CURRENCY); }
+        }
+        if (!$efHasData) { $efSheet->setCellValue('A3', 'Sin datos de efectividad de cobranza para este gestor en el periodo.'); }
+        $this->setColWidths($efSheet, ['A' => 16, 'B' => 12, 'C' => 16, 'D' => 16, 'E' => 16, 'F' => 16]);
+
+        $chartHelper->addBarChartFromData(
+            $efSheet, [
+                ['label' => 'Vigente', 'value' => (float) ($efectividad['vigente']['total'] ?? 0)],
+                ['label' => 'Atrasado', 'value' => (float) ($efectividad['atrasado']['total'] ?? 0)],
+                ['label' => 'Vencido', 'value' => (float) ($efectividad['vencido']['total'] ?? 0)],
+            ],
+            // dataStartCol=8 (H): la tabla de este sheet ocupa A:F (incluye TOTAL en F), a
+            // diferencia de RESUMEN/RECUPERACIÓN/COLOCACIÓN/CARTERA cuyas tablas terminan en D.
+            'Efectividad de cobranza', 'efectividad_' . $employeeId, 8, 3, 'H3',
         );
 
         try {

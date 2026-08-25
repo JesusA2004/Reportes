@@ -71,7 +71,7 @@ class RadiographyChartSvgBuilder
 
         $svg .= '</svg>';
 
-        return $svg;
+        return $this->wrapAsImg($svg, $width, $height);
     }
 
     /**
@@ -126,7 +126,26 @@ class RadiographyChartSvgBuilder
 
         $svg .= '</svg>';
 
-        return $svg;
+        return $this->wrapAsImg($svg, $width, $height);
+    }
+
+    /**
+     * dompdf (v3.1.5, esta instalación) no renderiza <svg> inline embebido directamente
+     * en el flujo HTML — lo trata como marcado desconocido y solo imprime los nodos de
+     * texto en línea, descartando los <rect>/<path> (verificado empíricamente: ver
+     * commit que introduce este método). Envolver el mismo SVG como
+     * <img src="data:image/svg+xml;base64,...">, en cambio, sí lo rasteriza/renderiza
+     * correctamente vía el adaptador de imágenes de dompdf. Mismo SVG, mismo dataset —
+     * solo cambia el contenedor HTML que dompdf sabe interpretar.
+     */
+    private function wrapAsImg(string $svg, int $width, int $height): string
+    {
+        $b64 = base64_encode($svg);
+
+        return sprintf(
+            '<img src="data:image/svg+xml;base64,%s" width="%d" height="%d" style="display:block;" />',
+            $b64, $width, $height
+        );
     }
 
     private function truncate(string $value, int $max): string

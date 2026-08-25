@@ -1095,6 +1095,20 @@ class RadiographySnapshotBuilder
         return $this->resolveDataIds($period);
     }
 
+    /**
+     * "Calienta" $this->dataIds/$this->closingDataIds sin reconstruir todo el snapshot —
+     * necesario antes de llamar métodos que leen ese estado directamente (p.ej.
+     * buildEfectividadCobranza()) sobre una instancia resuelta ad-hoc vía app() que nunca
+     * pasó por build()/findEmployeeGestorRowByEmployeeId() (que ya calienta este mismo
+     * estado como efecto secundario, ver esa implementación). Sin esto, esos métodos
+     * filtran contra un array vacío y devuelven ceros silenciosos — no un error visible.
+     */
+    public function warmDataIds(Period $period): void
+    {
+        $this->dataIds        = $this->resolveDataIds($period);
+        $this->closingDataIds = $this->resolveClosingDataIds($period);
+    }
+
     private function resolveDataIds(Period $period): array
     {
         $allPeriods = Period::all();

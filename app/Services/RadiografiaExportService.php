@@ -11,6 +11,7 @@ use App\Services\Radiography\RadiographySnapshotBuilder;
 use App\Services\Radiography\RadiographyWorkbookBuilder;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use RuntimeException;
@@ -212,13 +213,14 @@ class RadiografiaExportService
             if (!$branchId) {
                 throw new RuntimeException('Se requiere branch_id para reportes por sucursal.');
             }
-            $branchRow = $this->resolveBranchRow($snapshot, $branchId);
+            $branchRow  = $this->resolveBranchRow($snapshot, $branchId);
+            $branchData = $this->resolveBranchPdfData($period, $snapshot, $branchId, $branchRow);
 
-            $pdf = Pdf::loadView('reports.radiography-pdf-branch', [
+            $pdf = Pdf::loadView('reports.radiography-pdf-branch', array_merge($branchData, [
                 'period'     => $period,
                 'snap'       => $snapshot,
                 'branchRow'  => $branchRow,
-            ])->setPaper('letter', 'portrait')->setOption('isPhpEnabled', true);
+            ]))->setPaper('letter', 'portrait')->setOption('isPhpEnabled', true);
             $suffix = 'sucursal_' . $branchId;
         } elseif ($scope === 'employee') {
             $employeeId = (int) ($config['employee_id'] ?? 0);
@@ -311,6 +313,202 @@ class RadiografiaExportService
     }
 
     /**
+     * Enriquece $branchRow (branch_radiography.branches, ya resuelto por resolveBranchRow())
+     * con los mismos desgloses/gráficas que resolveEmployeeRow() ya construye para gestor —
+     * mismo dataset canónico, cero cálculos financieros nuevos (solo reshaping de
+     * presentación + reutilización de métodos canónicos ya existentes). Notas por sección:
+     *  - EBITDA (ingreso base/gastos totales/nómina/margen/categoría): reutiliza
+     *    BranchRadiographyCalculator::ingresoEbitdaBaseFor()/gastosTotalesFor()/
+     *    nominaTotalFor()/ebitdaFinalFor()/margenEbitdaFor() — las MISMAS fuentes que ya usa
+     *    RadiographyStyleHelper::branchEbitdaEstimate() (blade anterior).
+     *  - Recuperación por producto: NO se agrega aquí — Web mismo expone esto como "no
+     *    disponible por sucursal todavía" bajo alcance sucursal (ver
+     *    RadiographySnapshotBuilder::applyBranchScope(), comentario junto a
+     *    'recovery_by_product') — el PDF respeta el mismo límite, nunca inventa un desglose
+     *    que Web no tiene.
+     *  - Colocación por producto: SÍ existe por sucursal (sections.placement_by_branch_product,
+     *    el mismo campo que ya usa Web bajo applyBranchScope()) — se reutiliza tal cual,
+     *    filtrado por nombre de sucursal.
+     *  - Nómina y Capital Humano detallada: usa el MISMO universo de empleados que
+     *    computeNoiPercepcionesDeduccionesForBranch() (employee_branch_assignments del
+     *    periodo), para que el desglose por categoría siempre sume el mismo total que el KPI
+     *    agregado.
+     *  - Mora por bucket: mismos campos "mora_X_Y"/"mora_X_Y_cnt" que ya usa
+     *    RadiographySnapshotBuilder::buildPortfolioBuckets() (privado, no accesible desde
+     *    aquí) — mismo criterio, sin duplicar cálculo financiero, solo reshaping.
+     *  - Efectividad de cobranza: reutiliza buildEfectividadCobranza($period, null,
+     *    $branchId), la MISMA llamada que ya hace applyBranchScope() para Web.
+     */
+    private function resolveBranchPdfData(Period $period, array $snapshot, int $branchId, array $branchRow): array
+    {
+        $branchName = (string) ($branchRow['sucursal'] ?? '');
+
+        $rec     = (float) ($branchRow['recuperacion_total'] ?? 0);
+        $coloc   = (float) ($branchRow['colocacion'] ?? 0);
+        $cartera = (float) ($branchRow['valor_cartera'] ?? 0);
+        $gastos  = (float) ($branchRow['gastos_operativos'] ?? 0);
+
+        $bucketFields = [
+            'mora_1_30'     => 'mora_0_30',
+            'mora_31_60'    => 'mora_31_60',
+            'mora_61_90'    => 'mora_61_90',
+            'mora_91_120'   => 'mora_91_120',
+            'mora_120_plus' => 'mora_120_plus',
+        ];
+        $moraBuckets  = [];
+        $vencida      = 0.0;
+        $cntMoraTotal = 0;
+        foreach ($bucketFields as $bucketKey => $field) {
+            $monto = (float) ($branchRow[$field] ?? 0);
+            $cnt   = (int) ($branchRow["{$field}_cnt"] ?? 0);
+            $vencida      += $monto;
+            $cntMoraTotal += $cnt;
+            $moraBuckets[$bucketKey] = ['contratos' => $cnt, 'monto' => $monto];
+        }
+        $cntAlCorriente = max(0, (int) ($branchRow['contratos'] ?? 0) - $cntMoraTotal);
+        $moraBuckets = ['al_corriente' => ['contratos' => $cntAlCorriente, 'monto' => max(0, $cartera - $vencida)]] + $moraBuckets;
+        $mora = $cartera > 0 ? round($vencida / $cartera * 100, 2) : 0.0;
+
+        $recoveryComponents = [
+            'capital_recuperado'      => (float) ($branchRow['capital_recuperado']      ?? 0),
+            'interes_recuperado'      => (float) ($branchRow['interes_recuperado']      ?? 0),
+            'impuesto_recuperado'     => (float) ($branchRow['impuesto_recuperado']     ?? 0),
+            'charges'                 => (float) ($branchRow['charges']                 ?? 0),
+            'cargos_adicionales'      => (float) ($branchRow['cargos_adicionales']      ?? 0),
+            'excedente_recuperado'    => (float) ($branchRow['excedente_recuperado']    ?? 0),
+            'comision_apertura'       => (float) ($branchRow['comision_apertura']       ?? 0),
+            'cargos_inicio'           => (float) ($branchRow['cargos_inicio']           ?? 0),
+            'seguro_crece_reconocido' => (float) ($branchRow['seguro_crece_reconocido'] ?? 0),
+            'otros_recuperacion'      => (float) ($branchRow['otros_recuperacion']      ?? 0),
+        ];
+
+        $placementsByProduct = collect($snapshot['sections']['placement_by_branch_product'] ?? [])
+            ->filter(fn ($r) => strtoupper(trim($r['branch'] ?? '')) === strtoupper(trim($branchName)))
+            ->map(fn ($r) => ['producto' => $r['product'] ?? '—', 'operaciones' => (int) ($r['creditos'] ?? 0), 'colocacion' => (float) ($r['monto'] ?? 0)])
+            ->values()->all();
+
+        // Detalle de nómina NOI por concepto — reutiliza sections.payroll_by_branch_concept,
+        // la MISMA resolución empleado→sucursal (EBA + activity-lookup con fallback) que ya
+        // usa Web bajo applyBranchScope() (ver RadiographySnapshotBuilder::
+        // buildPayrollByBranchConceptResolved()). Un query directo a
+        // employee_branch_assignments (más simple) NO sirve aquí: muchos colaboradores no
+        // tienen asignación manual y solo se resuelven por actividad, así que habría dado
+        // falsos $0.00 para sucursales con nómina real. Es un SUBCONJUNTO informativo de
+        // "Nómina y Capital Humano" (nominaTotalFor() también incluye IMSS patronal y gastos
+        // de empleados vía nómina, que no vienen de fact_noi_movements) — nunca se presenta
+        // como si sumara contra ese KPI.
+        $branchCalc     = app(BranchRadiographyCalculator::class);
+        $payrollByBranch = collect($snapshot['sections']['payroll_by_branch_concept'] ?? [])
+            ->first(fn ($_, $k) => strtoupper(trim($k)) === strtoupper(trim($branchName))) ?? [];
+
+        $percepciones = [];
+        $deducciones  = [];
+        foreach ($payrollByBranch as $concept => $amount) {
+            $amount = (float) $amount;
+            if ($amount == 0.0) {
+                continue;
+            }
+            if (str_starts_with((string) $concept, 'D')) {
+                $deducciones[] = ['concepto' => (string) $concept, 'monto' => round($amount, 2)];
+            } else {
+                $percepciones[] = ['concepto' => (string) $concept, 'monto' => round($amount, 2)];
+            }
+        }
+        $payrollDetail = [
+            'percepciones'       => $percepciones,
+            'deducciones'        => $deducciones,
+            'percepciones_total' => round((float) array_sum(array_column($percepciones, 'monto')), 2),
+            'deducciones_total'  => round((float) array_sum(array_column($deducciones, 'monto')), 2),
+        ];
+
+        $nomina        = BranchRadiographyCalculator::nominaTotalFor($branchRow);
+        $ingresoBase   = BranchRadiographyCalculator::ingresoEbitdaBaseFor($branchRow);
+        $gastosTotales = BranchRadiographyCalculator::gastosTotalesFor($branchRow);
+        $ebitda        = BranchRadiographyCalculator::ebitdaFinalFor($branchRow);
+        $margen        = BranchRadiographyCalculator::margenEbitdaFor($branchRow);
+        $categoria     = \App\Services\Radiography\RadiographyStyleHelper::ebitdaCategory($ebitda);
+        $catColors     = \App\Services\Radiography\RadiographyStyleHelper::categoryColors($categoria);
+
+        $gastosDetalle = (array) ($branchRow['gastos_detalle'] ?? []);
+        arsort($gastosDetalle);
+
+        $fondeo      = (float) ($branchRow['prestamos_fondea'] ?? 0);
+        $excedente   = (float) ($branchRow['excedentes']       ?? 0);
+
+        // warmDataIds() ANTES de buildEfectividadCobranza(): $this->snapshotBuilder es el
+        // mismo objeto usado arriba para $snapshot, pero buildSnapshot()/buildSnapshotCached()
+        // puede haber servido esa lectura desde caché (sin invocar build() de nuevo en ESTA
+        // instancia) — dejaría $this->dataIds vacío y buildEfectividadCobranza() devolvería
+        // ceros silenciosos, no un error. El PDF/Excel de gestor no sufre esto porque
+        // findEmployeeGestorRowByEmployeeId() recalienta ese estado incondicionalmente en
+        // cada llamada (ver su implementación) — sucursal no tiene un equivalente, así que se
+        // recalienta explícitamente aquí.
+        $this->snapshotBuilder->warmDataIds($period);
+        $efectividad = $this->snapshotBuilder->buildEfectividadCobranza($period, null, $branchId);
+
+        $charts = app(\App\Services\Radiography\RadiographyChartSvgBuilder::class);
+
+        $chartRecuperacionVsColocacion = $charts->horizontalBarChart([
+            ['label' => 'Recuperación', 'value' => $rec],
+            ['label' => 'Colocación', 'value' => $coloc],
+        ], 'Recuperación vs Colocación');
+
+        $chartCarteraSanaVsVencida = $charts->stackedCompositionBar([
+            ['label' => 'Al corriente', 'value' => max(0, $cartera - $vencida)],
+            ['label' => 'Vencida', 'value' => $vencida],
+        ], 'Cartera sana vs vencida');
+
+        $moraBucketLabels = [
+            'al_corriente' => 'Al corriente', 'mora_1_30' => 'Mora 1-30', 'mora_31_60' => 'Mora 31-60',
+            'mora_61_90'   => 'Mora 61-90',   'mora_91_120' => 'Mora 91-120', 'mora_120_plus' => 'Mora 120+',
+        ];
+        $chartMoraPorBucket = $charts->horizontalBarChart(
+            array_map(fn ($k, $b) => ['label' => $moraBucketLabels[$k] ?? $k, 'value' => (float) $b['monto']], array_keys($moraBuckets), $moraBuckets),
+            'Mora por bucket',
+        );
+
+        $chartEbitda = $charts->horizontalBarChart([
+            ['label' => 'Ingreso base EBITDA', 'value' => $ingresoBase],
+            ['label' => 'Gastos totales', 'value' => $gastosTotales],
+            ['label' => 'EBITDA', 'value' => $ebitda],
+        ], 'Ingreso EBITDA vs Gastos vs EBITDA');
+
+        $chartNominaComposicion = $charts->stackedCompositionBar(
+            array_map(fn ($p) => ['label' => $p['concepto'], 'value' => (float) $p['monto']], $payrollDetail['percepciones'] ?? []),
+            'Composición de nómina (percepciones)',
+        );
+
+        $chartColocacionPorProducto = $charts->horizontalBarChart(
+            array_map(fn ($p) => ['label' => $p['producto'], 'value' => (float) $p['colocacion']], $placementsByProduct),
+            'Colocación por producto',
+        );
+
+        $chartEfectividad = $charts->horizontalBarChart([
+            ['label' => 'Vigente', 'value' => (float) ($efectividad['vigente']['total'] ?? 0)],
+            ['label' => 'Atrasado', 'value' => (float) ($efectividad['atrasado']['total'] ?? 0)],
+            ['label' => 'Vencido', 'value' => (float) ($efectividad['vencido']['total'] ?? 0)],
+        ], 'Efectividad de cobranza');
+
+        return [
+            'rec' => $rec, 'coloc' => $coloc, 'cartera' => $cartera, 'vencida' => $vencida, 'mora' => $mora,
+            'ops' => array_sum(array_column($placementsByProduct, 'operaciones')),
+            'gastos' => $gastos, 'nomina' => $nomina, 'ingresoBase' => $ingresoBase, 'gastosTotales' => $gastosTotales,
+            'ebitda' => $ebitda, 'margen' => $margen, 'ebitdaCategoria' => $categoria, 'ebitdaCategoriaColors' => $catColors,
+            'moraBuckets' => $moraBuckets, 'recoveryComponents' => $recoveryComponents,
+            'placementsByProduct' => $placementsByProduct, 'payrollDetail' => $payrollDetail,
+            'gastosDetalle' => $gastosDetalle, 'fondeo' => $fondeo, 'excedente' => $excedente,
+            'efectividad' => $efectividad,
+            'chartRecuperacionVsColocacion' => $chartRecuperacionVsColocacion,
+            'chartCarteraSanaVsVencida'     => $chartCarteraSanaVsVencida,
+            'chartMoraPorBucket'            => $chartMoraPorBucket,
+            'chartEbitda'                   => $chartEbitda,
+            'chartNominaComposicion'        => $chartNominaComposicion,
+            'chartColocacionPorProducto'    => $chartColocacionPorProducto,
+            'chartEfectividad'              => $chartEfectividad,
+        ];
+    }
+
+    /**
      * Resolve a single employee's gestor metrics. Identidad PRIMERO por employee_id, vía
      * RadiographySnapshotBuilder::findEmployeeGestorRowByEmployeeId() — la MISMA vinculación
      * robusta que usa Web (applyEmployeeScope()), en vez de comparar texto contra el nombre
@@ -393,8 +591,18 @@ class RadiografiaExportService
             ['label' => 'Vencida', 'value' => $vencida],
         ], 'Cartera sana vs vencida');
 
+        // Mismas etiquetas que RadiographySnapshotBuilder::moraBucketDefs() y el blade de
+        // gestor — solo texto de presentación, no recalcula montos.
+        $moraBucketLabels = [
+            'al_corriente'  => 'Al corriente',
+            'mora_1_30'     => 'Mora 1-30',
+            'mora_31_60'    => 'Mora 31-60',
+            'mora_61_90'    => 'Mora 61-90',
+            'mora_91_120'   => 'Mora 91-120',
+            'mora_120_plus' => 'Mora 120+',
+        ];
         $chartMoraPorBucket = $charts->horizontalBarChart(
-            array_map(fn ($k, $b) => ['label' => $b['label'] ?? $k, 'value' => (float) ($b['monto'] ?? 0)], array_keys($moraBuckets), $moraBuckets),
+            array_map(fn ($k, $b) => ['label' => $b['label'] ?? ($moraBucketLabels[$k] ?? $k), 'value' => (float) ($b['monto'] ?? 0)], array_keys($moraBuckets), $moraBuckets),
             'Mora por bucket',
         );
 
@@ -457,7 +665,12 @@ class RadiografiaExportService
             // EBITDA = Ingreso base EBITDA (mismos componentes que BranchRadiographyCalculator::
             // ingresoEbitdaBaseFor(), agregados por gestor) − (Gastos + NóminaNeta). NUNCA
             // Recuperación − Colocación (esa fórmula quedó obsoleta, ver criterio final 2026-07).
-            'utilidad'  => $ingresoBase - ($gastos + $pagos + $bonos - $desctos),
+            'utilidad'  => $utilidadFinal = $ingresoBase - ($gastos + $pagos + $bonos - $desctos),
+            'margen'    => $ingresoBase > 0 ? round($utilidadFinal / $ingresoBase * 100, 2) : 0.0,
+            'ebitdaCategoria' => $ebitdaCategoriaFinal = \App\Services\Radiography\RadiographyStyleHelper::ebitdaCategory($utilidadFinal),
+            // Colores ARGB (formato Excel, "FFrrggbb") de la MISMA fuente que usa el
+            // badge de categoría en Excel — se convierten a "#rrggbb" en el blade.
+            'ebitdaCategoriaColors' => \App\Services\Radiography\RadiographyStyleHelper::categoryColors($ebitdaCategoriaFinal),
         ];
     }
 
