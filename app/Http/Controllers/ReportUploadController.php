@@ -1666,7 +1666,25 @@ class ReportUploadController extends Controller {
                            && empty($staleUploads);   // stale uploads invalidate BD state
         $databaseUpdated = $summaryValid || ($compoundPeriod && empty($missingDb) && empty($failedDb));
 
-        $radiographyReady     = ($summary?->status === 'generated') && !$summary?->invalidated_at && empty($staleUploads);
+        // BUG RAÍZ (julio/VPS): PeriodRadiographyService::generate() marca el
+        // PeriodSummary como 'generated' DENTRO de una transacción que confirma antes
+        // de que GenerateRadiographyJob ejecute los pasos obligatorios posteriores
+        // (GastosExcelBranchResolverService::resolveForPeriodOrFail,
+        // FinanciamientoMotosAssignmentService::assignForPeriodOrFail, exportación de
+        // Excel/PDF). Si cualquiera de esos pasos lanza excepción, el run queda
+        // 'failed' pero el summary YA quedó 'generated' — sin esta comprobación del
+        // run, "radiography_ready" (y por lo tanto el estado "Reporte generado" en
+        // Etapa 5) quedaba en true aunque el Excel/PDF nunca se hubieran generado.
+        // Ver GenerateRadiographyJob::handle() y PeriodRadiographyService::generate().
+        $latestRunFailedOrIncomplete = $run && (
+            $run->status === 'failed'
+            || ($run->status === 'success' && (empty($run->output_excel_path) || empty($run->output_pdf_path)))
+        );
+
+        $radiographyReady     = ($summary?->status === 'generated')
+            && !$summary?->invalidated_at
+            && empty($staleUploads)
+            && !$latestRunFailedOrIncomplete;
         $hasPreviousSuccess   = !$radiographyReady && $run && $run->status === 'success';
         $runStatus            = $run?->status;
         $running              = in_array($runStatus, ['queued', 'running'], true);

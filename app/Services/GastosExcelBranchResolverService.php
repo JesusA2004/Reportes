@@ -22,6 +22,11 @@ use Illuminate\Support\Facades\DB;
  */
 class GastosExcelBranchResolverService
 {
+    public function __construct(
+        private readonly FinanciamientoMotosAssignmentService $identityResolver,
+    ) {
+    }
+
     /**
      * @return array<int, array{
      *   fact_expense_id:int, category:string, concept:string, amount:float, expense_date:?string,
@@ -56,13 +61,23 @@ class GastosExcelBranchResolverService
             $pdfGroups[$key][] = $r;
         }
 
+        // Financiamiento de Motos/Cascos son pagos recurrentes de MISMO importe cada
+        // periodo (p. ej. $749 cada ~2 semanas) — el emparejamiento por (monto, fecha
+        // exacta) contra el PDF es estructuralmente frágil ahí (varias filas candidatas
+        // con el mismo monto y fechas cercanas, ninguna exactamente igual). Esas filas
+        // tienen su propio resolvedor dedicado (FinanciamientoMotosAssignmentService,
+        // que resuelve por identidad/observations, no por espejo de PDF) y su propio
+        // OrFail más adelante en el pipeline — no deben contarse aquí como "sin_resolver".
+        $delegatedConcepts = array_map('mb_strtoupper', FinanciamientoMotosAssignmentService::CONCEPTS);
+
         $excelRows = DB::table('fact_expenses as e')
             ->join('report_uploads as ru', 'e.report_upload_id', '=', 'ru.id')
             ->whereIn('e.period_id', $dataIds)
             ->where('ru.data_source_id', $excelId)
             ->whereNull('e.branch_id')
+            ->whereNotIn(DB::raw("UPPER(TRIM(COALESCE(e.concept,'')))"), $delegatedConcepts)
             ->orderBy('e.id')
-            ->get(['e.id', 'e.category', 'e.concept', 'e.amount', 'e.expense_date', 'e.period_id', 'e.report_upload_id']);
+            ->get(['e.id', 'e.category', 'e.concept', 'e.amount', 'e.expense_date', 'e.period_id', 'e.report_upload_id', 'e.observations']);
 
         // Position counter per group so multiple same (amount, date) rows pair 1:1 in order.
         $cursor  = [];
@@ -115,20 +130,58 @@ class GastosExcelBranchResolverService
                     'estado'           => 'excluido_no_operativo',
                 ];
             } else {
-                $results[] = [
-                    'fact_expense_id'  => $row->id,
-                    'category'         => $row->category,
-                    'concept'          => $row->concept,
-                    'amount'           => (float) $row->amount,
-                    'expense_date'     => $row->expense_date,
-                    'period_id'        => $row->period_id,
-                    'report_upload_id' => $row->report_upload_id,
-                    'branch_id'        => null,
-                    'sucursal'         => null,
-                    'employee_id'      => null,
-                    'metodo'           => 'sin_par_pdf',
-                    'estado'           => 'sin_resolver',
-                ];
+                // Sin espejo en el PDF (ninguna fila con mismo monto+fecha) — antes de
+                // declararlo irresoluble, intenta resolver por IDENTIDAD del colaborador
+                // usando el mismo motor que ya usa Financiamiento de Motos/Cascos
+                // (nombre en `observations` → empleado exacto/alias/canónico → sucursal
+                // actual, histórica o de baja). Esto es lo correcto para conceptos como
+                // PAGO FINIQUITO: la persona puede ya no estar vigente en Lendus y aun
+                // así el gasto es real y debe contabilizarse con su sucursal histórica —
+                // "no está vigente" NO es lo mismo que "el gasto es basura".
+                $identity = $this->identityResolver->resolve(
+                    (string) ($row->observations ?? ''),
+                    $dataIds,
+                    $operativeMap,
+                );
+
+                if ($identity) {
+                    if (!$dryRun) {
+                        DB::table('fact_expenses')->where('id', $row->id)->update([
+                            'branch_id'   => $identity['branch_id'],
+                            'employee_id' => $identity['employee_id'],
+                            'updated_at'  => now(),
+                        ]);
+                    }
+                    $results[] = [
+                        'fact_expense_id'  => $row->id,
+                        'category'         => $row->category,
+                        'concept'          => $row->concept,
+                        'amount'           => (float) $row->amount,
+                        'expense_date'     => $row->expense_date,
+                        'period_id'        => $row->period_id,
+                        'report_upload_id' => $row->report_upload_id,
+                        'branch_id'        => $identity['branch_id'],
+                        'sucursal'         => $identity['branch_name'],
+                        'employee_id'      => $identity['employee_id'],
+                        'metodo'           => 'identity_' . $identity['method'],
+                        'estado'           => 'resuelto',
+                    ];
+                } else {
+                    $results[] = [
+                        'fact_expense_id'  => $row->id,
+                        'category'         => $row->category,
+                        'concept'          => $row->concept,
+                        'amount'           => (float) $row->amount,
+                        'expense_date'     => $row->expense_date,
+                        'period_id'        => $row->period_id,
+                        'report_upload_id' => $row->report_upload_id,
+                        'branch_id'        => null,
+                        'sucursal'         => null,
+                        'employee_id'      => null,
+                        'metodo'           => 'sin_par_pdf_sin_identidad',
+                        'estado'           => 'sin_resolver',
+                    ];
+                }
             }
         }
 

@@ -579,10 +579,23 @@ class NoiNominaImportService
         }
 
         $aliases = [
+            // Nombre del colaborador POR ENCABEZADO — formato NOI detectado 2026-08-25
+            // (columnas NOMBRE_TRAB / DESCRIP_CPTO / "Monto del periodo", que rompían la
+            // importación con "columnas mínimas requeridas: concept, amount"). Antes de
+            // este alias, el nombre solo se leía por POSICIÓN (columnas A/B, ver mapRow())
+            // — se conserva ese fallback posicional para no romper el formato anterior,
+            // pero cuando el archivo declara un encabezado real de nombre, se usa ese.
+            'employee_name' => [
+                'nombre_trab',
+                'nombre_trabajador',
+                'nombre_del_trabajador',
+            ],
             'concept' => [
                 'concept',
                 'concepto',
                 'descripcion_concepto',
+                'descrip_cpto',
+                'descripcion_cpto',
                 'movimiento',
                 'descripcion',
             ],
@@ -597,6 +610,7 @@ class NoiNominaImportService
                 'amount',
                 'importe',
                 'monto',
+                'monto_del_periodo',
                 'neto',
                 'total',
                 'importe_neto',
@@ -649,9 +663,16 @@ class NoiNominaImportService
 
         $employeeCode = $this->extractEmployeeCode($col1);
 
+        // Preferir el nombre resuelto por ENCABEZADO (alias, ej. NOMBRE_TRAB) — nunca
+        // depender solo de la posición de columna. Si el archivo no declara ese
+        // encabezado (formato anterior), cae al fallback posicional original (A/B).
+        $headerEmployeeName = $this->cleanString($this->valueFromRow($row, $headerMap, 'employee_name'));
+
         $employeeName = null;
 
-        if ($this->isValidEmployeeName($col1)) {
+        if ($this->isValidEmployeeName($headerEmployeeName)) {
+            $employeeName = $headerEmployeeName;
+        } elseif ($this->isValidEmployeeName($col1)) {
             $employeeName = $col1;
         } elseif ($this->isValidEmployeeName($col0)) {
             $employeeName = $col0;

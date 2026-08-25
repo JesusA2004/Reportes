@@ -151,6 +151,10 @@ it('consolidates a period into monthly employee summaries', function () {
     expect((float) $summary->total_bonuses)->toBe(200.0);
     expect((float) $summary->total_discounts)->toBe(100.0);
     expect((float) $summary->total_expenses)->toBe(50.0);
-    expect((float) $summary->net_amount)->toBe(1050.0);
+    // net_amount = percepciones - deducciones = (1000+200) - 100 = 1100. NO resta
+    // total_expenses: un gasto reembolsable (gasolina) no es una deducción de nómina —
+    // restarlo del neto pagado subestimaría el pago real al colaborador. Ver
+    // PeriodConsolidationService::consolidateForEmployee() y [[project_ajuste_general_jun2026]].
+    expect((float) $summary->net_amount)->toBe(1100.0);
     expect($summary->included_in_report)->toBeTrue();
 });

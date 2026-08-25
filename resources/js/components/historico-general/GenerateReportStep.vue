@@ -172,12 +172,18 @@ const scopeLabel = computed(() => {
 })
 
 // ── Status card config ────────────────────────────────────────────────
+// IMPORTANTE: isFailed/isCancelled (derivados del run EN VIVO vía polling) se
+// comprueban ANTES que isDone (derivado de radiography_ready, un prop de
+// Inertia que puede tardar un ciclo en refrescarse). Nunca debe poder mostrarse
+// la tarjeta verde "Reporte generado" al mismo tiempo que el bloque de error —
+// ver el bug de julio: un run fallido dejaba radiography_ready=true porque el
+// PeriodSummary ya se había marcado 'generated' antes del paso que reventó.
 const statusConfig = computed(() => {
-    if (isDone.value)      return { color: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700',  label: 'Reporte generado',       icon: CheckCircle,    iconClass: 'text-emerald-600' }
     if (isQueued.value)    return { color: 'bg-violet-50 border-violet-200',   text: 'text-violet-700',   label: 'En cola…',               icon: LoaderCircle,   iconClass: 'text-violet-600 animate-spin' }
     if (isRunning.value)   return { color: 'bg-indigo-50 border-indigo-200',   text: 'text-indigo-700',   label: 'Generando…',             icon: LoaderCircle,   iconClass: 'text-indigo-600 animate-spin' }
     if (isFailed.value)    return { color: 'bg-rose-50 border-rose-200',       text: 'text-rose-700',     label: 'La generación falló',    icon: XCircle,        iconClass: 'text-rose-600' }
     if (isCancelled.value) return { color: 'bg-slate-100 border-slate-300',    text: 'text-slate-600',    label: 'Generación cancelada',   icon: Ban,            iconClass: 'text-slate-500' }
+    if (isDone.value)      return { color: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700',  label: 'Reporte generado',       icon: CheckCircle,    iconClass: 'text-emerald-600' }
     if (props.canGenerate) return { color: 'bg-slate-50 border-slate-200',     text: 'text-slate-600',    label: 'Lista para generar',     icon: ShieldCheck,    iconClass: 'text-slate-500' }
     return                  { color: 'bg-amber-50 border-amber-200',           text: 'text-amber-700',    label: 'Bloqueado',              icon: TriangleAlert,  iconClass: 'text-amber-600' }
 })
@@ -295,7 +301,7 @@ const statusConfig = computed(() => {
                              isDone pero aún no llegó la respuesta real del backend, el botón se
                              muestra deshabilitado en vez de apuntar a un archivo posiblemente
                              equivocado (p. ej. el simple cuando lo generado fue un comparativo). -->
-                        <div v-if="isDone || liveExcelUrl || livePdfUrl" class="mt-4 flex flex-wrap gap-2">
+                        <div v-if="!isFailed && (isDone || liveExcelUrl || livePdfUrl)" class="mt-4 flex flex-wrap gap-2">
                             <a
                                 v-if="liveExcelUrl"
                                 :href="liveExcelUrl"
