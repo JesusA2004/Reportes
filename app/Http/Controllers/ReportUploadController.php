@@ -50,7 +50,22 @@ class ReportUploadController extends Controller {
         $reportSourceCodes  = $sources->where('is_required_for_report', true)->pluck('code')->values()->all();
 
         $summariesByPeriod     = PeriodSummary::query()->with('incidents')->get()->keyBy('period_id');
-        $runsByPeriod          = PeriodRadiographyRun::query()->orderByDesc('id')->get()->unique('period_id')->keyBy('period_id');
+        // Etapa 5 / "radiography_ready" siempre representan la Radiografía SIMPLE/GENERAL
+        // del periodo (es la que respaldan las rutas de descarga "sin scope" — ver
+        // GeneratedReportActions.vue/PeriodSelector.vue) — nunca "el último run sin
+        // importar de qué reporte era". Un comparativo o un reporte por sucursal/gestor
+        // generado DESPUÉS de un simple/general exitoso ya no debe pisar su estado.
+        $runsByPeriod          = PeriodRadiographyRun::query()
+            ->where(fn ($q) => $q->where('report_type', 'simple')->orWhereNull('report_type'))
+            ->where(fn ($q) => $q->where('scope', 'general')->orWhereNull('scope'))
+            ->whereNull('branch_id')->whereNull('employee_id')->whereNull('comparison_period_id')
+            ->orderByDesc('id')->get()->unique('period_id')->keyBy('period_id');
+        // Independiente del alcance — el dispatcher solo permite UN run activo por
+        // periodo sin importar report_type/scope (ver generateRadiography()), así que
+        // "¿hay algo corriendo ahora para este periodo?" SÍ es correcto period-wide.
+        $activePeriodIds       = PeriodRadiographyRun::query()
+            ->whereIn('status', ['queued', 'running'])
+            ->pluck('period_id')->unique()->flip();
         $dbRunsByPeriod        = PeriodDatabaseUpdateRun::query()->orderByDesc('id')->get()->unique('period_id')->keyBy('period_id');
         $reprocessRunsByPeriod = PeriodReprocessRun::query()->orderByDesc('id')->get()->unique('period_id')->keyBy('period_id');
 
@@ -60,7 +75,7 @@ class ReportUploadController extends Controller {
 
         $periods = $allPeriods->map(function (Period $period) use (
             $allPeriods, $weeklyPeriods, $sources, $bdSourceCodes, $reportSourceCodes,
-            $summariesByPeriod, $runsByPeriod, $dbRunsByPeriod, $reprocessRunsByPeriod
+            $summariesByPeriod, $runsByPeriod, $dbRunsByPeriod, $reprocessRunsByPeriod, $activePeriodIds
         ) {
             $coveredWeeks         = $this->resolveCoveredWeeks($period, $allPeriods);
             $uploads              = $this->resolveUploadsForWeeks($coveredWeeks);
@@ -81,7 +96,7 @@ class ReportUploadController extends Controller {
                     ->all();
             }
 
-            $workflowState = $this->resolveWorkflowState($uploads, $summary, $run, $period->isCompound(), $dbRun, $bdSourceCodes, $reportSourceCodes);
+            $workflowState = $this->resolveWorkflowState($uploads, $summary, $run, $period->isCompound(), $dbRun, $bdSourceCodes, $reportSourceCodes, $activePeriodIds->has($period->id));
 
             // Para periodos automáticos: validar que sus meses operativos tengan reportes generados
             $canGenerateAutomatic = null;
@@ -196,7 +211,7 @@ class ReportUploadController extends Controller {
 
         $groupedUploads = $allPeriods->map(function (Period $period) use (
             $allPeriods, $sources, $bdSourceCodes, $reportSourceCodes,
-            $summariesByPeriod, $runsByPeriod, $dbRunsByPeriod, $reprocessRunsByPeriod
+            $summariesByPeriod, $runsByPeriod, $dbRunsByPeriod, $reprocessRunsByPeriod, $activePeriodIds
         ) {
             $coveredWeeks        = $this->resolveCoveredWeeks($period, $allPeriods);
             $uploads             = $this->resolveUploadsForWeeks($coveredWeeks);
@@ -231,7 +246,7 @@ class ReportUploadController extends Controller {
                 'reprocess_run_log'           => $reprocessRun?->log,
                 'reprocess_run_progress'      => $reprocessRun?->metadata['progress'] ?? null,
                 'reprocess_run_id'            => $reprocessRun?->id,
-                ...$this->resolveWorkflowState($uploads, $summary, $run, $period->isCompound(), $dbRun, $bdSourceCodes, $reportSourceCodes),
+                ...$this->resolveWorkflowState($uploads, $summary, $run, $period->isCompound(), $dbRun, $bdSourceCodes, $reportSourceCodes, $activePeriodIds->has($period->id)),
                 'uploads' => $uploads->unique('id')->values()->map(fn ($upload) => [
                     'id'                   => $upload->id,
                     'original_name'        => $upload->original_name,
@@ -1039,8 +1054,17 @@ class ReportUploadController extends Controller {
                 return null;
             }
 
+            // Identidad fijada DESDE LA CREACIÓN (no solo cuando el job la backfillea al
+            // arrancar) — así generationProgress() puede ubicar el run correcto por
+            // identidad completa desde el primer poll, sin una ventana donde el run
+            // exista con report_type/scope en NULL. Ver PeriodRadiographyRun::identity().
             return PeriodRadiographyRun::query()->create([
-                'period_id'  => $period->id,
+                'period_id'            => $period->id,
+                'report_type'          => $config['report_type'] ?? 'simple',
+                'scope'                => $scope,
+                'branch_id'            => $scope === 'branch' ? (int) ($config['branch_id'] ?? 0) ?: null : null,
+                'employee_id'          => $scope === 'employee' ? (int) ($config['employee_id'] ?? 0) ?: null : null,
+                'comparison_period_id' => !empty($config['compare_period_id']) ? (int) $config['compare_period_id'] : null,
                 'status'     => 'queued',
                 'queued_at'  => now(),
                 'created_by' => auth()->id(),
@@ -1062,10 +1086,26 @@ class ReportUploadController extends Controller {
      * JSON endpoint: current progress of the most recent radiography generation run.
      * Polled every 3 s by the GenerateReportStep Vue component.
      */
-    public function generationProgress(Period $period): \Illuminate\Http\JsonResponse
+    public function generationProgress(Request $request, Period $period): \Illuminate\Http\JsonResponse
     {
+        // Identidad del reporte que el wizard tiene configurado ahora mismo (Etapa 4) —
+        // sin esto, "el último run del periodo" podía pertenecer a un reporte DISTINTO
+        // (comparativo/por sucursal/por gestor) generado después, y Etapa 5 mostraba su
+        // estado/errores en vez de los del reporte que el usuario realmente está viendo.
+        // Si el frontend no manda identidad (compatibilidad hacia atrás), cae al
+        // comportamiento anterior (el run más reciente de cualquier alcance).
+        $hasIdentityParams = $request->has('scope') || $request->has('report_type');
+
         $run = PeriodRadiographyRun::query()
             ->where('period_id', $period->id)
+            ->when($hasIdentityParams, fn ($q) => $q->forIdentity([
+                'period_id'            => $period->id,
+                'report_type'          => $request->query('report_type', 'simple'),
+                'scope'                => $request->query('scope', 'general'),
+                'branch_id'            => $request->query('branch_id') ? (int) $request->query('branch_id') : null,
+                'employee_id'          => $request->query('employee_id') ? (int) $request->query('employee_id') : null,
+                'comparison_period_id' => $request->query('compare_period_id') ? (int) $request->query('compare_period_id') : null,
+            ]))
             ->latest('id')
             ->first();
 
@@ -1597,6 +1637,7 @@ class ReportUploadController extends Controller {
         ?PeriodDatabaseUpdateRun $dbRun     = null,
         array                 $bdSourceCodes = [],
         array                 $reportSourceCodes = [],
+        bool                  $anyGenerationRunningForPeriod = false,
     ): array {
         $sourceCodes = $uploads->pluck('dataSource.code')->filter()->unique()->values();
 
@@ -1687,7 +1728,14 @@ class ReportUploadController extends Controller {
             && !$latestRunFailedOrIncomplete;
         $hasPreviousSuccess   = !$radiographyReady && $run && $run->status === 'success';
         $runStatus            = $run?->status;
-        $running              = in_array($runStatus, ['queued', 'running'], true);
+        // $run debe llegar ya filtrado a la identidad simple/general (ver
+        // PeriodRadiographyRun::scopeForIdentity()) — "el último run del periodo sin
+        // importar de qué reporte era" hacía que un GENERAL exitoso se viera
+        // fallido/desconocido en Etapa 5 si DESPUÉS se generaba (con éxito o error) un
+        // reporte por sucursal/gestor del mismo periodo. $anyGenerationRunningForPeriod
+        // sí es correcto que sea period-wide: el dispatcher solo permite UN run activo
+        // (queued/running) por periodo sin importar el alcance (ver generateRadiography()).
+        $running              = in_array($runStatus, ['queued', 'running'], true) || $anyGenerationRunningForPeriod;
         $dbRunStatus      = $dbRun?->status;
         $dbRunning        = in_array($dbRunStatus, ['queued', 'running'], true);
 

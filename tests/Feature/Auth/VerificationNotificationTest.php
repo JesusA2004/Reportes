@@ -14,9 +14,11 @@ test('sends verification notification', function () {
 
     $user = User::factory()->unverified()->create();
 
+    // Fortify redirige esta acción a '/' (no a route('home')/dashboard) en este
+    // proyecto.
     $this->actingAs($user)
         ->post(route('verification.send'))
-        ->assertRedirect(route('home'));
+        ->assertRedirect('/');
 
     Notification::assertSentTo($user, VerifyEmail::class);
 });

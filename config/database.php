@@ -84,6 +84,32 @@ return [
             ]) : [],
         ],
 
+        // Conexión de test AISLADA (MySQL/MariaDB real) para el testsuite
+        // RadiographyIntegration (tests/Integration) — RadiographySnapshotBuilder /
+        // BranchRadiographyCalculator usan SQL específico de MySQL (REGEXP,
+        // JSON_EXTRACT/JSON_UNQUOTE) que SQLite no soporta, así que los tests que
+        // ejercitan el pipeline real necesitan un MySQL/MariaDB de verdad. Ver
+        // .env.testing.mysql.example por las variables DB_TEST_* que la alimentan.
+        //
+        // NUNCA debe apuntar a la misma base de datos que DB_DATABASE (la de
+        // desarrollo/producción) — un RefreshDatabase ahí borraría datos reales. Por
+        // eso el default de DB_TEST_DATABASE es 'reportes_test', nunca 'reportes'.
+        'mysql_testing' => [
+            'driver' => 'mysql',
+            'host' => env('DB_TEST_HOST', '127.0.0.1'),
+            'port' => env('DB_TEST_PORT', '3306'),
+            'database' => env('DB_TEST_DATABASE', 'reportes_test'),
+            'username' => env('DB_TEST_USERNAME', 'root'),
+            'password' => env('DB_TEST_PASSWORD', ''),
+            'unix_socket' => env('DB_TEST_SOCKET', ''),
+            'charset' => 'utf8mb4',
+            'collation' => 'utf8mb4_unicode_ci',
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'strict' => true,
+            'engine' => null,
+        ],
+
         'pgsql' => [
             'driver' => 'pgsql',
             'url' => env('DB_URL'),

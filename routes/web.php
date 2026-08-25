@@ -14,6 +14,15 @@ Route::redirect('/', '/login');
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::inertia('/dashboard', 'Dashboard')->name('dashboard');
+    // Alias 'home' — el scaffolding de auth (login/logout/verificación/tests de
+    // ejemplo) espera route('home') por convención de Laravel; este proyecto no tenía
+    // ese nombre registrado, lo que rompía AuthenticationTest/
+    // VerificationNotificationTest/ProfileUpdateTest/ExampleTest con "Route [home] not
+    // defined." Debe responder 200 directamente (no un redirect), y en una URI PROPIA:
+    // registrar dos rutas con la MISMA URI '/dashboard' (una named 'dashboard', otra
+    // 'home') hace que Laravel pierda la resolución por nombre de la primera —
+    // confirmado con `php artisan route:list --name=dashboard` (vacío) tras probarlo.
+    Route::inertia('/home', 'Dashboard')->name('home');
 
     Route::prefix('historico-general')
         ->name('historico-general.')

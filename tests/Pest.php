@@ -17,6 +17,14 @@ pest()->extend(TestCase::class)
     ->use(Illuminate\Foundation\Testing\RefreshDatabase::class)
     ->in('Feature');
 
+// tests/Integration (testsuite RadiographyIntegration, ver phpunit.integration.xml)
+// NO trae RefreshDatabase por defecto — algunos de sus archivos leen la BD de
+// desarrollo real (ver Tests\Integration\UsesRealDevDatabase) y jamás deben
+// refrescarla. Los que sí necesitan la BD MySQL de pruebas aislada (mysql_testing)
+// lo declaran ellos mismos con uses(RefreshDatabase::class).
+pest()->extend(TestCase::class)
+    ->in('Integration');
+
 /*
 |--------------------------------------------------------------------------
 | Expectations

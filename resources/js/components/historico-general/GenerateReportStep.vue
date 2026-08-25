@@ -64,7 +64,19 @@ const clearPoll = () => {
 const pollProgress = async () => {
     if (!props.period?.id) return
     try {
-        const res = await fetch(`/historico-general/${props.period.id}/generar-reporte/progreso`, {
+        // Identidad del reporte configurado en Etapa 4 — sin esto el backend resolvía
+        // "el último run del periodo sin importar de qué reporte era", y un comparativo/
+        // por-sucursal/por-gestor generado después podía pisar el estado que esta
+        // tarjeta muestra. Ver ReportUploadController::generationProgress().
+        const identityParams = new URLSearchParams({
+            report_type: props.reportConfig?.report_type ?? 'simple',
+            scope: props.reportConfig?.scope ?? 'general',
+        })
+        if (props.reportConfig?.branch_id) identityParams.set('branch_id', String(props.reportConfig.branch_id))
+        if (props.reportConfig?.employee_id) identityParams.set('employee_id', String(props.reportConfig.employee_id))
+        if (props.reportConfig?.compare_period_id) identityParams.set('compare_period_id', String(props.reportConfig.compare_period_id))
+
+        const res = await fetch(`/historico-general/${props.period.id}/generar-reporte/progreso?${identityParams.toString()}`, {
             headers: { 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json' },
         })
         if (!res.ok) return

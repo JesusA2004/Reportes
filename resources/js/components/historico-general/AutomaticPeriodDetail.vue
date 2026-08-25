@@ -29,16 +29,18 @@ const overallStatusLabel = computed(() => ({
     waiting: 'Esperando meses',
 }[overallStatus.value]))
 
-const typeLabel = computed(() => ({
+const typeLabels: Record<string, string> = {
     bimonthly: 'Bimestre',
     quarterly: 'Trimestre',
     semiannual: 'Semestre',
     annual: 'Año',
-}[props.period?.type ?? ''] ?? 'Periodo compuesto'))
+}
+const typeLabel = computed(() => typeLabels[props.period?.type ?? ''] ?? 'Periodo compuesto')
 
-const requiredCount = computed(() => ({
+const requiredCounts: Record<string, number> = {
     bimonthly: 2, quarterly: 3, semiannual: 6, annual: 12,
-}[props.period?.type ?? ''] ?? 0))
+}
+const requiredCount = computed(() => requiredCounts[props.period?.type ?? ''] ?? 0)
 
 const excelUrl = computed(() => `/reportes-mensuales/${props.period?.id}/radiografia.xlsx`)
 const pdfUrl   = computed(() => `/reportes-mensuales/${props.period?.id}/radiografia.pdf`)

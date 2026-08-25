@@ -65,9 +65,20 @@ class ReportsAuditScopesCommand extends Command
 
         foreach ($periods as $period) {
             $summary = PeriodSummary::where('period_id', $period->id)->latest('id')->first();
-            if (!$summary) {
+
+            // Un periodo sin PeriodSummary, o cuyo summary nunca llegó a 'generated' (p. ej.
+            // se quedó en 'database_updated' o fue invalidado), NO es una inconsistencia
+            // financiera — simplemente nunca se generó (o ya no es válida) su radiografía.
+            // Marcarlo como ERROR_* infla el conteo de "errores" con periodos que ni siquiera
+            // aplican, y le resta señal a los errores reales. Ver PARTE B del cierre.
+            if (!$summary || $summary->status !== 'generated' || $summary->invalidated_at) {
+                $reason = !$summary
+                    ? 'No existe PeriodSummary para este periodo — la radiografía nunca se generó.'
+                    : ($summary->invalidated_at
+                        ? 'El PeriodSummary fue invalidado (' . ($summary->invalidated_reason ?: 'sin motivo registrado') . ') — no representa una radiografía vigente.'
+                        : "El PeriodSummary existe pero su status es '{$summary->status}', nunca llegó a 'generated'.");
                 $rows[] = $this->baseRow($period, 'general', null, null)
-                    + ['status' => 'ERROR_PERIOD_MAPPING', 'modules' => [], 'detail' => ['reason' => 'No existe PeriodSummary para este periodo — la radiografía nunca se generó.']];
+                    + ['status' => 'SKIPPED_NO_GENERATED_RADIOGRAPHY', 'modules' => [], 'detail' => ['reason' => $reason]];
                 $bar?->advance();
                 continue;
             }
@@ -83,6 +94,18 @@ class ReportsAuditScopesCommand extends Command
 
             if (!$employeeFilter && !$branchFilter) {
                 $rows[] = $this->evaluate($general, $period, 'general', null, null, $general);
+            }
+
+            // ── Conflictos de identidad (item 11/12 del cierre) ──────────────
+            // Nunca silenciosos: reports:audit-scopes es la fuente oficial para
+            // detectarlos, aunque no bloqueen la generación por sí solos.
+            foreach ($builder->lastIdentityConflicts() as $conflict) {
+                $rows[] = $this->baseRow($period, 'employee', null, $conflict['normalized_name'])
+                    + ['status' => 'IDENTITY_CONFLICT', 'modules' => ['IDENTITY' => 'IDENTITY_CONFLICT'], 'detail' => [
+                        'employee_ids' => implode(',', $conflict['employee_ids']),
+                        'branch_ids'   => json_encode($conflict['branch_ids']),
+                        'reason'       => 'Mismo nombre normalizado, sucursales operativas distintas y contradictorias en el mismo periodo — no se fusionó automáticamente.',
+                    ]];
             }
 
             // ── Sucursales ──────────────────────────────────────────────────
@@ -167,6 +190,9 @@ class ReportsAuditScopesCommand extends Command
         // ── IDENTITY ──────────────────────────────────────────────────────
         if ($scopeType === 'employee') {
             $resolution = $scopeMeta['identity_resolution'] ?? null;
+            // Item 12 del cierre: quiero que fuzzy sea excepcional — se registra SIEMPRE
+            // (no solo en el caso de error) para poder tallarlo en el resumen final.
+            $detail['identity_resolution'] = $resolution;
             if (!$available) {
                 $modules['IDENTITY'] = 'NOT_ATTRIBUTABLE';
                 $detail['identity'] = "Sin fila fusionada para employee_id={$refId} este periodo (roster lo lista, fact tables no aportaron datos atribuibles). resolution={$resolution}";
@@ -369,6 +395,29 @@ class ReportsAuditScopesCommand extends Command
         foreach ($this->tally($rows) as $status => $count) {
             if ($status === 'total') continue;
             $this->line('  ' . str_pad($status, 32) . $count);
+        }
+
+        // Item 12 del cierre: quiero que fuzzy sea excepcional — desglose de CÓMO se
+        // resolvió la identidad en cada fila employee (nunca solo "OK"/"ERROR").
+        $resolutionCounts = [];
+        foreach ($rows as $r) {
+            if (($r['scope_type'] ?? null) !== 'employee') continue;
+            $resolution = $r['detail']['identity_resolution'] ?? 'not_applicable';
+            $label = match ($resolution) {
+                'employee_id' => 'resolved_by_employee_id',
+                'name_fallback_exact' => 'resolved_by_exact_name',
+                'name_fallback_substring' => 'resolved_by_fuzzy',
+                default => $resolution ?? 'unresolved',
+            };
+            $resolutionCounts[$label] = ($resolutionCounts[$label] ?? 0) + 1;
+        }
+        if (!empty($resolutionCounts)) {
+            ksort($resolutionCounts);
+            $this->newLine();
+            $this->info('════ IDENTIDAD (colaboradores) ════');
+            foreach ($resolutionCounts as $label => $count) {
+                $this->line('  ' . str_pad($label, 32) . $count);
+            }
         }
     }
 }

@@ -6441,16 +6441,44 @@ class RadiographyWorkbookBuilder
         $sheet->getColumnDimension('D')->setWidth(35);
         $sheet->freezePane('A4');
 
-        // ── Sheet 2: NÓMINA DETAIL (from DB) ─────────────────────────────────
+        // ── Gráficas nativas de Excel (2026-08-25) — sobre los MISMOS valores ya
+        // calculados arriba (nunca recalculados). El bloque de datos de cada chart se
+        // escribe en columnas F/G, fuera del área impresa (A:D) para no interferir con
+        // el layout de la tabla RESUMEN. Cada addBarChartFromData() no agrega nada si
+        // no hay valores > 0 que graficar (nunca un chart vacío).
+        $chartHelper = app(RadiographyExcelChartHelper::class);
+        $chartHelper->addBarChartFromData(
+            $sheet, [['label' => 'Recuperación', 'value' => $rec], ['label' => 'Colocación', 'value' => $coloc]],
+            'Recuperación vs Colocación', 'rec_vs_coloc_' . $employeeId, 6, 4, 'F4',
+        );
+        $chartHelper->addBarChartFromData(
+            $sheet, [
+                ['label' => 'Ingreso base EBITDA', 'value' => $ingresoBase],
+                ['label' => 'Gastos + Nómina neta', 'value' => $gastos + $pagos + $bonos - $desctos],
+                ['label' => 'EBITDA', 'value' => $utilidad],
+            ],
+            'EBITDA vs Gastos', 'ebitda_vs_gastos_' . $employeeId, 6, 20, 'F20',
+        );
+
+        // ── Sheet 2: NÓMINA DETAIL ────────────────────────────────────────────
+        // IMPORTANTE (fix 2026-08-25): antes esta hoja consultaba fact_noi_movements
+        // filtrando SOLO por $employeeId (el id que llegó por parámetro) — si esa persona
+        // tenía movimientos bajo OTRO employee_id fusionado por el mismo $empRow
+        // (duplicado histórico NOI vs NOI Fiscal, ver buildEmployeesGestores()::_employee_ids),
+        // esos movimientos desaparecían de esta hoja aunque SÍ contaran en "Nómina total" del
+        // RESUMEN — exactamente el patrón "Nómina y Capital Humano > 0 pero NOI detail = 0".
+        // Ahora usa el MISMO grupo de employee_id que ya resolvió el RESUMEN (arriba), nunca
+        // una identidad distinta calculada aparte.
         $noiSheet = $spreadsheet->createSheet()->setTitle('NÓMINA');
         $this->sheetTitle($noiSheet, 'A1:E1', 'DETALLE DE NÓMINA — ' . mb_strtoupper($empName));
         $this->colHeaders($noiSheet, 2, ['A' => 'CONCEPTO', 'B' => 'TIPO', 'C' => 'MONTO', 'D' => 'FECHA', 'E' => 'PERIODO NÓMINA']);
         $resolveDataIds = app(\App\Services\Radiography\RadiographySnapshotBuilder::class)
             ->resolveDataIdsPublic($period);
+        $noiEmployeeIds = !empty($empRow['_employee_ids']) ? $empRow['_employee_ids'] : [$employeeId];
         $noiRows = \Illuminate\Support\Facades\DB::table('fact_noi_movements as n')
             ->join('employees as e', 'n.employee_id', '=', 'e.id')
             ->whereIn('n.period_id', $resolveDataIds)
-            ->where('n.employee_id', $employeeId)
+            ->whereIn('n.employee_id', $noiEmployeeIds)
             ->selectRaw('n.concept, n.concept_type, n.amount, n.movement_date, n.payroll_type')
             ->orderBy('n.movement_date')
             ->get();
@@ -6469,56 +6497,76 @@ class RadiographyWorkbookBuilder
         $this->setColWidths($noiSheet, ['A' => 38, 'B' => 16, 'C' => 18, 'D' => 16, 'E' => 20]);
 
         // ── Sheet 3: COLOCACIÓN ──────────────────────────────────────────────
+        // IMPORTANTE (fix 2026-08-25): antes esta hoja recalculaba colocación por producto
+        // con un LIKE '%nombre%' directo contra fact_placements.promoter_name — una fuente
+        // de verdad DISTINTA de la que ya usa Web (applyEmployeeScope()::_placements_by_product,
+        // agrupada por nombre CANÓNICO/normalizado, la misma agregación que produjo el KPI
+        // "Colocación" del RESUMEN). Un LIKE puede dar un total distinto (substrings
+        // parciales, variantes de nombre no fusionadas) — Excel y Web podían mostrar cifras
+        // diferentes para el mismo colaborador. Ahora usa el MISMO desglose reconciliado.
         $colEmpSheet = $spreadsheet->createSheet()->setTitle('COLOCACIÓN');
         $this->sheetTitle($colEmpSheet, 'A1:D1', 'COLOCACIÓN — ' . mb_strtoupper($empName));
         $this->colHeaders($colEmpSheet, 2, ['A' => 'PRODUCTO', 'B' => 'MONTO', 'C' => 'CRÉDITOS', 'D' => 'SUCURSAL']);
-        $canonicalizer2 = app(\App\Services\EmployeeNameCanonicalizer::class);
-        $placRows = \Illuminate\Support\Facades\DB::table('fact_placements as p')
-            ->leftJoin('branches as b', 'p.branch_id', '=', 'b.id')
-            ->whereIn('p.period_id', $resolveDataIds)
-            ->where(fn ($q) => $q->whereRaw('LOWER(p.promoter_name) LIKE ?', ['%' . mb_strtolower($employee->full_name) . '%']))
-            ->selectRaw('p.product_name, SUM(p.amount) as monto, COUNT(*) as creditos, b.name as sucursal')
-            ->groupBy('p.product_name', 'b.name')
-            ->get();
+        $placRows = $empRow['_placements_by_product'] ?? [];
         $plr = 3;
         foreach ($placRows as $i => $row) {
-            $colEmpSheet->setCellValue("A{$plr}", $row->product_name ?? '—');
-            $colEmpSheet->setCellValue("B{$plr}", (float)$row->monto);
-            $colEmpSheet->setCellValue("C{$plr}", (int)$row->creditos);
-            $colEmpSheet->setCellValue("D{$plr}", $row->sucursal ?? '—');
+            $colEmpSheet->setCellValue("A{$plr}", $row['producto'] ?? '—');
+            $colEmpSheet->setCellValue("B{$plr}", (float)($row['colocacion'] ?? 0));
+            $colEmpSheet->setCellValue("C{$plr}", (int)($row['operaciones'] ?? 0));
+            $colEmpSheet->setCellValue("D{$plr}", $empBranch ?? '—');
             $this->dataRow($colEmpSheet, "A{$plr}:D{$plr}", $i % 2 === 0);
             $colEmpSheet->getStyle("B{$plr}")->getNumberFormat()->setFormatCode(self::CURRENCY);
             $plr++;
         }
-        if ($placRows->isEmpty()) { $colEmpSheet->setCellValue('A3', 'Sin colocación registrada para este gestor en el periodo.'); }
+        if (empty($placRows)) { $colEmpSheet->setCellValue('A3', 'Sin colocación registrada para este gestor en el periodo.'); }
         $this->setColWidths($colEmpSheet, ['A' => 28, 'B' => 18, 'C' => 12, 'D' => 22]);
 
-        // ── Sheet 4: CARTERA ─────────────────────────────────────────────────
+        $chartHelper->addBarChartFromData(
+            $colEmpSheet,
+            array_map(fn ($p) => ['label' => $p['producto'] ?? '—', 'value' => (float) ($p['colocacion'] ?? 0)], $placRows),
+            'Colocación por producto', 'colocacion_producto_' . $employeeId, 6, 3, 'F3',
+        );
+
+        // ── Sheet 4: CARTERA Y MORA ───────────────────────────────────────────
+        // IMPORTANTE (fix 2026-08-25): antes recalculaba cartera/vencida por PRODUCTO con un
+        // LIKE '%nombre%' contra fact_portfolios.promoter_name — otra fuente de verdad
+        // distinta de la que Web ya expone (applyEmployeeScope()::_mora_buckets, la MISMA
+        // agregación por nombre canónico que produce 'cartera'/'vencida' del RESUMEN, con
+        // guardia de reconciliación SUM(buckets)==vencida). Se cambia el desglose de
+        // "por producto" a "por antigüedad de mora" (buckets) — es el desglose reconciliado
+        // que realmente existe a nivel colaborador; no se inventa un desglose por producto
+        // que no tiene fuente canónica equivalente.
         $portEmpSheet = $spreadsheet->createSheet()->setTitle('CARTERA');
-        $this->sheetTitle($portEmpSheet, 'A1:E1', 'CARTERA Y MORA — ' . mb_strtoupper($empName));
-        $this->colHeaders($portEmpSheet, 2, ['A' => 'PRODUCTO', 'B' => 'CARTERA', 'C' => 'VENCIDA', 'D' => 'MORA %', 'E' => 'SUCURSAL']);
-        $portEmpRows = \Illuminate\Support\Facades\DB::table('fact_portfolios as po')
-            ->leftJoin('branches as b', 'po.branch_id', '=', 'b.id')
-            ->whereIn('po.period_id', $resolveDataIds)
-            ->where(fn ($q) => $q->whereRaw('LOWER(po.promoter_name) LIKE ?', ['%' . mb_strtolower($employee->full_name) . '%']))
-            ->selectRaw('po.product_name, SUM(po.balance) as cartera, SUM(CASE WHEN po.days_past_due>0 THEN po.balance ELSE 0 END) as vencida, b.name as sucursal')
-            ->groupBy('po.product_name', 'b.name')
-            ->get();
+        $this->sheetTitle($portEmpSheet, 'A1:D1', 'CARTERA Y MORA — ' . mb_strtoupper($empName));
+        $this->colHeaders($portEmpSheet, 2, ['A' => 'BUCKET DE MORA', 'B' => 'CONTRATOS', 'C' => 'MONTO', 'D' => 'MORA %']);
+        $moraBucketsRows = $empRow['_mora_buckets'] ?? [];
         $por = 3;
-        foreach ($portEmpRows as $i => $row) {
-            $moraPp = (float)$row->cartera > 0 ? round((float)$row->vencida / (float)$row->cartera * 100, 2) : 0;
-            $portEmpSheet->setCellValue("A{$por}", $row->product_name ?? '—');
-            $portEmpSheet->setCellValue("B{$por}", (float)$row->cartera);
-            $portEmpSheet->setCellValue("C{$por}", (float)$row->vencida);
+        $i = 0;
+        foreach ($moraBucketsRows as $bucketKey => $b) {
+            $monto  = (float) ($b['monto'] ?? 0);
+            $moraPp = $cartera > 0 && $bucketKey !== 'al_corriente' ? round($monto / $cartera * 100, 2) : 0;
+            $portEmpSheet->setCellValue("A{$por}", $b['label'] ?? $bucketKey);
+            $portEmpSheet->setCellValue("B{$por}", (int) ($b['contratos'] ?? 0));
+            $portEmpSheet->setCellValue("C{$por}", $monto);
             $portEmpSheet->setCellValue("D{$por}", $moraPp);
-            $portEmpSheet->setCellValue("E{$por}", $row->sucursal ?? '—');
-            $this->dataRow($portEmpSheet, "A{$por}:E{$por}", $i % 2 === 0);
-            foreach (['B', 'C'] as $col) { $portEmpSheet->getStyle("{$col}{$por}")->getNumberFormat()->setFormatCode(self::CURRENCY); }
+            $this->dataRow($portEmpSheet, "A{$por}:D{$por}", $i % 2 === 0);
+            $portEmpSheet->getStyle("C{$por}")->getNumberFormat()->setFormatCode(self::CURRENCY);
             $portEmpSheet->getStyle("D{$por}")->getNumberFormat()->setFormatCode(self::PERCENT);
             $por++;
+            $i++;
         }
-        if ($portEmpRows->isEmpty()) { $portEmpSheet->setCellValue('A3', 'Sin cartera registrada para este gestor en el periodo.'); }
-        $this->setColWidths($portEmpSheet, ['A' => 28, 'B' => 18, 'C' => 18, 'D' => 10, 'E' => 22]);
+        if (empty($moraBucketsRows)) { $portEmpSheet->setCellValue('A3', 'Sin cartera registrada para este gestor en el periodo.'); }
+        $this->setColWidths($portEmpSheet, ['A' => 22, 'B' => 14, 'C' => 18, 'D' => 12]);
+
+        $chartHelper->addBarChartFromData(
+            $portEmpSheet, [['label' => 'Al corriente', 'value' => max(0, $cartera - $vencida)], ['label' => 'Vencida', 'value' => $vencida]],
+            'Cartera sana vs vencida', 'cartera_sana_vencida_' . $employeeId, 6, 3, 'F3',
+        );
+        $chartHelper->addBarChartFromData(
+            $portEmpSheet,
+            array_map(fn ($k, $b) => ['label' => $b['label'] ?? $k, 'value' => (float) ($b['monto'] ?? 0)], array_keys($moraBucketsRows), $moraBucketsRows),
+            'Mora por bucket', 'mora_bucket_' . $employeeId, 6, 20, 'F20',
+        );
 
         try {
             $idx = $spreadsheet->getIndex($spreadsheet->getSheetByName('Worksheet'));

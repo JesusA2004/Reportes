@@ -65,7 +65,9 @@ test('users can logout', function () {
     $response = $this->actingAs($user)->post(route('logout'));
 
     $this->assertGuest();
-    $response->assertRedirect(route('home'));
+    // Fortify redirige logout a '/' (no a route('home')/dashboard) — correcto en este
+    // proyecto, donde '/' ya redirige a /login para cualquiera sin sesión.
+    $response->assertRedirect('/');
 });
 
 test('users are rate limited', function () {

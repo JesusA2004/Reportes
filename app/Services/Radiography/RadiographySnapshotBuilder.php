@@ -40,6 +40,9 @@ class RadiographySnapshotBuilder
     private array $lastGm          = [];
     private ?int  $lastPeriodId    = null;
 
+    /** Conflictos de identidad detectados en la ÚLTIMA llamada a buildEmployeesGestores() — ver detectEmployeeIdentityConflicts(). */
+    private array $lastIdentityConflicts = [];
+
     public function __construct(
         private readonly EmployeeNameCanonicalizer $canonicalizer,
         private readonly BranchRadiographyCalculator $branchCalculator,
@@ -412,6 +415,77 @@ class RadiographySnapshotBuilder
      * este periodo (no se cachea entre llamadas: se usa en exportaciones bajo demanda, no en
      * el hot path del dashboard) — mismo pipeline, cero lógica paralela.
      */
+    /**
+     * Conflictos de identidad detectados en la ÚLTIMA llamada a build()/
+     * buildEmployeesGestores() para este builder — ver detectEmployeeIdentityConflicts().
+     * Usado por reports:audit-scopes para reportarlos explícitamente (nunca silencioso).
+     *
+     * @return array<int, array{normalized_name:string, employee_ids:int[], branch_ids:array<int,?int>, period_id:int}>
+     */
+    public function lastIdentityConflicts(): array
+    {
+        return $this->lastIdentityConflicts;
+    }
+
+    /**
+     * Detecta nombres normalizados con >1 employee_id cuya evidencia es CONTRADICTORIA
+     * (asignación de sucursal operativa distinta en el MISMO periodo) — señal fuerte de
+     * que son dos personas reales distintas que casualmente comparten nombre, no un
+     * duplicado del mismo colaborador entre fuentes. Nunca decide "cuál es cuál": solo
+     * lo hace visible (log + retorno) para revisión, en vez de fusionarlo en silencio.
+     *
+     * @param array<string, int[]> $employeeIdsByNorm
+     * @return array<int, array{normalized_name:string, employee_ids:int[], branch_ids:array<int,?int>, period_id:int}>
+     */
+    private function detectEmployeeIdentityConflicts(array $employeeIdsByNorm, Period $period): array
+    {
+        $conflicts = [];
+
+        $candidateNorms = array_filter($employeeIdsByNorm, fn (array $ids) => count($ids) > 1);
+        if (empty($candidateNorms)) {
+            return $conflicts;
+        }
+
+        $allCandidateIds = array_values(array_unique(array_merge(...array_values($candidateNorms))));
+        $operativeMap = $this->branchCalculator->buildBranchMap()['operative'];
+
+        $branchByEmployee = DB::table('employee_branch_assignments')
+            ->where('period_id', $period->id)
+            ->whereIn('employee_id', $allCandidateIds)
+            ->whereNotNull('branch_id')
+            ->pluck('branch_id', 'employee_id');
+
+        foreach ($candidateNorms as $norm => $ids) {
+            $branchIds = [];
+            foreach ($ids as $id) {
+                $branchIds[$id] = $branchByEmployee[$id] ?? null;
+            }
+
+            $distinctOperativeBranches = array_unique(array_filter(
+                $branchIds,
+                fn ($b) => $b !== null && isset($operativeMap[(int) $b]),
+            ));
+
+            if (count($distinctOperativeBranches) > 1) {
+                $conflicts[] = [
+                    'normalized_name' => $norm,
+                    'employee_ids'    => $ids,
+                    'branch_ids'      => $branchIds,
+                    'period_id'       => $period->id,
+                ];
+
+                Log::warning('RadiographySnapshotBuilder::detectEmployeeIdentityConflicts — IDENTITY_CONFLICT: mismo nombre normalizado con sucursales operativas distintas y contradictorias en el mismo periodo. NO se fusionó automáticamente.', [
+                    'normalized_name' => $norm,
+                    'employee_ids'    => $ids,
+                    'branch_ids'      => $branchIds,
+                    'period_id'       => $period->id,
+                ]);
+            }
+        }
+
+        return $conflicts;
+    }
+
     public function findEmployeeGestorRowByEmployeeId(Period $period, int $employeeId): ?array
     {
         $this->dataIds        = $this->resolveDataIds($period);
@@ -2235,6 +2309,18 @@ class RadiographySnapshotBuilder
         foreach ($employeeIdsByNorm as $normKey => $ids) {
             $employeeIdsByNorm[$normKey] = array_values(array_unique($ids));
         }
+
+        // ── Guardia de identidad (2026-08-25, item 11 del cierre) ────────────────
+        // Un mismo nombre normalizado con >1 employee_id distinto puede ser: (a) el
+        // mismo colaborador duplicado entre fuentes (NOI vs NOI Fiscal) — el caso normal
+        // que este merge ya fusiona correctamente — o (b) DOS PERSONAS REALES distintas
+        // que casualmente comparten nombre. Nunca se decide esto a ciegas: si hay
+        // evidencia CONTRADICTORIA (sucursales operativas distintas y ambas con datos
+        // reales en el MISMO periodo), se registra como IDENTITY_CONFLICT — logueado,
+        // nunca silencioso — para que reports:audit-scopes lo reporte explícitamente.
+        // No se "arregla" solo automáticamente: no hay suficiente señal en este punto
+        // para decidir con certeza cuál de las dos personas es cuál.
+        $this->lastIdentityConflicts = $this->detectEmployeeIdentityConflicts($employeeIdsByNorm, $period);
 
         $allKeys = collect(array_keys($payroll))
             ->merge(array_keys($gestorPlacements))
@@ -4239,7 +4325,7 @@ class RadiographySnapshotBuilder
      * que computeNoiPercepcionesDeduccionesForEmployee() ya suma, así SUM(categorías) ==
      * $percepDeducc['percepciones']/['deducciones'] por construcción, no por coincidencia.
      */
-    private function buildEmployeePayrollDetail(array $employeeIds, array $percepDeducc): array
+    public function buildEmployeePayrollDetail(array $employeeIds, array $percepDeducc): array
     {
         $categoryLabels = [
             'nomina_total'       => 'Sueldo',
@@ -4306,7 +4392,7 @@ class RadiographySnapshotBuilder
      * (comportamiento previo, sin cambio). Nunca redefine la clasificación vigente/atrasado/
      * vencido ni las exclusiones — solo agrega un filtro de fila adicional.
      */
-    private function buildEfectividadCobranza(Period $period, ?string $promoterName = null, ?int $branchId = null): array
+    public function buildEfectividadCobranza(Period $period, ?string $promoterName = null, ?int $branchId = null): array
     {
         $dataIds = $this->dataIds;
 

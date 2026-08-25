@@ -137,7 +137,7 @@ const elapsedFormatted = computed(() => {
     return `${mins} min ${String(secs).padStart(2, '0')} seg`
 })
 const isQueued      = computed(() => dbRunStatus.value === 'queued')
-const isRunning     = computed(() => ['queued', 'running'].includes(dbRunStatus.value))
+const isRunning     = computed(() => ['queued', 'running'].includes(dbRunStatus.value ?? ''))
 const isFailed      = computed(() => dbRunStatus.value === 'failed')
 const isCancelled   = computed(() => dbRunStatus.value === 'cancelled')
 const dbDone        = computed(() => !!props.period?.database_updated)

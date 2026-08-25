@@ -16,7 +16,6 @@ import {
 
 import InputError from '@/components/InputError.vue'
 import { usePeriodosIndex } from '@/composables/usePeriodosIndex'
-import AppLayout from '@/layouts/AppLayout.vue'
 import { index as periodosIndex } from '@/routes/periodos'
 
 const props = withDefaults(
@@ -64,20 +63,17 @@ const props = withDefaults(
     },
 )
 
+// Mismo patrón que resources/js/pages/settings/Profile.vue (evita el error de tipos
+// del overload de h() al envolver AppLayout manualmente con breadcrumbs).
 defineOptions({
-    layout: (h, page) =>
-        h(
-            AppLayout,
+    layout: {
+        breadcrumbs: [
             {
-                breadcrumbs: [
-                    {
-                        title: 'Periodos',
-                        href: periodosIndex(),
-                    },
-                ],
+                title: 'Periodos',
+                href: periodosIndex(),
             },
-            () => page,
-        ),
+        ],
+    },
 })
 
 const {

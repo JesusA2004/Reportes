@@ -79,4 +79,40 @@ class PeriodRadiographyRun extends Model
             'employee_id'          => $this->employee_id,
         ];
     }
+
+    /**
+     * Filtra runs que pertenecen EXACTAMENTE a la identidad dada (period_id + tipo +
+     * alcance + sucursal/empleado/periodo de comparación) — nunca "el último run del
+     * periodo sin importar de qué reporte era". Bug real corregido 2026-08-25: un
+     * reporte GENERAL exitoso podía verse como fallido/desconocido en Etapa 5 si
+     * DESPUÉS se generaba (con éxito o con error) un reporte por sucursal/gestor del
+     * MISMO periodo — "el último run" pasaba a ser el scoped, no el general.
+     *
+     * report_type/scope tratan NULL como su default ('simple'/'general') porque runs
+     * creados antes de que el dispatcher empezara a fijarlos explícitamente pueden
+     * traerlos vacíos — ver ReportUploadController::generateRadiography().
+     */
+    public function scopeForIdentity($query, array $identity)
+    {
+        $reportType = $identity['report_type'] ?? 'simple';
+        $scope      = $identity['scope'] ?? 'general';
+
+        return $query
+            ->where('period_id', $identity['period_id'])
+            ->where(function ($q) use ($reportType) {
+                $q->where('report_type', $reportType);
+                if ($reportType === 'simple') {
+                    $q->orWhereNull('report_type');
+                }
+            })
+            ->where(function ($q) use ($scope) {
+                $q->where('scope', $scope);
+                if ($scope === 'general') {
+                    $q->orWhereNull('scope');
+                }
+            })
+            ->where('branch_id', $identity['branch_id'] ?? null)
+            ->where('employee_id', $identity['employee_id'] ?? null)
+            ->where('comparison_period_id', $identity['comparison_period_id'] ?? null);
+    }
 }

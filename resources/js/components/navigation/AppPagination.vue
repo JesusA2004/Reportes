@@ -46,6 +46,7 @@ const go = (page: number) => {
   <Pagination
     :page="currentPage"
     :total="lastPage"
+    :items-per-page="1"
     class="w-full"
   >
     <PaginationContent class="flex flex-wrap items-center justify-center gap-2 p-4">

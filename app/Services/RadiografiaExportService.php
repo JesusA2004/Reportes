@@ -334,6 +334,71 @@ class RadiografiaExportService
         $mora        = $cartera > 0 ? round($vencida / $cartera * 100, 2) : (float)($empRow['mora'] ?? 0);
         $ingresoBase = (float)($empRow['ingreso_ebitda_base'] ?? 0);
 
+        // ── Desgloses canónicos (2026-08-25) — MISMOS campos internos que ya usa Web
+        // (RadiographySnapshotBuilder::applyEmployeeScope()) y el Excel de gestor
+        // (RadiographyWorkbookBuilder::buildEmployeeFromSnapshot()) — nunca recalculados
+        // aparte, para que Web = Excel = PDF muestren siempre la misma historia. Ver
+        // buildEmployeesGestores() por el origen de estos campos "_"-internos.
+        $employeeIdsForNoi = !empty($empRow['_employee_ids']) ? $empRow['_employee_ids'] : [$employeeId];
+        $percepDeducc      = app(BranchRadiographyCalculator::class)
+            ->computeNoiPercepcionesDeduccionesForEmployees($this->snapshotBuilder->resolveDataIdsPublic($period), $employeeIdsForNoi);
+        $payrollDetail     = $this->snapshotBuilder->buildEmployeePayrollDetail($employeeIdsForNoi, $percepDeducc);
+
+        $recoveryComponents = $empRow['_recovery_components'] ?? null;
+        $recoveryByProduct  = $empRow['_recovery_by_product'] ?? [];
+        $placementsByProduct = $empRow['_placements_by_product'] ?? [];
+        $moraBuckets        = $empRow['_mora_buckets'] ?? [];
+        $efectividad        = $this->snapshotBuilder->buildEfectividadCobranza($period, $empRow['name'] ?? null);
+
+        // ── Gráficas del PDF — SVG server-side sobre el MISMO dataset canónico de
+        // arriba (nunca recalculado aparte). Cada builder devuelve '' si no hay datos
+        // reales que graficar — el blade omite la sección completa en ese caso, nunca
+        // un recuadro vacío. Ver RadiographyChartSvgBuilder por qué SVG (dompdf no
+        // ejecuta JS/canvas, así que una librería de charts basada en JS no aplica).
+        $charts = app(\App\Services\Radiography\RadiographyChartSvgBuilder::class);
+
+        $chartRecuperacionVsColocacion = $charts->horizontalBarChart([
+            ['label' => 'Recuperación', 'value' => $rec],
+            ['label' => 'Colocación', 'value' => $coloc],
+        ], 'Recuperación vs Colocación');
+
+        $chartCarteraSanaVsVencida = $charts->stackedCompositionBar([
+            ['label' => 'Al corriente', 'value' => max(0, $cartera - $vencida)],
+            ['label' => 'Vencida', 'value' => $vencida],
+        ], 'Cartera sana vs vencida');
+
+        $chartMoraPorBucket = $charts->horizontalBarChart(
+            array_map(fn ($k, $b) => ['label' => $b['label'] ?? $k, 'value' => (float) ($b['monto'] ?? 0)], array_keys($moraBuckets), $moraBuckets),
+            'Mora por bucket',
+        );
+
+        $chartEbitda = $charts->horizontalBarChart([
+            ['label' => 'Ingreso base EBITDA', 'value' => $ingresoBase],
+            ['label' => 'Gastos + Nómina neta', 'value' => $gastos + $pagos + $bonos - $desctos],
+            ['label' => 'EBITDA', 'value' => $ingresoBase - ($gastos + $pagos + $bonos - $desctos)],
+        ], 'Ingreso EBITDA vs Gastos vs EBITDA');
+
+        $chartNominaComposicion = $charts->stackedCompositionBar(
+            array_map(fn ($p) => ['label' => $p['concepto'], 'value' => (float) $p['monto']], $payrollDetail['percepciones'] ?? []),
+            'Composición de nómina (percepciones)',
+        );
+
+        $chartColocacionPorProducto = $charts->horizontalBarChart(
+            array_map(fn ($p) => ['label' => $p['producto'] ?? '—', 'value' => (float) ($p['colocacion'] ?? 0)], $placementsByProduct),
+            'Colocación por producto',
+        );
+
+        $chartRecuperacionPorProducto = $charts->horizontalBarChart(
+            array_map(fn ($p) => ['label' => $p['producto'] ?? '—', 'value' => (float) ($p['recuperacion'] ?? 0)], $recoveryByProduct),
+            'Recuperación por producto',
+        );
+
+        $chartEfectividad = $charts->horizontalBarChart([
+            ['label' => 'Vigente', 'value' => (float) ($efectividad['vigente']['total'] ?? 0)],
+            ['label' => 'Atrasado', 'value' => (float) ($efectividad['atrasado']['total'] ?? 0)],
+            ['label' => 'Vencido', 'value' => (float) ($efectividad['vencido']['total'] ?? 0)],
+        ], 'Efectividad de cobranza');
+
         return [
             'empName'   => $employee->full_name,
             'empBranch' => $empRow['branch'] ?? 'Sin asignar',
@@ -348,6 +413,21 @@ class RadiografiaExportService
             'cartera'   => $cartera,
             'vencida'   => $vencida,
             'mora'      => $mora,
+            'ingresoBase' => $ingresoBase,
+            'payrollDetail'       => $payrollDetail,
+            'recoveryComponents'  => $recoveryComponents,
+            'recoveryByProduct'   => $recoveryByProduct,
+            'placementsByProduct' => $placementsByProduct,
+            'moraBuckets'         => $moraBuckets,
+            'efectividad'         => $efectividad,
+            'chartRecuperacionVsColocacion' => $chartRecuperacionVsColocacion,
+            'chartCarteraSanaVsVencida'     => $chartCarteraSanaVsVencida,
+            'chartMoraPorBucket'            => $chartMoraPorBucket,
+            'chartEbitda'                   => $chartEbitda,
+            'chartNominaComposicion'        => $chartNominaComposicion,
+            'chartColocacionPorProducto'    => $chartColocacionPorProducto,
+            'chartRecuperacionPorProducto'  => $chartRecuperacionPorProducto,
+            'chartEfectividad'              => $chartEfectividad,
             // EBITDA = Ingreso base EBITDA (mismos componentes que BranchRadiographyCalculator::
             // ingresoEbitdaBaseFor(), agregados por gestor) − (Gastos + NóminaNeta). NUNCA
             // Recuperación − Colocación (esa fórmula quedó obsoleta, ver criterio final 2026-07).

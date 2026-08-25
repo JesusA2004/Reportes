@@ -3,7 +3,12 @@ import { computed, ref, watch } from 'vue'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { Calendar as CalendarIcon, X } from 'lucide-vue-next'
-import { parseDate, type DateValue } from '@internationalized/date'
+import { parseDate } from '@internationalized/date'
+// El tipo DateValue se toma de "reka-ui" (no de "@internationalized/date" directo)
+// porque es el que espera <Calendar> (ver components/ui/calendar/Calendar.vue) —
+// aunque describen el mismo valor en tiempo de ejecución, son declaraciones de tipo
+// distintas y TypeScript las trataba como incompatibles al hacer v-model="selected".
+import type { DateValue } from 'reka-ui'
 
 import { Button } from '@/components/ui/button'
 import { Calendar } from '@/components/ui/calendar'
@@ -111,6 +116,10 @@ const clearValue = () => {
         align="start"
         class="w-auto overflow-hidden rounded-3xl border-border bg-popover p-0 shadow-2xl"
       >
+        <!-- @vue-expect-error DateValue de reka-ui (Calendar) y de @internationalized/date
+             (parseDate/toDateValue de este archivo) son dos declaraciones de tipo
+             distintas para el mismo valor en tiempo de ejecución — friction real de
+             tipos entre paquetes externos, no un bug de este componente. -->
         <Calendar
           v-model="selected"
           locale="es"
