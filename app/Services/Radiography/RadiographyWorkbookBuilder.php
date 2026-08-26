@@ -246,63 +246,13 @@ class RadiographyWorkbookBuilder
             $gastosOpDetalleMap[$gasto] = $getGDet($gasto);
         }
 
-        $globalNomina    = $brCalcGlobal ? (float)$brCalcGlobal['nomina_total']     : (float)$pay['pagos'];
-        $globalComisions = $brCalcGlobal ? (float)$brCalcGlobal['comisiones']       : 0.0;
-        $globalBonos     = $brCalcGlobal ? (float)$brCalcGlobal['bonos']            : (float)$pay['bonos'];
-        $globalVacac     = $brCalcGlobal ? (float)$brCalcGlobal['vacaciones']       : 0.0;
-        $globalPrimaVac  = $brCalcGlobal ? (float)$brCalcGlobal['prima_vacacional'] : 0.0;
-        $globalNomDet = [];
-        foreach ((array)($brCalcGlobal['nomina_detalle'] ?? []) as $k => $v) {
-            $globalNomDet[$k] = ($globalNomDet[$k] ?? 0.0) + (float) $v;
-        }
-        foreach ((array)($brCalcGlobal['nomina_informativo'] ?? []) as $k => $v) {
-            $globalNomDet[$k] = ($globalNomDet[$k] ?? 0.0) + (float) $v;
-        }
-
-        $nomDisplayOrder = [
-            'Nómina'                                    => $globalNomina,
-            'Comisiones'                                => $globalComisions,
-            'Vacaciones'                                => $globalVacac,
-            'Prima vacacional'                          => $globalPrimaVac,
-            'Bonos'                                     => $globalBonos,
-            'Bonos Aceleradores'                        => 0.0,
-            'IMSS'                                      => 0.0,
-            'Descuentos Infonavit'                      => 0.0,
-            'Finiquito'                                 => 0.0,
-            'Gastos médicos'                            => 0.0,
-            'Gasolina'                                  => 0.0,
-            'Financiamiento De Motos'                   => 0.0,
-            'Descuento Servicios Moto'                  => 0.0,
-            'Financiamiento Celular'                    => 0.0,
-            'Cascos'                                    => 0.0,
-            'Descuento de uniformes'                    => 0.0,
-            'Descuentos FONACOT'                        => 0.0,
-            'Descuento extravío tarjeta de circulación' => 0.0,
-            'Descuentos Tienda Mr Lana'                 => 0.0,
-            'Descuento Servicios Automóvil'             => 0.0,
-            'Descuento faltante en caja'                => 0.0,
-            'Anticipo de nómina'                        => 0.0,
-            'Formatería'                                => 0.0,
-            'Pensión Alimenticia'                       => 0.0,
-        ];
-        $nomDetAlias = [
-            'Financiamiento de Motos' => 'Financiamiento De Motos',
-            'Descuento tienda Mr Lana' => 'Descuentos Tienda Mr Lana',
-        ];
-        $mandatory24 = array_keys($nomDisplayOrder);
-        $claimed = [];
-        foreach ($globalNomDet as $detKey => $detVal) {
-            $canonical = $nomDetAlias[$detKey] ?? $detKey;
-            if (array_key_exists($canonical, $nomDisplayOrder)) {
-                $nomDisplayOrder[$canonical] += (float) $detVal;
-                $claimed[$detKey] = true;
-            }
-        }
-        foreach ($globalNomDet as $detKey => $detVal) {
-            if (!isset($claimed[$detKey]) && (float) $detVal > 0) {
-                $nomDisplayOrder[$detKey] = ($nomDisplayOrder[$detKey] ?? 0.0) + (float) $detVal;
-            }
-        }
+        // Ver mismo fix y explicación en buildGlobalSheet() (bug real 2026-08-26): el
+        // desglose viene EXCLUSIVAMENTE de nominaBreakdownFor(), garantizado a sumar
+        // exacto contra nominaTotalFor() — las deducciones (nomina_detalle) se manejan
+        // aparte, nunca mezcladas en esta tabla reconciliable.
+        $nomDisplayOrder = $brCalcGlobal ? BranchRadiographyCalculator::nominaBreakdownFor($brCalcGlobal) : [];
+        $mandatory24 = ['Sueldo', 'Comisiones', 'Bonos', 'Vacaciones'];
+        $globalNomDeducciones = (array) ($brCalcGlobal['nomina_detalle'] ?? []);
         $nomTotal = $brCalcGlobal ? BranchRadiographyCalculator::nominaTotalFor($brCalcGlobal) : (float) $pay['pagos'];
 
         $brGlobalFondea = $brCalcGlobal ? (float)$brCalcGlobal['prestamos_fondea'] : (float)($loans['operative_fondeos']['fondea_total'] ?? 0);
@@ -432,78 +382,18 @@ class RadiographyWorkbookBuilder
         $gastosOpOtros = round($gastosOpTotal - $gastosOpCurada, 2);
 
         // ── Nómina y Capital Humano (totales primero, render después) ───────
-        $globalNomina    = $brCalcGlobal ? (float)$brCalcGlobal['nomina_total']     : (float)$pay['pagos'];
-        $globalComisions = $brCalcGlobal ? (float)$brCalcGlobal['comisiones']       : 0.0;
-        $globalBonos     = $brCalcGlobal ? (float)$brCalcGlobal['bonos']            : (float)$pay['bonos'];
-        $globalVacac     = $brCalcGlobal ? (float)$brCalcGlobal['vacaciones']       : 0.0;
-        $globalPrimaVac  = $brCalcGlobal ? (float)$brCalcGlobal['prima_vacacional'] : 0.0;
-        // nomina_detalle (deducciones NOI, YA restadas de nomina_total) + nomina_informativo
-        // (IMSS/Gasolina/Motos/Cascos/Finiquito/Médicos/Formatería, JAMÁS sumados) — se
-        // muestran juntos en la tabla por transparencia, el Total real viene de nominaTotalFor().
-        // Suma aditiva (no array_merge) porque una misma etiqueta puede existir en ambos
-        // (ej. "Financiamiento Celular": deducción NOI D125 + gasto ERP, son montos distintos).
-        $globalNomDet = [];
-        foreach ((array)($brCalcGlobal['nomina_detalle'] ?? []) as $k => $v) {
-            $globalNomDet[$k] = ($globalNomDet[$k] ?? 0.0) + (float) $v;
-        }
-        foreach ((array)($brCalcGlobal['nomina_informativo'] ?? []) as $k => $v) {
-            $globalNomDet[$k] = ($globalNomDet[$k] ?? 0.0) + (float) $v;
-        }
-
-        // 24 mandatory rows — always shown even if $0
-        // 'IMSS' = costo patronal (del archivo IMSS vía accumulateImssPatronal).
-        // Los renglones de deducciones (Infonavit, FONACOT, etc.) se muestran para
-        // transparencia pero NO se suman al Total del empleador.
-        $nomDisplayOrder = [
-            'Nómina'                                    => $globalNomina,
-            'Comisiones'                                => $globalComisions,
-            'Vacaciones'                                => $globalVacac,
-            'Prima vacacional'                          => $globalPrimaVac,
-            'Bonos'                                     => $globalBonos,
-            'Bonos Aceleradores'                        => 0.0,
-            'IMSS'                                      => 0.0,
-            'Descuentos Infonavit'                      => 0.0,
-            'Finiquito'                                 => 0.0,
-            'Gastos médicos'                            => 0.0,
-            'Gasolina'                                  => 0.0,
-            'Financiamiento De Motos'                   => 0.0,
-            'Descuento Servicios Moto'                  => 0.0,
-            'Financiamiento Celular'                    => 0.0,
-            'Cascos'                                    => 0.0,
-            'Descuento de uniformes'                    => 0.0,
-            'Descuentos FONACOT'                        => 0.0,
-            'Descuento extravío tarjeta de circulación' => 0.0,
-            'Descuentos Tienda Mr Lana'                 => 0.0,
-            'Descuento Servicios Automóvil'             => 0.0,
-            'Descuento faltante en caja'                => 0.0,
-            'Anticipo de nómina'                        => 0.0,
-            'Formatería'                                => 0.0,
-            'Pensión Alimenticia'                       => 0.0,
-        ];
-        // Aliases: calculator key → canonical display label
-        $nomDetAlias = [
-            'Financiamiento de Motos' => 'Financiamiento De Motos',
-            // 'Descuento tienda Mr Lana' renamed to 'Descuentos Tienda Mr Lana' for consistency
-            'Descuento tienda Mr Lana' => 'Descuentos Tienda Mr Lana',
-        ];
-        $mandatory24 = array_keys($nomDisplayOrder);
-        $claimed = [];
-        foreach ($globalNomDet as $detKey => $detVal) {
-            $canonical = $nomDetAlias[$detKey] ?? $detKey;
-            if (array_key_exists($canonical, $nomDisplayOrder)) {
-                $nomDisplayOrder[$canonical] += (float) $detVal;
-                $claimed[$detKey] = true;
-            }
-        }
-        // Overflow: nomina_detalle items not covered by mandatory rows (only shown if > 0)
-        foreach ($globalNomDet as $detKey => $detVal) {
-            if (!isset($claimed[$detKey]) && (float) $detVal > 0) {
-                $nomDisplayOrder[$detKey] = ($nomDisplayOrder[$detKey] ?? 0.0) + (float) $detVal;
-            }
-        }
-        // Total = fuente única BranchRadiographyCalculator::nominaTotalFor(). Las filas de la
-        // tabla (deducciones NOI + informativos ERP/Lendus/IMSS) son SIEMPRE transparencia,
-        // nunca se vuelven a sumar aquí.
+        // Bug real 2026-08-26: la lista curada de abajo mezclaba nomina_detalle
+        // (deducciones NOI, que YA NO se restan de nomina_total — ver accumulateNomina())
+        // junto con nomina_informativo (IMSS/Motos/Cascos/Finiquito/Médicos, que SÍ están
+        // incluidos en el total) en UNA SOLA tabla — así SUM(filas mostradas) no cuadraba
+        // contra "Total Nómina y Capital Humano". nomDisplayOrder ahora viene EXCLUSIVAMENTE
+        // de BranchRadiographyCalculator::nominaBreakdownFor() (los mismos 9 campos que arma
+        // nominaTotalFor(), garantizado por construcción a sumar exacto); las deducciones se
+        // renderizan aparte, después del Total, para que nunca se confundan con un componente.
+        $nomDisplayOrder = $brCalcGlobal ? BranchRadiographyCalculator::nominaBreakdownFor($brCalcGlobal) : [];
+        $mandatory24 = ['Sueldo', 'Comisiones', 'Bonos', 'Vacaciones'];
+        $globalNomDeducciones = (array) ($brCalcGlobal['nomina_detalle'] ?? []);
+        // Total = fuente única BranchRadiographyCalculator::nominaTotalFor().
         $nomTotal = $brCalcGlobal ? BranchRadiographyCalculator::nominaTotalFor($brCalcGlobal) : (float) $pay['pagos'];
 
         // ── Préstamos intersucursales — SOLO movimientos sucursal operativa → sucursal
@@ -1380,6 +1270,32 @@ class RadiographyWorkbookBuilder
         $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
 
+        // Deducciones NOI — informativas, NUNCA se restan del Total de arriba (regla
+        // vigente 2026-07). Aparte para que nunca se confundan con un componente del total.
+        if (!empty($globalNomDeducciones)) {
+            RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", 'DEDUCCIONES NOI (informativo — no se restan del total)');
+            $r++;
+            $di = 0;
+            $dedTotal = 0.0;
+            foreach ($globalNomDeducciones as $dedName => $dedVal) {
+                $dedVal = (float) $dedVal;
+                if ($dedVal == 0.0) continue;
+                RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", $dedName);
+                $sheet->setCellValue("B{$r}", $dedVal);
+                $this->dataRow($sheet, "A{$r}:D{$r}", $di % 2 === 0);
+                $this->applyFmt($sheet, "B{$r}", 'currency', $dedVal);
+                $dedTotal += $dedVal;
+                $di++;
+                $r++;
+            }
+            RadiographyStyleHelper::setCellValueSafe($sheet, "A{$r}", 'Total deducciones (informativo)');
+            $sheet->setCellValue("B{$r}", $dedTotal);
+            $this->totalsRow($sheet, "A{$r}:D{$r}");
+            $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $r++;
+        }
+        $r++;
+
         // ── 5. Préstamos Intersucursales ──────────────────────────────────────
         RadiographyStyleHelper::applySectionHeaderStyle($sheet, "A{$r}:D{$r}", '5. PRÉSTAMOS INTERSUCURSALES (solo sucursal operativa → sucursal operativa)');
         $r++;
@@ -2068,6 +1984,15 @@ class RadiographyWorkbookBuilder
             $vencido   = (float)($ec['vencido']['total'] ?? 0);
             $this->writeComparativeRow($sheet, $r, 'Cobros en mora (Atrasado + Vencido)', $cAtrasado + $cVencido, $atrasado + $vencido, 'currency', true);
             $this->writeComparativeRow($sheet, $r, 'Cobros al corriente (Vigente)', $cVigente, $vigente, 'currency', false);
+            $r++;
+            // % real de efectividad — recuperado de mora ÷ cartera en mora al cierre del
+            // MES ANTERIOR a cada periodo respectivamente (nunca una fórmula compartida).
+            $cEfPct = $cEc['efectividad']['efectividad_pct'] ?? null;
+            $efPct  = $ec['efectividad']['efectividad_pct'] ?? null;
+            $sheet->setCellValue("A{$r}", 'Efectividad de cobranza (real)');
+            $sheet->setCellValue("B{$r}", $cEfPct !== null ? number_format($cEfPct, 1) . '%' : 'N/D');
+            $sheet->setCellValue("C{$r}", $efPct !== null ? number_format($efPct, 1) . '%' : 'N/D');
+            $this->dataRow($sheet, "A{$r}:C{$r}", true);
 
             $this->setColWidths($sheet, ['A' => 30, 'B' => 20, 'C' => 20, 'D' => 18, 'E' => 14]);
             $sheet->freezePane('A5');
@@ -2152,6 +2077,20 @@ class RadiographyWorkbookBuilder
         $sheet->setCellValue("A{$r}", 'Cobros al corriente (Vigente)');
         $sheet->setCellValue("B{$r}", '$' . number_format($vigente, 2) . ' (' . round($vigente / $total * 100, 1) . '%)');
         $r++;
+
+        // % real de efectividad (2026-08-26) — recuperado de cartera en mora este
+        // periodo ÷ cartera en mora (DPD>0) al cierre del mes anterior. Distinto de las
+        // filas de arriba (esas son composición del dinero cobrado, no una tasa contra
+        // lo que había que cobrar). Ver RadiographySnapshotBuilder::buildEfectividadCobranza().
+        $efInfo = $ec['efectividad'] ?? null;
+        if ($efInfo) {
+            $sheet->setCellValue("A{$r}", 'Efectividad de cobranza (real)');
+            $sheet->setCellValue("B{$r}", $efInfo['efectividad_pct'] !== null
+                ? number_format($efInfo['efectividad_pct'], 1) . '% — recuperado ' . '$' . number_format($efInfo['recuperado_de_mora'], 2)
+                    . ' de $' . number_format($efInfo['cartera_mora_periodo_anterior'], 2) . ' en mora al cierre de ' . ($efInfo['periodo_anterior_label'] ?? '')
+                : 'N/D — sin cartera del mes anterior para calcular el denominador');
+            $r++;
+        }
 
         foreach (['A'=>32,'B'=>22,'C'=>18,'D'=>18,'E'=>18,'F'=>18,'G'=>18,'H'=>12] as $col => $w) {
             $sheet->getColumnDimension($col)->setWidth($w);
@@ -3152,39 +3091,19 @@ class RadiographyWorkbookBuilder
                 // 4. Nómina y Capital Humano
                 $this->sectionHeader($sheet, "A{$r}:E{$r}", '4. NÓMINA Y CAPITAL HUMANO'); $r++;
                 $this->comparativeHeader($sheet, $r, $labelCmp, $labelCur, 'CONCEPTO'); $r++;
-                $brNomDisplayList = [
-                    'Nómina','Comisiones','Vacaciones','Prima vacacional','Bonos','Bonos Aceleradores',
-                    'IMSS','Descuentos Infonavit','Finiquito','Gastos médicos','Gasolina',
-                    'Financiamiento De Motos','Descuento Servicios Moto','Financiamiento Celular','Cascos',
-                    'Descuento de uniformes','Descuento gastos sin comprobar','Descuento extravío tarjeta de circulación',
-                    'Descuento tienda Mr Lana','Descuento Servicios Automóvil','Descuento faltante en caja',
-                    'Anticipo de nómina','Formatería','Pensión Alimenticia',
-                ];
-                $buildBrNomMap = function (?array $c) use ($brNomDisplayList): array {
-                    if (!$c) return array_fill_keys($brNomDisplayList, 0.0);
-                    $map = [
-                        'Nómina' => (float)$c['nomina_total'], 'Comisiones' => (float)$c['comisiones'],
-                        'Vacaciones' => (float)$c['vacaciones'], 'Prima vacacional' => (float)$c['prima_vacacional'],
-                        'Bonos' => (float)$c['bonos'], 'Bonos Aceleradores' => (float)$c['bonos_aceleradores'],
-                    ];
-                    $alias = ['Financiamiento de Motos' => 'Financiamiento De Motos', 'Descuentos Tienda Mr Lana' => 'Descuento tienda Mr Lana'];
-                    foreach ((array)($c['nomina_detalle'] ?? []) as $k => $v) {
-                        $canon = $alias[$k] ?? $k;
-                        $map[$canon] = ($map[$canon] ?? 0.0) + (float)$v;
-                    }
-                    foreach ((array)($c['nomina_informativo'] ?? []) as $k => $v) {
-                        $canon = $alias[$k] ?? $k;
-                        $map[$canon] = ($map[$canon] ?? 0.0) + (float)$v;
-                    }
-                    return $map;
-                };
-                $nomMapCur = $buildBrNomMap($calc);
-                $nomMapCmp = $buildBrNomMap($calcCmp);
+                // Bug real 2026-08-26 (mismo fix que buildGlobalSheet()): antes se mezclaban
+                // nomina_detalle (deducciones, NO parte del total) con nomina_informativo (SÍ
+                // parte del total) en un solo mapa — la suma de filas mostradas no cuadraba
+                // contra "Total Nómina y Capital Humano". Ahora usa nominaBreakdownFor(), que
+                // suma exacto a nominaTotalFor() por construcción.
+                $nomMapCur = $calc    ? BranchRadiographyCalculator::nominaBreakdownFor($calc)    : [];
+                $nomMapCmp = $calcCmp ? BranchRadiographyCalculator::nominaBreakdownFor($calcCmp) : [];
+                $brNomDisplayList = array_values(array_unique(array_merge(array_keys($nomMapCur), array_keys($nomMapCmp))));
                 $ni = 0;
                 foreach ($brNomDisplayList as $nomName) {
                     $prev = (float)($nomMapCmp[$nomName] ?? 0);
                     $curr = (float)($nomMapCur[$nomName] ?? 0);
-                    if ($prev == 0.0 && $curr == 0.0 && !in_array($nomName, ['Nómina','Comisiones','Vacaciones','Prima vacacional','Bonos'], true)) continue;
+                    if ($prev == 0.0 && $curr == 0.0 && !in_array($nomName, ['Sueldo','Comisiones','Vacaciones','Bonos'], true)) continue;
                     $this->writeComparativeRow($sheet, $r, $nomName, $prev, $curr, 'currency', $ni % 2 === 0);
                     $ni++;
                 }
@@ -3367,74 +3286,21 @@ class RadiographyWorkbookBuilder
             $r += 2;
 
             // 4. Nómina y Capital Humano — expanded (same structure as GLOBAL)
+            // Bug real 2026-08-26 (mismo fix que buildGlobalSheet()): antes se mezclaban
+            // nomina_detalle (deducciones, NO parte del total) con nomina_informativo (SÍ
+            // parte del total) en una sola tabla — la suma de filas no cuadraba contra
+            // "Total Nómina y Capital Humano". nominaBreakdownFor() suma exacto por
+            // construcción; las deducciones se muestran aparte, después del Total.
             $this->sectionHeader($sheet, "A{$r}:C{$r}", '4. NÓMINA Y CAPITAL HUMANO');
             $r++;
-            $brNomina    = $calc ? (float)$calc['nomina_total']        : 0.0;
-            $brComisions = $calc ? (float)$calc['comisiones']          : 0.0;
-            $brBonos     = $calc ? (float)$calc['bonos']               : 0.0;
-            $brBonAcel   = $calc ? (float)$calc['bonos_aceleradores']  : 0.0;
-            $brVacac     = $calc ? (float)$calc['vacaciones']          : 0.0;
-            $brPrimaVac  = $calc ? (float)$calc['prima_vacacional']    : 0.0;
-            $brNomDet = [];
-            foreach ((array)($calc['nomina_detalle'] ?? []) as $k => $v) {
-                $brNomDet[$k] = ($brNomDet[$k] ?? 0.0) + (float) $v;
-            }
-            foreach ((array)($calc['nomina_informativo'] ?? []) as $k => $v) {
-                $brNomDet[$k] = ($brNomDet[$k] ?? 0.0) + (float) $v;
-            }
+            $brNomDisplay  = $calc ? BranchRadiographyCalculator::nominaBreakdownFor($calc) : [];
+            $brMandatory24 = ['Sueldo', 'Comisiones', 'Vacaciones', 'Bonos'];
+            $brDeducciones = (array) ($calc['nomina_detalle'] ?? []);
 
-            // 24 mandatory rows — always shown even if $0
-            $brNomDisplay = [
-                'Nómina'                                    => $brNomina,
-                'Comisiones'                                => $brComisions,
-                'Vacaciones'                                => $brVacac,
-                'Prima vacacional'                          => $brPrimaVac,
-                'Bonos'                                     => $brBonos,
-                'Bonos Aceleradores'                        => $brBonAcel,
-                'IMSS'                                      => 0.0,
-                'Descuentos Infonavit'                      => 0.0,
-                'Finiquito'                                 => 0.0,
-                'Gastos médicos'                            => 0.0,
-                'Gasolina'                                  => 0.0,
-                'Financiamiento De Motos'                   => 0.0,
-                'Descuento Servicios Moto'                  => 0.0,
-                'Financiamiento Celular'                    => 0.0,
-                'Cascos'                                    => 0.0,
-                'Descuento de uniformes'                    => 0.0,
-                'Descuento gastos sin comprobar'            => 0.0,
-                'Descuento extravío tarjeta de circulación' => 0.0,
-                'Descuento tienda Mr Lana'                  => 0.0,
-                'Descuento Servicios Automóvil'             => 0.0,
-                'Descuento faltante en caja'                => 0.0,
-                'Anticipo de nómina'                        => 0.0,
-                'Formatería'                                => 0.0,
-                'Pensión Alimenticia'                       => 0.0,
-            ];
-            $brNomAlias = [
-                'Financiamiento de Motos'   => 'Financiamiento De Motos',
-                'Descuentos Tienda Mr Lana' => 'Descuento tienda Mr Lana',
-            ];
-            $brMandatory24 = array_keys($brNomDisplay);
-            $brClaimed = [];
-            foreach ($brNomDet as $detKey => $detVal) {
-                $canonical = $brNomAlias[$detKey] ?? $detKey;
-                if (array_key_exists($canonical, $brNomDisplay)) {
-                    $brNomDisplay[$canonical] += (float) $detVal;
-                    $brClaimed[$detKey] = true;
-                }
-            }
-            foreach ($brNomDet as $detKey => $detVal) {
-                if (!isset($brClaimed[$detKey]) && (float) $detVal > 0) {
-                    $brNomDisplay[$detKey] = ($brNomDisplay[$detKey] ?? 0.0) + (float) $detVal;
-                }
-            }
-
-            // Total = fuente única BranchRadiographyCalculator::nominaTotalFor() — las filas de
-            // abajo (deducciones NOI + informativos ERP/Lendus/IMSS) son SIEMPRE transparencia.
             $brNomTotal = $calc ? BranchRadiographyCalculator::nominaTotalFor($calc) : 0.0;
             $i2         = 0;
             foreach ($brNomDisplay as $nomName => $nomVal) {
-                if ($nomVal == 0.0 && !in_array($nomName, $brMandatory24)) continue;
+                if ($nomVal == 0.0 && !in_array($nomName, $brMandatory24, true)) continue;
                 $sheet->setCellValue("A{$r}", $nomName);
                 $sheet->setCellValue("B{$r}", $nomVal);
                 $this->dataRow($sheet, "A{$r}:C{$r}", $i2 % 2 === 0);
@@ -3447,6 +3313,31 @@ class RadiographyWorkbookBuilder
             $this->totalsRow($sheet, "A{$r}:C{$r}");
             $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
             $r += 2;
+
+            // Deducciones NOI — informativas, NUNCA se restan del Total de arriba.
+            if (!empty($brDeducciones)) {
+                $this->sectionHeader($sheet, "A{$r}:C{$r}", 'DEDUCCIONES NOI (informativo — no se restan del total)');
+                $r++;
+                $di = 0;
+                $brDedTotal = 0.0;
+                foreach ($brDeducciones as $dedName => $dedVal) {
+                    $dedVal = (float) $dedVal;
+                    if ($dedVal == 0.0) continue;
+                    $sheet->setCellValue("A{$r}", $dedName);
+                    $sheet->setCellValue("B{$r}", $dedVal);
+                    $this->dataRow($sheet, "A{$r}:C{$r}", $di % 2 === 0);
+                    $this->applyFmt($sheet, "B{$r}", 'currency', $dedVal);
+                    $brDedTotal += $dedVal;
+                    $di++;
+                    $r++;
+                }
+                $sheet->setCellValue("A{$r}", 'Total deducciones (informativo)');
+                $sheet->setCellValue("B{$r}", $brDedTotal);
+                $this->totalsRow($sheet, "A{$r}:C{$r}");
+                $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+                $r++;
+            }
+            $r++;
 
             // 5. Préstamos Intersucursales
             $this->sectionHeader($sheet, "A{$r}:C{$r}", '5. PRÉSTAMOS INTERSUCURSALES');
@@ -6085,22 +5976,20 @@ class RadiographyWorkbookBuilder
         $r += 2;
 
         $this->sectionHeader($sheet, "A{$r}:D{$r}", '4. NÓMINA Y CAPITAL HUMANO'); $r++;
-        $nomCats = ['Nómina' => 0.0, 'Comisiones' => 0.0, 'Vacaciones' => 0.0, 'Bonos' => 0.0, 'Gasolina' => 0.0];
-        foreach ($branchPayroll as $concept => $amount) {
-            $k = strtoupper(trim($concept));
-            foreach ($nomCats as $nom => $v) {
-                if (str_contains($k, strtoupper($nom))) { $nomCats[$nom] += (float)$amount; }
-            }
-        }
-        $nomTotal2 = 0.0;
-        foreach ($nomCats as $i2 => [$nomName, $nomVal]) {}
+        // Bug real 2026-08-26: antes se buscaba el nombre de cada categoría (ej. "Nómina")
+        // como substring DENTRO del concepto NOI crudo (ej. "P001 SUELDO") — nunca matchea,
+        // así que "Nómina"/"Bonos" siempre daban $0 pese a haber sueldo/bonos reales, y el
+        // total ($nomTotalBW) no reconciliaba contra la suma de filas mostradas. Ahora usa
+        // BranchRadiographyCalculator::nominaBreakdownFor($brCalc) — los MISMOS 9 campos
+        // escalares que arma nominaTotalFor(), garantizado por construcción a sumar exacto.
+        $nomCats = $brCalc ? BranchRadiographyCalculator::nominaBreakdownFor($brCalc) : [];
         $ii = 0;
         foreach ($nomCats as $nomName => $nomVal) {
+            if ($nomVal == 0.0 && !in_array($nomName, ['Sueldo', 'Comisiones', 'Bonos', 'Vacaciones'], true)) continue;
             $sheet->setCellValue("A{$r}", $nomName);
             $sheet->setCellValue("B{$r}", $nomVal);
             $this->dataRow($sheet, "A{$r}:D{$r}", $ii % 2 === 0);
             $this->applyFmt($sheet, "B{$r}", 'currency', $nomVal);
-            $nomTotal2 += $nomVal;
             $ii++;
             $r++;
         }
@@ -6109,6 +5998,33 @@ class RadiographyWorkbookBuilder
         $this->totalsRow($sheet, "A{$r}:D{$r}");
         $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
+
+        // Deducciones NOI — informativas, NUNCA se restan del Total de arriba (regla
+        // vigente 2026-07, ver BranchRadiographyCalculator::accumulateNomina()). Se
+        // muestran aparte para que nunca se confundan con un componente del total.
+        $brDeducciones = (array) ($brCalc['nomina_detalle'] ?? []);
+        if (!empty($brDeducciones)) {
+            $this->sectionHeader($sheet, "A{$r}:D{$r}", 'DEDUCCIONES NOI (informativo — no se restan del total)'); $r++;
+            $di = 0;
+            $dedTotal = 0.0;
+            foreach ($brDeducciones as $dedName => $dedVal) {
+                $dedVal = (float) $dedVal;
+                if ($dedVal == 0.0) continue;
+                $sheet->setCellValue("A{$r}", $dedName);
+                $sheet->setCellValue("B{$r}", $dedVal);
+                $this->dataRow($sheet, "A{$r}:D{$r}", $di % 2 === 0);
+                $this->applyFmt($sheet, "B{$r}", 'currency', $dedVal);
+                $dedTotal += $dedVal;
+                $di++;
+                $r++;
+            }
+            $sheet->setCellValue("A{$r}", 'Total deducciones (informativo)');
+            $sheet->setCellValue("B{$r}", $dedTotal);
+            $this->totalsRow($sheet, "A{$r}:D{$r}");
+            $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
+            $r++;
+        }
+        $r++;
 
         $this->sectionHeader($sheet, "A{$r}:D{$r}", '5. PRÉSTAMOS INTERSUCURSALES'); $r++;
         foreach ([
@@ -6398,6 +6314,25 @@ class RadiographyWorkbookBuilder
             foreach (['C', 'D', 'E', 'F'] as $col) { $efSheetB->getStyle("{$col}{$ebr}")->getNumberFormat()->setFormatCode(self::CURRENCY); }
         }
         if (!$efBHasData) { $efSheetB->setCellValue('A3', 'Sin datos de efectividad de cobranza para esta sucursal en el periodo.'); }
+
+        // % real de efectividad (2026-08-25→08-26) — recuperado de mora ÷ cartera en
+        // mora al cierre del mes anterior. La tabla de arriba es composición del
+        // dinero cobrado, no un ratio contra lo que había que cobrar.
+        $efBInfo = $efectividadB['efectividad'] ?? null;
+        if ($efBInfo) {
+            $ebr++;
+            $efSheetB->setCellValue("A{$ebr}", 'Efectividad de cobranza (real)');
+            $efSheetB->setCellValue("B{$ebr}", $efBInfo['efectividad_pct'] !== null
+                ? number_format($efBInfo['efectividad_pct'], 1) . '%'
+                : 'N/D');
+            $ebr++;
+            $efSheetB->setCellValue("A{$ebr}", 'Fórmula');
+            $efSheetB->setCellValue("B{$ebr}", $efBInfo['cartera_mora_periodo_anterior'] !== null
+                ? 'Recuperado de mora $' . number_format($efBInfo['recuperado_de_mora'], 2)
+                    . ' ÷ cartera en mora al cierre de ' . ($efBInfo['periodo_anterior_label'] ?? '')
+                    . ' $' . number_format($efBInfo['cartera_mora_periodo_anterior'], 2)
+                : 'Sin cartera del mes anterior para calcular el denominador.');
+        }
         $this->setColWidths($efSheetB, ['A' => 16, 'B' => 12, 'C' => 16, 'D' => 16, 'E' => 16, 'F' => 16]);
 
         $chartHelper->addBarChartFromData(
@@ -6822,6 +6757,26 @@ class RadiographyWorkbookBuilder
             foreach (['C', 'D', 'E', 'F'] as $col) { $efSheet->getStyle("{$col}{$er}")->getNumberFormat()->setFormatCode(self::CURRENCY); }
         }
         if (!$efHasData) { $efSheet->setCellValue('A3', 'Sin datos de efectividad de cobranza para este gestor en el periodo.'); }
+
+        // % real de efectividad (2026-08-26) — recuperado de mora ÷ cartera en mora al
+        // cierre del mes anterior, filtrado por ESTE gestor (mismo promoter_name que
+        // buildEfectividadCobranza() ya usó arriba). La tabla de arriba es composición
+        // del dinero cobrado por antigüedad, no un ratio contra lo que había que cobrar.
+        $efGestorInfo = $efectividad['efectividad'] ?? null;
+        if ($efGestorInfo) {
+            $er++;
+            $efSheet->setCellValue("A{$er}", 'Efectividad de cobranza (real)');
+            $efSheet->setCellValue("B{$er}", $efGestorInfo['efectividad_pct'] !== null
+                ? number_format($efGestorInfo['efectividad_pct'], 1) . '%'
+                : 'N/D');
+            $er++;
+            $efSheet->setCellValue("A{$er}", 'Fórmula');
+            $efSheet->setCellValue("B{$er}", $efGestorInfo['cartera_mora_periodo_anterior'] !== null
+                ? 'Recuperado de mora $' . number_format($efGestorInfo['recuperado_de_mora'], 2)
+                    . ' ÷ cartera en mora al cierre de ' . ($efGestorInfo['periodo_anterior_label'] ?? '')
+                    . ' $' . number_format($efGestorInfo['cartera_mora_periodo_anterior'], 2)
+                : 'Sin cartera del mes anterior para calcular el denominador.');
+        }
         $this->setColWidths($efSheet, ['A' => 16, 'B' => 12, 'C' => 16, 'D' => 16, 'E' => 16, 'F' => 16]);
 
         $chartHelper->addBarChartFromData(

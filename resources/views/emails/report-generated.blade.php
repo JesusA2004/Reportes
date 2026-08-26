@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Reporte listo — {{ $period->label }}</title>
+<title>{{ $subject }}</title>
 </head>
 <body style="margin:0;padding:0;background-color:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:40px 16px;">
@@ -14,7 +14,7 @@
       <tr>
         <td style="background:#0f172a;padding:28px 36px;">
           <p style="margin:0 0 6px;color:#64748b;font-size:11px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;">Sistema Reportes</p>
-          <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:900;line-height:1.3;">Reporte listo para descargar</h1>
+          <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:900;line-height:1.3;">{{ $subject }}</h1>
         </td>
       </tr>
 
@@ -32,32 +32,22 @@
             Hola{{ $user?->name ? ', ' . $user->name : '' }},
           </p>
           <p style="margin:0 0 28px;color:#334155;font-size:15px;line-height:1.7;">
-            El reporte del periodo <strong style="color:#0f172a;">{{ $period->label }}</strong> ya está listo.
-            Puedes consultarlo en vista previa o descargarlo en Excel y PDF desde Reportes mensuales.
+            @if($isComparative)
+              El comparativo del periodo <strong style="color:#0f172a;">{{ $period->label }}</strong> contra
+              <strong style="color:#0f172a;">{{ $comparisonPeriod->label ?? '—' }}</strong> ya está listo.
+            @elseif($scope === 'branch')
+              La radiografía de la sucursal <strong style="color:#0f172a;">{{ $branch->name ?? '—' }}</strong>
+              del periodo <strong style="color:#0f172a;">{{ $period->label }}</strong> ya está lista.
+            @elseif($scope === 'employee')
+              La radiografía de <strong style="color:#0f172a;">{{ $employee->full_name ?? '—' }}</strong>
+              del periodo <strong style="color:#0f172a;">{{ $period->label }}</strong> ya está lista.
+            @else
+              La radiografía general del periodo <strong style="color:#0f172a;">{{ $period->label }}</strong> ya está lista.
+            @endif
+            Puedes consultarla en vista previa o descargarla en Excel y PDF desde Reportes mensuales.
           </p>
 
           @php
-            $periodTypeLabel = match($period->type) {
-                'monthly'    => 'Mes operativo',
-                'weekly'     => 'Semana',
-                'bimonthly'  => 'Bimestral',
-                'quarterly'  => 'Trimestral',
-                'semiannual' => 'Semestral',
-                'annual'     => 'Anual',
-                default      => $period->type ?? 'Periodo',
-            };
-
-            $componentLabels = [];
-            if (!empty($period->component_period_ids)) {
-                $componentIds    = collect($period->component_period_ids)->map(fn ($id) => (int) $id)->all();
-                $componentLabels = \App\Models\Period::whereIn('id', $componentIds)
-                    ->orderBy('sequence')
-                    ->get()
-                    ->map(fn ($p) => $p->label)
-                    ->values()
-                    ->all();
-            }
-
             $generadoAt = $run->finished_at
                 ? $run->finished_at->setTimezone('America/Mexico_City')->format('d/m/Y H:i')
                 : now('America/Mexico_City')->format('d/m/Y H:i');
@@ -65,28 +55,52 @@
 
           <!-- Info table -->
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;margin-bottom:28px;">
+
+            @if($isComparative)
+            <tr style="border-bottom:1px solid #e2e8f0;">
+              <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;width:40%;">Tipo</td>
+              <td style="padding:12px 18px;font-size:13px;color:#0f172a;font-weight:700;">{{ $reportTypeLabel }}</td>
+            </tr>
+            <tr style="border-bottom:1px solid #e2e8f0;">
+              <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">Periodo principal</td>
+              <td style="padding:12px 18px;font-size:13px;color:#0f172a;font-weight:700;">{{ $period->label }}</td>
+            </tr>
+            <tr style="border-bottom:1px solid #e2e8f0;">
+              <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">Periodo comparado</td>
+              <td style="padding:12px 18px;font-size:13px;color:#0f172a;font-weight:700;">{{ $comparisonPeriod->label ?? '—' }}</td>
+            </tr>
+            @else
             <tr style="border-bottom:1px solid #e2e8f0;">
               <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;width:40%;">Periodo</td>
               <td style="padding:12px 18px;font-size:13px;color:#0f172a;font-weight:700;">{{ $period->label }}</td>
             </tr>
             <tr style="border-bottom:1px solid #e2e8f0;">
-              <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">Tipo</td>
-              <td style="padding:12px 18px;font-size:13px;color:#0f172a;">{{ $periodTypeLabel }}</td>
-            </tr>
-            @if($period->start_date && $period->end_date)
-            <tr style="border-bottom:1px solid #e2e8f0;">
-              <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">Rango</td>
-              <td style="padding:12px 18px;font-size:13px;color:#0f172a;">
-                {{ $period->start_date->format('d/m/Y') }} al {{ $period->end_date->format('d/m/Y') }}
-              </td>
+              <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">Tipo de reporte</td>
+              <td style="padding:12px 18px;font-size:13px;color:#0f172a;">{{ $reportTypeLabel }}</td>
             </tr>
             @endif
-            @if(!empty($componentLabels))
+
             <tr style="border-bottom:1px solid #e2e8f0;">
-              <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">Incluye</td>
-              <td style="padding:12px 18px;font-size:13px;color:#0f172a;">{{ implode(', ', $componentLabels) }}</td>
+              <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">Alcance</td>
+              <td style="padding:12px 18px;font-size:13px;color:#0f172a;font-weight:700;">{{ $scopeLabel }}</td>
+            </tr>
+
+            @if($scope === 'branch')
+            <tr style="border-bottom:1px solid #e2e8f0;">
+              <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">Sucursal</td>
+              <td style="padding:12px 18px;font-size:13px;color:#0f172a;font-weight:700;">{{ $branch->name ?? '—' }}</td>
+            </tr>
+            @elseif($scope === 'employee')
+            <tr style="border-bottom:1px solid #e2e8f0;">
+              <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">Empleado</td>
+              <td style="padding:12px 18px;font-size:13px;color:#0f172a;font-weight:700;">{{ $employee->full_name ?? '—' }}</td>
+            </tr>
+            <tr style="border-bottom:1px solid #e2e8f0;">
+              <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">Sucursal histórica</td>
+              <td style="padding:12px 18px;font-size:13px;color:#0f172a;">{{ $employeeBranchName ?? 'No disponible' }}</td>
             </tr>
             @endif
+
             <tr style="border-bottom:1px solid #e2e8f0;">
               <td style="padding:12px 18px;font-size:13px;color:#64748b;font-weight:600;">Generado</td>
               <td style="padding:12px 18px;font-size:13px;color:#0f172a;">{{ $generadoAt }} (hora México)</td>

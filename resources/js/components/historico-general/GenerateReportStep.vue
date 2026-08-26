@@ -36,7 +36,26 @@ const liveExcelUrl   = ref<string | null>(null)
 const livePdfUrl     = ref<string | null>(null)
 const liveCanProcessNow = ref(false)
 
+// ── Polling health — distinto de un error de generación: esto es "no pude
+// consultar el estado", no "la generación falló". Ver sección "SI EL POLLING
+// FALLA" — nunca debe dejar un spinner infinito sin explicación ni crear un job
+// nuevo; solo informa y ofrece reintentar la CONSULTA (no la generación).
+const pollFailCount = ref(0)
+const pollError      = ref(false)
+
+// props.period.radiography_run_status (y hermanos) SIEMPRE describen la identidad
+// SIMPLE/GENERAL del periodo (ver ReportUploadController::index()). Para cualquier
+// otro alcance configurado en Etapa 4 (sucursal/gestor/comparativo), ese prop
+// pertenece a UN RUN DISTINTO — aplicarlo aquí pisaría el estado real (ya resuelto
+// por identidad completa vía pollProgress()/generationProgress()) con el de un run
+// ajeno, incluso a mitad de una generación en curso. Ver Problema 2.
+const isSimpleGeneralConfig = computed(() =>
+    (props.reportConfig?.report_type ?? 'simple') === 'simple' &&
+    (props.reportConfig?.scope ?? 'general') === 'general'
+)
+
 const syncFromProps = () => {
+    if (!isSimpleGeneralConfig.value) return
     liveStatus.value        = props.period?.radiography_run_status ?? null
     liveLog.value           = props.period?.radiography_run_log ?? null
     liveError.value         = props.period?.radiography_run_error ?? null
@@ -79,8 +98,22 @@ const pollProgress = async () => {
         const res = await fetch(`/historico-general/${props.period.id}/generar-reporte/progreso?${identityParams.toString()}`, {
             headers: { 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json' },
         })
-        if (!res.ok) return
+        // Un !res.ok (ej. 401/419 por sesión expirada durante una generación larga,
+        // o un 5xx transitorio) o una respuesta que no es JSON (ej. redirect al login
+        // devuelto como 200 con HTML) NO deben dejarse pasar en silencio: antes esto
+        // simplemente "return"eaba y la tarjeta se quedaba congelada para siempre en
+        // el último estado conocido (típicamente "en proceso"), aunque el job ya
+        // hubiera terminado y el correo de éxito ya hubiera llegado — el usuario solo
+        // lo notaba si hacía F5. Ahora se registra como fallo de POLLING (distinto de
+        // un fallo de generación) y se sigue reintentando solo; el job en el backend
+        // nunca se toca ni se relanza desde aquí.
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const contentType = res.headers.get('content-type') ?? ''
+        if (!contentType.includes('application/json')) throw new Error('respuesta no-JSON (¿sesión expirada?)')
         const data = await res.json()
+
+        pollFailCount.value = 0
+        pollError.value     = false
 
         liveStatus.value        = data.status
         liveLog.value           = data.log
@@ -101,7 +134,12 @@ const pollProgress = async () => {
             emit('refresh')
         }
     } catch {
-        // silent — retry next tick
+        // No tocar liveStatus/liveExcelUrl/etc. aquí: un fallo de RED no significa que
+        // la generación haya fallado, y pisar el estado con algo distinto podría sacar
+        // la tarjeta de "en proceso" sin motivo real. Solo se avisa tras 2 fallos
+        // seguidos (~6-9 s) para no mostrar el aviso por un simple parpadeo de red.
+        pollFailCount.value++
+        if (pollFailCount.value >= 2) pollError.value = true
     }
 }
 
@@ -168,18 +206,33 @@ const isDone              = computed(() => liveStatus.value === 'success')
 const hasPreviousReport   = computed(() => props.period?.has_previous_radiography)
 const previousReportAt    = computed(() => props.period?.previous_radiography_at ?? null)
 
-const elapsedFormatted = computed(() => {
+// Formato reloj "00:42" — el que pide la UX para "Tiempo transcurrido"/"Tiempo total".
+const elapsedClock = computed(() => {
     if (liveSeconds.value === null) return null
-    const s = liveSeconds.value
-    const mins = Math.floor(s / 60)
-    const secs = s % 60
-    if (mins === 0) return `${secs} seg`
-    return `${mins} min ${String(secs).padStart(2, '0')} seg`
+    const mins = Math.floor(liveSeconds.value / 60)
+    const secs = liveSeconds.value % 60
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
 })
 
 const runMeta     = computed(() => liveMeta.value)
 const progress    = computed(() => runMeta.value?.progress_percent ?? null)
 const currentStep = computed(() => runMeta.value?.current_step ?? null)
+
+// Aviso suave a partir de 5 min corriendo (no en cola — eso ya tiene su propio umbral
+// de 5 min vía liveStuck) — "tarda más de lo habitual" NUNCA marca failed ni bloquea,
+// solo informa. Se apaga solo si liveStuck ya escaló a la alerta dura (30 min).
+const isRunningSlow = computed(() =>
+    isRunning.value && !isQueued.value && !liveStuck.value &&
+    liveSeconds.value !== null && liveSeconds.value >= 300
+)
+
+// Razones de bloqueo REALES para mostrar en UI — nunca incluye "en proceso" (eso es
+// processing state, no un blocker de negocio; ver Problema 5). El backend ya manda
+// blocking_reasons_display sin ese mensaje; este fallback cubre props viejos en caché.
+const displayBlockingReasons = computed(() =>
+    (props.period?.blocking_reasons_display ?? props.period?.blocking_reasons ?? [])
+        .filter((r: string) => r !== 'La Radiografía está en proceso.')
+)
 
 // ── Config summary labels ─────────────────────────────────────────────
 const reportTypeLabel = computed(() => {
@@ -205,14 +258,30 @@ const scopeLabel = computed(() => {
 // la tarjeta verde "Reporte generado" al mismo tiempo que el bloque de error —
 // ver el bug de julio: un run fallido dejaba radiography_ready=true porque el
 // PeriodSummary ya se había marcado 'generated' antes del paso que reventó.
+// Estados mutuamente excluyentes de Etapa 5 — READY / PROCESSING / SUCCESS / FAILED
+// (más 'cancelled', que es su propio estado terminal). "Bloqueado" ya NUNCA se usa
+// para describir un run en curso — solo para READY-con-blockers reales (faltan
+// fuentes, incidencias, etc.), y esos blockers ya no incluyen "en proceso" (ver
+// displayBlockingReasons).
+const stage = computed(() => {
+    if (isQueued.value)    return 'processing'
+    if (isRunning.value)   return 'processing'
+    if (isFailed.value)    return 'failed'
+    if (isCancelled.value) return 'cancelled'
+    if (isDone.value)      return 'success'
+    if (props.canGenerate) return 'ready'
+    return 'blocked'
+})
+
 const statusConfig = computed(() => {
-    if (isQueued.value)    return { color: 'bg-violet-50 border-violet-200',   text: 'text-violet-700',   label: 'En cola…',               icon: LoaderCircle,   iconClass: 'text-violet-600 animate-spin' }
-    if (isRunning.value)   return { color: 'bg-indigo-50 border-indigo-200',   text: 'text-indigo-700',   label: 'Generando…',             icon: LoaderCircle,   iconClass: 'text-indigo-600 animate-spin' }
-    if (isFailed.value)    return { color: 'bg-rose-50 border-rose-200',       text: 'text-rose-700',     label: 'La generación falló',    icon: XCircle,        iconClass: 'text-rose-600' }
-    if (isCancelled.value) return { color: 'bg-slate-100 border-slate-300',    text: 'text-slate-600',    label: 'Generación cancelada',   icon: Ban,            iconClass: 'text-slate-500' }
-    if (isDone.value)      return { color: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700',  label: 'Reporte generado',       icon: CheckCircle,    iconClass: 'text-emerald-600' }
-    if (props.canGenerate) return { color: 'bg-slate-50 border-slate-200',     text: 'text-slate-600',    label: 'Lista para generar',     icon: ShieldCheck,    iconClass: 'text-slate-500' }
-    return                  { color: 'bg-amber-50 border-amber-200',           text: 'text-amber-700',    label: 'Bloqueado',              icon: TriangleAlert,  iconClass: 'text-amber-600' }
+    switch (stage.value) {
+        case 'processing': return { color: 'bg-indigo-50 border-indigo-200',   text: 'text-indigo-700',   label: 'Generando reporte',      icon: LoaderCircle,   iconClass: 'text-indigo-600 animate-spin' }
+        case 'failed':      return { color: 'bg-rose-50 border-rose-200',       text: 'text-rose-700',     label: 'No se pudo generar',     icon: XCircle,        iconClass: 'text-rose-600' }
+        case 'cancelled':   return { color: 'bg-slate-100 border-slate-300',    text: 'text-slate-600',    label: 'Generación cancelada',   icon: Ban,            iconClass: 'text-slate-500' }
+        case 'success':     return { color: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700',  label: 'Reporte generado',       icon: CheckCircle,    iconClass: 'text-emerald-600' }
+        case 'ready':       return { color: 'bg-slate-50 border-slate-200',     text: 'text-slate-600',    label: 'Listo para generar',     icon: ShieldCheck,    iconClass: 'text-slate-500' }
+        default:            return { color: 'bg-amber-50 border-amber-200',     text: 'text-amber-700',    label: 'Bloqueado',              icon: TriangleAlert,  iconClass: 'text-amber-600' }
+    }
 })
 </script>
 
@@ -247,10 +316,13 @@ const statusConfig = computed(() => {
                             <span class="text-xs font-bold text-slate-500 uppercase tracking-wide">Alcance</span>
                             <span class="text-sm font-black text-slate-900">{{ scopeLabel }}</span>
                         </div>
-                        <div v-if="period?.blocking_reasons?.length" class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
+                        <!-- Solo blockers de NEGOCIO reales (faltan fuentes, incidencias, etc.) —
+                             nunca mientras el run activo está procesando: eso tiene su propia
+                             tarjeta PROCESSING más abajo (ver Problema 1/5). -->
+                        <div v-if="!isRunning && displayBlockingReasons.length" class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
                             <p class="text-xs font-black text-amber-800">Bloqueado — razones:</p>
                             <ul class="mt-1.5 list-disc pl-4 space-y-0.5 text-xs text-amber-700">
-                                <li v-for="reason in period.blocking_reasons" :key="reason">{{ reason }}</li>
+                                <li v-for="reason in displayBlockingReasons" :key="reason">{{ reason }}</li>
                             </ul>
                         </div>
                         <!-- Reporte anterior disponible aunque el flujo esté bloqueado -->
@@ -290,8 +362,20 @@ const statusConfig = computed(() => {
                             <component :is="statusConfig.icon" class="size-6 shrink-0" :class="statusConfig.iconClass" />
                             <div class="min-w-0 flex-1">
                                 <p class="font-black text-slate-950">{{ statusConfig.label }}</p>
-                                <p v-if="liveLog" class="mt-0.5 truncate text-xs leading-5" :class="statusConfig.text">{{ liveLog }}</p>
+                                <!-- PROCESSING: mensaje fijo de espera, nunca "bloqueado" -->
+                                <p v-if="isRunning" class="mt-0.5 text-xs leading-5" :class="statusConfig.text">
+                                    Estamos calculando la radiografía y generando los archivos Excel y PDF.
+                                </p>
+                                <p v-else-if="liveLog" class="mt-0.5 truncate text-xs leading-5" :class="statusConfig.text">{{ liveLog }}</p>
                             </div>
+                        </div>
+
+                        <!-- Subtexto de espera + paso actual (PROCESSING) -->
+                        <div v-if="isRunning" class="mt-2 space-y-1">
+                            <p class="text-xs leading-5 text-slate-500">
+                                Puedes esperar en esta pantalla. Te enviaremos un correo cuando termine.
+                            </p>
+                            <p v-if="currentStep" class="text-xs font-bold text-indigo-700">Procesando: {{ currentStep }}</p>
                         </div>
 
                         <!-- Barra de progreso -->
@@ -312,22 +396,27 @@ const statusConfig = computed(() => {
                         </div>
 
                         <!-- Timestamps y tiempo transcurrido -->
-                        <div v-if="liveQueuedAt || liveStartedAt || liveFinishedAt || elapsedFormatted" class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                        <div v-if="liveQueuedAt || liveStartedAt || liveFinishedAt || elapsedClock" class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
                             <span v-if="liveQueuedAt && !liveStartedAt">En cola: <strong>{{ liveQueuedAt }}</strong></span>
                             <span v-if="liveStartedAt">Inicio: <strong>{{ liveStartedAt }}</strong></span>
                             <span v-if="liveFinishedAt">Fin: <strong>{{ liveFinishedAt }}</strong></span>
-                            <span v-if="elapsedFormatted" class="flex items-center gap-1">
-                                <Clock class="size-3 shrink-0" /> Transcurrido: <strong>{{ elapsedFormatted }}</strong>
+                            <span v-if="elapsedClock" class="flex items-center gap-1">
+                                <Clock class="size-3 shrink-0" />
+                                {{ isRunning ? 'Tiempo transcurrido' : 'Tiempo total' }}: <strong>{{ elapsedClock }}</strong>
                             </span>
                         </div>
 
                         <!-- Error detail -->
                         <div v-if="isFailed && liveError" class="mt-3 break-all rounded-xl bg-rose-100 p-3 font-mono text-xs leading-5 text-rose-800">{{ liveError }}</div>
 
-                        <!-- Descarga (éxito con archivos listos) — nunca se adivina la URL: si
+                        <!-- Éxito: checklist Excel/PDF + descarga — nunca se adivina la URL: si
                              isDone pero aún no llegó la respuesta real del backend, el botón se
                              muestra deshabilitado en vez de apuntar a un archivo posiblemente
                              equivocado (p. ej. el simple cuando lo generado fue un comparativo). -->
+                        <div v-if="isDone" class="mt-3 space-y-1 text-xs font-bold text-emerald-700">
+                            <p class="flex items-center gap-1.5"><CheckCircle class="size-3.5" />Excel listo</p>
+                            <p class="flex items-center gap-1.5"><CheckCircle class="size-3.5" />PDF listo</p>
+                        </div>
                         <div v-if="!isFailed && (isDone || liveExcelUrl || livePdfUrl)" class="mt-4 flex flex-wrap gap-2">
                             <a
                                 v-if="liveExcelUrl"
@@ -349,6 +438,35 @@ const statusConfig = computed(() => {
                             <span v-else-if="isDone" class="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-400">
                                 <LoaderCircle class="size-3.5 animate-spin" />Descargar PDF
                             </span>
+                        </div>
+                    </div>
+
+                    <!-- Aviso: la generación tarda más de lo habitual (>5 min corriendo) — nunca
+                         marca failed ni bloquea, solo informa; distinto de la alerta dura de
+                         "atascado" (30 min) que sí sugiere revisar el worker. -->
+                    <div v-if="isRunningSlow" class="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                        <div class="flex items-start gap-2.5">
+                            <Clock class="mt-0.5 size-4 shrink-0 text-amber-600" />
+                            <p class="text-xs leading-5 text-amber-700">
+                                El reporte está tardando más de lo habitual, pero continúa procesándose.
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Fallo de POLLING (no de generación) — el job puede seguir corriendo en
+                         segundo plano; nunca se relanza otro job desde aquí. -->
+                    <div v-if="pollError" class="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                        <div class="flex items-start gap-2.5">
+                            <AlertTriangle class="mt-0.5 size-4 shrink-0 text-amber-600" />
+                            <div class="min-w-0 flex-1">
+                                <p class="text-xs leading-5 text-amber-700">
+                                    No se pudo actualizar el estado de generación.
+                                    El proceso puede seguir ejecutándose en segundo plano.
+                                </p>
+                                <button type="button" class="mt-2 inline-flex items-center gap-1.5 rounded-xl border border-amber-300 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 transition hover:bg-amber-50" @click="pollProgress">
+                                    <RefreshCw class="size-3.5" />Reintentar consulta de estado
+                                </button>
+                            </div>
                         </div>
                     </div>
 

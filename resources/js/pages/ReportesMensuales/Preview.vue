@@ -1169,11 +1169,13 @@ const ecStatus = computed(() => {
     ]
 })
 const ecTotal = computed(() => ecData.value?.total ?? { capital: 0, interes: 0, impuesto: 0, moratorios: 0, total: 0, contratos: 0 })
-const efectividadKpiPct = computed(() => {
-    const total = ecTotal.value.total
-    if (!ecData.value || total <= 0) return null
-    return ((ecData.value?.vigente?.total ?? 0) / total * 100)
-})
+// % real de efectividad (2026-08-26): recuperado de cartera en mora (atrasado+vencido)
+// del periodo ÷ cartera en mora (DPD>0) al CIERRE del mes anterior — no la composición
+// vigente/total de arriba (esa es de qué antigüedad vino el dinero cobrado, no qué tan
+// bien se cobró lo que había que cobrar). Fuente: RadiographySnapshotBuilder::
+// buildEfectividadCobranza()['efectividad']. null (no 0%) cuando no hay mes anterior.
+const efectividad = computed(() => ecData.value?.efectividad ?? null)
+const efectividadKpiPct = computed(() => efectividad.value?.efectividad_pct ?? null)
 
 const tabs: { key: TabKey; label: string }[] = [
     { key: 'resumen',    label: 'Resumen' },
@@ -2249,10 +2251,29 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                 <div v-show="activeTab === 'cobranza'" class="space-y-5">
                     <template v-if="ecData">
                         <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                            <KpiCard
+                                label="Efectividad de cobranza"
+                                :value="efectividadKpiPct !== null ? `${efectividadKpiPct.toFixed(1)}%` : 'N/D'"
+                                :icon="TrendingUp"
+                                :tone="efectividadKpiPct === null ? 'neutral' : efectividadKpiPct >= 100 ? 'green' : efectividadKpiPct >= 50 ? 'amber' : 'red'"
+                            />
                             <KpiCard label="Total cobrado" :value="money(ecTotal.total)" :icon="Banknote" tone="teal" />
                             <KpiCard label="Cobros vigentes" :value="money(ecData?.vigente?.total ?? 0)" :icon="CheckCircle2" tone="green" />
                             <KpiCard label="Cobros en atraso" :value="money((ecData?.atrasado?.total ?? 0) + (ecData?.vencido?.total ?? 0))" :icon="AlertTriangle" tone="amber" />
                             <KpiCard label="Cobros vencidos" :value="money(ecData?.vencido?.total ?? 0)" :icon="AlertTriangle" tone="red" />
+                        </div>
+
+                        <div v-if="efectividad" class="rounded-2xl border bg-white px-5 py-4 text-sm shadow-sm">
+                            <p class="text-xs font-black uppercase tracking-wider text-slate-500">Cómo se calcula la efectividad</p>
+                            <p class="mt-1.5 text-slate-600">
+                                Recuperado de cartera en mora este periodo (<strong>{{ money(efectividad.recuperado_de_mora) }}</strong>)
+                                ÷ cartera en mora al cierre de
+                                <strong>{{ efectividad.periodo_anterior_label ?? 'el periodo anterior' }}</strong>
+                                (<strong>{{ efectividad.cartera_mora_periodo_anterior !== null ? money(efectividad.cartera_mora_periodo_anterior) : 'sin datos' }}</strong>).
+                            </p>
+                            <p v-if="efectividadKpiPct === null" class="mt-1 text-amber-700">
+                                No disponible: no hay cartera cargada del mes anterior para calcular el denominador.
+                            </p>
                         </div>
 
                         <div class="overflow-x-auto rounded-2xl border bg-white shadow-sm">

@@ -71,6 +71,11 @@ class GenerateRadiographyJob implements ShouldQueue
         @ini_set('max_execution_time', '1800');
         @set_time_limit(1800);
 
+        // ── Observabilidad de duración (Problema 6) — SOLO mide tiempos, no toca
+        // ninguna fórmula/cálculo financiero. Permite saber qué etapa es lenta
+        // (snapshot/consolidación vs Excel vs PDF vs correo) sin adivinar.
+        $tStart = microtime(true);
+
         $period = Period::query()->findOrFail($this->periodId);
 
         $run = $this->runId
@@ -153,20 +158,28 @@ class GenerateRadiographyJob implements ShouldQueue
             $this->updateProgress($run, 68, 'Consolidando resumen de empleados', 'Calculando totales de nómina, percepciones y deducciones por persona y sucursal.');
             $consolidationService->consolidate($period);
 
+            // Fin de la etapa de cálculo/consolidación ("snapshot" en el sentido de
+            // observabilidad — datos ya listos para exportar).
+            $tSnapshotReady = microtime(true);
+
             // ── 5. Export Excel (from scratch, no template) ──
             // Comparativo/por sucursal/por gestor usan el builder con config (que SÍ
             // arma un archivo distinto), nunca el simple — este era el bug raíz por
             // el que un comparativo terminaba descargando el reporte simple.
             $this->updateProgress($run, 75, 'Generando Excel', 'Construyendo hojas, tablas y formato del reporte.');
+            $tExcelStart = microtime(true);
             $path = $isComparativeOrScoped
                 ? $exportService->exportWithConfig($period, $this->config)
                 : $exportService->export($period, $this->config);
+            $tExcelEnd = microtime(true);
 
             // ── 6. Export PDF (via Blade + dompdf) ──
             $this->updateProgress($run, 90, 'Generando PDF', 'Renderizando el reporte en formato PDF.');
+            $tPdfStart = microtime(true);
             $pdfPath = $isComparativeOrScoped
                 ? $exportService->exportPdfWithConfig($period, $this->config)
                 : $exportService->exportPdf($period, $this->config);
+            $tPdfEnd = microtime(true);
         } catch (\Throwable $exception) {
             // Fallo REAL: no se generaron archivos válidos. Marca el run como
             // fallido y notifica por correo — este es el único caso que debe
@@ -275,6 +288,7 @@ class GenerateRadiographyJob implements ShouldQueue
             ]);
         }
 
+        $tMailStart = microtime(true);
         $this->notifyUser(
             subject: 'Radiografía lista',
             message: "La Radiografía del periodo {$period->label} ya está lista. Puedes consultarla en Reportes mensuales.",
@@ -282,6 +296,46 @@ class GenerateRadiographyJob implements ShouldQueue
             success: true,
             run: $run,
         );
+        $tMailEnd = microtime(true);
+
+        $this->logPerformance($run, $identity, [
+            'snapshot' => $tSnapshotReady - $tStart,
+            'excel'    => $tExcelEnd - $tExcelStart,
+            'pdf'      => $tPdfEnd - $tPdfStart,
+            'mail'     => $tMailEnd - $tMailStart,
+            'total'    => $tMailEnd - $tStart,
+        ]);
+    }
+
+    /**
+     * Observabilidad de duración (Problema 6): deja constancia de cuánto tardó cada
+     * etapa — snapshot/consolidación, Excel, PDF, correo y total — tanto en el log
+     * (una línea fácil de grep: "Radiography generation performance") como en
+     * run.metadata['timings'], para poder comparar entre corridas sin adivinar cuál
+     * etapa es el cuello de botella. No participa en ningún cálculo del reporte.
+     */
+    private function logPerformance(PeriodRadiographyRun $run, array $identity, array $seconds): void
+    {
+        $rounded = array_map(fn ($s) => round($s, 1), $seconds);
+
+        Log::info('Radiography generation performance', array_merge($identity, [
+            'run_id'         => $run->id,
+            'snapshot_sec'   => $rounded['snapshot'],
+            'excel_sec'      => $rounded['excel'],
+            'pdf_sec'        => $rounded['pdf'],
+            'mail_sec'       => $rounded['mail'],
+            'total_sec'      => $rounded['total'],
+            'summary'        => sprintf(
+                'snapshot: %.1f sec | excel: %.1f sec | pdf: %.1f sec | mail: %.1f sec | total: %.1f sec',
+                $rounded['snapshot'], $rounded['excel'], $rounded['pdf'], $rounded['mail'], $rounded['total']
+            ),
+        ]));
+
+        $run->update([
+            'metadata' => array_merge(is_array($run->metadata) ? $run->metadata : [], [
+                'timings' => $rounded,
+            ]),
+        ]);
     }
 
     /**
@@ -319,7 +373,14 @@ class GenerateRadiographyJob implements ShouldQueue
             : PeriodRadiographyRun::query()->where('period_id', $period->id)->latest('id')->first();
 
         try {
-            $downloadUrl = route('reportes-mensuales.preview', $period->id);
+            // El CTA del correo debe apuntar al reporte REALMENTE generado — un
+            // comparativo/por sucursal/por gestor nunca debe mandar al preview plano
+            // del reporte simple del periodo (mismo criterio que
+            // ReportUploadController::generationProgress()).
+            $isSimpleGeneral = ($run?->report_type ?: 'simple') === 'simple' && ($run?->scope ?: 'general') === 'general';
+            $downloadUrl = ($run && !$isSimpleGeneral)
+                ? route('reportes-mensuales.run-ver', $run->id)
+                : route('reportes-mensuales.preview', $period->id);
 
             if (!$success) {
                 Mail::to($user->email)->send(

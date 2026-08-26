@@ -324,6 +324,20 @@ $sucursal = $branchRow['sucursal'] ?? 'Sucursal';
 
 <div class="section-bar alt" style="margin-top:18px;">9. Efectividad de cobranza</div>
 @if(!empty($efectividad))
+@php($ef = $efectividad['efectividad'] ?? null)
+@if($ef)
+<div style="text-align:center; margin-bottom:10px;">
+    <div class="kpi-label" style="margin-bottom:4px;">EFECTIVIDAD DE COBRANZA</div>
+    <span class="cat-badge" style="background:{{ $ef['efectividad_pct'] === null ? '#e2e8f0' : ($ef['efectividad_pct'] >= 100 ? '#dcfce7' : ($ef['efectividad_pct'] >= 50 ? '#fef3c7' : '#fee2e2')) }}; color:{{ $ef['efectividad_pct'] === null ? '#475569' : ($ef['efectividad_pct'] >= 100 ? '#15803d' : ($ef['efectividad_pct'] >= 50 ? '#92400e' : '#b91c1c')) }};">
+        {{ $ef['efectividad_pct'] !== null ? number_format($ef['efectividad_pct'], 1) . '%' : 'N/D' }}
+    </span>
+    <div style="font-size:9px; color:#64748b; margin-top:4px;">
+        Recuperado de mora ({{ $fmt2($ef['recuperado_de_mora']) }}) ÷ cartera en mora al cierre de
+        {{ $ef['periodo_anterior_label'] ?? 'periodo anterior' }}
+        ({{ $ef['cartera_mora_periodo_anterior'] !== null ? $fmt2($ef['cartera_mora_periodo_anterior']) : 'sin datos' }})
+    </div>
+</div>
+@endif
 <table class="tbl avoid">
     <thead><tr><th>Estatus</th><th class="c">Contratos</th><th class="r">Capital</th><th class="r">Interés</th><th class="r">Impuesto</th><th class="r">Moratorios</th><th class="r">Total</th></tr></thead>
     <tbody>

@@ -115,6 +115,55 @@ it('keeps the GENERAL report ready after a later EMPLOYEE report fails', functio
     $progressEmp->assertOk()->assertJson(['status' => 'failed']);
 });
 
+/**
+ * Problema 4 (cierre del flujo de generación, 2026-08-26): "Exportación" y
+ * "Generar reporte" mostraban "En proceso" para el reporte GENERAL ya
+ * completado solo porque OTRO alcance (empleado) estaba corriendo AHORA MISMO
+ * para el mismo periodo — radiography_running/can_export_radiography usaban un
+ * flag period-wide ($running, que incluye cualquier alcance) en vez de uno
+ * propio de la identidad. Ver ReportUploadController::resolveWorkflowState().
+ */
+it('keeps GENERAL export/running state unaffected while an EMPLOYEE run is actively queued for the same period', function () {
+    $user = User::factory()->create();
+    $period = makeIdentityPeriodo();
+    $summary = makeIdentitySummary($period);
+    $employee = Employee::query()->create([
+        'employee_code' => 'EMP003', 'full_name' => 'Carlos Ruiz', 'normalized_name' => 'carlos ruiz',
+        'first_name' => 'Carlos', 'paternal_last_name' => 'Ruiz', 'is_active' => true, 'source_system' => 'noi',
+    ]);
+
+    PeriodRadiographyRun::query()->create([
+        'period_id' => $period->id, 'period_summary_id' => $summary->id,
+        'report_type' => 'simple', 'scope' => 'general', 'status' => 'success',
+        'started_at' => now()->subMinutes(10), 'finished_at' => now()->subMinutes(9),
+        'output_excel_path' => 'radiografias/general.xlsx', 'output_pdf_path' => 'radiografias/general.pdf',
+    ]);
+
+    // Un reporte de OTRO alcance está corriendo AHORA MISMO para el mismo periodo.
+    PeriodRadiographyRun::query()->create([
+        'period_id' => $period->id, 'period_summary_id' => $summary->id,
+        'report_type' => 'simple', 'scope' => 'employee', 'employee_id' => $employee->id, 'status' => 'queued',
+        'queued_at' => now(),
+    ]);
+
+    $response = $this->actingAs($user)->get('/historico-general');
+    $response->assertInertia(function ($page) use ($period) {
+        $row = collect($page->toArray()['props']['periods'])->firstWhere('id', $period->id);
+
+        // El GENERAL ya terminó — su propio estado visual (Etapa 6/7) no debe
+        // decir "en proceso" solo porque otro alcance esté corriendo.
+        expect($row['radiography_ready'])->toBeTrue();
+        expect($row['radiography_running'])->toBeFalse();
+        expect($row['can_export_radiography'])->toBeTrue();
+
+        // El doble-submit SÍ debe seguir bloqueado mientras cualquier alcance corre.
+        expect($row['can_generate_radiography'])->toBeFalse();
+        expect($row['blocking_reasons'])->toContain('La Radiografía está en proceso.');
+        // Pero el mensaje "en proceso" no debe colarse en el listado de UI para Etapa 5.
+        expect($row['blocking_reasons_display'] ?? [])->not->toContain('La Radiografía está en proceso.');
+    });
+});
+
 it('does not let EMPLOYEE B failed affect EMPLOYEE A success (same period, different employees)', function () {
     $user = User::factory()->create();
     $period = makeIdentityPeriodo();

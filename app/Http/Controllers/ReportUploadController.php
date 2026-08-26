@@ -289,7 +289,7 @@ class ReportUploadController extends Controller {
             }
         }
 
-        return Inertia::render('historico-general/index', [
+        return Inertia::render('Historico-General/index', [
             'periods'         => $periods,
             'sources'         => $sources,
             'groupedUploads'  => $groupedUploads,
@@ -1735,7 +1735,20 @@ class ReportUploadController extends Controller {
         // reporte por sucursal/gestor del mismo periodo. $anyGenerationRunningForPeriod
         // sí es correcto que sea period-wide: el dispatcher solo permite UN run activo
         // (queued/running) por periodo sin importar el alcance (ver generateRadiography()).
-        $running              = in_array($runStatus, ['queued', 'running'], true) || $anyGenerationRunningForPeriod;
+        // BUG REAL (2026-08-26): $running mezclaba "¿está corriendo ESTE run (identidad
+        // simple/general)?" con "¿hay CUALQUIER generación corriendo para el periodo
+        // (cualquier alcance)?". Eso es correcto para bloquear un doble-submit
+        // (can_generate_radiography), pero rompía la semántica de "¿mi reporte general
+        // ya quedó listo?": si alguien generaba un reporte por sucursal/gestor DESPUÉS
+        // de que el general ya había terminado con éxito, $running seguía true
+        // (por el alcance ajeno) y Etapa 6/7 mostraban "Vista previa: Completo" pero
+        // "Exportación: En proceso"/"Generar reporte: En proceso" — inconsistente,
+        // aunque los archivos del general ya existían intactos. $ownIdentityRunning
+        // se usa para todo lo que describe el ESTADO VISUAL de ESTE run (radiography_running,
+        // can_export_radiography); $running (period-wide) se conserva solo para lo que
+        // de verdad debe impedir un doble-submit (can_generate_radiography, blockingReasons).
+        $ownIdentityRunning   = in_array($runStatus, ['queued', 'running'], true);
+        $running              = $ownIdentityRunning || $anyGenerationRunningForPeriod;
         $dbRunStatus      = $dbRun?->status;
         $dbRunning        = in_array($dbRunStatus, ['queued', 'running'], true);
 
@@ -1919,7 +1932,7 @@ class ReportUploadController extends Controller {
             'unprocessed_radiography_sources' => $unprocessedRadiography,
             'radiography_ready'               => $radiographyReady,
             'radiography_invalidated'         => (bool) $summary?->invalidated_at,
-            'radiography_running'             => $running,
+            'radiography_running'             => $ownIdentityRunning,
             'radiography_run_queued_at'       => optional($run?->queued_at ?? $run?->created_at)->format('d/m/Y H:i'),
             'radiography_run_started_at'      => ($runStatus !== 'queued') ? optional($run?->started_at)->format('d/m/Y H:i') : null,
             'radiography_run_metadata'        => $run?->metadata,
@@ -1928,8 +1941,14 @@ class ReportUploadController extends Controller {
             'can_update_database'             => empty($missingDb) && empty($failedDb) && !$dbRunning,
             'can_resolve_incidents'           => $databaseUpdated,
             'can_generate_radiography'        => $databaseUpdated && $pendingCritical === 0 && empty($missingRadiography) && empty($unprocessedRadiography) && !$running,
-            'can_export_radiography'          => $radiographyReady && empty($missingRadiography) && empty($unprocessedRadiography) && !$running,
+            'can_export_radiography'          => $radiographyReady && empty($missingRadiography) && empty($unprocessedRadiography) && !$ownIdentityRunning,
             'blocking_reasons'                => array_values(array_unique($blockingReasons)),
+            // "La Radiografía está en proceso." solo describe por qué NO puedes lanzar
+            // otro submit ahora mismo (puede deberse a un alcance ajeno corriendo) — es
+            // un blocker de negocio, no el estado visual de "mi" generación. Etapa 5 ya
+            // tiene su propia tarjeta PROCESSING (ver GenerateReportStep.vue); reusar
+            // este mensaje ahí mostraba "Bloqueado" mientras el reporte solo procesaba.
+            'blocking_reasons_display'        => array_values(array_unique(array_diff($blockingReasons, ['La Radiografía está en proceso.']))),
             'preview_summary'                 => $previewSummary,
             // Stale-upload state: visible to UI so it can show "archivos reemplazados" warning
             'has_stale_uploads'               => !empty($staleUploads),

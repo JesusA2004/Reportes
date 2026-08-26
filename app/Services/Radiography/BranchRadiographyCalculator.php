@@ -91,6 +91,44 @@ class BranchRadiographyCalculator
     }
 
     /**
+     * Desglose por componente del KPI "Nómina y Capital Humano" — GARANTIZADO por
+     * construcción a sumar EXACTO contra nominaTotalFor() (mismos 9 campos, nunca
+     * fórmula/lista aparte). Corrige el bug real 2026-08-26: varias vistas (Excel
+     * "por sucursal" en particular) armaban su propio desglose por match de texto
+     * contra `payroll_by_branch_concept` (concepto crudo NOI, ej. "P001 SUELDO") con
+     * un heurístico como str_contains($concepto, 'Nómina') — que NUNCA matchea
+     * "SUELDO", dejando esa fila en $0 — y además mezclaban nomina_detalle
+     * (deducciones NOI, que YA NO se restan de nomina_total, ver arriba) como si
+     * fueran parte del total, así que SUM(filas mostradas) != Total mostrado.
+     *
+     * 'IMSS' dentro de nomina_informativo es el MISMO monto que imss_patronal
+     * (ver accumulateImssPatronal(), que llena ambos a la vez) — se excluye aquí
+     * para no contarlo dos veces; se muestra como 'IMSS patronal' en su lugar.
+     */
+    public static function nominaBreakdownFor(array $branchOrGlobal): array
+    {
+        $rows = [
+            'Sueldo'             => (float) ($branchOrGlobal['nomina_total'] ?? 0),
+            'Comisiones'         => (float) ($branchOrGlobal['comisiones'] ?? 0),
+            'Bonos'              => (float) ($branchOrGlobal['bonos'] ?? 0),
+            'Bonos aceleradores' => (float) ($branchOrGlobal['bonos_aceleradores'] ?? 0),
+            'Vacaciones'         => (float) ($branchOrGlobal['vacaciones'] ?? 0),
+            'Prima vacacional'   => (float) ($branchOrGlobal['prima_vacacional'] ?? 0),
+            'Otras percepciones' => (float) ($branchOrGlobal['otros_percepciones'] ?? 0),
+            'IMSS patronal'      => (float) ($branchOrGlobal['imss_patronal'] ?? 0),
+        ];
+
+        foreach ((array) ($branchOrGlobal['nomina_informativo'] ?? []) as $label => $amount) {
+            if ($label === 'IMSS') {
+                continue; // ya representado arriba como 'IMSS patronal' — mismo monto
+            }
+            $rows[$label] = ($rows[$label] ?? 0.0) + (float) $amount;
+        }
+
+        return $rows;
+    }
+
+    /**
      * Fuente canónica ÚNICA del "Ingreso base EBITDA" para un branch summary o GLOBAL.
      * Regla vigente (2026-07, criterio final): EBITDA NO usa Recuperación total (que incluye
      * capital recuperado — no es ingreso real) ni Colocación. El ingreso base EBITDA es
