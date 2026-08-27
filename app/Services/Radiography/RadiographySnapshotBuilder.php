@@ -367,7 +367,7 @@ class RadiographySnapshotBuilder
         if ($scope === 'employee') {
             $employeeId = (int) ($config['employee_id'] ?? 0);
             if (!$employeeId) return $snapshot;
-            return $this->applyEmployeeScope($snapshot, $employeeId, $empGestores, $period);
+            return $this->applyEmployeeScope($snapshot, $employeeId, $empGestores, $period, $config);
         }
 
         return $snapshot;
@@ -484,6 +484,63 @@ class RadiographySnapshotBuilder
         }
 
         return $conflicts;
+    }
+
+    /**
+     * OPEX de un colaborador = DOS FUENTES DISTINTAS que se SUMAN (auditoría
+     * 27-ago-2026, aclaración explícita del usuario) — nunca una reemplaza a la otra:
+     *
+     *   A) AUTOMÁTICO: fact_expenses ya atribuidos a este employee_id (import
+     *      directo + GastosExcelBranchResolverService + FinanciamientoMotosAssignmentService
+     *      + ExpenseObservationAttributionService — ver auditoría de atribución de
+     *      OPEX). Dato oficial persistido, agnóstico de qué reporte se esté viendo.
+     *   B) MANUAL: "Gasto general por gestor" capturado en Etapa 4 del wizard
+     *      (config extra_employee_expense_amount/extra_employee_expense_notes) —
+     *      un ajuste de ESTA configuración de reporte, NUNCA se escribe a
+     *      fact_expenses (ver semántica actual documentada donde se arma $config).
+     *
+     * Fuente ÚNICA para Web (applyEmployeeScope), Excel
+     * (RadiographyWorkbookBuilder::buildEmployeeFromSnapshot) y PDF
+     * (RadiografiaExportService::resolveEmployeeRow) — los tres deben llamar
+     * exactamente este método con los mismos argumentos, nunca sumar por su cuenta,
+     * para garantizar Web = Excel = PDF sin duplicar ni perder ninguna de las dos
+     * fuentes.
+     *
+     * Requiere que $this->dataIds ya esté resuelto (build() o
+     * findEmployeeGestorRowByEmployeeId() ya lo hacen antes de llegar aquí).
+     *
+     * @param  int[] $employeeIds  Normalmente [$employeeId] — fact_expenses.employee_id
+     *                             ya es un id canónico único por persona (a diferencia
+     *                             de fact_noi_movements, que puede traer más de un
+     *                             employee_id para la misma persona real).
+     */
+    public function buildEmployeeExpenseDetail(array $employeeIds, float $manualAmount = 0.0, string $manualNotes = ''): array
+    {
+        $items = empty($employeeIds) ? collect() : DB::table('fact_expenses')
+            ->whereIn('period_id', $this->dataIds)
+            ->whereIn('employee_id', $employeeIds)
+            ->selectRaw("COALESCE(concept, 'Sin concepto') as concept, COALESCE(category, 'Sin categoría') as category, SUM(COALESCE(NULLIF(paid_amount,0), amount)) as total")
+            ->groupBy('concept', 'category')
+            ->orderByDesc('total')
+            ->get()
+            ->map(fn ($r) => [
+                'concept'  => $r->concept,
+                'category' => $r->category,
+                'amount'   => (float) $r->total,
+                'fuente'   => 'automatico',
+            ]);
+
+        $automaticTotal = round((float) $items->sum('amount'), 2);
+        $manualAmount   = round($manualAmount, 2);
+        $manualNotes    = $manualAmount > 0 ? trim($manualNotes) : '';
+
+        return [
+            'automatic_total' => $automaticTotal,
+            'automatic_items' => $items->values()->all(),
+            'manual_total'    => $manualAmount,
+            'manual_notes'    => $manualNotes,
+            'total'           => round($automaticTotal + $manualAmount, 2),
+        ];
     }
 
     public function findEmployeeGestorRowByEmployeeId(Period $period, int $employeeId): ?array
@@ -663,7 +720,7 @@ class RadiographySnapshotBuilder
         return $snapshot;
     }
 
-    private function applyEmployeeScope(array $snapshot, int $employeeId, array $empGestores, Period $period): array
+    private function applyEmployeeScope(array $snapshot, int $employeeId, array $empGestores, Period $period, array $config = []): array
     {
         $employee = Employee::find($employeeId);
         if (!$employee) {
@@ -726,7 +783,14 @@ class RadiographySnapshotBuilder
         $employeeIdsForNoi = !empty($row['_employee_ids']) ? $row['_employee_ids'] : [$employeeId];
         $percepDeducc = $this->branchCalculator->computeNoiPercepcionesDeduccionesForEmployees($this->dataIds, $employeeIdsForNoi);
 
-        $snapshot['summary'] = $this->summaryFromRow($row, $percepDeducc, $row);
+        // OPEX del gestor = automático (fact_expenses) + manual ("Gasto general por
+        // gestor" de Etapa 4) — ver buildEmployeeExpenseDetail(). Misma identidad
+        // (employeeIdsForNoi) que usa el resto del scope para no divergir de NOI.
+        $manualAmount   = (float) ($config['extra_employee_expense_amount'] ?? 0);
+        $manualNotes    = (string) ($config['extra_employee_expense_notes'] ?? '');
+        $expenseDetail  = $this->buildEmployeeExpenseDetail($employeeIdsForNoi, $manualAmount, $manualNotes);
+
+        $snapshot['summary'] = $this->summaryFromRow($row, $percepDeducc, $row, $expenseDetail);
         $snapshot['branch_radiography']['global']     = $this->notAttributable('El colaborador no representa una sucursal completa — ver sections.employees_gestores.');
         $snapshot['branch_radiography']['branches']   = [];
         $snapshot['branch_radiography']['unassigned'] = $this->notAttributable();
@@ -845,10 +909,15 @@ class RadiographySnapshotBuilder
             ] : null, $orderedBuckets)));
         }
 
-        $expByEmployeeRow = collect($s['expenses_detail']['byEmployee'] ?? [])->first(fn ($r) => $this->eqName($r['empleado'] ?? '') === $this->eqName($employee->full_name));
+        // GENERAL DEL OPEX DE ESTE COLABORADOR (auditoría 27-ago-2026): dos fuentes que se
+        // SUMAN, nunca una reemplaza a la otra — ver buildEmployeeExpenseDetail(). 'total' es
+        // el mismo valor que summary.expenses_total/opex_total (misma llamada, un solo cálculo).
         $s['expenses_detail'] = [
-            'total'      => (float) ($expByEmployeeRow['total'] ?? 0),
-            'byEmployee' => $expByEmployeeRow ? [$expByEmployeeRow] : [],
+            'total'            => $expenseDetail['total'],
+            'automatic_total'  => $expenseDetail['automatic_total'],
+            'automatic_items'  => $expenseDetail['automatic_items'],
+            'manual_total'     => $expenseDetail['manual_total'],
+            'manual_notes'     => $expenseDetail['manual_notes'],
             'byCategory' => null, 'byConcept' => null, 'byBranch' => null, 'bySource' => null,
             'detail_not_attributable' => 'El desglose por categoría/concepto/sucursal/fuente solo está disponible a nivel general en este snapshot.',
         ];
@@ -941,17 +1010,24 @@ class RadiographySnapshotBuilder
      *
      * $branchRow: fila de branchCalcBranches (shape completo) para scope=branch, o null.
      * $employeeRow: fila de employees_gestores para scope=employee, o null.
+     * $expenseDetail: buildEmployeeExpenseDetail() ya resuelto (automático + manual) —
+     * solo aplica cuando $employeeRow !== null; si no se pasa, cae a $employeeRow['gastos']
+     * solo (compatibilidad, sin manual) — nunca debería pasar en el flujo real desde
+     * applyEmployeeScope(), que siempre lo calcula y lo pasa.
      */
-    private function summaryFromRow(array $row, array $percepDeducc, ?array $employeeRow): array
+    private function summaryFromRow(array $row, array $percepDeducc, ?array $employeeRow, ?array $expenseDetail = null): array
     {
         if ($employeeRow !== null) {
             // Alcance colaborador: la fila YA trae recuperacion/colocacion/cartera/vencida/mora/
-            // gastos/pagos/bonos/descuentos/neto/ingreso_ebitda_base — mismos campos que usa
-            // RadiografiaExportService::resolveEmployeeRow() para Excel/PDF.
+            // pagos/bonos/descuentos/neto/ingreso_ebitda_base — mismos campos que usa
+            // RadiografiaExportService::resolveEmployeeRow() para Excel/PDF. Los GASTOS/OPEX
+            // salen de $expenseDetail (auditoría 27-ago-2026: automático de fact_expenses +
+            // manual de "Gasto general por gestor" — DOS FUENTES QUE SE SUMAN), nunca solo de
+            // $employeeRow['gastos'] (que es SOLO el automático).
             $pagos       = (float) ($employeeRow['pagos'] ?? 0);
             $bonos       = (float) ($employeeRow['bonos'] ?? 0);
             $descuentos  = (float) ($employeeRow['descuentos'] ?? 0);
-            $gastos      = (float) ($employeeRow['gastos'] ?? 0);
+            $gastos      = $expenseDetail['total'] ?? (float) ($employeeRow['gastos'] ?? 0);
             $neto        = (float) ($employeeRow['neto'] ?? ($pagos + $bonos - $descuentos));
             $ingresoBase = (float) ($employeeRow['ingreso_ebitda_base'] ?? 0);
             $cartera     = (float) ($employeeRow['cartera'] ?? 0);
@@ -966,6 +1042,9 @@ class RadiographySnapshotBuilder
                 'overdue_portfolio'             => $vencida,
                 'mora_index'                    => $cartera > 0 ? round($vencida / $cartera * 100, 2) : 0.0,
                 'expenses_total'                => $gastos,
+                'expenses_automatic_total'      => $expenseDetail['automatic_total'] ?? $gastos,
+                'expenses_manual_total'         => $expenseDetail['manual_total'] ?? 0.0,
+                'expenses_manual_notes'         => $expenseDetail['manual_notes'] ?? '',
                 'payroll_total'                 => $pagos + $bonos,
                 'net_payroll'                   => $neto,
                 'noi_percepciones'              => $percepDeducc['percepciones'],

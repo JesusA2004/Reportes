@@ -436,25 +436,118 @@ it('never attributes NOMINA/PAGO DE IMSS/DEDUCCIONES/ANTICIPO DE NOMINA (already
 // ── 12. EBITDA del colaborador cambia exactamente por el OPEX atribuido ──────
 // Usa la MISMA fórmula canónica de RadiographySnapshotBuilder::applyEmployeeScope()
 // (ebitda = ingreso_base - (gastos + neto)) — no se inventa ninguna fórmula nueva.
-it('shifts employee EBITDA by exactly the newly-attributed OPEX amount, via the canonical formula', function () {
-    $period = Period::query()->create(['name' => 'Junio EBITDA', 'code' => 'M-ATTR-EBITDA', 'type' => 'monthly', 'year' => 2026, 'month' => 6, 'sequence' => 1, 'start_date' => '2026-06-01', 'end_date' => '2026-06-30', 'is_closed' => false]);
-    $employee = Employee::query()->create(['full_name' => 'EMPLEADO EBITDA', 'normalized_name' => 'empleado ebitda', 'first_name' => 'Empleado', 'paternal_last_name' => 'Ebitda', 'is_active' => true, 'source_system' => 'noi']);
+// ============================================================================
+// ACLARACIÓN 27-ago-2026: OPEX DE EMPLEADO/GESTOR = AUTOMÁTICO + MANUAL
+// ============================================================================
+// La atribución automática (fact_expenses vía Observación/Justificación) NO
+// reemplaza el input manual que ya existe en Etapa 4 ("Gasto general por
+// gestor" / extra_employee_expense_amount+notes) — se SUMAN. Ver
+// RadiographySnapshotBuilder::buildEmployeeExpenseDetail(), fuente única para
+// Web (applyEmployeeScope), Excel (buildEmployeeFromSnapshot) y PDF
+// (resolveEmployeeRow).
+function makeEbitdaFixtureRow(int $employeeId): array
+{
+    return ['name' => 'EMPLEADO EBITDA', 'branch' => 'ORIZABA', 'pagos' => 40000.0, 'bonos' => 0.0, 'descuentos' => 0.0, 'neto' => 40000.0, 'gastos' => 0.0, 'colocacion' => 0.0, 'operaciones' => 0, 'recuperacion' => 0.0, 'cartera' => 0.0, 'vencida' => 0.0, 'mora' => 0.0, 'ingreso_ebitda_base' => 190000.0, '_employee_ids' => [$employeeId]];
+}
+
+// Test obligatorio 1: automatic=200, manual=0 → total=200 (nunca $0 solo porque no hay manual).
+it('OPEX total = automatic only, when there is no manual input', function () {
+    $period = makeAttribPeriodo();
+    $upload = makeAttribUpload($period);
+    $branch = makeAttribBranch('Orizaba');
+    $employee = makeAttribRosterEmployee($period, 'EMPLEADO EBITDA A', $branch);
+    makeAttribExpense($period, $upload, ['amount' => 200, 'paid_amount' => 200, 'employee_id' => $employee->id, 'branch_id' => $branch->id]);
+
+    // buildEmployeeExpenseDetail() lee $this->dataIds — en el flujo real (Web/Excel/PDF)
+    // ya viene "calentado" por findEmployeeGestorRowByEmployeeId()/build() antes de
+    // llegar aquí; se replica esa misma secuencia para la prueba directa del método.
+    $builder = app(RadiographySnapshotBuilder::class);
+    $builder->findEmployeeGestorRowByEmployeeId($period, $employee->id);
+    $detail = $builder->buildEmployeeExpenseDetail([$employee->id], 0.0, '');
+
+    expect($detail['automatic_total'])->toBe(200.0);
+    expect($detail['manual_total'])->toBe(0.0);
+    expect($detail['total'])->toBe(200.0);
+});
+
+// Test obligatorio 2: automatic=0, manual=1500 → total=1500 (nunca $0 porque no hay automático).
+it('OPEX total = manual only, when there is no automatic attribution', function () {
+    $detail = app(RadiographySnapshotBuilder::class)->buildEmployeeExpenseDetail([999999], 1500.0, 'Viáticos y comunicación');
+
+    expect($detail['automatic_total'])->toBe(0.0);
+    expect($detail['manual_total'])->toBe(1500.0);
+    expect($detail['total'])->toBe(1500.0);
+});
+
+// Test obligatorio 3: automatic=200 + manual=1500 → total=1700. SUMAR, nunca reemplazar.
+it('OPEX total = automatic + manual, SUMMED, never one replacing the other', function () {
+    $period = makeAttribPeriodo();
+    $upload = makeAttribUpload($period);
+    $branch = makeAttribBranch('Orizaba');
+    $employee = makeAttribRosterEmployee($period, 'EMPLEADO EBITDA B', $branch);
+    makeAttribExpense($period, $upload, ['amount' => 200, 'paid_amount' => 200, 'employee_id' => $employee->id, 'branch_id' => $branch->id]);
 
     $builder = app(RadiographySnapshotBuilder::class);
+    $builder->findEmployeeGestorRowByEmployeeId($period, $employee->id);
+    $detail = $builder->buildEmployeeExpenseDetail([$employee->id], 1500.0, 'Viáticos y comunicación');
 
-    $rowSinGastos = ['name' => 'EMPLEADO EBITDA', 'branch' => 'ORIZABA', 'pagos' => 40000.0, 'bonos' => 0.0, 'descuentos' => 0.0, 'neto' => 40000.0, 'gastos' => 0.0, 'colocacion' => 0.0, 'operaciones' => 0, 'recuperacion' => 0.0, 'cartera' => 0.0, 'vencida' => 0.0, 'mora' => 0.0, 'ingreso_ebitda_base' => 190000.0, '_employee_ids' => [$employee->id]];
-    $rowConGastos = array_merge($rowSinGastos, ['gastos' => 200.0]);
+    expect($detail['automatic_total'])->toBe(200.0);
+    expect($detail['manual_total'])->toBe(1500.0);
+    expect($detail['manual_notes'])->toBe('Viáticos y comunicación');
+    expect($detail['total'])->toBe(1700.0);
+    expect($detail['automatic_items'])->toHaveCount(1);
+});
 
-    $snapshotSin = makeGeneralSnapshotFixture($period->id, [], [$rowSinGastos]);
-    $snapshotCon = makeGeneralSnapshotFixture($period->id, [], [$rowConGastos]);
+// Test obligatorio 4: EBITDA usa la fórmula canónica con el OPEX TOTAL (automático+manual),
+// vía applyEmployeeScope() → summaryFromRow() → buildEmployeeExpenseDetail(). Nunca una
+// fórmula nueva — misma resta que ya existía (ingreso_base - (gastos + neto)).
+it('shifts employee EBITDA by exactly the combined automatic+manual OPEX, via the canonical formula', function () {
+    $period = makeAttribPeriodo();
+    $upload = makeAttribUpload($period);
+    $branch = makeAttribBranch('Orizaba');
+    $employee = makeAttribRosterEmployee($period, 'EMPLEADO EBITDA C', $branch);
 
-    $resultSin = invokeScopeMethod($builder, 'applyEmployeeScope', ['dataIds' => [$period->id], 'args' => [$snapshotSin, $employee->id, [$rowSinGastos], $period]]);
-    $resultCon = invokeScopeMethod($builder, 'applyEmployeeScope', ['dataIds' => [$period->id], 'args' => [$snapshotCon, $employee->id, [$rowConGastos], $period]]);
+    $builder = app(RadiographySnapshotBuilder::class);
+    $rowSin = makeEbitdaFixtureRow($employee->id);
+    $rowSin['name'] = 'EMPLEADO EBITDA C';
+
+    // Sin ningún gasto (automático ni manual) — baseline.
+    $snapshotSin = makeGeneralSnapshotFixture($period->id, [], [$rowSin]);
+    $resultSin = invokeScopeMethod($builder, 'applyEmployeeScope', ['dataIds' => [$period->id], 'args' => [$snapshotSin, $employee->id, [$rowSin], $period, []]]);
+
+    // Automático $200 (fact_expenses real) + manual $1,500 (config de esta corrida).
+    makeAttribExpense($period, $upload, ['amount' => 200, 'paid_amount' => 200, 'employee_id' => $employee->id, 'branch_id' => $branch->id]);
+    $snapshotCon = makeGeneralSnapshotFixture($period->id, [], [$rowSin]);
+    $config = ['extra_employee_expense_amount' => 1500.0, 'extra_employee_expense_notes' => 'Viáticos y comunicación'];
+    $resultCon = invokeScopeMethod($builder, 'applyEmployeeScope', ['dataIds' => [$period->id], 'args' => [$snapshotCon, $employee->id, [$rowSin], $period, $config]]);
+
+    expect((float) $resultSin['summary']['opex_total'])->toBe(0.0);
+    expect((float) $resultCon['summary']['opex_total'])->toBe(1700.0);
+    expect((float) $resultCon['summary']['expenses_automatic_total'])->toBe(200.0);
+    expect((float) $resultCon['summary']['expenses_manual_total'])->toBe(1500.0);
 
     $ebitdaSin = (float) $resultSin['summary']['ebitda_final'];
     $ebitdaCon = (float) $resultCon['summary']['ebitda_final'];
 
-    // ebitda = ingreso_base - (gastos + neto) → con $200 más de gastos, EBITDA baja exactamente $200.
-    expect(round($ebitdaSin - $ebitdaCon, 2))->toBe(200.0);
-    expect((float) $resultCon['summary']['opex_total'])->toBe(200.0);
+    // ebitda = ingreso_base - (gastos + neto) → EBITDA baja exactamente $1,700 (200+1500).
+    expect(round($ebitdaSin - $ebitdaCon, 2))->toBe(1700.0);
+});
+
+// Test obligatorio 5: el input manual NUNCA toca fact_expenses ni el OPEX general oficial —
+// sigue siendo semántica de ESTA configuración de reporte, no un dato persistido.
+it('never writes the manual amount to fact_expenses or changes the official general OPEX', function () {
+    $period = makeAttribPeriodo();
+    $upload = makeAttribUpload($period);
+    $branch = makeAttribBranch('Orizaba');
+    $employee = makeAttribRosterEmployee($period, 'EMPLEADO EBITDA D', $branch);
+    makeAttribExpense($period, $upload, ['amount' => 200, 'paid_amount' => 200, 'employee_id' => $employee->id, 'branch_id' => $branch->id]);
+
+    $totalFactExpensesAntes = (float) DB::table('fact_expenses')->where('period_id', $period->id)->count();
+    $sumaAntes = (float) DB::table('fact_expenses')->where('period_id', $period->id)->sum('paid_amount');
+
+    app(RadiographySnapshotBuilder::class)->buildEmployeeExpenseDetail([$employee->id], 1500.0, 'Ajuste manual');
+
+    expect((float) DB::table('fact_expenses')->where('period_id', $period->id)->count())->toBe($totalFactExpensesAntes);
+    expect((float) DB::table('fact_expenses')->where('period_id', $period->id)->sum('paid_amount'))->toBe($sumaAntes);
+    expect($sumaAntes)->toBe(200.0); // el manual ($1,500) nunca aparece en fact_expenses
 });

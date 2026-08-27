@@ -319,20 +319,32 @@ $catFg = '#' . substr($catColors['fg'], 2);
 @endif
 @endif
 
-@if($extraAmount > 0)
-<div class="section-bar alt">Gasto adicional registrado</div>
+<div class="section-bar alt">7. Gastos atribuibles / OPEX</div>
+<div class="section-sub">Dos fuentes que se SUMAN — nunca una reemplaza a la otra: (A) gastos oficiales ya atribuidos a este colaborador (Observación/Justificación del reporte de Gastos, nunca gasto de sucursal repartido arbitrariamente), y (B) el ajuste manual capturado en la configuración de este reporte.</div>
+@if(!empty($expenseDetail['automatic_items']))
 <table class="tbl avoid">
+    <thead><tr><th>Concepto</th><th class="c">Fuente</th><th class="r">Monto</th></tr></thead>
     <tbody>
-        <tr><td>{{ $extraNotes ?: 'Sin observación' }}</td><td class="r">{{ $fmt2($extraAmount) }}</td></tr>
+        @foreach($expenseDetail['automatic_items'] as $item)
+        <tr><td>{{ $item['concept'] }}</td><td class="c">Gasto Lendus atribuido</td><td class="r">{{ $fmt2($item['amount']) }}</td></tr>
+        @endforeach
     </tbody>
+    <tfoot><tr><td colspan="2">OPEX detectado (automático)</td><td class="r">{{ $fmt2($expenseDetail['automatic_total']) }}</td></tr></tfoot>
 </table>
 @endif
-
-<div class="section-bar alt">7. Gastos atribuibles</div>
-<div class="section-sub">Solo gastos con evidencia directa de que corresponden a este colaborador — nunca gasto de sucursal repartido arbitrariamente.</div>
+@if($expenseDetail['manual_total'] > 0)
+<div style="height:6px"></div>
+<table class="tbl avoid">
+    <thead><tr><th>Notas</th><th class="c">Fuente</th><th class="r">Monto</th></tr></thead>
+    <tbody>
+        <tr><td>{{ $expenseDetail['manual_notes'] ?: 'Sin observación' }}</td><td class="c">Ajuste manual del reporte</td><td class="r">{{ $fmt2($expenseDetail['manual_total']) }}</td></tr>
+    </tbody>
+    <tfoot><tr><td colspan="2">Gasto adicional (manual)</td><td class="r">{{ $fmt2($expenseDetail['manual_total']) }}</td></tr></tfoot>
+</table>
+@endif
 @if($gastos > 0)
 <table class="exec-summary avoid">
-    <tr><td class="k">Gastos atribuibles al colaborador</td><td class="v">{{ $fmt2($gastos) }}</td></tr>
+    <tr><td class="k"><b>OPEX total gestor</b></td><td class="v">{{ $fmt2($gastos) }}</td></tr>
 </table>
 @else
 <div class="semantic-box">Sin gastos atribuibles a este colaborador en el periodo.</div>

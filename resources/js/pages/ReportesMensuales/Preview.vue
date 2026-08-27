@@ -1994,7 +1994,53 @@ const rankingGestoresSeries = computed(() => topGestoresColocacion.value.map((e:
                         <KpiCard label="OPEX Total" :value="money(kpiGastos)" :icon="Receipt" tone="amber" />
                     </div>
 
-                    <div class="grid gap-4 lg:grid-cols-2">
+                    <!-- Scope colaborador (27-ago-2026): OPEX = automático (fact_expenses ya
+                         atribuido por Observación/Justificación) + manual ("Gasto general por
+                         gestor" de Etapa 4) — DOS FUENTES QUE SE SUMAN, nunca una reemplaza a la
+                         otra. Ver RadiographySnapshotBuilder::buildEmployeeExpenseDetail(). -->
+                    <div v-if="activeScope.type === 'employee'" class="rounded-2xl border bg-white shadow-sm overflow-hidden">
+                        <div class="border-b bg-slate-50 px-5 py-3">
+                            <h3 class="text-xs font-black uppercase tracking-wider text-slate-500">Gastos operativos / OPEX del colaborador</h3>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-xs">
+                                <thead>
+                                    <tr class="border-b bg-slate-50/60 text-slate-500">
+                                        <th class="px-4 py-2 text-left font-bold">Concepto</th>
+                                        <th class="px-4 py-2 text-left font-bold">Fuente</th>
+                                        <th class="px-4 py-2 text-right font-bold">Monto</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="item in gastosDetail?.automatic_items ?? []" :key="item.concept" class="border-b last:border-0">
+                                        <td class="px-4 py-1.5 text-slate-700">{{ item.concept }}</td>
+                                        <td class="px-4 py-1.5 text-slate-500">Gasto detectado automáticamente</td>
+                                        <td class="px-4 py-1.5 text-right font-semibold">{{ money(item.amount) }}</td>
+                                    </tr>
+                                    <tr v-if="!(gastosDetail?.automatic_items ?? []).length">
+                                        <td colspan="3" class="px-4 py-3 text-center text-slate-400">Sin gastos detectados automáticamente para este colaborador.</td>
+                                    </tr>
+                                </tbody>
+                                <tfoot>
+                                    <tr class="border-t bg-slate-50/70 font-bold">
+                                        <td class="px-4 py-2" colspan="2">Subtotal automático</td>
+                                        <td class="px-4 py-2 text-right">{{ money(gastosDetail?.automatic_total ?? 0) }}</td>
+                                    </tr>
+                                    <tr v-if="(gastosDetail?.manual_total ?? 0) > 0">
+                                        <td class="px-4 py-2 text-slate-700">{{ gastosDetail?.manual_notes || 'Gasto adicional registrado' }}</td>
+                                        <td class="px-4 py-2 text-slate-500">Ajuste manual del reporte</td>
+                                        <td class="px-4 py-2 text-right font-semibold">{{ money(gastosDetail?.manual_total ?? 0) }}</td>
+                                    </tr>
+                                    <tr class="border-t-2 bg-amber-50 font-black text-amber-800">
+                                        <td class="px-4 py-2.5" colspan="2">TOTAL OPEX GESTOR</td>
+                                        <td class="px-4 py-2.5 text-right">{{ money(gastosDetail?.total ?? 0) }}</td>
+                                    </tr>
+                                </tfoot>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div v-else class="grid gap-4 lg:grid-cols-2">
                         <ChartCard title="Gastos por sucursal" :series="gastosPorSucursalSeries" :options="gastosPorSucursalOptions" type="donut" :height="300" />
                         <ChartCard title="Top categorías de gasto" :series="gastosPorCategoriaSeries" :options="gastosPorCategoriaOptions" type="donut" :height="300" />
                     </div>

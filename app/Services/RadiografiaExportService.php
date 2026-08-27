@@ -229,7 +229,7 @@ class RadiografiaExportService
             }
             $extraAmount = (float) ($config['extra_employee_expense_amount'] ?? 0);
             $extraNotes  = (string) ($config['extra_employee_expense_notes'] ?? '');
-            $empData = $this->resolveEmployeeRow($period, $snapshot, $employeeId, $extraAmount);
+            $empData = $this->resolveEmployeeRow($period, $snapshot, $employeeId, $extraAmount, $extraNotes);
 
             $pdf = Pdf::loadView('reports.radiography-pdf-employee', array_merge($empData, [
                 'period'      => $period,
@@ -515,7 +515,7 @@ class RadiografiaExportService
      * de display de la fila ya expuesta (frágil: causa raíz real de "funciona un mes, falla
      * otro" — ver auditoría 2026-08-24). El nombre solo se usa como fallback explícito.
      */
-    private function resolveEmployeeRow(Period $period, array $snapshot, int $employeeId, float $extraExpenseAmount = 0.0): array
+    private function resolveEmployeeRow(Period $period, array $snapshot, int $employeeId, float $extraExpenseAmount = 0.0, string $extraExpenseNotes = ''): array
     {
         $employee = Employee::find($employeeId);
         if (!$employee) {
@@ -549,7 +549,6 @@ class RadiografiaExportService
         $pagos       = (float)($empRow['pagos']       ?? 0);
         $bonos       = (float)($empRow['bonos']       ?? 0);
         $desctos     = (float)($empRow['descuentos']  ?? 0);
-        $gastos      = (float)($empRow['gastos']      ?? 0) + $extraExpenseAmount;
         $neto        = (float)($empRow['neto']        ?? ($pagos + $bonos - $desctos));
         $coloc       = (float)($empRow['colocacion']  ?? 0);
         $rec         = (float)($empRow['recuperacion'] ?? 0);
@@ -566,6 +565,11 @@ class RadiografiaExportService
         $employeeIdsForNoi = !empty($empRow['_employee_ids']) ? $empRow['_employee_ids'] : [$employeeId];
         $percepDeducc      = app(BranchRadiographyCalculator::class)
             ->computeNoiPercepcionesDeduccionesForEmployees($this->snapshotBuilder->resolveDataIdsPublic($period), $employeeIdsForNoi);
+
+        // OPEX del gestor = automático (fact_expenses) + manual (Gasto general por
+        // gestor) — 27-ago-2026, misma fuente que Web/Excel. Ver buildEmployeeExpenseDetail().
+        $expenseDetail = $this->snapshotBuilder->buildEmployeeExpenseDetail($employeeIdsForNoi, $extraExpenseAmount, $extraExpenseNotes);
+        $gastos        = $expenseDetail['total'];
         $payrollDetail     = $this->snapshotBuilder->buildEmployeePayrollDetail($employeeIdsForNoi, $percepDeducc);
 
         $recoveryComponents = $empRow['_recovery_components'] ?? null;
@@ -640,6 +644,7 @@ class RadiografiaExportService
             'bonos'     => $bonos,
             'desctos'   => $desctos,
             'gastos'    => $gastos,
+            'expenseDetail' => $expenseDetail,
             'neto'      => $neto,
             'coloc'     => $coloc,
             'ops'       => (int)($empRow['operaciones'] ?? 0),

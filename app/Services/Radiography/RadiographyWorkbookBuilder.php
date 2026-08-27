@@ -6417,7 +6417,13 @@ class RadiographyWorkbookBuilder
         $pagos     = (float)($empRow['pagos']        ?? 0);
         $bonos     = (float)($empRow['bonos']        ?? 0);
         $desctos   = (float)($empRow['descuentos']   ?? 0);
-        $gastos    = (float)($empRow['gastos']        ?? 0) + $extraExpenseAmount;
+        // OPEX del gestor = automático (fact_expenses) + manual (Gasto general por
+        // gestor) — MISMA fuente/fórmula que Web (RadiographySnapshotBuilder::
+        // applyEmployeeScope()) y PDF (RadiografiaExportService::resolveEmployeeRow()).
+        // Nunca se recalcula por separado — ver buildEmployeeExpenseDetail().
+        $employeeIdsForExpenses = !empty($empRow['_employee_ids']) ? $empRow['_employee_ids'] : [$employeeId];
+        $expenseDetail = $snapshotBuilder->buildEmployeeExpenseDetail($employeeIdsForExpenses, $extraExpenseAmount, $extraExpenseNotes);
+        $gastos    = $expenseDetail['total'];
         $neto      = (float)($empRow['neto']          ?? ($pagos + $bonos - $desctos));
         $coloc     = (float)($empRow['colocacion']    ?? 0);
         $ops       = (int)($empRow['operaciones']     ?? 0);
@@ -6480,20 +6486,42 @@ class RadiographyWorkbookBuilder
         }
         $r++;
 
-        $this->sectionHeader($sheet, "A{$r}:D{$r}", '3. GASTOS'); $r++;
-        $sheet->setCellValue("A{$r}", 'Gastos directos'); $sheet->setCellValue("B{$r}", (float)($empRow['gastos'] ?? 0));
+        // 27-ago-2026: OPEX del gestor = automático (fact_expenses ya atribuidos, uno
+        // por concepto) + manual (Gasto general por gestor, Etapa 4) — DOS FUENTES QUE
+        // SE SUMAN, nunca una reemplaza a la otra. Ver buildEmployeeExpenseDetail().
+        $this->sectionHeader($sheet, "A{$r}:D{$r}", '3. GASTOS / OPEX'); $r++;
+        $this->colHeaders($sheet, $r, ['A' => 'CONCEPTO', 'B' => 'MONTO', 'C' => '', 'D' => 'FUENTE']); $r++;
+        if (empty($expenseDetail['automatic_items'])) {
+            $sheet->setCellValue("A{$r}", 'Sin gastos automáticos atribuidos a este colaborador');
+            $this->dataRow($sheet, "A{$r}:D{$r}", true);
+            $r++;
+        } else {
+            foreach ($expenseDetail['automatic_items'] as $i => $item) {
+                $sheet->setCellValue("A{$r}", $item['concept']);
+                $sheet->setCellValue("B{$r}", $item['amount']);
+                $sheet->setCellValue("D{$r}", 'Gasto Lendus atribuido');
+                $this->dataRow($sheet, "A{$r}:D{$r}", $i % 2 === 0);
+                $this->applyFmt($sheet, "B{$r}", 'currency', $item['amount']);
+                $r++;
+            }
+        }
+        $sheet->setCellValue("A{$r}", 'Subtotal automático'); $sheet->setCellValue("B{$r}", $expenseDetail['automatic_total']);
         $this->dataRow($sheet, "A{$r}:D{$r}", true);
-        $this->applyFmt($sheet, "B{$r}", 'currency', (float)($empRow['gastos'] ?? 0));
+        $this->applyFmt($sheet, "B{$r}", 'currency', $expenseDetail['automatic_total']);
         $r++;
-        if ($extraExpenseAmount > 0) {
+        if ($expenseDetail['manual_total'] > 0) {
             $sheet->setCellValue("A{$r}", 'Gasto general asignado al gestor');
-            $sheet->setCellValue("B{$r}", $extraExpenseAmount);
-            $sheet->setCellValue("D{$r}", $extraExpenseNotes ?: '—');
+            $sheet->setCellValue("B{$r}", $expenseDetail['manual_total']);
+            $sheet->setCellValue("D{$r}", 'Ajuste manual del reporte');
             $this->dataRow($sheet, "A{$r}:D{$r}", false);
-            $this->applyFmt($sheet, "B{$r}", 'currency', $extraExpenseAmount);
+            $this->applyFmt($sheet, "B{$r}", 'currency', $expenseDetail['manual_total']);
+            $r++;
+            $sheet->setCellValue("A{$r}", 'Notas del ajuste manual');
+            $sheet->setCellValue("B{$r}", $expenseDetail['manual_notes'] ?: '—');
+            $this->dataRow($sheet, "A{$r}:D{$r}", true);
             $r++;
         }
-        $sheet->setCellValue("A{$r}", 'Total Gastos'); $sheet->setCellValue("B{$r}", $gastos);
+        $sheet->setCellValue("A{$r}", 'TOTAL OPEX GESTOR'); $sheet->setCellValue("B{$r}", $gastos);
         $this->totalsRow($sheet, "A{$r}:D{$r}");
         $sheet->getStyle("B{$r}")->getNumberFormat()->setFormatCode(self::CURRENCY);
         $r += 2;
