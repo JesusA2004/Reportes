@@ -119,13 +119,17 @@ class GenerateRadiographyJob implements ShouldQueue
         $this->updateProgress($run, 3, 'Iniciando generación', 'Preparando configuración del reporte.');
 
         try {
-            // ── 1. Remove previous export files for THIS SAME identity only ──────
-            // Nunca borra los exports de otras identidades (p. ej. el reporte simple
-            // sigue intacto al generar un comparativo del mismo periodo).
-            $this->updateProgress($run, 8, 'Limpiando versión anterior', 'Eliminando reportes generados anteriormente.');
-            $cleaner->clearGeneratedReportsForIdentity($period, $identity, excludeRunId: $run->id);
-
-            // ── 2. Generate summary (metrics from Expense/Recovery/Placement/Portfolio) ──
+            // ── 1. Generate summary (metrics from Expense/Recovery/Placement/Portfolio) ──
+            // NO se borra la versión anterior de ESTA MISMA identidad aquí (antes sí se
+            // hacía, al principio, antes de intentar nada). PROBLEMA 2/4/5 (auditoría
+            // 27-ago-2026): borrar de entrada dejaba el reporte SIN NINGÚN success si esta
+            // nueva regeneración fallaba en un paso posterior (Excel/PDF/asignaciones) —
+            // el intento anterior, exitoso, ya no existía ni en BD ni en disco, así que
+            // Vista previa/Exportación (que dependen del último ÉXITO de la identidad, ver
+            // PeriodRadiographyRun::resolveForIdentity()) quedaban bloqueadas pese a que el
+            // histórico (MonthlyReportController) mostraba "Generado" un instante antes.
+            // Ahora la limpieza ocurre DESPUÉS de confirmar que el Excel/PDF nuevos existen
+            // (ver bloque 7 más abajo) — un intento fallido nunca destruye el último éxito.
             $this->updateProgress($run, 12, 'Calculando métricas financieras', 'Analizando cobranza, colocación, nómina y cartera del periodo. Esta etapa puede tardar varios minutos.');
             $summary = $radiographyService->generate($period, $this->userId, $this->config);
 
@@ -195,9 +199,14 @@ class GenerateRadiographyJob implements ShouldQueue
             ]);
 
             $publicError = $this->publicErrorMessage($exception);
+            $errorCode   = $this->publicErrorCode($exception);
 
+            // PROBLEMA 7: metadata equivalente a error_code/error_message — el mensaje
+            // genérico ya no es lo único disponible para la UI; error_code permite
+            // mostrar/clasificar el fallo sin adivinar a partir de texto libre.
             $errMeta = array_merge(is_array($run->metadata) ? $run->metadata : [], [
                 'current_step' => 'Error',
+                'error_code'   => $errorCode,
             ]);
 
             $run->update([
@@ -269,6 +278,8 @@ class GenerateRadiographyJob implements ShouldQueue
                 'output_excel_path' => $path,
                 'output_pdf_path'   => $pdfPath,
             ]);
+
+            $this->cleanupPreviousIdentityVersion($cleaner, $period, $identity, $run->id);
         } catch (\Throwable $bookkeepingException) {
             Log::error('GenerateRadiographyJob: el Excel/PDF se generaron correctamente pero falló el registro posterior (esto NO debe disparar un correo de error).', [
                 'period_id' => $period->id,
@@ -286,6 +297,8 @@ class GenerateRadiographyJob implements ShouldQueue
                 'output_excel_path' => $path,
                 'output_pdf_path'   => $pdfPath,
             ]);
+
+            $this->cleanupPreviousIdentityVersion($cleaner, $period, $identity, $run->id);
         }
 
         $tMailStart = microtime(true);
@@ -398,6 +411,62 @@ class GenerateRadiographyJob implements ShouldQueue
                 'error'     => $exception->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Borra el/los run(s)/export(s)/archivo(s) previos de la MISMA identidad, ahora
+     * que el Excel/PDF nuevos ya están confirmados en disco y registrados (ver
+     * comentario en el bloque try principal — PROBLEMA 2/4/5). Un fallo aquí es solo
+     * housekeeping (deja un archivo viejo huérfano en disco) — nunca debe convertir
+     * una generación ya exitosa en un run failed ni disparar un correo de error.
+     */
+    private function cleanupPreviousIdentityVersion(PeriodDerivedDataCleaner $cleaner, Period $period, array $identity, int $currentRunId): void
+    {
+        try {
+            $cleaner->clearGeneratedReportsForIdentity($period, $identity, excludeRunId: $currentRunId);
+        } catch (\Throwable $cleanupException) {
+            Log::warning('GenerateRadiographyJob: no se pudo limpiar la versión anterior de esta identidad (el reporte nuevo generado sigue siendo válido).', [
+                'period_id' => $period->id,
+                'run_id'    => $currentRunId,
+                'identity'  => $identity,
+                'exception' => get_class($cleanupException),
+                'message'   => $cleanupException->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * PROBLEMA 7: código corto y estable para que la UI clasifique el fallo sin
+     * adivinar a partir de texto libre (el stack trace completo solo va al log).
+     */
+    private function publicErrorCode(\Throwable $exception): string
+    {
+        $msg = $exception->getMessage();
+
+        if (
+            str_contains($msg, 'PhpOffice') || str_contains($msg, 'PhpSpreadsheet') ||
+            str_contains($msg, 'Spreadsheet') || str_contains(get_class($exception), 'PhpOffice')
+        ) {
+            return 'GENERATION_EXCEL_FAILED';
+        }
+
+        if (str_contains($msg, 'Dompdf') || str_contains($msg, 'dompdf') || str_contains(get_class($exception), 'Dompdf')) {
+            return 'GENERATION_PDF_FAILED';
+        }
+
+        if (str_contains($msg, 'SQLSTATE') || str_contains($msg, 'QueryException') || str_contains(get_class($exception), 'QueryException')) {
+            return 'GENERATION_QUERY_FAILED';
+        }
+
+        if (str_contains($msg, 'Faltan fuentes') || str_contains($msg, 'No se puede generar la Radiografía')) {
+            return 'GENERATION_MISSING_SOURCES';
+        }
+
+        if (str_contains($msg, 'no quedó procesada') || str_contains($msg, 'no tiene ruta de almacenamiento')) {
+            return 'GENERATION_SOURCE_NOT_PROCESSED';
+        }
+
+        return 'GENERATION_UNKNOWN_FAILED';
     }
 
     private function publicErrorMessage(\Throwable $exception): string

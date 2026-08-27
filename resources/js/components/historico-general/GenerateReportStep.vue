@@ -20,6 +20,20 @@ const emit = defineEmits<{
     (e: 'cancel'): void
     (e: 'refresh'): void
     (e: 'process-now'): void
+    (e: 'identity-state', payload: {
+        reportType: string
+        scope: string
+        branchId?: number | null
+        employeeId?: number | null
+        comparePeriodId?: number | null
+        status: string | null
+        canExport: boolean
+        excelUrl: string | null
+        pdfUrl: string | null
+        previewUrl: string | null
+        errorMessage: string | null
+        errorCode: string | null
+    }): void
 }>()
 
 // ── Live state — synced from Inertia props, kept fresh by polling ─────
@@ -34,6 +48,9 @@ const liveStuck      = ref(false)
 const liveMeta       = ref<any>(null)
 const liveExcelUrl   = ref<string | null>(null)
 const livePdfUrl     = ref<string | null>(null)
+const livePreviewUrl = ref<string | null>(null)
+const liveCanExport  = ref(false)
+const liveErrorCode  = ref<string | null>(null)
 const liveCanProcessNow = ref(false)
 
 // ── Polling health — distinto de un error de generación: esto es "no pude
@@ -118,6 +135,7 @@ const pollProgress = async () => {
         liveStatus.value        = data.status
         liveLog.value           = data.log
         liveError.value         = data.error_message
+        liveErrorCode.value     = data.error_code ?? null
         liveQueuedAt.value      = data.queued_at
         liveStartedAt.value     = data.started_at
         liveFinishedAt.value    = data.finished_at
@@ -126,7 +144,29 @@ const pollProgress = async () => {
         liveMeta.value          = data.metadata ?? null
         liveExcelUrl.value      = data.excel_url ?? null
         livePdfUrl.value        = data.pdf_url ?? null
+        livePreviewUrl.value    = data.preview_url ?? null
+        liveCanExport.value     = !!data.can_export
         liveCanProcessNow.value = !!data.can_process_now
+
+        // PROBLEMA 2/4/5 — el padre reenvía este estado (resuelto por identidad
+        // exacta, ver ReportUploadController::generationProgress()) a ReportPreview.vue
+        // y GeneratedReportActions.vue, para que Etapa 6/7 nunca usen los campos
+        // period.* (que SIEMPRE describen la identidad simple/general — ver comentario
+        // más abajo) cuando el alcance configurado es otro (sucursal/gestor/comparativo).
+        emit('identity-state', {
+            reportType: props.reportConfig?.report_type ?? 'simple',
+            scope: props.reportConfig?.scope ?? 'general',
+            branchId: props.reportConfig?.branch_id ?? null,
+            employeeId: props.reportConfig?.employee_id ?? null,
+            comparePeriodId: props.reportConfig?.compare_period_id ?? null,
+            status: data.status ?? null,
+            canExport: liveCanExport.value,
+            excelUrl: liveExcelUrl.value,
+            pdfUrl: livePdfUrl.value,
+            previewUrl: livePreviewUrl.value,
+            errorMessage: liveError.value,
+            errorCode: liveErrorCode.value,
+        })
 
         // Stop polling once terminal — let parent reload Inertia
         if (!['queued', 'running'].includes(data.status ?? '')) {

@@ -115,4 +115,35 @@ class PeriodRadiographyRun extends Model
             ->where('employee_id', $identity['employee_id'] ?? null)
             ->where('comparison_period_id', $identity['comparison_period_id'] ?? null);
     }
+
+    /**
+     * RESOLVEDOR ÚNICO DE ESTADO (auditoría 27-ago-2026, Problema 2/4/5).
+     *
+     * Antes existían dos nociones de "el run" para una misma identidad, usadas
+     * inconsistentemente entre pantallas:
+     *   - "el intento más reciente" (puede estar failed/running/cancelled)
+     *   - "el último éxito" (el que realmente tiene Excel/PDF descargables)
+     * Etapa 5 necesita la PRIMERA (para reflejar processing/failed en vivo).
+     * Etapa 7 (exportación) y el histórico (MonthlyReportController) necesitan la
+     * SEGUNDA — un intento de regeneración fallido NUNCA debe ocultar un éxito
+     * anterior de la MISMA identidad. Este método es la única fuente que ambos
+     * consumidores deben usar en vez de repetir la resolución en cada controlador.
+     *
+     * @return array{latest: ?self, latest_success: ?self}
+     */
+    public static function resolveForIdentity(array $identity): array
+    {
+        $latest = static::query()->forIdentity($identity)->latest('id')->first();
+
+        $latestSuccess = ($latest && $latest->status === 'success' && $latest->output_excel_path && $latest->output_pdf_path)
+            ? $latest
+            : static::query()->forIdentity($identity)
+                ->where('status', 'success')
+                ->whereNotNull('output_excel_path')
+                ->whereNotNull('output_pdf_path')
+                ->latest('id')
+                ->first();
+
+        return ['latest' => $latest, 'latest_success' => $latestSuccess];
+    }
 }

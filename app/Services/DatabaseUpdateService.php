@@ -280,14 +280,30 @@ class DatabaseUpdateService
         }
 
         $allIncidents = array_merge($noiResult['incidents'] ?? [], $cobranzaResult['incidents'] ?? [], $importFailureIncidents, $rotationImssIncidents, $identityIncidents);
+        // PROBLEMA 6: un fallo al persistir UNA incidencia (ej. mensaje inusualmente largo
+        // desde NoiNominaImportService) no debe abortar la actualización de BD completa ni
+        // tragarse la excepción real — se deja constancia clara con
+        // 'failed_to_persist_incident' y se continúa con el resto.
         foreach ($allIncidents as $incident) {
-            PeriodIncident::query()->create([
-                'period_summary_id' => $summary->id,
-                'type'              => 'db_update.' . ($incident['type'] ?? 'unknown'),
-                'severity'          => $incident['severity'] ?? 'high',
-                'message'           => $incident['message'] ?? 'Incidencia detectada durante actualización de BD.',
-                'context'           => $incident['context'] ?? null,
-            ]);
+            try {
+                PeriodIncident::query()->create([
+                    'period_summary_id' => $summary->id,
+                    'type'              => 'db_update.' . ($incident['type'] ?? 'unknown'),
+                    'severity'          => $incident['severity'] ?? 'high',
+                    'message'           => $incident['message'] ?? 'Incidencia detectada durante actualización de BD.',
+                    'context'           => $incident['context'] ?? null,
+                ]);
+            } catch (\Throwable $incidentException) {
+                Log::error('failed_to_persist_incident', [
+                    'period_id'          => $period->id,
+                    'period_summary_id'  => $summary->id,
+                    'incident_type'      => $incident['type'] ?? 'unknown',
+                    'incident_severity'  => $incident['severity'] ?? null,
+                    'message_length'     => mb_strlen((string) ($incident['message'] ?? '')),
+                    'exception'          => get_class($incidentException),
+                    'exception_message'  => $incidentException->getMessage(),
+                ]);
+            }
         }
 
         $criticalCount = count(array_filter($allIncidents, fn ($i) => in_array($i['severity'] ?? 'high', ['high', 'critical'], true)));

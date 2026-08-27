@@ -60,6 +60,17 @@ class ReportUploadController extends Controller {
             ->where(fn ($q) => $q->where('scope', 'general')->orWhereNull('scope'))
             ->whereNull('branch_id')->whereNull('employee_id')->whereNull('comparison_period_id')
             ->orderByDesc('id')->get()->unique('period_id')->keyBy('period_id');
+        // PROBLEMA 2/4/5: el ÚLTIMO ÉXITO simple/general por periodo, aparte del último
+        // INTENTO ($runsByPeriod, que puede ser un 'failed' más reciente). Etapa 7
+        // (Excel/PDF) y "reporte anterior disponible" deben resolver este, nunca
+        // asumir que el intento más reciente es el que trae los archivos válidos.
+        $latestSuccessRunsByPeriod = PeriodRadiographyRun::query()
+            ->where(fn ($q) => $q->where('report_type', 'simple')->orWhereNull('report_type'))
+            ->where(fn ($q) => $q->where('scope', 'general')->orWhereNull('scope'))
+            ->whereNull('branch_id')->whereNull('employee_id')->whereNull('comparison_period_id')
+            ->where('status', 'success')
+            ->whereNotNull('output_excel_path')->whereNotNull('output_pdf_path')
+            ->orderByDesc('id')->get()->unique('period_id')->keyBy('period_id');
         // Independiente del alcance — el dispatcher solo permite UN run activo por
         // periodo sin importar report_type/scope (ver generateRadiography()), así que
         // "¿hay algo corriendo ahora para este periodo?" SÍ es correcto period-wide.
@@ -75,7 +86,7 @@ class ReportUploadController extends Controller {
 
         $periods = $allPeriods->map(function (Period $period) use (
             $allPeriods, $weeklyPeriods, $sources, $bdSourceCodes, $reportSourceCodes,
-            $summariesByPeriod, $runsByPeriod, $dbRunsByPeriod, $reprocessRunsByPeriod, $activePeriodIds
+            $summariesByPeriod, $runsByPeriod, $latestSuccessRunsByPeriod, $dbRunsByPeriod, $reprocessRunsByPeriod, $activePeriodIds
         ) {
             $coveredWeeks         = $this->resolveCoveredWeeks($period, $allPeriods);
             $uploads              = $this->resolveUploadsForWeeks($coveredWeeks);
@@ -84,6 +95,7 @@ class ReportUploadController extends Controller {
             $uploadedRequiredCount = $sources->where('is_required_for_report', true)->whereIn('code', $uploadedSourceCodes->toArray())->count();
             $summary              = $summariesByPeriod->get($period->id);
             $run                  = $runsByPeriod->get($period->id);
+            $latestSuccessRun     = $latestSuccessRunsByPeriod->get($period->id);
             $dbRun                = $dbRunsByPeriod->get($period->id);
             $reprocessRun         = $reprocessRunsByPeriod->get($period->id);
 
@@ -96,7 +108,7 @@ class ReportUploadController extends Controller {
                     ->all();
             }
 
-            $workflowState = $this->resolveWorkflowState($uploads, $summary, $run, $period->isCompound(), $dbRun, $bdSourceCodes, $reportSourceCodes, $activePeriodIds->has($period->id));
+            $workflowState = $this->resolveWorkflowState($uploads, $summary, $run, $period->isCompound(), $dbRun, $bdSourceCodes, $reportSourceCodes, $activePeriodIds->has($period->id), $latestSuccessRun);
 
             // Para periodos automáticos: validar que sus meses operativos tengan reportes generados
             $canGenerateAutomatic = null;
@@ -211,7 +223,7 @@ class ReportUploadController extends Controller {
 
         $groupedUploads = $allPeriods->map(function (Period $period) use (
             $allPeriods, $sources, $bdSourceCodes, $reportSourceCodes,
-            $summariesByPeriod, $runsByPeriod, $dbRunsByPeriod, $reprocessRunsByPeriod, $activePeriodIds
+            $summariesByPeriod, $runsByPeriod, $latestSuccessRunsByPeriod, $dbRunsByPeriod, $reprocessRunsByPeriod, $activePeriodIds
         ) {
             $coveredWeeks        = $this->resolveCoveredWeeks($period, $allPeriods);
             $uploads             = $this->resolveUploadsForWeeks($coveredWeeks);
@@ -220,6 +232,7 @@ class ReportUploadController extends Controller {
             $uploadedRequiredCount = $sources->where('is_required_for_report', true)->whereIn('code', $uploadedSourceCodes->toArray())->count();
             $summary             = $summariesByPeriod->get($period->id);
             $run                 = $runsByPeriod->get($period->id);
+            $latestSuccessRun    = $latestSuccessRunsByPeriod->get($period->id);
             $dbRun               = $dbRunsByPeriod->get($period->id);
             $reprocessRun        = $reprocessRunsByPeriod->get($period->id);
 
@@ -246,7 +259,7 @@ class ReportUploadController extends Controller {
                 'reprocess_run_log'           => $reprocessRun?->log,
                 'reprocess_run_progress'      => $reprocessRun?->metadata['progress'] ?? null,
                 'reprocess_run_id'            => $reprocessRun?->id,
-                ...$this->resolveWorkflowState($uploads, $summary, $run, $period->isCompound(), $dbRun, $bdSourceCodes, $reportSourceCodes, $activePeriodIds->has($period->id)),
+                ...$this->resolveWorkflowState($uploads, $summary, $run, $period->isCompound(), $dbRun, $bdSourceCodes, $reportSourceCodes, $activePeriodIds->has($period->id), $latestSuccessRun),
                 'uploads' => $uploads->unique('id')->values()->map(fn ($upload) => [
                     'id'                   => $upload->id,
                     'original_name'        => $upload->original_name,
@@ -995,20 +1008,37 @@ class ReportUploadController extends Controller {
         $coveredWeeks = $this->resolveCoveredWeeks($period, $allPeriods);
         $uploads      = $this->resolveUploadsForWeeks($coveredWeeks);
         $summary      = PeriodSummary::query()->where('period_id', $period->id)->with('incidents')->first();
-        $latestRun    = PeriodRadiographyRun::query()->where('period_id', $period->id)->latest('id')->first();
+
+        // PROBLEMA 3 (auditoría 27-ago-2026): antes se usaba el ÚLTIMO INTENTO del
+        // periodo SIN IMPORTAR identidad ("->where('period_id', ...)->latest('id')")
+        // para decidir can_generate_radiography/blocking_reasons — un comparativo o un
+        // reporte por sucursal/gestor fallido podía bloquear (o un success ajeno podía
+        // desbloquear) la generación de un alcance completamente distinto. La
+        // configuración (scope/report_type/branch/employee/comparación) ya está
+        // disponible en el request en este punto — se usa para resolver por identidad
+        // exacta, igual que generationProgress().
+        $config = $request->input('config', []);
+        $scope  = $config['scope'] ?? 'general';
+        $type   = ($config['report_type'] ?? 'simple') === 'simple' ? 'Radiografía simple' : 'Reporte comparativo';
+
+        $identityForGate = [
+            'period_id'            => $period->id,
+            'report_type'          => $config['report_type'] ?? 'simple',
+            'scope'                => $scope,
+            'branch_id'            => $scope === 'branch' ? (int) ($config['branch_id'] ?? 0) ?: null : null,
+            'employee_id'          => $scope === 'employee' ? (int) ($config['employee_id'] ?? 0) ?: null : null,
+            'comparison_period_id' => !empty($config['compare_period_id']) ? (int) $config['compare_period_id'] : null,
+        ];
+        ['latest' => $latestRun, 'latest_success' => $latestSuccessRun] = PeriodRadiographyRun::resolveForIdentity($identityForGate);
 
         $bdSourceCodes     = DataSource::query()->where('is_active', true)->where('is_required_for_bd', true)->pluck('code')->values()->all();
         $reportSourceCodes = DataSource::query()->where('is_active', true)->where('is_required_for_report', true)->pluck('code')->values()->all();
 
-        $workflow = $this->resolveWorkflowState($uploads, $summary, $latestRun, $period->isCompound(), null, $bdSourceCodes, $reportSourceCodes);
+        $workflow = $this->resolveWorkflowState($uploads, $summary, $latestRun, $period->isCompound(), null, $bdSourceCodes, $reportSourceCodes, false, $latestSuccessRun);
 
         if (!$workflow['can_generate_radiography']) {
             return back()->with('error', implode(' ', $workflow['blocking_reasons']) ?: 'No se puede generar la Radiografía todavía.');
         }
-
-        $config = $request->input('config', []);
-        $scope  = $config['scope'] ?? 'general';
-        $type   = ($config['report_type'] ?? 'simple') === 'simple' ? 'Radiografía simple' : 'Reporte comparativo';
 
         // Validate scope config before queuing — backend must reject invalid configs even if frontend fails.
         if ($scope === 'general') {
@@ -1096,18 +1126,28 @@ class ReportUploadController extends Controller {
         // comportamiento anterior (el run más reciente de cualquier alcance).
         $hasIdentityParams = $request->has('scope') || $request->has('report_type');
 
-        $run = PeriodRadiographyRun::query()
-            ->where('period_id', $period->id)
-            ->when($hasIdentityParams, fn ($q) => $q->forIdentity([
-                'period_id'            => $period->id,
-                'report_type'          => $request->query('report_type', 'simple'),
-                'scope'                => $request->query('scope', 'general'),
-                'branch_id'            => $request->query('branch_id') ? (int) $request->query('branch_id') : null,
-                'employee_id'          => $request->query('employee_id') ? (int) $request->query('employee_id') : null,
-                'comparison_period_id' => $request->query('compare_period_id') ? (int) $request->query('compare_period_id') : null,
-            ]))
-            ->latest('id')
-            ->first();
+        $identity = [
+            'period_id'            => $period->id,
+            'report_type'          => $request->query('report_type', 'simple'),
+            'scope'                => $request->query('scope', 'general'),
+            'branch_id'            => $request->query('branch_id') ? (int) $request->query('branch_id') : null,
+            'employee_id'          => $request->query('employee_id') ? (int) $request->query('employee_id') : null,
+            'comparison_period_id' => $request->query('compare_period_id') ? (int) $request->query('compare_period_id') : null,
+        ];
+
+        if ($hasIdentityParams) {
+            // PROBLEMA 2/4/5: 'latest' describe el INTENTO más reciente de ESTA
+            // identidad (para el card de Etapa 5 — processing/failed/success en vivo).
+            // 'latest_success' es el que de verdad tiene Excel/PDF descargables — puede
+            // ser distinto de 'latest' si el intento más reciente falló pero uno
+            // anterior de la MISMA identidad sí terminó bien. Nunca deben mezclarse.
+            ['latest' => $run, 'latest_success' => $latestSuccessRun] = PeriodRadiographyRun::resolveForIdentity($identity);
+        } else {
+            // Compatibilidad hacia atrás (sin scope/report_type en la query): el
+            // comportamiento anterior — el run más reciente de cualquier alcance.
+            $run = PeriodRadiographyRun::query()->where('period_id', $period->id)->latest('id')->first();
+            $latestSuccessRun = ($run && $run->status === 'success') ? $run : null;
+        }
 
         if (!$run) {
             return response()->json(['status' => null]);
@@ -1137,33 +1177,51 @@ class ReportUploadController extends Controller {
         // del reporte simple del periodo — se resuelve por el run específico.
         $isSimpleGeneral = ($run->report_type ?: 'simple') === 'simple' && ($run->scope ?: 'general') === 'general';
 
-        $excelUrl = $run->output_excel_path
+        // PROBLEMA 2/4/5: excel_url/pdf_url/preview_url se resuelven contra
+        // $latestSuccessRun (el último ÉXITO de ESTA identidad), NUNCA contra $run —
+        // si $run es un intento MÁS RECIENTE que falló, antes esto devolvía null y
+        // Etapa 5/7 perdían los enlaces de descarga de una versión anterior que seguía
+        // siendo válida. can_export solo describe si HAY algo descargable ahora mismo
+        // para esta identidad exacta — independiente de si el intento más reciente
+        // (mostrado en $status) está processing/failed.
+        $excelUrl = $latestSuccessRun?->output_excel_path
             ? ($isSimpleGeneral
                 ? route('reportes-mensuales.export-radiography', $period->id)
-                : route('reportes-mensuales.run-excel', $run->id))
+                : route('reportes-mensuales.run-excel', $latestSuccessRun->id))
             : null;
-        $pdfUrl = $run->output_pdf_path
+        $pdfUrl = $latestSuccessRun?->output_pdf_path
             ? ($isSimpleGeneral
                 ? route('reportes-mensuales.export-radiography-pdf', $period->id)
-                : route('reportes-mensuales.run-pdf', $run->id))
+                : route('reportes-mensuales.run-pdf', $latestSuccessRun->id))
+            : null;
+        $previewUrl = $latestSuccessRun
+            ? ($isSimpleGeneral
+                ? route('reportes-mensuales.preview', $period->id)
+                : route('reportes-mensuales.run-ver', $latestSuccessRun->id))
             : null;
 
         return response()->json([
-            'status'          => $status,
-            'run_id'          => $run->id,
-            'report_type'     => $run->report_type ?: 'simple',
-            'scope'           => $run->scope ?: 'general',
-            'log'             => $run->log ? mb_strimwidth($run->log, 0, 300) : null,
-            'error_message'   => $run->error_message ? mb_strimwidth($run->error_message, 0, 300) : null,
-            'queued_at'       => optional($run->queued_at ?? $run->created_at)->format('d/m/Y H:i'),
-            'started_at'      => $isQueued ? null : optional($run->started_at)->format('d/m/Y H:i'),
-            'finished_at'     => optional($run->finished_at)->format('d/m/Y H:i'),
-            'elapsed_seconds' => $elapsedSeconds,
-            'stuck_warning'   => $stuckWarning,
-            'metadata'        => $run->metadata,
-            'excel_url'       => $excelUrl,
-            'pdf_url'         => $pdfUrl,
-            'can_process_now' => !app()->isProduction() && $isQueued,
+            'status'            => $status,
+            'run_id'            => $run->id,
+            'report_type'       => $run->report_type ?: 'simple',
+            'scope'             => $run->scope ?: 'general',
+            'log'               => $run->log ? mb_strimwidth($run->log, 0, 300) : null,
+            'error_message'     => $run->error_message ? mb_strimwidth($run->error_message, 0, 300) : null,
+            // PROBLEMA 7: código corto para que la UI clasifique el fallo sin adivinar
+            // a partir de texto libre (ver GenerateRadiographyJob::publicErrorCode()).
+            'error_code'        => is_array($run->metadata) ? ($run->metadata['error_code'] ?? null) : null,
+            'queued_at'         => optional($run->queued_at ?? $run->created_at)->format('d/m/Y H:i'),
+            'started_at'        => $isQueued ? null : optional($run->started_at)->format('d/m/Y H:i'),
+            'finished_at'       => optional($run->finished_at)->format('d/m/Y H:i'),
+            'elapsed_seconds'   => $elapsedSeconds,
+            'stuck_warning'     => $stuckWarning,
+            'metadata'          => $run->metadata,
+            'excel_url'         => $excelUrl,
+            'pdf_url'           => $pdfUrl,
+            'preview_url'       => $previewUrl,
+            'can_export'        => $latestSuccessRun !== null,
+            'latest_success_run_id' => $latestSuccessRun?->id,
+            'can_process_now'   => !app()->isProduction() && $isQueued,
         ]);
     }
 
@@ -1638,6 +1696,7 @@ class ReportUploadController extends Controller {
         array                 $bdSourceCodes = [],
         array                 $reportSourceCodes = [],
         bool                  $anyGenerationRunningForPeriod = false,
+        ?PeriodRadiographyRun $latestSuccessRun = null,
     ): array {
         $sourceCodes = $uploads->pluck('dataSource.code')->filter()->unique()->values();
 
@@ -1707,26 +1766,29 @@ class ReportUploadController extends Controller {
                            && empty($staleUploads);   // stale uploads invalidate BD state
         $databaseUpdated = $summaryValid || ($compoundPeriod && empty($missingDb) && empty($failedDb));
 
-        // BUG RAÍZ (julio/VPS): PeriodRadiographyService::generate() marca el
-        // PeriodSummary como 'generated' DENTRO de una transacción que confirma antes
-        // de que GenerateRadiographyJob ejecute los pasos obligatorios posteriores
-        // (GastosExcelBranchResolverService::resolveForPeriodOrFail,
-        // FinanciamientoMotosAssignmentService::assignForPeriodOrFail, exportación de
-        // Excel/PDF). Si cualquiera de esos pasos lanza excepción, el run queda
-        // 'failed' pero el summary YA quedó 'generated' — sin esta comprobación del
-        // run, "radiography_ready" (y por lo tanto el estado "Reporte generado" en
-        // Etapa 5) quedaba en true aunque el Excel/PDF nunca se hubieran generado.
-        // Ver GenerateRadiographyJob::handle() y PeriodRadiographyService::generate().
-        $latestRunFailedOrIncomplete = $run && (
-            $run->status === 'failed'
-            || ($run->status === 'success' && (empty($run->output_excel_path) || empty($run->output_pdf_path)))
-        );
-
+        // PROBLEMA 2/4/5 (auditoría 27-ago-2026) — "radiography_ready" (Vista previa,
+        // Etapa 6) ya NO depende de si el ÚLTIMO INTENTO de export (Excel/PDF, Etapa 7)
+        // tuvo éxito. Son cosas distintas: la vista previa se construye en vivo desde
+        // PeriodSummary/BranchRadiographyCalculator (ver MonthlyReportController::
+        // previewPage()/exportRadiography(), que YA sólo miran el summary — nunca el
+        // run), no desde archivos Excel/PDF ya escritos en disco. Antes, un intento de
+        // REGENERACIÓN que fallaba DESPUÉS de que PeriodRadiographyService::generate()
+        // ya había confirmado un summary válido (nueva versión) dejaba
+        // radiography_ready=false y bloqueaba Vista previa/Exportación pese a que:
+        //   (a) el summary seguía siendo válido y consultable, y
+        //   (b) el histórico (MonthlyReportController::index()) seguía mostrando
+        //       "Generado" para esa misma identidad vía su último run SUCCESS —
+        //       dos fuentes de verdad distintas para la misma pregunta.
+        // La comprobación de que el run falló SIGUE existiendo — ahora vive en
+        // PeriodRadiographyRun::resolveForIdentity()['latest_success'], que es lo que
+        // debe usarse para decidir si hay Excel/PDF descargables (Etapa 7), nunca para
+        // bloquear la vista previa (Etapa 6).
         $radiographyReady     = ($summary?->status === 'generated')
             && !$summary?->invalidated_at
-            && empty($staleUploads)
-            && !$latestRunFailedOrIncomplete;
-        $hasPreviousSuccess   = !$radiographyReady && $run && $run->status === 'success';
+            && empty($staleUploads);
+        // Usa el ÚLTIMO ÉXITO real de la identidad (puede no ser $run, si $run es un
+        // intento más reciente que falló) — no basta con que $run mismo sea 'success'.
+        $hasPreviousSuccess   = !$radiographyReady && $latestSuccessRun !== null;
         $runStatus            = $run?->status;
         // $run debe llegar ya filtrado a la identidad simple/general (ver
         // PeriodRadiographyRun::scopeForIdentity()) — "el último run del periodo sin
@@ -1956,7 +2018,7 @@ class ReportUploadController extends Controller {
             'stale_upload_details'            => $staleUploadInfo,
             // Previous successful radiography (run succeeded but summary was later reset)
             'has_previous_radiography'        => $hasPreviousSuccess,
-            'previous_radiography_at'         => $hasPreviousSuccess ? optional($run->finished_at)->format('d/m/Y H:i') : null,
+            'previous_radiography_at'         => $hasPreviousSuccess ? optional($latestSuccessRun->finished_at)->format('d/m/Y H:i') : null,
         ];
     }
 }

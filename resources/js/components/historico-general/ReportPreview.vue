@@ -4,7 +4,23 @@ import { ExternalLink } from 'lucide-vue-next'
 import EmptyState from './EmptyState.vue'
 import SectionHeader from './SectionHeader.vue'
 
-const props = defineProps<{ period: any; preview: any | null; config: any }>()
+const props = defineProps<{ period: any; preview: any | null; config: any; identityState?: any }>()
+
+// PROBLEMA 2/4/5 (auditoría 27-ago-2026): la disponibilidad de Vista previa
+// (period.radiography_ready) ya es correcta para cualquier alcance — depende solo de
+// PeriodSummary, no del run (ver ReportUploadController::resolveWorkflowState()). El
+// enlace "Ver reporte completo" para un alcance por sucursal/gestor sí puede diferir
+// del que este componente arma a mano (identityState.previewUrl, resuelto por
+// identidad exacta) — se prefiere cuando coincide con la configuración actual.
+const identityMatches = computed(() => {
+    const s = props.identityState
+    if (!s) return false
+    return s.reportType === (props.config?.report_type ?? 'simple')
+        && s.scope === (props.config?.scope ?? 'general')
+        && (s.branchId ?? null) === (props.config?.branch_id ?? null)
+        && (s.employeeId ?? null) === (props.config?.employee_id ?? null)
+        && (s.comparePeriodId ?? null) === (props.config?.compare_period_id ?? null)
+})
 
 const money = (v: number) =>
     new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(Number(v || 0))
@@ -78,6 +94,7 @@ const metricCards = computed(() => {
 
 // ── "Ver reporte completo" URL — preserva el filtro aplicado ─────────────────
 const previewUrl = computed(() => {
+    if (identityMatches.value && props.identityState.previewUrl) return props.identityState.previewUrl
     if (!props.period?.radiography_ready) return null
     const base = `/reportes-mensuales/${props.period.id}/preview`
     if (props.config?.scope === 'branch' && props.config?.branch_id)

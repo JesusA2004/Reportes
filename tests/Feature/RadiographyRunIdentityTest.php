@@ -328,3 +328,102 @@ it('reproduces the exact production fixture (julio 2026): GENERAL failed + compa
     expect($progress->json('excel_url'))->not->toBeNull();
     expect($progress->json('pdf_url'))->not->toBeNull();
 });
+
+/**
+ * PROBLEMA 2/4/5 (auditoría 27-ago-2026) — EL BUG CENTRAL reportado en producción:
+ * una REGENERACIÓN (intento MÁS RECIENTE, mayor id) de la MISMA identidad falla,
+ * pero un intento ANTERIOR de esa MISMA identidad sí tuvo éxito y sigue teniendo
+ * Excel/PDF válidos. Antes, generationProgress() resolvía "el run con mayor id"
+ * (PeriodRadiographyRun::forIdentity(...)->latest('id')->first()) SIN distinguir
+ * éxito de fallo — el intento fallido más reciente ocultaba el éxito anterior,
+ * dejando excel_url/pdf_url en null y bloqueando la descarga pese a que el
+ * histórico (MonthlyReportController::index()) seguía mostrando "Generado" para
+ * esa misma identidad. Fix: PeriodRadiographyRun::resolveForIdentity() separa
+ * 'latest' (para el estado EN VIVO de Etapa 5 — sigue reportando 'failed', eso es
+ * correcto) de 'latest_success' (de donde salen excel_url/pdf_url/can_export).
+ */
+it('falls back to an OLDER success run of the exact same identity when the NEWEST attempt failed', function () {
+    $user = User::factory()->create();
+    $period = makeIdentityPeriodo();
+    $summary = makeIdentitySummary($period);
+    $employee = Employee::query()->create([
+        'employee_code' => 'EMP099', 'full_name' => 'Margarita Regeneracion', 'normalized_name' => 'margarita regeneracion',
+        'first_name' => 'Margarita', 'paternal_last_name' => 'Regeneracion', 'is_active' => true, 'source_system' => 'noi',
+    ]);
+
+    // Intento viejo: SUCCESS, con Excel/PDF reales.
+    $oldSuccessRun = PeriodRadiographyRun::query()->create([
+        'period_id' => $period->id, 'period_summary_id' => $summary->id,
+        'report_type' => 'simple', 'scope' => 'employee', 'employee_id' => $employee->id, 'status' => 'success',
+        'started_at' => now()->subDays(2), 'finished_at' => now()->subDays(2),
+        'output_excel_path' => 'radiografias/margarita_v1.xlsx', 'output_pdf_path' => 'radiografias/margarita_v1.pdf',
+    ]);
+
+    // REGENERACIÓN (intento más reciente, mayor id) de la MISMA identidad: falló
+    // DESPUÉS de que PeriodRadiographyService::generate() ya sobrescribió el
+    // summary — el run en sí no tiene Excel/PDF.
+    PeriodRadiographyRun::query()->create([
+        'period_id' => $period->id, 'period_summary_id' => $summary->id,
+        'report_type' => 'simple', 'scope' => 'employee', 'employee_id' => $employee->id, 'status' => 'failed',
+        'started_at' => now(), 'finished_at' => now(),
+        'error_message' => 'No se pudo generar el PDF del reporte.',
+    ]);
+
+    $progress = $this->actingAs($user)->getJson(
+        "/historico-general/{$period->id}/generar-reporte/progreso?report_type=simple&scope=employee&employee_id={$employee->id}"
+    );
+
+    $progress->assertOk();
+    // Etapa 5 (estado EN VIVO del intento más reciente): sigue viendo el fallo real.
+    expect($progress->json('status'))->toBe('failed');
+    expect($progress->json('run_id'))->not->toBe($oldSuccessRun->id);
+    // Etapa 7 (exportación): debe seguir ofreciendo el último ÉXITO real, no null.
+    expect($progress->json('can_export'))->toBeTrue();
+    expect($progress->json('latest_success_run_id'))->toBe($oldSuccessRun->id);
+    expect($progress->json('excel_url'))->toContain((string) $oldSuccessRun->id);
+    expect($progress->json('pdf_url'))->toContain((string) $oldSuccessRun->id);
+    expect($progress->json('preview_url'))->toContain((string) $oldSuccessRun->id);
+});
+
+/**
+ * CASO 4 del pliego 27-ago-2026: "PeriodSummary generado + run running → preview
+ * DISPONIBLE, export PROCESSING." Un intento EN CURSO para la identidad activa no
+ * debe bloquear Vista previa (que no depende del run), pero sí debe seguir
+ * ocultando la descarga hasta que termine — no tiene sentido ofrecer un archivo
+ * mientras se está regenerando.
+ */
+it('keeps preview available while a new attempt is queued/running, but hides export until it finishes', function () {
+    $user = User::factory()->create();
+    $period = makeRadPeriodoRunning();
+
+    $summary = PeriodSummary::query()->create([
+        'period_id' => $period->id, 'status' => 'generated', 'generated_at' => now(),
+    ]);
+
+    PeriodRadiographyRun::query()->create([
+        'period_id' => $period->id, 'period_summary_id' => $summary->id,
+        'report_type' => 'simple', 'scope' => 'general', 'status' => 'running',
+        'started_at' => now(),
+    ]);
+
+    $response = $this->actingAs($user)->get('/historico-general');
+    $response->assertInertia(function ($page) use ($period) {
+        $row = collect($page->toArray()['props']['periods'])->firstWhere('id', $period->id);
+        expect($row['radiography_ready'])->toBeTrue();
+        expect($row['radiography_running'])->toBeTrue();
+        expect($row['can_export_radiography'])->toBeFalse();
+    });
+});
+
+function makeRadPeriodoRunning(): Period
+{
+    static $seq = 0;
+    $seq++;
+    $month = (($seq - 1) % 12) + 1;
+
+    return Period::query()->create([
+        'name' => "Periodo running {$seq}", 'code' => "M-2026-RUN-{$month}-{$seq}", 'type' => 'monthly',
+        'year' => 2026, 'month' => $month, 'sequence' => 2,
+        'start_date' => sprintf('2026-%02d-01', $month), 'end_date' => sprintf('2026-%02d-28', $month), 'is_closed' => false,
+    ]);
+}

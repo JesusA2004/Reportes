@@ -4,9 +4,30 @@ import { Download, ExternalLink, FileSpreadsheet, FileText } from 'lucide-vue-ne
 import SectionHeader from './SectionHeader.vue'
 import StatusBadge from './StatusBadge.vue'
 
-const props = defineProps<{ period: any; config?: any }>()
+const props = defineProps<{ period: any; config?: any; identityState?: any }>()
 
-const canExport = computed(() => !!props.period?.can_export_radiography)
+// PROBLEMA 2/4/5 (auditoría 27-ago-2026): props.period.can_export_radiography/
+// radiography_run_id SIEMPRE describen la identidad simple/general (ver
+// ReportUploadController::index()) — usarlos para un alcance distinto (sucursal/
+// gestor/comparativo) podía habilitar el botón con el run EQUIVOCADO (runId de un
+// reporte simple ajeno) o dejarlo bloqueado pese a que ESE alcance sí tiene éxito.
+// identityState (emitido por GenerateReportStep vía generationProgress(), resuelto
+// por identidad exacta) es la fuente correcta para cualquier alcance — solo se usa
+// si su identidad coincide con la configuración actual; si no coincide (o no llegó
+// aún) se cae al comportamiento anterior basado en period/config.
+const identityMatches = computed(() => {
+    const s = props.identityState
+    if (!s) return false
+    return s.reportType === (props.config?.report_type ?? 'simple')
+        && s.scope === (props.config?.scope ?? 'general')
+        && (s.branchId ?? null) === (props.config?.branch_id ?? null)
+        && (s.employeeId ?? null) === (props.config?.employee_id ?? null)
+        && (s.comparePeriodId ?? null) === (props.config?.compare_period_id ?? null)
+})
+
+const canExport = computed(() =>
+    identityMatches.value ? !!props.identityState.canExport : !!props.period?.can_export_radiography
+)
 const isRunning = computed(() => !!props.period?.radiography_running)
 
 // report_type distinto de 'simple' (comparativo mes/bimestre/trimestre vs vs) TAMBIÉN
@@ -34,6 +55,7 @@ const filteredParams = computed(() => {
 const runId = computed(() => props.period?.radiography_run_id ?? null)
 
 const excelUrl = computed(() => {
+    if (identityMatches.value && props.identityState.excelUrl) return props.identityState.excelUrl
     if (!props.period) return '#'
     if (isFiltered.value && runId.value) return `/reportes-mensuales/runs/${runId.value}/excel`
     return isFiltered.value
@@ -42,6 +64,7 @@ const excelUrl = computed(() => {
 })
 
 const pdfUrl = computed(() => {
+    if (identityMatches.value && props.identityState.pdfUrl) return props.identityState.pdfUrl
     if (!props.period) return '#'
     if (isFiltered.value && runId.value) return `/reportes-mensuales/runs/${runId.value}/pdf`
     return isFiltered.value
@@ -50,6 +73,7 @@ const pdfUrl = computed(() => {
 })
 
 const previewUrl = computed(() => {
+    if (identityMatches.value) return props.identityState.previewUrl ?? null
     if (!props.period?.radiography_ready) return null
     if (isFiltered.value && runId.value) return `/reportes-mensuales/runs/${runId.value}/ver`
     const base = `/reportes-mensuales/${props.period.id}/preview`

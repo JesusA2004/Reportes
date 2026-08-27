@@ -19,6 +19,7 @@ use App\Models\NoiMovement;
 use App\Services\Radiography\BranchRadiographyCalculator;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class PeriodRadiographyService
 {
@@ -145,11 +146,29 @@ class PeriodRadiographyService
                 ->where('period_summary_id', $summary->id)
                 ->delete();
 
+            // PROBLEMA 6: registrar una incidencia es secundario respecto a la generación
+            // del reporte en sí — un fallo AQUÍ (ej. violación de columna, deadlock puntual)
+            // nunca debe hacer rollback de $summary/branchSummaries/corporateSummary recién
+            // calculados ni tragarse una excepción real de negocio. Se loggea completo
+            // (incluye la excepción original) con la marca 'failed_to_persist_incident' y
+            // se continúa con las demás incidencias — la generación del reporte sigue.
             foreach ($this->incidents($period, $dataIds) as $incident) {
-                PeriodIncident::query()->create([
-                    'period_summary_id' => $summary->id,
-                    ...$incident,
-                ]);
+                try {
+                    PeriodIncident::query()->create([
+                        'period_summary_id' => $summary->id,
+                        ...$incident,
+                    ]);
+                } catch (\Throwable $incidentException) {
+                    Log::error('failed_to_persist_incident', [
+                        'period_id'          => $period->id,
+                        'period_summary_id'  => $summary->id,
+                        'incident_type'      => $incident['type'] ?? 'unknown',
+                        'incident_severity'  => $incident['severity'] ?? null,
+                        'message_length'     => mb_strlen((string) ($incident['message'] ?? '')),
+                        'exception'          => get_class($incidentException),
+                        'exception_message'  => $incidentException->getMessage(),
+                    ]);
+                }
             }
 
             return $summary->fresh(['branchSummaries', 'corporateSummary', 'incidents']);

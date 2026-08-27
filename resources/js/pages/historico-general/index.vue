@@ -54,6 +54,18 @@ const reportConfig     = ref({
         .map((b) => b.id),
 })
 
+// PROBLEMA 2/4/5 (auditoría 27-ago-2026): period.radiography_ready/can_export_radiography
+// SIEMPRE describen la identidad simple/general del periodo (ver ReportUploadController::
+// index()) — para cualquier otro alcance (sucursal/gestor/comparativo), esos campos
+// pertenecen a un run distinto. GenerateReportStep ya resuelve el estado por identidad
+// exacta vía generationProgress() (pollProgress()); este ref reenvía ese resultado a
+// Etapa 6 (ReportPreview)/Etapa 7 (GeneratedReportActions) para que dejen de mezclar
+// alcances. Solo se usa cuando su identidad coincide con reportConfig actual — si el
+// usuario cambia la configuración sin volver a pasar por Etapa 5, no se reutiliza un
+// estado de una identidad distinta (ver coincide() en cada componente consumidor).
+const identityState = ref<any>(null)
+const handleIdentityState = (payload: any) => { identityState.value = payload }
+
 const period  = computed(() => props.periods.find((p) => p.id === selectedPeriodId.value) ?? null)
 const grouped = computed(() => props.groupedUploads.find((p) => p.period_id === selectedPeriodId.value) ?? null)
 const uploadsBySource = computed(() => {
@@ -798,14 +810,16 @@ const processGenerationNow = async () => {
                         @cancel="cancelGeneration"
                         @refresh="() => router.reload({ only: ['periods', 'groupedUploads'] })"
                         @process-now="processGenerationNow"
+                        @identity-state="handleIdentityState"
                     />
                     <ReportPreview
                         v-else-if="currentStep === 'preview'"
                         :period="period"
                         :preview="preview"
                         :config="reportConfig"
+                        :identity-state="identityState"
                     />
-                    <GeneratedReportActions v-else :period="period" :config="reportConfig" />
+                    <GeneratedReportActions v-else :period="period" :config="reportConfig" :identity-state="identityState" />
                 </transition>
 
             </template>
