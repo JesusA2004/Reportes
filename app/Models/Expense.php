@@ -21,6 +21,10 @@ class Expense extends Model {
         'expense_date',
         'observations',
         'raw_payload',
+        'attribution_method',
+        'attribution_confidence',
+        'attribution_source',
+        'attribution_needs_review',
     ];
 
     protected $casts = [
@@ -28,6 +32,8 @@ class Expense extends Model {
         'paid_amount' => 'decimal:2',
         'expense_date' => 'date',
         'raw_payload' => 'array',
+        'attribution_confidence' => 'decimal:2',
+        'attribution_needs_review' => 'boolean',
     ];
 
     public function period(): BelongsTo {

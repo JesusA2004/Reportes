@@ -10,6 +10,7 @@ use App\Models\PeriodRadiographyRun;
 use App\Models\PeriodSummary;
 use App\Models\User;
 use App\Services\EmployeeBranchAutoMatchService;
+use App\Services\ExpenseObservationAttributionService;
 use App\Services\FinanciamientoMotosAssignmentService;
 use App\Services\GastosExcelBranchResolverService;
 use App\Services\PeriodConsolidationService;
@@ -66,6 +67,7 @@ class GenerateRadiographyJob implements ShouldQueue
         FinanciamientoMotosAssignmentService $motosAssignment,
         GastosExcelBranchResolverService $gastosExcelResolver,
         RadiographySnapshotBuilder $snapshotBuilder,
+        ExpenseObservationAttributionService $expenseAttribution,
     ): void {
         @ini_set('memory_limit', '1024M');
         @ini_set('max_execution_time', '1800');
@@ -157,6 +159,26 @@ class GenerateRadiographyJob implements ShouldQueue
 
             $this->updateProgress($run, 67, 'Resolviendo Financiamiento de Motos', 'Vinculando cada movimiento de Financiamiento de Motos/Cascos con su empleado y sucursal.');
             $motosAssignment->assignForPeriodOrFail($period, $dataIds);
+
+            // ── 3c. Atribuir OPEX a colaboradores vía Observación/Justificación ────────
+            // NO bloqueante — a diferencia de los pasos anteriores (gastosExcelResolver/
+            // motosAssignment, que SÍ detienen la generación si algo queda sin resolver),
+            // aquí "no atribuible"/"ambiguo"/"conflicto" son estados finales VÁLIDOS y
+            // esperados (el gasto sigue siendo OPEX general/sucursal igual que antes, solo
+            // no se pudo vincular a un colaborador específico) — nunca deben detener la
+            // generación del reporte. Cualquier excepción inesperada se loggea y se
+            // ignora: es una mejora dimensional, no un requisito para que el reporte exista.
+            $this->updateProgress($run, 67, 'Atribuyendo gastos a colaboradores', 'Resolviendo el colaborador beneficiario de gastos OPEX vía Observación/Justificación del reporte de gastos.');
+            try {
+                $expenseAttribution->attributeForPeriod($period, $dataIds);
+            } catch (\Throwable $attributionException) {
+                Log::warning('GenerateRadiographyJob: no se pudo atribuir OPEX a colaboradores vía Observación/Justificación (el reporte sigue generándose con los gastos sin esa atribución adicional).', [
+                    'period_id' => $period->id,
+                    'run_id'    => $run->id,
+                    'exception' => get_class($attributionException),
+                    'message'   => $attributionException->getMessage(),
+                ]);
+            }
 
             // ── 4. Consolidate employee summaries (populates fact_period_employee_summary) ──
             $this->updateProgress($run, 68, 'Consolidando resumen de empleados', 'Calculando totales de nómina, percepciones y deducciones por persona y sucursal.');
